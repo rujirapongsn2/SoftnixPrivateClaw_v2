@@ -1,0 +1,194 @@
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+/* ---- app shell: sidebar + main, claude.ai-like ---- */
+.claw-app {
+  display: flex;
+  height: 100vh;
+  background: var(--color-background-wash, #faf9f5);
+}
+.claw-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.claw-sidenav-top {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+}
+.claw-sidenav-footer {
+  padding: 4px;
+}
+/* Wraps a SideNavItem (a real <button>) with a delete IconButton positioned
+   as a sibling overlay — nesting a button inside SideNavItem's button would
+   be invalid HTML, so the delete control lives next to it, not inside it. */
+.claw-recent-row {
+  position: relative;
+}
+.claw-recent-row .claw-recent-delete {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+}
+.claw-recent-row:hover .claw-recent-delete,
+.claw-recent-row:focus-within .claw-recent-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ---- chat column ---- */
+.claw-chat {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.claw-column,
+.claw-composer {
+  width: 100%;
+  max-width: 768px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+.claw-composer {
+  padding-bottom: 12px;
+}
+.claw-attach-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.claw-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--color-background-section, #8882);
+  border: 1px solid #8883;
+  font-size: 13px;
+}
+.claw-greeting,
+.claw-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  flex: 1;
+  padding: 48px 16px;
+}
+.claw-cursor {
+  animation: claw-blink 1s infinite;
+}
+@keyframes claw-blink {
+  50% { opacity: 0; }
+}
+.claw-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.6;
+}
+.claw-feedback {
+  display: flex;
+  gap: 2px;
+}
+.claw-error {
+  color: var(--color-error, #c0392b);
+}
+
+/* ---- login ---- */
+.claw-login {
+  max-width: 340px;
+  margin: 18vh auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+}
+.claw-login > * {
+  width: 100%;
+}
+.claw-login picture {
+  width: auto;
+}
+
+/* Brand lockup: Softnix wordmark + PrivateClaw */
+.claw-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.claw-brand-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--color-text-primary);
+}
+.claw-sidenav-brand {
+  padding: 4px 4px 0;
+}
+.claw-greeting picture,
+.claw-welcome picture {
+  display: block;
+}
+
+/* ---- settings ---- */
+.claw-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 420px;
+}
+.claw-settings-body {
+  overflow-y: auto;
+  max-height: 60vh;
+}
+.claw-settings-panel {
+  flex: 1;
+  overflow-y: auto;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 24px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.claw-settings-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.claw-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 4px;
+}
+.claw-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.claw-row-between {
+  justify-content: space-between;
+}
+.claw-toggle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}

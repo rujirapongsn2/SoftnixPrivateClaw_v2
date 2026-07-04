@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: claw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-claw}
+      POSTGRES_DB: claw
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claw"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CLAW_DATABASE_URL: postgresql+asyncpg://claw:${POSTGRES_PASSWORD:-claw}@postgres:5432/claw
+      CLAW_SECRET_KEY: ${CLAW_SECRET_KEY:?set a strong secret key}
+      CLAW_AUTH_MODE: password
+      CLAW_LLM__MODEL: ${CLAW_LLM__MODEL:-openrouter/anthropic/claude-sonnet-5}
+      CLAW_LLM__API_KEY: ${CLAW_LLM__API_KEY:?set the LLM API key}
+      CLAW_PUBLIC_BASE_URL: ${CLAW_PUBLIC_BASE_URL:-http://localhost:8700}
+      CLAW_WEB_BASE_URL: ${CLAW_WEB_BASE_URL:-http://localhost:8700}
+    ports:
+      - "8700:8700"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8700/api/ready').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  pgdata:

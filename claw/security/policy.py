@@ -1,0 +1,146 @@
+"""Control policy engine — the agent's safety layer.
+
+Text crossing a boundary (user input, model output, tool arguments) is checked
+against ordered rules. A rule can:
+- mask   : replace matches with a placeholder (e.g. [REDACTED_EMAIL])
+- block  : refuse the whole action, returning a safe message
+- monitor: record a hit for audit but let the text pass unchanged
+
+Rules are pure regex + action, so decisions are deterministic and cheap; the
+engine never calls an LLM. Built-in PII/secret patterns ship enabled; operators
+can add custom rules per instance.
+"""
+
+import re
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Iterable
+
+
+class Action(str, Enum):
+    MASK = "mask"
+    BLOCK = "block"
+    MONITOR = "monitor"
+
+
+Scope = str  # "input" | "output" | "tool_args"
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyRule:
+    name: str
+    pattern: str
+    action: Action
+    scopes: tuple[Scope, ...] = ("input", "output", "tool_args")
+    placeholder: str = "[REDACTED]"
+    severity: str = "medium"
+    enabled: bool = True
+    # Human message returned when this rule blocks.
+    block_message: str = "This request was blocked by the control policy."
+
+    def compiled(self) -> re.Pattern:
+        return re.compile(self.pattern, re.IGNORECASE)
+
+
+@dataclass(slots=True)
+class PolicyDecision:
+    action: Action | None
+    text: str  # possibly-masked text (equals input when nothing matched)
+    matched_rules: list[str] = field(default_factory=list)
+    severity: str = "info"
+    message: str | None = None  # set when blocked
+
+    @property
+    def blocked(self) -> bool:
+        return self.action is Action.BLOCK
+
+    @property
+    def masked(self) -> bool:
+        return self.action is Action.MASK
+
+
+# Built-in PII / secret rules. Ordered: block rules should precede mask rules.
+_BUILTINS: tuple[PolicyRule, ...] = (
+    PolicyRule(
+        name="credit_card",
+        pattern=r"\b(?:\d[ -]*?){13,16}\b",
+        action=Action.MASK,
+        placeholder="[REDACTED_CARD]",
+        severity="high",
+    ),
+    PolicyRule(
+        name="email",
+        pattern=r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+        action=Action.MASK,
+        placeholder="[REDACTED_EMAIL]",
+    ),
+    PolicyRule(
+        name="api_key",
+        pattern=r"\b(?:sk|pk|rk)-[A-Za-z0-9]{16,}\b|\bAKIA[0-9A-Z]{16}\b",
+        action=Action.MASK,
+        placeholder="[REDACTED_SECRET]",
+        severity="high",
+    ),
+    PolicyRule(
+        name="thai_national_id",
+        pattern=r"\b\d-?\d{4}-?\d{5}-?\d{2}-?\d\b",
+        action=Action.MASK,
+        placeholder="[REDACTED_ID]",
+        severity="high",
+    ),
+)
+
+
+class PolicyEngine:
+    def __init__(self, rules: Iterable[PolicyRule] | None = None, *, monitor_only: bool = False):
+        self.rules: list[PolicyRule] = list(rules if rules is not None else _BUILTINS)
+        # Global kill-switch: when True, block/mask are downgraded to monitor
+        # so operators can observe hits before enforcing.
+        self.monitor_only = monitor_only
+
+    def enforce(self, text: str, scope: Scope) -> PolicyDecision:
+        if not text:
+            return PolicyDecision(action=None, text=text)
+
+        working = text
+        matched: list[str] = []
+        highest_severity = "info"
+        effective_action: Action | None = None
+
+        for rule in self.rules:
+            if not rule.enabled or scope not in rule.scopes:
+                continue
+            regex = rule.compiled()
+            if not regex.search(working):
+                continue
+            matched.append(rule.name)
+            highest_severity = _max_severity(highest_severity, rule.severity)
+
+            action = Action.MONITOR if self.monitor_only else rule.action
+            if action is Action.BLOCK:
+                return PolicyDecision(
+                    action=Action.BLOCK,
+                    text=working,
+                    matched_rules=matched,
+                    severity=highest_severity,
+                    message=rule.block_message,
+                )
+            if action is Action.MASK:
+                working = regex.sub(rule.placeholder, working)
+                effective_action = Action.MASK
+            elif effective_action is None:
+                effective_action = Action.MONITOR
+
+        return PolicyDecision(
+            action=effective_action,
+            text=working,
+            matched_rules=matched,
+            severity=highest_severity if matched else "info",
+        )
+
+
+_SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def _max_severity(a: str, b: str) -> str:
+    return a if _SEVERITY_ORDER.get(a, 0) >= _SEVERITY_ORDER.get(b, 0) else b
