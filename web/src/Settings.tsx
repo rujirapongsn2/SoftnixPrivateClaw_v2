@@ -4,13 +4,19 @@ import { Card } from "@astryxdesign/core/Card";
 import { Divider } from "@astryxdesign/core/Divider";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon, type IconName, type IconType } from "@astryxdesign/core/Icon";
+import { MoreMenu } from "@astryxdesign/core/MoreMenu";
 import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import {
   Brain,
+  Puzzle,
+  Copy,
+  Download,
+  ExternalLink,
   HeartPulse,
+  Link as LinkIcon,
   Pencil,
   Play,
   Plug,
@@ -29,7 +35,8 @@ export type SettingsSection =
   | "connectors"
   | "schedules"
   | "heartbeat"
-  | "telegram";
+  | "telegram"
+  | "browser-extension";
 
 export const SETTINGS_SECTIONS: { key: SettingsSection; label: string; icon: IconType | IconName }[] = [
   { key: "skills", label: "Skills", icon: Sparkles },
@@ -38,6 +45,7 @@ export const SETTINGS_SECTIONS: { key: SettingsSection; label: string; icon: Ico
   { key: "schedules", label: "Schedule", icon: "calendar" },
   { key: "heartbeat", label: "Heartbeat", icon: HeartPulse },
   { key: "telegram", label: "Telegram", icon: Send },
+  { key: "browser-extension", label: "Browser extension", icon: Puzzle },
 ];
 
 export function SettingsPanel({ section }: { section: SettingsSection }) {
@@ -55,6 +63,7 @@ export function SettingsPanel({ section }: { section: SettingsSection }) {
         {section === "schedules" && <SchedulesPanel />}
         {section === "heartbeat" && <HeartbeatPanel />}
         {section === "telegram" && <TelegramPanel />}
+        {section === "browser-extension" && <BrowserExtensionPanel />}
       </div>
     </div>
   );
@@ -86,44 +95,54 @@ function SkillsPanel() {
   }, [reload]);
 
   if (editing) {
+    const readOnly = !!editing.builtin;
     return (
       <div className="claw-panel">
+        {readOnly && (
+          <Text size="sm" color="secondary">
+            This is a built-in skill — view only. Use it as a reference for authoring your own.
+          </Text>
+        )}
         <TextInput
           label="Name"
           value={editing.name ?? ""}
           onChange={(v) => setEditing({ ...editing, name: v })}
-          isDisabled={!!editing.id}
+          isDisabled={readOnly || !!editing.id}
         />
         <TextInput
           label="Description (shown to the agent in every chat)"
           value={editing.description ?? ""}
           onChange={(v) => setEditing({ ...editing, description: v })}
+          isDisabled={readOnly}
         />
         <TextArea
           label="Instructions (loaded when the agent uses this skill)"
           value={editing.content ?? ""}
           onChange={(v) => setEditing({ ...editing, content: v })}
           rows={10}
+          isDisabled={readOnly}
         />
         {error && <ErrorText>{error}</ErrorText>}
         <div className="claw-row">
-          <Button
-            label="Save skill"
-            icon={<Icon icon="check" size="sm" />}
-            clickAction={() =>
-              guard(async () => {
-                await api.saveSkill({
-                  name: (editing.name ?? "").trim(),
-                  description: editing.description ?? "",
-                  content: editing.content ?? "",
-                  enabled: editing.enabled ?? true,
-                });
-                setEditing(null);
-                await reload();
-              })
-            }
-          />
-          <Button label="Cancel" variant="ghost" clickAction={() => setEditing(null)} />
+          {!readOnly && (
+            <Button
+              label="Save skill"
+              icon={<Icon icon="check" size="sm" />}
+              clickAction={() =>
+                guard(async () => {
+                  await api.saveSkill({
+                    name: (editing.name ?? "").trim(),
+                    description: editing.description ?? "",
+                    content: editing.content ?? "",
+                    enabled: editing.enabled ?? true,
+                  });
+                  setEditing(null);
+                  await reload();
+                })
+              }
+            />
+          )}
+          <Button label={readOnly ? "Back" : "Cancel"} variant="ghost" clickAction={() => setEditing(null)} />
         </div>
       </div>
     );
@@ -150,43 +169,56 @@ function SkillsPanel() {
           <Card key={skill.id} padding={2}>
             <div className="claw-row claw-row-between">
               <div>
-                <Text weight="semibold">{skill.name}</Text>
+                <div className="claw-row">
+                  <Text weight="semibold">{skill.name}</Text>
+                  {skill.builtin && <Badge variant="info" label="Built-in" />}
+                </div>
                 <Text size="sm" color="secondary" as="p">
                   {skill.description || "—"}
                 </Text>
               </div>
-              <div className="claw-row">
-                <Switch
-                  value={skill.enabled}
-                  label={`Enable ${skill.name}`}
-                  isLabelHidden
-                  changeAction={(checked) =>
-                    guard(async () => {
-                      await api.saveSkill({ ...skill, enabled: checked });
-                      await reload();
-                    })
-                  }
-                />
+              {skill.builtin ? (
                 <Button
-                  label="Edit"
-                  icon={<Icon icon={Pencil} size="sm" />}
+                  label="View"
+                  icon={<Icon icon={ExternalLink} size="sm" />}
                   size="sm"
                   variant="ghost"
                   clickAction={() => setEditing(skill)}
                 />
-                <Button
-                  label="Delete"
-                  icon={<Icon icon={Trash2} size="sm" />}
-                  size="sm"
-                  variant="destructive"
-                  clickAction={() =>
-                    guard(async () => {
-                      await api.deleteSkill(skill.id);
-                      await reload();
-                    })
-                  }
-                />
-              </div>
+              ) : (
+                <div className="claw-row">
+                  <Switch
+                    value={skill.enabled}
+                    label={`Enable ${skill.name}`}
+                    isLabelHidden
+                    changeAction={(checked) =>
+                      guard(async () => {
+                        await api.saveSkill({ ...skill, enabled: checked });
+                        await reload();
+                      })
+                    }
+                  />
+                  <Button
+                    label="Edit"
+                    icon={<Icon icon={Pencil} size="sm" />}
+                    size="sm"
+                    variant="ghost"
+                    clickAction={() => setEditing(skill)}
+                  />
+                  <Button
+                    label="Delete"
+                    icon={<Icon icon={Trash2} size="sm" />}
+                    size="sm"
+                    variant="destructive"
+                    clickAction={() =>
+                      guard(async () => {
+                        await api.deleteSkill(skill.id);
+                        await reload();
+                      })
+                    }
+                  />
+                </div>
+              )}
             </div>
           </Card>
         ))
@@ -263,10 +295,193 @@ function MemoryPanel() {
 
 // ---------------------------------------------------------------- Connectors
 
+// Brand logos carried over from the original softnix-agenticclaw project
+// (nanobot/admin/static/app.js CONNECTOR_IMAGE_ASSET_MAP), copied into
+// public/connectors/. Keyed by the preset `key` from the backend catalog;
+// falls back to a neutral plug icon when a preset has no logo asset.
+const PRESET_LOGO: Record<string, string> = {
+  github: "/connectors/github.png",
+  gmail: "/connectors/gmail.png",
+  outlook: "/connectors/outlook.png",
+  "outlook-calendar": "/connectors/outlook-calendar.png",
+  onedrive: "/connectors/onedrive.png",
+  notion: "/connectors/notion.png",
+  tavily: "/connectors/tavily.png",
+  composio: "/connectors/composio.png",
+  "softnix-one": "/connectors/softnix-one.png",
+};
+
+// A short auth-method chip on the catalog card, so users know what setup to
+// expect (one-click sign-in vs. pasting a key) before they open the form.
+function presetAuthHint(p: ConnectorPreset): string | null {
+  if (p.setup === "oauth") return "1-click sign-in";
+  if (p.setup === "api_key" || p.setup === "token") return "API key";
+  return null;
+}
+
+function ConnectorBrandTile({ presetKey }: { presetKey: string }) {
+  const logo = PRESET_LOGO[presetKey];
+  return (
+    <div className="claw-connector-tile">
+      {logo ? (
+        <img src={logo} alt="" aria-hidden="true" />
+      ) : (
+        <Icon icon={Plug} size="md" color="secondary" />
+      )}
+    </div>
+  );
+}
+
+const OAUTH_PROVIDER_LABEL: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
+
+/** Friendly, no-jargon setup for a preset connector. Renders a one-click OAuth
+ * panel, or a small labeled-fields form for API-key/token connectors — the raw
+ * MCP editor is never shown here. */
+function GuidedSetup({
+  preset,
+  installed,
+  onCancel,
+  onSaved,
+  onManage,
+}: {
+  preset: ConnectorPreset;
+  installed?: ConnectorInfo;
+  onCancel: () => void;
+  onSaved: () => Promise<void>;
+  onManage: (c: ConnectorInfo) => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const header = (
+    <div className="claw-setup-header">
+      <ConnectorBrandTile presetKey={preset.key} />
+      <div>
+        <Text type="display-3">{preset.label}</Text>
+        <Text color="secondary" as="p">
+          {preset.description}
+        </Text>
+      </div>
+    </div>
+  );
+
+  // ---- OAuth: one-click connect ----
+  if (preset.setup === "oauth") {
+    const provider = OAUTH_PROVIDER_LABEL[preset.oauth_provider] ?? preset.oauth_provider;
+    const connect = async () => {
+      setBusy(true);
+      setError("");
+      try {
+        const { url } = await api.connectorOAuthStart(preset.key);
+        window.location.href = url;
+      } catch (e) {
+        const msg = String(e);
+        setBusy(false);
+        setError(
+          /not_configured/.test(msg)
+            ? `${provider} sign-in isn't set up yet. Ask your administrator to enable it in the Admin console.`
+            : "Couldn't start sign-in. Please try again.",
+        );
+      }
+    };
+    return (
+      <div className="claw-panel claw-setup">
+        {header}
+        {installed?.runtime.status === "connected" && (
+          <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label="Connected" />
+        )}
+        <Card padding={3} variant="muted">
+          <Text weight="semibold">Sign in with {provider}</Text>
+          <Text size="sm" color="secondary" as="p">
+            You'll be redirected to {provider} to grant access. Nothing is stored except a secure token,
+            encrypted at rest.
+          </Text>
+        </Card>
+        {error && <ErrorText>{error}</ErrorText>}
+        <div className="claw-row">
+          <Button
+            label={busy ? "Redirecting…" : installed ? `Reconnect with ${provider}` : `Connect with ${provider}`}
+            icon={<Icon icon={LinkIcon} size="sm" />}
+            isDisabled={busy}
+            clickAction={connect}
+          />
+          {installed && (
+            <Button label="Manage" variant="secondary" clickAction={() => onManage(installed)} />
+          )}
+          <Button label="Cancel" variant="ghost" clickAction={onCancel} />
+        </div>
+      </div>
+    );
+  }
+
+  // ---- API key / token: labeled fields ----
+  const save = async () => {
+    setError("");
+    setBusy(true);
+    try {
+      const env: Record<string, string> = {};
+      for (const f of preset.fields) {
+        const raw = (values[f.key] ?? "").trim();
+        if (!raw) {
+          if (!f.optional) throw new Error(`${f.label} is required.`);
+          continue;
+        }
+        env[f.key] = f.prefix && !raw.startsWith(f.prefix) ? f.prefix + raw : raw;
+      }
+      await api.saveConnector({
+        name: preset.name,
+        transport: preset.transport,
+        command: preset.command,
+        url: preset.url,
+        env,
+        enabled: true,
+      });
+      await onSaved();
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="claw-panel claw-setup">
+      {header}
+      {preset.fields.map((f) => (
+        <div key={f.key} className="claw-setup-field">
+          <TextInput
+            label={f.optional ? `${f.label} (optional)` : f.label}
+            type={f.secret ? "password" : "text"}
+            value={values[f.key] ?? ""}
+            placeholder={f.placeholder}
+            onChange={(v) => setValues((prev) => ({ ...prev, [f.key]: v }))}
+          />
+          {f.help && (
+            <Text size="sm" color="secondary" as="p" className="claw-setup-help">
+              {f.help}
+            </Text>
+          )}
+        </div>
+      ))}
+      {error && <ErrorText>{error}</ErrorText>}
+      <div className="claw-row">
+        <Button
+          label={busy ? "Saving…" : "Add connector"}
+          icon={<Icon icon="check" size="sm" />}
+          isDisabled={busy}
+          clickAction={save}
+        />
+        <Button label="Cancel" variant="ghost" clickAction={onCancel} />
+      </div>
+    </div>
+  );
+}
+
 function ConnectorsPanel() {
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
   const [editing, setEditing] = useState<Partial<ConnectorInfo> | null>(null);
+  const [setupPreset, setSetupPreset] = useState<ConnectorPreset | null>(null);
   const { error, guard } = useAsyncError();
 
   const reload = useCallback(() => api.listConnectors().then(setConnectors), []);
@@ -275,17 +490,18 @@ function ConnectorsPanel() {
     api.connectorPresets().then(setPresets).catch(() => setPresets([]));
   }, [reload]);
 
-  // Prefill the editor from a preset: command/transport filled, env keys blank
-  // for the user to paste their own secrets.
-  const fromPreset = (p: ConnectorPreset) =>
-    setEditing({
-      name: p.name,
-      transport: p.transport,
-      command: p.command,
-      url: p.url,
-      env: Object.fromEntries(p.env_fields.map((k) => [k, ""])),
-      enabled: true,
-    });
+  const installedByName = new Map(connectors.map((c) => [c.name.toLowerCase(), c]));
+
+  // Group presets into ordered categories for the catalog grid.
+  const categoryOrder = ["Productivity", "Communication", "Search", "Automation", "Softnix", "Other"];
+  const grouped = new Map<string, ConnectorPreset[]>();
+  for (const p of presets) {
+    const cat = p.category || "Other";
+    (grouped.get(cat) ?? grouped.set(cat, []).get(cat)!).push(p);
+  }
+  const categories = [...grouped.keys()].sort(
+    (a, b) => (categoryOrder.indexOf(a) + 1 || 99) - (categoryOrder.indexOf(b) + 1 || 99),
+  );
 
   if (editing) {
     const transport = editing.transport ?? "stdio";
@@ -369,100 +585,182 @@ function ConnectorsPanel() {
     );
   }
 
+  if (setupPreset) {
+    return (
+      <GuidedSetup
+        preset={setupPreset}
+        installed={installedByName.get(setupPreset.name.toLowerCase())}
+        onCancel={() => setSetupPreset(null)}
+        onSaved={async () => {
+          setSetupPreset(null);
+          await reload();
+        }}
+        onManage={(c) => {
+          setSetupPreset(null);
+          setEditing(c);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
         <Text color="secondary">
-          Connectors add MCP tools (Gmail, GitHub, Notion, …) to your agent.
+          Add a connector to give Claw access to your apps. You supply your own keys — stored
+          encrypted.
         </Text>
         <Button
-          label="Add connector"
+          label="Add custom"
           icon={<Icon icon={Plus} size="sm" />}
           size="sm"
+          variant="secondary"
           clickAction={() => setEditing({ transport: "stdio", enabled: true })}
         />
       </div>
       {error && <ErrorText>{error}</ErrorText>}
-      {presets.length > 0 && (
-        <div className="claw-panel" style={{ gap: 6 }}>
-          <Text size="sm" color="secondary">Add from a preset (you supply your own keys):</Text>
-          <div className="claw-row">
-            {presets.map((p) => (
-              <Button
-                key={p.key}
-                label={p.label}
-                size="sm"
-                variant="secondary"
-                clickAction={() => fromPreset(p)}
-              />
-            ))}
+
+      {categories.map((cat) => (
+        <div key={cat} className="claw-connector-category">
+          <Text type="label" color="secondary" className="claw-connector-cat-title">
+            {cat}
+          </Text>
+          <Divider />
+          <div className="claw-connector-grid">
+            {(grouped.get(cat) ?? []).map((p) => {
+              const installed = installedByName.get(p.name.toLowerCase());
+              const menuItems = [
+                ...(p.docs
+                  ? [{ label: "View docs", icon: ExternalLink, onClick: () => window.open(p.docs, "_blank", "noopener") }]
+                  : []),
+                ...(installed
+                  ? [
+                      { label: "Edit", icon: Pencil, onClick: () => setEditing(installed) },
+                      { type: "divider" as const },
+                      {
+                        label: "Remove",
+                        icon: Trash2,
+                        onClick: () =>
+                          guard(async () => {
+                            await api.deleteConnector(installed.id);
+                            await reload();
+                          }),
+                      },
+                    ]
+                  : []),
+              ];
+              return (
+                <Card key={p.key} padding={2} className="claw-connector-card">
+                  <ConnectorBrandTile presetKey={p.key} />
+                  <div className="claw-connector-body">
+                    <Text weight="semibold" className="claw-connector-name">
+                      {p.label}
+                    </Text>
+                    <Text size="sm" color="secondary" as="p" className="claw-connector-desc">
+                      {p.description}
+                    </Text>
+                    <div className="claw-connector-meta">
+                      {installed?.runtime.status === "connected" ? (
+                        <Badge
+                          variant="success"
+                          icon={<Icon icon="check" size="xsm" />}
+                          label={`${installed.runtime.tools ?? 0} tools`}
+                        />
+                      ) : installed?.runtime.status === "error" ? (
+                        <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label="Error" />
+                      ) : (
+                        (() => {
+                          const hint = presetAuthHint(p);
+                          return hint ? <span className="claw-connector-auth">{hint}</span> : null;
+                        })()
+                      )}
+                    </div>
+                  </div>
+                  <div className="claw-connector-actions">
+                    {installed ? (
+                      <Button
+                        label="Manage"
+                        size="sm"
+                        variant="secondary"
+                        clickAction={() => setEditing(installed)}
+                      />
+                    ) : (
+                      <Button label="Add" size="sm" variant="primary" clickAction={() => setSetupPreset(p)} />
+                    )}
+                    {menuItems.length > 0 && <MoreMenu label={`${p.label} options`} size="sm" items={menuItems} />}
+                  </div>
+                </Card>
+              );
+            })}
           </div>
         </div>
-      )}
-      {connectors.length === 0 ? (
-        <EmptyState
-          title="No connectors"
-          description="Add an MCP server to give Claw access to your apps."
-        />
-      ) : (
-        connectors.map((c) => (
-          <Card key={c.id} padding={2}>
-            <div className="claw-row claw-row-between">
-              <div>
-                <div className="claw-row">
-                  <Text weight="semibold">{c.name}</Text>
-                  <Badge variant="neutral" label={c.transport} />
-                  {c.runtime.status === "connected" && (
-                    <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label={`${c.runtime.tools} tools`} />
-                  )}
-                  {c.runtime.status === "error" && (
-                    <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label="error" />
+      ))}
+
+      {connectors.length > 0 && (
+        <div className="claw-connector-category">
+          <Text type="label" color="secondary" className="claw-connector-cat-title">
+            Your connectors
+          </Text>
+          <Divider />
+          {connectors.map((c) => (
+            <Card key={c.id} padding={2}>
+              <div className="claw-row claw-row-between">
+                <div>
+                  <div className="claw-row">
+                    <Text weight="semibold">{c.name}</Text>
+                    <Badge variant="neutral" label={c.transport} />
+                    {c.runtime.status === "connected" && (
+                      <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label={`${c.runtime.tools} tools`} />
+                    )}
+                    {c.runtime.status === "error" && (
+                      <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label="error" />
+                    )}
+                  </div>
+                  <Text size="sm" color="secondary" as="p">
+                    {c.transport === "stdio" ? c.command : c.url}
+                  </Text>
+                  {c.runtime.error && (
+                    <Text size="sm" color="secondary" as="p">
+                      {c.runtime.error}
+                    </Text>
                   )}
                 </div>
-                <Text size="sm" color="secondary" as="p">
-                  {c.transport === "stdio" ? c.command : c.url}
-                </Text>
-                {c.runtime.error && (
-                  <Text size="sm" color="secondary" as="p">
-                    {c.runtime.error}
-                  </Text>
-                )}
+                <div className="claw-row">
+                  <Switch
+                    value={c.enabled}
+                    label={`Enable ${c.name}`}
+                    isLabelHidden
+                    changeAction={(checked) =>
+                      guard(async () => {
+                        await api.saveConnector({ ...c, enabled: checked });
+                        await reload();
+                      })
+                    }
+                  />
+                  <Button
+                    label="Edit"
+                    icon={<Icon icon={Pencil} size="sm" />}
+                    size="sm"
+                    variant="ghost"
+                    clickAction={() => setEditing(c)}
+                  />
+                  <Button
+                    label="Delete"
+                    icon={<Icon icon={Trash2} size="sm" />}
+                    size="sm"
+                    variant="destructive"
+                    clickAction={() =>
+                      guard(async () => {
+                        await api.deleteConnector(c.id);
+                        await reload();
+                      })
+                    }
+                  />
+                </div>
               </div>
-              <div className="claw-row">
-                <Switch
-                  value={c.enabled}
-                  label={`Enable ${c.name}`}
-                  isLabelHidden
-                  changeAction={(checked) =>
-                    guard(async () => {
-                      await api.saveConnector({ ...c, enabled: checked });
-                      await reload();
-                    })
-                  }
-                />
-                <Button
-                  label="Edit"
-                  icon={<Icon icon={Pencil} size="sm" />}
-                  size="sm"
-                  variant="ghost"
-                  clickAction={() => setEditing(c)}
-                />
-                <Button
-                  label="Delete"
-                  icon={<Icon icon={Trash2} size="sm" />}
-                  size="sm"
-                  variant="destructive"
-                  clickAction={() =>
-                    guard(async () => {
-                      await api.deleteConnector(c.id);
-                      await reload();
-                    })
-                  }
-                />
-              </div>
-            </div>
-          </Card>
-        ))
+            </Card>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -781,6 +1079,135 @@ function TelegramPanel() {
             </Card>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Browser extension
+
+function BrowserExtensionPanel() {
+  const [status, setStatus] = useState<Awaited<ReturnType<typeof api.browserExtensionStatus>> | null>(
+    null,
+  );
+  const [pairing, setPairing] = useState<Awaited<ReturnType<typeof api.browserExtensionPairingInit>> | null>(
+    null,
+  );
+  const [copied, setCopied] = useState(false);
+  const { error, guard } = useAsyncError();
+
+  const reload = useCallback(() => api.browserExtensionStatus().then(setStatus), []);
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  if (!status) return <Text color="secondary">Loading…</Text>;
+
+  if (!status.client_extension_enabled) {
+    return (
+      <div className="claw-panel">
+        <Text color="secondary">
+          The browser extension is not enabled on this server. An administrator must set
+          CLAW_BROWSER__CLIENT_EXTENSION_ENABLED=true to allow pairing.
+        </Text>
+      </div>
+    );
+  }
+
+  const pairingText = pairing
+    ? `Admin API: ${pairing.api_base}\nInstance: ${pairing.instance_id}\nTicket: ${pairing.pairing_ticket}`
+    : "";
+
+  return (
+    <div className="claw-panel">
+      <Text color="secondary">
+        Pair your own Chrome so Claw can act inside your real browser tabs (logged-in sites,
+        multi-step flows) instead of an isolated server browser.
+      </Text>
+
+      <div className="claw-row">
+        {status.paired ? (
+          <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label="Paired" />
+        ) : (
+          <Badge variant="neutral" label="Not paired" />
+        )}
+        {status.paired &&
+          (status.online ? (
+            <Badge variant="success" label="Online" />
+          ) : (
+            <Badge variant="warning" label="Offline" />
+          ))}
+      </div>
+      {error && <ErrorText>{error}</ErrorText>}
+
+      <Card padding={2} variant="muted">
+        <Text weight="semibold">1. Install the extension</Text>
+        <Text size="sm" color="secondary" as="p">
+          Download the package, unzip it, then load it in Chrome via chrome://extensions → enable
+          Developer mode → “Load unpacked” → pick the unzipped folder.
+        </Text>
+        <div className="claw-row">
+          <Button
+            label="Download extension"
+            icon={<Icon icon={Download} size="sm" />}
+            clickAction={() => {
+              window.location.href = "/api/browser-extension/download";
+            }}
+          />
+        </div>
+      </Card>
+
+      <Card padding={2} variant="muted">
+        <Text weight="semibold">2. Pair your browser</Text>
+        <Text size="sm" color="secondary" as="p">
+          Generate pairing details, copy them, open the extension popup, and paste into “Paste
+          pairing details”. The ticket expires in a few minutes.
+        </Text>
+        <div className="claw-row">
+          <Button
+            label="Generate pairing details"
+            icon={<Icon icon={LinkIcon} size="sm" />}
+            clickAction={() =>
+              guard(async () => {
+                setCopied(false);
+                setPairing(await api.browserExtensionPairingInit());
+              })
+            }
+          />
+        </div>
+        {pairing && (
+          <Card padding={2}>
+            <Text type="code">{pairingText}</Text>
+            <div className="claw-row">
+              <Button
+                label={copied ? "Copied" : "Copy pairing details"}
+                icon={<Icon icon={Copy} size="sm" />}
+                variant="secondary"
+                clickAction={() =>
+                  guard(async () => {
+                    await navigator.clipboard.writeText(pairingText);
+                    setCopied(true);
+                  })
+                }
+              />
+            </div>
+          </Card>
+        )}
+      </Card>
+
+      {status.paired && (
+        <Button
+          label="Unpair browser"
+          icon={<Icon icon={Trash2} size="sm" />}
+          variant="destructive"
+          clickAction={() =>
+            guard(async () => {
+              await api.browserExtensionUnpair();
+              setPairing(null);
+              await reload();
+            })
+          }
+        />
       )}
     </div>
   );

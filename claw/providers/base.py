@@ -63,8 +63,14 @@ class LLMProvider(ABC):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.1,
+        api_key: str | None = None,
+        api_base: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        """Stream a chat completion. Yields deltas, then exactly one ChatResult."""
+        """Stream a chat completion. Yields deltas, then exactly one ChatResult.
+
+        `api_key`/`api_base` override the provider defaults per call, so a single
+        provider instance can serve models from different admin-configured upstreams.
+        """
 
     async def chat(
         self,
@@ -73,9 +79,13 @@ class LLMProvider(ABC):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.1,
+        api_key: str | None = None,
+        api_base: str | None = None,
     ) -> ChatResult:
         """Non-streaming convenience wrapper (memory consolidation, heartbeat)."""
-        async for event in self.stream_chat(messages, tools, model, max_tokens, temperature):
+        async for event in self.stream_chat(
+            messages, tools, model, max_tokens, temperature, api_key=api_key, api_base=api_base
+        ):
             if isinstance(event, ChatResult):
                 return event
         raise ProviderError("stream ended without a final result")

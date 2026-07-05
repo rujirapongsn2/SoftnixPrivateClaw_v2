@@ -1,36 +1,39 @@
 import { defineTheme } from "@astryxdesign/core/theme";
 import { neutralTheme } from "@astryxdesign/theme-neutral/built";
 
-// Base body text at 18px (up from the default 14px) with the same 1.2 ratio,
-// plus a larger spacing/control scale — comfortable defaults for readers of
-// all ages rather than the design system's dense default sizing.
+// "ClawThai" (self-hosted Noto Sans Thai, see @font-face in styles.css) is
+// FIRST so Thai codepoints render with it; its unicode-range is limited to
+// the Thai block, so Latin/other codepoints skip it and use system-ui —
+// matching ChatGPT's Latin look while guaranteeing correct Thai shaping,
+// notably in Safari where the OS's system-ui Thai substitution mis-renders
+// inside a contenteditable.
+const FONT_FALLBACKS = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+
 export const clawTheme = defineTheme({
   name: "claw",
   extends: neutralTheme,
   typography: {
-    scale: { base: 18, ratio: 1.2 },
-  },
-  radius: {
-    base: 4,
-    multiplier: 1.15,
+    // 16px body — matches ChatGPT's own body size.
+    scale: { base: 16, ratio: 1.2 },
+    body: {
+      family: "ClawThai",
+      fallbacks: FONT_FALLBACKS,
+      weight: "normal", // 400
+    },
+    heading: {
+      family: "ClawThai",
+      fallbacks: FONT_FALLBACKS,
+      weight: "semibold", // 600; largest headings go bold (700) below
+      weights: { 1: "bold" },
+    },
   },
   tokens: {
-    "--spacing-0-5": "3px",
-    "--spacing-1": "5px",
-    "--spacing-1-5": "8px",
-    "--spacing-2": "10px",
-    "--spacing-3": "15px",
-    "--spacing-4": "20px",
-    "--spacing-5": "25px",
-    "--spacing-6": "30px",
-    "--spacing-7": "35px",
-    "--spacing-8": "40px",
-    "--spacing-9": "45px",
-    "--spacing-10": "50px",
-    "--spacing-11": "55px",
-    "--spacing-12": "60px",
-    "--size-element-sm": "34px",
-    "--size-element-md": "40px",
-    "--size-element-lg": "44px",
+    // Default leading from the type scale is tuned for Latin (~1.43–1.5).
+    // Thai vowel/tone marks need more vertical room to stay legible without
+    // crowding the line above — 1.65 matches ChatGPT's Thai rendering.
+    "--text-body-leading": "1.65",
+    "--size-element-sm": "30px",
+    "--size-element-md": "34px",
+    "--size-element-lg": "38px",
   },
 });

@@ -83,6 +83,39 @@ async def me(user: User = Depends(current_user)) -> dict:
 
 # ---------------------------------------------------------------- OIDC / social login
 
+async def _resolve_provider(state: AppState, provider: str):
+    """Build a social-login config for `provider`, preferring the admin-registered
+    OAuth app in the DB and falling back to environment settings. This is what
+    lets one console-configured Google/Microsoft app power both login and
+    connectors. Returns None when neither source has usable credentials."""
+    creds = await state.oauth_apps.get(provider)
+    s = state.settings
+    if provider == "google":
+        client_id = creds.get("client_id") or s.oidc_google_client_id
+        client_secret = creds.get("client_secret") or s.oidc_google_client_secret
+        tenant = ""
+    elif provider == "microsoft":
+        client_id = creds.get("client_id") or s.oidc_microsoft_client_id
+        client_secret = creds.get("client_secret") or s.oidc_microsoft_client_secret
+        tenant = creds.get("tenant") or s.oidc_microsoft_tenant
+    else:
+        return None
+    if not (client_id and client_secret):
+        return None
+    return oidc.provider_config(
+        provider, client_id=client_id, client_secret=client_secret, tenant=tenant
+    )
+
+
+async def _resolve_providers(state: AppState) -> dict:
+    out = {}
+    for provider in ("google", "microsoft"):
+        cfg = await _resolve_provider(state, provider)
+        if cfg is not None:
+            out[provider] = cfg
+    return out
+
+
 async def _upsert_oidc_user(state: AppState, email: str, name: str) -> User:
     """Find or create a Claw user for an OIDC identity.
 
@@ -108,7 +141,7 @@ async def oidc_authenticate(
     state: AppState, provider: str, code: str, redirect: str, http: httpx.AsyncClient
 ) -> User:
     """Exchange an auth code for identity and resolve it to an active Claw user."""
-    cfg = oidc.enabled_providers(state.settings).get(provider)
+    cfg = await _resolve_provider(state, provider)
     if cfg is None:
         raise HTTPException(status_code=404, detail="provider not configured")
     tokens = await oidc.exchange_code(cfg, code, redirect, http)
@@ -123,12 +156,12 @@ async def oidc_authenticate(
 
 @router.get("/providers")
 async def list_providers(state: AppState = Depends(get_state)) -> dict:
-    return {"providers": list(oidc.enabled_providers(state.settings).keys())}
+    return {"providers": list((await _resolve_providers(state)).keys())}
 
 
 @router.get("/oidc/{provider}/login")
 async def oidc_login(provider: str, state: AppState = Depends(get_state)) -> RedirectResponse:
-    cfg = oidc.enabled_providers(state.settings).get(provider)
+    cfg = await _resolve_provider(state, provider)
     if cfg is None:
         raise HTTPException(status_code=404, detail="provider not configured")
     redirect = oidc.redirect_uri(state.settings, provider)

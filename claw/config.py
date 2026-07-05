@@ -27,18 +27,58 @@ class BrowserSettings(BaseModel):
     max_chars: int = 30_000
     # Close a user's idle browser page after this many seconds (0 = keep until shutdown).
     idle_close_seconds: int = 600
+    # Client-side browser: pair the user's own Chrome via the downloadable
+    # extension. When a paired extension is online, the `browser` tool drives it
+    # (real cookies/sessions); otherwise it falls back to the server-side one.
+    client_extension_enabled: bool = False
+    # How long the agent waits for the extension to run a queued task.
+    poll_timeout_seconds: int = 60
+    # Require admin approval before the extension runs a submit action.
+    require_confirmation_for_submit: bool = False
+    # Optional allow-list of domains the client browser may visit (empty = any).
+    allowed_domains: list[str] = []
 
 
 class SandboxSettings(BaseModel):
     """Tool-ephemeral sandbox: shell commands run in short-lived containers."""
 
     enabled: bool = True
-    image: str = "python:3.12-slim"
+    # Custom image pre-loaded with the document/archive stack (reportlab,
+    # weasyprint, openpyxl, python-docx, python-pptx, pandas, zip/unzip).
+    # Build with: docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .
+    image: str = "claw-sandbox:latest"
     cpu_limit: float = 1.0
     memory_limit: str = "1g"
     pids_limit: int = 256
-    network: str = "none"  # none | bridge
+    # bridge gives the sandbox internet (pip install, downloads); none isolates
+    # it. bridge is more capable but riskier — exec runs are audit-logged.
+    network: str = "bridge"  # none | bridge
     timeout_seconds: int = 90
+    # Longer default: pip install / network fetches can be slow.
+    # (kept modest to bound worst-case; raise if agents do heavy builds)
+
+
+class MemorySettings(BaseModel):
+    """Continuous-learning memory consolidation: the agent folds a session into
+    durable per-user memory once enough new messages accumulate."""
+
+    # New messages (user + assistant + tool) in a session before a consolidation
+    # pass runs. Lower = the agent "learns" from shorter conversations. Tune via
+    # CLAW_MEMORY__WINDOW.
+    window: int = 30
+    # Most-recent messages left raw (not yet folded into memory) each pass; must
+    # be smaller than `window`. Tune via CLAW_MEMORY__KEEP.
+    keep: int = 12
+
+
+class SchedulerSettings(BaseModel):
+    """Recurring/one-shot scheduled tasks."""
+
+    # IANA timezone that cron expressions are interpreted in — e.g. cron
+    # "0 7 * * *" means 07:00 in THIS zone, not UTC. Defaults to Asia/Bangkok so
+    # local users get the wall-clock time they expect without configuring it.
+    # Override with CLAW_SCHEDULER__TIMEZONE (e.g. UTC, America/New_York).
+    timezone: str = "Asia/Bangkok"
 
 
 class Settings(BaseSettings):
@@ -84,6 +124,8 @@ class Settings(BaseSettings):
     llm: LLMSettings = LLMSettings()
     sandbox: SandboxSettings = SandboxSettings()
     browser: BrowserSettings = BrowserSettings()
+    memory: MemorySettings = MemorySettings()
+    scheduler: SchedulerSettings = SchedulerSettings()
 
 
 def load_settings() -> Settings:

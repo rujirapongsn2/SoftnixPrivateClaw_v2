@@ -5,10 +5,17 @@ registers their tools as `mcp_{connector}_{tool}` in the agent's registry.
 Connections are cached per user and rebuilt only when the config changes.
 """
 
+import asyncio
 import shlex
+import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
+
+# Env keys with this prefix are turned into HTTP headers for remote (http)
+# connectors instead of being passed as process env — this is how remote MCP
+# endpoints (Composio, Softnix ONE, …) carry their bearer/api-key auth.
+_HEADER_ENV_PREFIX = "HEADER_"
 
 from loguru import logger
 
@@ -49,46 +56,57 @@ class ConnectorManager:
     def __init__(self, store: ConnectorStore):
         self.store = store
         self._users: dict[str, _UserConnections] = {}
+        # Serialize sync_tools per user: it is now driven both by chat turns and
+        # by the connectors listing endpoint (composer menu), which can overlap.
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock(self, user_id: str) -> asyncio.Lock:
+        lock = self._locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[user_id] = lock
+        return lock
 
     async def status(self, user_id: str) -> dict[str, dict]:
         return dict(self._users.get(user_id, _UserConnections()).statuses)
 
     async def sync_tools(self, user_id: str, registry: ToolRegistry) -> None:
         """Ensure the registry reflects the user's enabled connectors. Cheap when unchanged."""
-        connectors = await self.store.enabled_for_user(user_id)
-        signature = tuple(sorted((c.id, c.updated_at.isoformat()) for c in connectors))
-        state = self._users.get(user_id)
-        if state is not None and state.signature == signature:
-            return
+        async with self._lock(user_id):
+            connectors = await self.store.enabled_for_user(user_id)
+            signature = tuple(sorted((c.id, c.updated_at.isoformat()) for c in connectors))
+            state = self._users.get(user_id)
+            if state is not None and state.signature == signature:
+                return
 
-        await self._close_user(user_id, registry)
-        state = _UserConnections(signature=signature, stack=AsyncExitStack())
-        self._users[user_id] = state
-        if not connectors:
-            return
+            await self._close_user(user_id, registry)
+            state = _UserConnections(signature=signature, stack=AsyncExitStack())
+            self._users[user_id] = state
+            if not connectors:
+                return
 
-        await state.stack.__aenter__()
-        for connector in connectors:
-            try:
-                session = await self._connect(state.stack, connector)
-                listed = await session.list_tools()
-                count = 0
-                for tool in listed.tools:
-                    proxy = McpToolProxy(
-                        session,
-                        connector.name,
-                        tool.name,
-                        tool.description or "",
-                        tool.inputSchema or {},
-                    )
-                    registry.register(proxy)
-                    state.tool_names.append(proxy.name)
-                    count += 1
-                state.statuses[connector.name] = {"status": "connected", "tools": count}
-                logger.info("MCP connector {} connected with {} tools", connector.name, count)
-            except Exception as exc:
-                state.statuses[connector.name] = {"status": "error", "error": str(exc)[:300]}
-                logger.warning("MCP connector {} failed: {}", connector.name, exc)
+            await state.stack.__aenter__()
+            for connector in connectors:
+                try:
+                    session = await self._connect(state.stack, connector)
+                    listed = await session.list_tools()
+                    count = 0
+                    for tool in listed.tools:
+                        proxy = McpToolProxy(
+                            session,
+                            connector.name,
+                            tool.name,
+                            tool.description or "",
+                            tool.inputSchema or {},
+                        )
+                        registry.register(proxy)
+                        state.tool_names.append(proxy.name)
+                        count += 1
+                    state.statuses[connector.name] = {"status": "connected", "tools": count}
+                    logger.info("MCP connector {} connected with {} tools", connector.name, count)
+                except Exception as exc:
+                    state.statuses[connector.name] = {"status": "error", "error": str(exc)[:300]}
+                    logger.warning("MCP connector {} failed: {}", connector.name, exc)
 
     async def _connect(self, stack: AsyncExitStack, connector) -> Any:
         from mcp import ClientSession
@@ -96,7 +114,15 @@ class ConnectorManager:
         if connector.transport == "http":
             from mcp.client.streamable_http import streamablehttp_client
 
-            read, write, _ = await stack.enter_async_context(streamablehttp_client(connector.url))
+            # Split env into HTTP headers (HEADER_*) and everything else.
+            headers = {
+                key[len(_HEADER_ENV_PREFIX):]: value
+                for key, value in (connector.env or {}).items()
+                if key.startswith(_HEADER_ENV_PREFIX) and value
+            }
+            read, write, _ = await stack.enter_async_context(
+                streamablehttp_client(connector.url, headers=headers or None)
+            )
         else:
             from mcp import StdioServerParameters
             from mcp.client.stdio import stdio_client
@@ -104,6 +130,11 @@ class ConnectorManager:
             argv = shlex.split(connector.command)
             if not argv:
                 raise ValueError("empty command")
+            # Built-in preset servers launch as `python -m claw.integrations.*`.
+            # Use the running interpreter so the `claw` package is importable
+            # regardless of what `python`/`python3` resolves to on PATH.
+            if argv[0] in ("python", "python3"):
+                argv[0] = sys.executable
             params = StdioServerParameters(
                 command=argv[0], args=argv[1:], env={**(connector.env or {})} or None
             )

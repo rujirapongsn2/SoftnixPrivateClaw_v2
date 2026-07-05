@@ -79,6 +79,39 @@ async def test_max_iterations_guard():
     assert outcome.final_content is None
 
 
+class FakeExecTool(Tool):
+    """Stands in for the sandbox exec tool: writes a file into the workspace."""
+
+    name = "exec"
+    description = "Run a command"
+    parameters = {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+
+    def __init__(self, workspace):
+        self.workspace = workspace
+
+    async def execute(self, command: str, **_: Any) -> str:
+        (self.workspace / "btc_30d_chart.png").write_bytes(b"\x89PNG fake")
+        return "[exit code: 0]"
+
+
+async def test_exec_created_files_are_surfaced_as_artifacts(tmp_path):
+    provider = FakeProvider(
+        [
+            [ChatResult(content=None, tool_calls=[ToolCall(id="c1", name="exec", arguments={"command": "make chart"})])],
+            text_turn("chart ready"),
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(FakeExecTool(tmp_path))
+    loop = AgentLoop(provider, tools, workspace=tmp_path)
+    _, emit = collector()
+
+    outcome = await loop.run_turn("t1", [{"role": "user", "content": "chart"}], emit)
+
+    # The file the exec command wrote should be offered as a downloadable artifact.
+    assert "btc_30d_chart.png" in outcome.artifacts
+
+
 async def test_unknown_tool_returns_error_to_model():
     provider = FakeProvider(
         [

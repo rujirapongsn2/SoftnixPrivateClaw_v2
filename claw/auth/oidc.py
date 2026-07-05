@@ -60,6 +60,34 @@ def enabled_providers(settings: Settings) -> dict[str, OIDCConfig]:
     return out
 
 
+def provider_config(
+    name: str, *, client_id: str, client_secret: str, tenant: str = "common"
+) -> OIDCConfig | None:
+    """Build a provider config from explicit credentials (e.g. an admin-registered
+    OAuth app in the DB), independent of environment settings. Returns None for an
+    unknown provider so the caller can fall through."""
+    if name == "google":
+        return OIDCConfig(
+            name="google",
+            client_id=client_id,
+            client_secret=client_secret,
+            authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+            token_url="https://oauth2.googleapis.com/token",
+            userinfo_url="https://openidconnect.googleapis.com/v1/userinfo",
+        )
+    if name == "microsoft":
+        base = f"https://login.microsoftonline.com/{tenant or 'common'}/oauth2/v2.0"
+        return OIDCConfig(
+            name="microsoft",
+            client_id=client_id,
+            client_secret=client_secret,
+            authorize_url=f"{base}/authorize",
+            token_url=f"{base}/token",
+            userinfo_url="https://graph.microsoft.com/oidc/userinfo",
+        )
+    return None
+
+
 def redirect_uri(settings: Settings, provider: str) -> str:
     return f"{settings.public_base_url.rstrip('/')}/api/auth/oidc/{provider}/callback"
 

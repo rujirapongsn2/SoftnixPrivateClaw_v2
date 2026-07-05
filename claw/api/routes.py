@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from claw.api.deps import AppState, current_user, current_user_ws, get_state
@@ -72,11 +73,14 @@ async def me(user: User = Depends(current_user)) -> dict:
 @router.get("/api/sessions")
 async def list_sessions(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
     sessions = await state.sessions.list_for_user(user.id)
+    running = state.runtime.active_sessions()
     return [
         {
             "id": s.id,
             "title": s.title,
             "channel": s.channel,
+            "model": s.model,
+            "running": s.id in running,
             "updated_at": s.updated_at.isoformat(),
         }
         for s in sessions
@@ -138,6 +142,25 @@ async def list_messages(
     return [m for m in messages if m["role"] in ("user", "assistant") and m.get("content")]
 
 
+@router.get("/api/sessions/{session_id}/files/{path:path}")
+async def get_workspace_file(
+    session_id: str,
+    path: str,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> FileResponse:
+    """Serve a file the agent created in the user's workspace (e.g. a report the
+    agent wrote). Owner-scoped + path-escape-safe. Auth accepts a ?token= query
+    param (current_user), so a plain new-tab link works. No filename → inline, so
+    html/pdf/images render in the browser instead of force-downloading."""
+    await _owned_session(state, user, session_id)
+    workspace = _user_workspace(state, user.id)
+    resolved = _resolve_attachment(workspace, path)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(resolved)
+
+
 @router.post("/api/sessions/{session_id}/attachments")
 async def upload_attachments(
     session_id: str,
@@ -196,6 +219,10 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
                 await websocket.send_text(json.dumps(event.to_dict(), ensure_ascii=False))
 
     forwarder = asyncio.create_task(forward_events())
+    # Re-render any confirmations still awaiting an answer (e.g. this is a
+    # reconnect while a turn is paused on an Ask-mode gate).
+    for pending in state.runtime.pending_confirmations(session_id):
+        await websocket.send_text(json.dumps(pending.to_dict(), ensure_ascii=False))
     turns: set[asyncio.Task] = set()
     try:
         while True:
@@ -204,8 +231,16 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            # Ask-mode: the client answering a pending tool confirmation.
+            if payload.get("type") == "tool_decision":
+                request_id = str(payload.get("request_id") or "")
+                if request_id:
+                    state.runtime.resolve_confirmation(request_id, bool(payload.get("approved")))
+                continue
             content = str(payload.get("content") or "").strip()
             raw_attachments = payload.get("attachments") or []
+            model = str(payload.get("model") or "").strip() or None
+            permission_mode = "ask" if str(payload.get("permission_mode") or "") == "ask" else "auto"
             workspace = _user_workspace(state, user.id)
             media = [
                 p for p in (_resolve_attachment(workspace, str(a)) for a in raw_attachments[:_MAX_ATTACHMENTS]) if p
@@ -220,6 +255,8 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
                     channel="web",
                     locale=user.locale,
                     media=media,
+                    model=model,
+                    permission_mode=permission_mode,
                 )
             )
             turns.add(turn)

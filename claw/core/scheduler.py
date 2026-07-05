@@ -9,6 +9,7 @@ stream to any connected client.
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 from loguru import logger
@@ -21,25 +22,47 @@ TurnHandler = Callable[[str, str, str], Awaitable[str | None]]
 _MAX_SLEEP = 60.0
 
 
+def resolve_tz(name: str) -> ZoneInfo:
+    """Resolve an IANA tz name, falling back to UTC if it's unknown/unavailable
+    (e.g. a slim container missing tzdata) rather than crashing the scheduler."""
+    try:
+        return ZoneInfo(name or "UTC")
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        logger.warning("Unknown scheduler timezone '{}', falling back to UTC", name)
+        return ZoneInfo("UTC")
+
+
 def compute_next_run(
-    cron: str, interval_seconds: int, now: datetime | None = None
+    cron: str, interval_seconds: int, now: datetime | None = None, tz: str = "UTC"
 ) -> datetime | None:
+    """Next fire time (as UTC). Cron is interpreted in ``tz`` so "0 7 * * *"
+    means 07:00 wall-clock in that zone; the result is returned in UTC for
+    storage/comparison."""
     now = now or datetime.now(timezone.utc)
     if cron:
+        base = now.astimezone(resolve_tz(tz))
         try:
-            return croniter(cron, now).get_next(datetime)
+            nxt = croniter(cron, base).get_next(datetime)
         except (ValueError, KeyError) as exc:
             raise ValueError(f"invalid cron expression: {cron}") from exc
+        return nxt.astimezone(timezone.utc)
     if interval_seconds > 0:
         return now + timedelta(seconds=max(30, interval_seconds))
     return None  # one-shot with explicit next_run_at, or disabled
 
 
 class SchedulerService:
-    def __init__(self, schedules: ScheduleStore, sessions: SessionStore, handler: TurnHandler):
+    def __init__(
+        self,
+        schedules: ScheduleStore,
+        sessions: SessionStore,
+        handler: TurnHandler,
+        timezone: str = "UTC",
+    ):
         self.schedules = schedules
         self.sessions = sessions
         self.handler = handler
+        self.timezone = timezone
         self._wake = asyncio.Event()
         self._running = False
         self._task: asyncio.Task | None = None
@@ -96,7 +119,7 @@ class SchedulerService:
             self._firing.discard(job.id)
 
         try:
-            next_run = compute_next_run(job.cron, job.interval_seconds)
+            next_run = compute_next_run(job.cron, job.interval_seconds, tz=self.timezone)
         except ValueError:
             next_run = None
         await self.schedules.mark_ran(job.id, next_run_at=next_run, status=status)

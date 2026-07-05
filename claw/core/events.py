@@ -54,10 +54,35 @@ class ToolFinished(AgentEvent):
 
 
 @dataclass(slots=True)
+class ToolConfirmRequest(AgentEvent):
+    """Ask-mode: the agent wants to run a potentially unsafe tool and is waiting
+    for the user to approve or decline. The client replies over the WS with
+    {type: "tool_decision", request_id, approved}."""
+
+    turn_id: str
+    request_id: str
+    tool: str
+    args_preview: str
+    type: str = field(default="tool_confirm_request", init=False)
+
+
+@dataclass(slots=True)
+class ToolConfirmResolved(AgentEvent):
+    """A pending confirmation was answered (or timed out) — lets every connected
+    client settle the card, not just the one that clicked."""
+
+    turn_id: str
+    request_id: str
+    approved: bool
+    type: str = field(default="tool_confirm_resolved", init=False)
+
+
+@dataclass(slots=True)
 class TurnCompleted(AgentEvent):
     turn_id: str
     content: str
     usage: dict[str, int] = field(default_factory=dict)
+    artifacts: list[str] = field(default_factory=list)
     type: str = field(default="turn_completed", init=False)
 
 

@@ -2,11 +2,14 @@ export interface SessionInfo {
   id: string;
   title: string;
   updated_at: string;
+  model?: string | null;
+  running?: boolean;
 }
 
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  meta?: { artifacts?: string[] } | null;
 }
 
 export interface AttachmentRef {
@@ -24,6 +27,8 @@ export interface AgentEvent {
     | "thinking_delta"
     | "tool_started"
     | "tool_finished"
+    | "tool_confirm_request"
+    | "tool_confirm_resolved"
     | "turn_completed"
     | "turn_error";
   turn_id: string;
@@ -34,6 +39,9 @@ export interface AgentEvent {
   is_error?: boolean;
   content?: string;
   message?: string;
+  artifacts?: string[];
+  request_id?: string;
+  approved?: boolean;
 }
 
 export interface SkillInfo {
@@ -42,6 +50,8 @@ export interface SkillInfo {
   description: string;
   content: string;
   enabled: boolean;
+  // Built-in skills ship with the platform: read-only, always enabled.
+  builtin?: boolean;
 }
 
 export interface MemoryInfo {
@@ -60,16 +70,31 @@ export interface ConnectorInfo {
   runtime: { status: string; tools?: number; error?: string };
 }
 
+export interface FieldSpec {
+  key: string;
+  label: string;
+  help: string;
+  secret: boolean;
+  optional: boolean;
+  placeholder: string;
+  prefix: string;
+}
+
 export interface ConnectorPreset {
   key: string;
   name: string;
   label: string;
   description: string;
   transport: "stdio" | "http";
+  category: string;
+  setup: "api_key" | "token" | "oauth" | "custom";
   command: string;
   url: string;
-  env_fields: string[];
+  fields: FieldSpec[];
   docs: string;
+  oauth_provider: string;
+  oauth_scopes: string;
+  env_prefix: string;
 }
 
 export interface ScheduleInfo {
@@ -97,6 +122,110 @@ export interface AdminUser extends AuthUser {
   is_active: boolean;
   sessions: number;
   created_at: string;
+}
+
+export interface ActivityPoint {
+  label: string;
+  count: number;
+}
+
+export interface AdminOverview {
+  stats: Record<string, number | boolean>;
+  activity_by_day: ActivityPoint[];
+  activity_by_hour: ActivityPoint[];
+}
+
+export type ModelCost = "low" | "medium" | "high" | "very_high";
+
+export interface LLMModelCfg {
+  id: string;
+  model_id: string;
+  label: string;
+  enabled: boolean;
+  is_default: boolean;
+  cost: ModelCost;
+  description: string;
+}
+
+export interface LLMProviderCfg {
+  id: string;
+  name: string;
+  api_base: string;
+  has_key: boolean;
+  enabled: boolean;
+  models: LLMModelCfg[];
+}
+
+export interface GuardrailRule {
+  id: string;
+  name: string;
+  pattern: string;
+  action: "mask" | "block" | "monitor";
+  scopes: string[];
+  severity: string;
+  placeholder: string;
+  enabled: boolean;
+  is_builtin: boolean;
+}
+
+export interface AuditRow {
+  id: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  user_id: string | null;
+  session_id: string | null;
+  created_at: string;
+}
+
+export interface OAuthAppPublic {
+  client_id: string;
+  tenant: string;
+  has_secret: boolean;
+}
+
+export interface OAuthAppsInfo {
+  google: OAuthAppPublic;
+  microsoft: OAuthAppPublic;
+  redirect_uris: { google: string; microsoft: string };
+  login_redirect_uris: { google: string; microsoft: string };
+}
+
+export interface GuardrailTestResult {
+  action: "mask" | "block" | "monitor" | null;
+  matched_rules: { name: string; scope: string }[];
+  masked: string;
+  severity: string;
+  monitor_only: boolean;
+}
+
+export interface ModelOption {
+  model_id: string;
+  label: string;
+  provider: string;
+  is_default: boolean;
+  cost: ModelCost;
+  description: string;
+}
+
+export interface BrowserExtensionInstance {
+  extension_id: string;
+  label: string;
+  last_seen: number;
+  online: boolean;
+}
+
+export interface BrowserExtensionStatus {
+  client_extension_enabled: boolean;
+  paired: boolean;
+  online: boolean;
+  extensions: BrowserExtensionInstance[];
+}
+
+export interface BrowserExtensionPairing {
+  api_base: string;
+  instance_id: string;
+  pairing_ticket: string;
+  expires_at: number;
 }
 
 export function getToken(): string {
@@ -181,6 +310,9 @@ export const api = {
       body: JSON.stringify(c),
     }),
   deleteConnector: (id: string) => request(`/api/connectors/${id}`, { method: "DELETE" }),
+  // One-click OAuth: returns the provider authorize URL for the browser to visit.
+  connectorOAuthStart: (presetKey: string) =>
+    request<{ url: string }>(`/api/connectors/oauth/${encodeURIComponent(presetKey)}/start`),
 
   listSchedules: () => request<ScheduleInfo[]>("/api/schedules"),
   createSchedule: (s: Partial<ScheduleInfo>) =>
@@ -194,13 +326,106 @@ export const api = {
   adminListUsers: () => request<AdminUser[]>("/api/admin/users"),
   adminStats: () =>
     request<Record<string, number | boolean>>("/api/admin/stats"),
-  adminCreateUser: (email: string, password: string, is_admin: boolean) =>
+  adminCreateUser: (email: string, password: string, is_admin: boolean, display_name = "") =>
     request<AdminUser>("/api/admin/users", {
       method: "POST",
-      body: JSON.stringify({ email, password, is_admin }),
+      body: JSON.stringify({ email, password, is_admin, display_name }),
     }),
-  adminUpdateUser: (id: string, patch: { is_admin?: boolean; is_active?: boolean }) =>
-    request<AdminUser>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  adminUpdateUser: (
+    id: string,
+    patch: { is_admin?: boolean; is_active?: boolean; display_name?: string; password?: string },
+  ) => request<AdminUser>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  adminDeleteUser: (id: string) => request(`/api/admin/users/${id}`, { method: "DELETE" }),
+
+  // -- admin: overview / LLM providers / guardrails / audit --
+  adminOverview: () => request<AdminOverview>("/api/admin/overview"),
+
+  adminListLLM: () => request<{ providers: LLMProviderCfg[] }>("/api/admin/llm"),
+  adminCreateProvider: (p: { name: string; api_key: string; api_base: string; enabled?: boolean }) =>
+    request<LLMProviderCfg>("/api/admin/providers", { method: "POST", body: JSON.stringify(p) }),
+  adminUpdateProvider: (
+    id: string,
+    p: { name?: string; api_key?: string; api_base?: string; enabled?: boolean },
+  ) => request<LLMProviderCfg>(`/api/admin/providers/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  adminDeleteProvider: (id: string) => request(`/api/admin/providers/${id}`, { method: "DELETE" }),
+  adminCreateModel: (
+    providerId: string,
+    m: { model_id: string; label: string; enabled?: boolean; cost?: ModelCost; description?: string },
+  ) =>
+    request<LLMModelCfg>(`/api/admin/providers/${providerId}/models`, {
+      method: "POST",
+      body: JSON.stringify(m),
+    }),
+  adminUpdateModel: (
+    id: string,
+    m: {
+      model_id?: string;
+      label?: string;
+      enabled?: boolean;
+      is_default?: boolean;
+      cost?: ModelCost;
+      description?: string;
+    },
+  ) => request<LLMModelCfg>(`/api/admin/models/${id}`, { method: "PATCH", body: JSON.stringify(m) }),
+  adminDeleteModel: (id: string) => request(`/api/admin/models/${id}`, { method: "DELETE" }),
+
+  adminGuardrails: () =>
+    request<{ monitor_only: boolean; rules: GuardrailRule[] }>("/api/admin/guardrails"),
+  adminSetMonitorOnly: (monitor_only: boolean) =>
+    request<{ monitor_only: boolean }>("/api/admin/guardrails", {
+      method: "PUT",
+      body: JSON.stringify({ monitor_only }),
+    }),
+  adminCreateRule: (r: {
+    name: string;
+    kind: "keyword" | "regex";
+    pattern: string;
+    action: "mask" | "block" | "monitor";
+    severity?: string;
+  }) => request<GuardrailRule>("/api/admin/guardrails/rules", { method: "POST", body: JSON.stringify(r) }),
+  adminUpdateRule: (
+    id: string,
+    patch: {
+      enabled?: boolean;
+      action?: string;
+      name?: string;
+      pattern?: string;
+      severity?: string;
+      kind?: "keyword" | "regex";
+    },
+  ) =>
+    request<GuardrailRule>(`/api/admin/guardrails/rules/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  adminDeleteRule: (id: string) => request(`/api/admin/guardrails/rules/${id}`, { method: "DELETE" }),
+  adminTestGuardrails: (text: string) =>
+    request<GuardrailTestResult>("/api/admin/guardrails/test", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+
+  adminGetOAuthApps: () => request<OAuthAppsInfo>("/api/admin/oauth-apps"),
+  adminSetOAuthApp: (
+    provider: "google" | "microsoft",
+    body: { client_id: string; client_secret: string; tenant?: string },
+  ) => request<OAuthAppPublic>(`/api/admin/oauth-apps/${provider}`, { method: "PUT", body: JSON.stringify(body) }),
+
+  adminAudit: (
+    filters: { kind?: string; user_id?: string; search?: string; before?: string; limit?: number } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (filters.kind) q.set("kind", filters.kind);
+    if (filters.user_id) q.set("user_id", filters.user_id);
+    if (filters.search) q.set("search", filters.search);
+    if (filters.before) q.set("before", filters.before);
+    q.set("limit", String(filters.limit ?? 50));
+    return request<{ events: AuditRow[]; kinds: string[]; has_more: boolean; next_before: string | null }>(
+      `/api/admin/audit?${q.toString()}`,
+    );
+  },
+
+  listModels: () => request<{ models: ModelOption[]; default: string }>("/api/models"),
 
   getHeartbeat: () =>
     request<{ interval_minutes: number; enabled: boolean; next_run_at: string | null }>("/api/heartbeat"),
@@ -233,6 +458,13 @@ export const api = {
       method: "POST",
     }),
   unlinkTelegram: () => request<{ linked: boolean }>("/api/telegram/link", { method: "DELETE" }),
+
+  browserExtensionStatus: () =>
+    request<BrowserExtensionStatus>("/api/browser-extension/status"),
+  browserExtensionPairingInit: () =>
+    request<BrowserExtensionPairing>("/api/browser-extension/pairing/init", { method: "POST" }),
+  browserExtensionUnpair: () =>
+    request<{ unpaired: number }>("/api/browser-extension/pairing", { method: "DELETE" }),
 };
 
 export function openChatSocket(sessionId: string): WebSocket {
@@ -240,4 +472,11 @@ export function openChatSocket(sessionId: string): WebSocket {
   return new WebSocket(
     `${proto}://${location.host}/ws/chat/${sessionId}?token=${encodeURIComponent(getToken())}`,
   );
+}
+
+/** URL to open/download a file the agent created in the workspace. The token is
+ * in the query so a plain new-tab link authenticates (no header needed). */
+export function fileUrl(sessionId: string, path: string): string {
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  return `/api/sessions/${sessionId}/files/${encoded}?token=${encodeURIComponent(getToken())}`;
 }

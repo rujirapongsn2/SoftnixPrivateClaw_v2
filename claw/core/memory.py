@@ -65,6 +65,29 @@ class MemoryService:
             return ""
         return f"# Memory\n\n## Long-term Memory\n{core}"
 
+    async def remember(self, user_id: str, fact: str) -> str:
+        """Append a durable fact to core memory on demand (agent-invoked).
+
+        Consolidation (maybe_consolidate) later merges/cleans these; this just
+        makes an explicit "remember X" persist immediately instead of waiting
+        for the message window to fill.
+        """
+        fact = fact.strip()
+        if not fact:
+            return "Nothing to remember."
+        current = await self.memories.get_core(user_id)
+        line = fact if fact.startswith(("-", "*")) else f"- {fact}"
+        # Skip exact duplicates so repeated "remember" calls don't pile up.
+        existing = {ln.strip().lstrip("-* ").strip() for ln in current.splitlines()}
+        if fact.lstrip("-* ").strip() in existing:
+            return f"Already in memory: {fact}"
+        updated = f"{current.rstrip()}\n{line}" if current.strip() else line
+        await self.memories.set_core(user_id, updated)
+        return f"Saved to memory: {fact}"
+
+    async def core_text(self, user_id: str) -> str:
+        return await self.memories.get_core(user_id)
+
     async def maybe_consolidate(self, user_id: str, session_id: str) -> bool:
         """Consolidate when enough unconsolidated messages accumulated. Returns True if ran."""
         session = await self.sessions.get(session_id)

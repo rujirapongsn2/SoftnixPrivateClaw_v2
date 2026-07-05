@@ -24,6 +24,8 @@ class FakeProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.1,
+        api_key: str | None = None,
+        api_base: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         self.calls.append(list(messages))
         if not self.turns:

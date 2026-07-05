@@ -1,6 +1,7 @@
 import { Button } from "@astryxdesign/core/Button";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
+import { Popover } from "@astryxdesign/core/Popover";
 import {
   SideNav,
   SideNavCollapseButton,
@@ -10,9 +11,10 @@ import {
 } from "@astryxdesign/core/SideNav";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { LogOut, MessageSquare, Plus, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
-import { AdminDialog } from "./Admin";
+import { useToast } from "@astryxdesign/core/Toast";
+import { Loader2, LogOut, MessageCircle, MessageSquare, Plus, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo } from "./Logo";
@@ -35,6 +37,129 @@ function NewChatButton({ onClick }: { onClick: () => void }) {
 function SidebarBrand() {
   const { isCollapsed } = useSideNavCollapse();
   return <div className="claw-sidenav-brand">{isCollapsed ? <SoftnixLogo height={22} /> : <Brand height={22} />}</div>;
+}
+
+/** Truncate a chat title for the narrow collapsed-rail popover. */
+function truncateTitle(title: string, max = 28) {
+  return title.length > max ? title.slice(0, max) + "…" : title;
+}
+
+/** Recent-chats list. Expanded: full SideNavSection (unchanged). Collapsed: the
+ * rail would otherwise stack one icon per chat (unbounded height) — instead
+ * show a single "Recents" icon that opens a flyout with the same list. */
+function RecentsNav({
+  sessions,
+  active,
+  done,
+  onSelect,
+  onDelete,
+}: {
+  sessions: SessionInfo[];
+  active: string | null;
+  done: Set<string>;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  const { isCollapsed } = useSideNavCollapse();
+  const [isOpen, setIsOpen] = useState(false);
+
+  // Running spinner (turn processing) or a "new response" dot (finished while
+  // you were elsewhere) — shown until the row is hovered (which reveals delete).
+  const statusFor = (s: SessionInfo) =>
+    s.running ? (
+      <span className="claw-recent-status" title="Processing…">
+        <Icon icon={Loader2} size="xsm" />
+      </span>
+    ) : done.has(s.id) ? (
+      <span className="claw-recent-status claw-recent-status--done" title="New response" />
+    ) : null;
+
+  if (!isCollapsed) {
+    return (
+      <SideNavSection title="Recents">
+        {sessions.map((s) => (
+          <div key={s.id} className="claw-recent-row">
+            <SideNavItem
+              label={s.title}
+              icon={MessageSquare}
+              isSelected={s.id === active}
+              onClick={() => onSelect(s.id)}
+            />
+            {statusFor(s)}
+            <span className="claw-recent-delete">
+              <IconButton
+                label="Delete chat"
+                icon={<Icon icon="close" size="xsm" />}
+                variant="ghost"
+                size="sm"
+                clickAction={(e) => {
+                  e.stopPropagation();
+                  onDelete(s.id);
+                }}
+              />
+            </span>
+          </div>
+        ))}
+      </SideNavSection>
+    );
+  }
+
+  return (
+    <div className="claw-recents-collapsed">
+      <Popover
+        label="Recents"
+        placement="end"
+        alignment="start"
+        isOpen={isOpen}
+        onOpenChange={setIsOpen}
+        width={260}
+        // This flyout is opened by a mouse click far more often than by
+        // keyboard, so don't steal focus onto the first row automatically —
+        // on macOS Safari with "Full Keyboard Access" on, that paints a
+        // heavy native focus ring around whichever row gets auto-focused
+        // and (via :focus-within) permanently reveals its delete button,
+        // making the very first item look stuck in a bogus selected state.
+        hasAutoFocus={false}
+        content={
+          <div className="claw-recents-popover">
+            <Text size="sm" weight="semibold" color="secondary" className="claw-recents-popover-title">
+              Recents
+            </Text>
+            {sessions.length === 0 ? (
+              <Text size="sm" color="secondary">
+                No conversations yet.
+              </Text>
+            ) : (
+              sessions.map((s) => (
+                <div key={s.id} className="claw-recents-popover-row">
+                  <Button
+                    label={truncateTitle(s.title)}
+                    icon={<Icon icon={MessageSquare} size="sm" />}
+                    variant={s.id === active ? "secondary" : "ghost"}
+                    size="sm"
+                    className="claw-recents-popover-item"
+                    clickAction={() => {
+                      onSelect(s.id);
+                      setIsOpen(false);
+                    }}
+                  />
+                  <IconButton
+                    label="Delete chat"
+                    icon={<Icon icon="close" size="xsm" />}
+                    variant="ghost"
+                    size="sm"
+                    clickAction={() => onDelete(s.id)}
+                  />
+                </div>
+              ))
+            )}
+          </div>
+        }
+      >
+        <IconButton label="Recents" icon={<Icon icon={MessageCircle} size="sm" />} variant="ghost" />
+      </Popover>
+    </div>
+  );
 }
 
 function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; initialError?: string }) {
@@ -109,14 +234,31 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
-  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
+  // Sessions that finished a turn while the user wasn't viewing them — shown
+  // with a "new response" dot in the sidebar until opened.
+  const [doneSessions, setDoneSessions] = useState<Set<string>>(new Set());
+  const prevRunningRef = useRef<Set<string>>(new Set());
+  const activeRef = useRef<string | null>(null);
+  const toast = useToast();
 
   // Capture a JWT (or error) returned by the OIDC callback, then restore session.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const urlToken = params.get("token");
     const urlError = params.get("auth_error");
+    // Connector OAuth callback lands here with ?connector=<key>&connector_status=…
+    const connector = params.get("connector");
+    const connectorStatus = params.get("connector_status");
+    if (connectorStatus) {
+      toast(
+        connectorStatus === "connected"
+          ? { body: `${connector || "Connector"} connected`, type: "info", autoHideDuration: 3000 }
+          : { body: "Couldn't connect. Please try again.", type: "error" },
+      );
+      window.history.replaceState({}, "", window.location.pathname);
+    }
     if (urlToken || urlError) {
       if (urlToken) setToken(urlToken);
       if (urlError) setAuthError("Social sign-in failed. Please try again.");
@@ -142,11 +284,56 @@ export default function App() {
     if (user) void refresh();
   }, [user, refresh]);
 
-  const newChat = useCallback(async () => {
+  // Keep `activeRef` in sync so the polling reconciler can read it without
+  // re-subscribing the interval on every navigation.
+  useEffect(() => {
+    activeRef.current = active;
+    // Opening a session clears its "new response" marker.
+    if (active) setDoneSessions((prev) => (prev.has(active) ? new Set([...prev].filter((id) => id !== active)) : prev));
+  }, [active]);
+
+  // Poll the session list so the sidebar reflects background turns (running →
+  // done) even when the user has navigated away from the processing chat.
+  useEffect(() => {
+    if (!user) return;
+    const id = setInterval(() => void refresh(), 3000);
+    return () => clearInterval(id);
+  }, [user, refresh]);
+
+  // Detect running→done transitions to flag sessions with a fresh response the
+  // user hasn't seen yet (skip the one they're currently viewing).
+  useEffect(() => {
+    const nowRunning = new Set(sessions.filter((s) => s.running).map((s) => s.id));
+    const prev = prevRunningRef.current;
+    const finished = [...prev].filter((idv) => !nowRunning.has(idv) && idv !== activeRef.current);
+    if (finished.length) {
+      setDoneSessions((cur) => {
+        const next = new Set(cur);
+        finished.forEach((idv) => next.add(idv));
+        return next;
+      });
+    }
+    prevRunningRef.current = nowRunning;
+  }, [sessions]);
+
+  // "New chat" just clears the view to the draft landing — no session is
+  // created until the user actually sends something (see requireSession),
+  // matching claude.ai and avoiding a pile-up of empty "New chat" sessions.
+  const newChat = useCallback(() => {
+    setActive(null);
+    setSettingsSection(null);
+    setAdminSection(null);
+  }, []);
+
+  // Materialize a session on demand (first message / attachment from the draft
+  // landing) and make it active. Returns the new id for immediate use.
+  const requireSession = useCallback(async () => {
     const created = await api.createSession();
     await refresh();
     setActive(created.id);
     setSettingsSection(null);
+    setAdminSection(null);
+    return created.id;
   }, [refresh]);
 
   const autoTitle = useCallback(
@@ -163,6 +350,7 @@ export default function App() {
     setSessions([]);
     setActive(null);
     setSettingsSection(null);
+    setAdminSection(null);
   };
 
   if (checking) return <div className="claw-login"><Text color="secondary">Loading…</Text></div>;
@@ -180,7 +368,11 @@ export default function App() {
         footer={
           <div className="claw-sidenav-footer">
             <SideNavItem label={user.display_name || user.email} icon={UserIcon}>
-              <SideNavItem label="Settings" icon={SettingsIcon} collapsible>
+              <SideNavItem
+                label="Settings"
+                icon={SettingsIcon}
+                collapsible={{ defaultIsCollapsed: true }}
+              >
                 {SETTINGS_SECTIONS.map((s) => (
                   <SideNavItem
                     key={s.key}
@@ -189,17 +381,34 @@ export default function App() {
                     isSelected={settingsSection === s.key}
                     onClick={() => {
                       setSettingsSection(s.key);
+                      setAdminSection(null);
                       setActive(null);
                     }}
                   />
                 ))}
               </SideNavItem>
               {user.is_admin && (
-                <SideNavItem
-                  label="Admin console"
-                  icon={Shield}
-                  onClick={() => setAdminOpen(true)}
-                />
+                <div className="claw-nav-admin">
+                  <SideNavItem
+                    label="Admin console"
+                    icon={Shield}
+                    collapsible={{ defaultIsCollapsed: true }}
+                  >
+                    {ADMIN_SECTIONS.map((s) => (
+                      <SideNavItem
+                        key={s.key}
+                        label={s.label}
+                        icon={s.icon}
+                        isSelected={adminSection === s.key}
+                        onClick={() => {
+                          setAdminSection(s.key);
+                          setSettingsSection(null);
+                          setActive(null);
+                        }}
+                      />
+                    ))}
+                  </SideNavItem>
+                </div>
               )}
               <SideNavItem label="Log out" icon={LogOut} onClick={logout} />
             </SideNavItem>
@@ -208,55 +417,41 @@ export default function App() {
         footerIcons={<SideNavCollapseButton />}
         collapsible={{ hasButton: false }}
       >
-        <SideNavSection title="Recents">
-          {sessions.map((s) => (
-            <div key={s.id} className="claw-recent-row">
-              <SideNavItem
-                label={s.title}
-                icon={MessageSquare}
-                isSelected={s.id === active}
-                onClick={() => {
-                  setActive(s.id);
-                  setSettingsSection(null);
-                }}
-              />
-              <span className="claw-recent-delete">
-                <IconButton
-                  label="Delete chat"
-                  icon={<Icon icon="close" size="xsm" />}
-                  variant="ghost"
-                  size="sm"
-                  clickAction={(e) => {
-                    e.stopPropagation();
-                    void api.deleteSession(s.id).then(() => {
-                      if (active === s.id) setActive(null);
-                      void refresh();
-                    });
-                  }}
-                />
-              </span>
-            </div>
-          ))}
-        </SideNavSection>
+        <RecentsNav
+          sessions={sessions}
+          active={active}
+          done={doneSessions}
+          onSelect={(id) => {
+            setActive(id);
+            setSettingsSection(null);
+            setAdminSection(null);
+          }}
+          onDelete={(id) => {
+            void api.deleteSession(id).then(() => {
+              if (active === id) setActive(null);
+              void refresh();
+            });
+          }}
+        />
       </SideNav>
 
       <main className="claw-main">
-        {settingsSection ? (
+        {adminSection ? (
+          <AdminPanel section={adminSection} selfId={user.id} />
+        ) : settingsSection ? (
           <SettingsPanel section={settingsSection} />
-        ) : active ? (
-          <Chat sessionId={active} userName={user.display_name} onFirstMessage={autoTitle(active)} />
         ) : (
-          <div className="claw-welcome">
-            <SoftnixLogo height={40} />
-            <Text type="display-3">How can Claw help you today?</Text>
-            <Button label="Start a new chat" icon={<Icon icon={Plus} size="sm" />} clickAction={newChat} />
-          </div>
+          <Chat
+            sessionId={active}
+            userName={user.display_name}
+            onFirstMessage={active ? autoTitle(active) : undefined}
+            onRequireSession={requireSession}
+            onActivity={refresh}
+            running={active ? (sessions.find((s) => s.id === active)?.running ?? false) : false}
+            initialModel={active ? sessions.find((s) => s.id === active)?.model ?? null : null}
+          />
         )}
       </main>
-
-      {user.is_admin && (
-        <AdminDialog isOpen={adminOpen} onOpenChange={setAdminOpen} selfId={user.id} />
-      )}
     </div>
   );
 }

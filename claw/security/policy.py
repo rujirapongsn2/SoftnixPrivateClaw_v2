@@ -98,6 +98,16 @@ class PolicyEngine:
         # so operators can observe hits before enforcing.
         self.monitor_only = monitor_only
 
+    def reload(self, rules: Iterable[PolicyRule], monitor_only: bool | None = None) -> None:
+        """Swap the active ruleset (and optionally the monitor toggle) atomically.
+
+        Called at startup and after any admin guardrail edit so enforcement in
+        `enforce()` reflects the persisted configuration without a restart.
+        """
+        self.rules = list(rules)
+        if monitor_only is not None:
+            self.monitor_only = monitor_only
+
     def enforce(self, text: str, scope: Scope) -> PolicyDecision:
         if not text:
             return PolicyDecision(action=None, text=text)
@@ -144,3 +154,39 @@ _SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 def _max_severity(a: str, b: str) -> str:
     return a if _SEVERITY_ORDER.get(a, 0) >= _SEVERITY_ORDER.get(b, 0) else b
+
+
+# -- persistence bridge (DB <-> engine) -------------------------------------
+
+def builtin_rule_seeds() -> list[dict]:
+    """Built-in rules as plain dicts, for one-time seeding into GuardrailStore."""
+    return [
+        {
+            "name": r.name,
+            "pattern": r.pattern,
+            "action": r.action.value,
+            "scopes": list(r.scopes),
+            "placeholder": r.placeholder,
+            "severity": r.severity,
+            "block_message": r.block_message,
+            "enabled": r.enabled,
+            "is_builtin": True,
+        }
+        for r in _BUILTINS
+    ]
+
+
+def rule_from_row(row) -> PolicyRule:
+    """Build a PolicyRule from a GuardrailRule ORM row (or any object with the fields)."""
+    action = row.action if isinstance(row.action, Action) else Action(str(row.action))
+    scopes = tuple(row.scopes or ("input", "output", "tool_args"))
+    return PolicyRule(
+        name=row.name,
+        pattern=row.pattern,
+        action=action,
+        scopes=scopes,
+        placeholder=row.placeholder or "[REDACTED]",
+        severity=row.severity or "medium",
+        enabled=bool(row.enabled),
+        block_message=row.block_message or "This request was blocked by the control policy.",
+    )

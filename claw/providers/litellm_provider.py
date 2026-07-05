@@ -106,6 +106,8 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.1,
+        api_key: str | None = None,
+        api_base: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         from litellm import acompletion
 
@@ -122,10 +124,13 @@ class LiteLLMProvider(LLMProvider):
             "stream_options": {"include_usage": True},
         }
         apply_model_overrides(model, kwargs)
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
+        # Per-call creds (admin-configured provider) win over instance defaults.
+        effective_key = api_key or self.api_key
+        effective_base = api_base or self.api_base
+        if effective_key:
+            kwargs["api_key"] = effective_key
+        if effective_base:
+            kwargs["api_base"] = effective_base
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"

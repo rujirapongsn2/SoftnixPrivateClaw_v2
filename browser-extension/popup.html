@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Softnix Browser</title>
+    <style>
+      body { font: 13px system-ui, sans-serif; width: 340px; margin: 16px; color: #17202a; }
+      label { display: block; margin: 10px 0 4px; font-weight: 600; }
+      input, textarea { width: 100%; box-sizing: border-box; padding: 8px; }
+      textarea { min-height: 86px; resize: vertical; }
+      button { margin-top: 12px; width: 100%; padding: 9px; border: 0; background: #1264a3; color: white; font-weight: 700; }
+      button.secondary { background: #eef4fb; color: #17476d; }
+      .note { margin-top: 10px; color: #64748b; line-height: 1.4; }
+      #status { margin-top: 10px; min-height: 18px; color: #445; }
+    </style>
+  </head>
+  <body>
+    <label for="pairingDetails">Paste pairing details</label>
+    <textarea id="pairingDetails" placeholder="Paste the copied details from Softnix Web Chat"></textarea>
+    <button id="parse-details" class="secondary" type="button">Use Pasted Details</button>
+    <label for="apiBase">Admin API base URL</label>
+    <input id="apiBase" placeholder="https://example.com">
+    <label for="instanceId">Instance ID</label>
+    <input id="instanceId" placeholder="default-prod">
+    <label for="ticket">Pairing ticket</label>
+    <input id="ticket" placeholder="brp_...">
+    <button id="pair">Pair Browser</button>
+    <p class="note">Site access is approved from Softnix Web Chat and controlled by the Claw security policy.</p>
+    <div id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

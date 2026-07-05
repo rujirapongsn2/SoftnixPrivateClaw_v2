@@ -1,14 +1,19 @@
 """Shared FastAPI app builder for API-level tests (auth + admin + manage routers)."""
 
+import tempfile
+from pathlib import Path
+
 import httpx
 from fastapi import FastAPI
 
 from claw.api.admin import router as admin_router
 from claw.api.auth import router as auth_router
+from claw.api.browser_ext import router as browser_ext_router
 from claw.api.deps import AppState
 from claw.api.manage import router as manage_router
 from claw.api.routes import router as core_router
 from claw.api.telegram import router as telegram_router
+from claw.browser.broker import BrowserBrokerStore
 from claw.channels.link import LinkCodeService
 from claw.config import Settings
 from claw.core.connectors import ConnectorManager
@@ -16,8 +21,11 @@ from claw.db.stores import (
     AuditStore,
     ConnectorStore,
     FeedbackStore,
+    GuardrailStore,
+    LLMConfigStore,
     MemoryStore,
     MessageStore,
+    OAuthAppStore,
     ScheduleStore,
     SessionStore,
     SkillStore,
@@ -31,9 +39,12 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
     app = FastAPI()
     app.include_router(auth_router)
     app.include_router(admin_router)
+    app.include_router(browser_ext_router)
     app.include_router(manage_router)
     app.include_router(telegram_router)
     app.include_router(core_router)
+    # Per-app temp root so browser-broker state never leaks across tests.
+    broker_root = Path(tempfile.mkdtemp(prefix="claw-broker-")) / "_browser_broker"
     app.state.claw = AppState(
         # _env_file=None keeps tests hermetic — never read the developer's .env.
         settings=Settings(dev_token="t", secret_key="test-secret", _env_file=None, **settings_kwargs),
@@ -52,6 +63,11 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         telegram_link=LinkCodeService(),
         usage=UsageStore(db_factory),
         feedback=FeedbackStore(db_factory),
+        guardrails=GuardrailStore(db_factory),
+        llm_config=LLMConfigStore(db_factory),
+        audit=AuditStore(db_factory),
+        oauth_apps=OAuthAppStore(db_factory),
+        browser_broker=BrowserBrokerStore(broker_root),
         telegram=None,
     )
     return app

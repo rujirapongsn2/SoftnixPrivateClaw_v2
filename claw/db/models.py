@@ -52,6 +52,8 @@ class ChatSession(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     title: Mapped[str] = mapped_column(String(255), default="New chat")
     channel: Mapped[str] = mapped_column(String(32), default="web")
+    # Sticky per-chat model choice (litellm id). Null = use the configured default.
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     last_consolidated_seq: Mapped[int] = mapped_column(Integer, default=0)
@@ -173,7 +175,10 @@ class Feedback(Base):
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
-    __table_args__ = (Index("ix_audit_user_time", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_audit_user_time", "user_id", "created_at"),
+        Index("ix_audit_kind_time", "kind", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     user_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -181,3 +186,68 @@ class AuditEvent(Base):
     kind: Mapped[str] = mapped_column(String(32))  # tool_call|message|auth|policy
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class LLMProvider(Base):
+    """Admin-configured upstream LLM provider (OpenRouter, Anthropic, …).
+
+    The API key is stored encrypted at rest (SecretBox), like connector secrets.
+    """
+
+    __tablename__ = "llm_providers"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    api_key: Mapped[str] = mapped_column(Text, default="")  # encrypted at rest
+    api_base: Mapped[str] = mapped_column(String(500), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class LLMModel(Base):
+    """A model a provider exposes; enabled ones appear in the chat model picker."""
+
+    __tablename__ = "llm_models"
+    __table_args__ = (Index("ix_llm_models_provider", "provider_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    provider_id: Mapped[str] = mapped_column(ForeignKey("llm_providers.id"), index=True)
+    model_id: Mapped[str] = mapped_column(String(128))  # litellm id, e.g. anthropic/claude-sonnet-5
+    label: Mapped[str] = mapped_column(String(128), default="")
+    # Shown in the chat model picker: cost tier + a one-line description.
+    cost: Mapped[str] = mapped_column(String(16), default="medium")  # low|medium|high|very_high
+    description: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class GuardrailRule(Base):
+    """A control-policy rule (mask/block/monitor). Built-ins are seeded on first run;
+    admins can toggle them and add custom keyword/regex rules."""
+
+    __tablename__ = "guardrail_rules"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    pattern: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(String(16), default="mask")  # mask|block|monitor
+    scopes: Mapped[list] = mapped_column(JSON, default=lambda: ["input", "output", "tool_args"])
+    placeholder: Mapped[str] = mapped_column(String(64), default="[REDACTED]")
+    severity: Mapped[str] = mapped_column(String(16), default="medium")
+    block_message: Mapped[str] = mapped_column(
+        Text, default="This request was blocked by the control policy."
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class AppSetting(Base):
+    """Tiny key/value store for admin-tunable settings persisted across restarts."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

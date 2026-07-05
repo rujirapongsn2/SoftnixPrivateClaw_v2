@@ -25,7 +25,7 @@ class SkillBody(BaseModel):
     enabled: bool = True
 
 
-def _skill_json(s) -> dict:
+def _skill_json(s, builtin: bool = False) -> dict:
     return {
         "id": s.id,
         "name": s.name,
@@ -33,12 +33,19 @@ def _skill_json(s) -> dict:
         "content": s.content,
         "enabled": s.enabled,
         "updated_at": s.updated_at.isoformat(),
+        "builtin": builtin,
     }
 
 
 @router.get("/skills")
 async def list_skills(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
-    return [_skill_json(s) for s in await state.skills.list_for_user(user.id)]
+    from claw.core.builtin_skills import builtin_skills
+
+    user_skills = await state.skills.list_for_user(user.id)
+    user_names = {s.name for s in user_skills}
+    # Built-ins first (read-only), skipping any a user skill shadows by name.
+    builtins = [_skill_json(b, builtin=True) for b in builtin_skills() if b.name not in user_names]
+    return builtins + [_skill_json(s) for s in user_skills]
 
 
 @router.put("/skills/{name}")
@@ -48,6 +55,10 @@ async def upsert_skill(
     user: User = Depends(require_operator),
     state: AppState = Depends(get_state),
 ) -> dict:
+    from claw.core.builtin_skills import get_builtin_skill
+
+    if get_builtin_skill(name.strip()) is not None:
+        raise HTTPException(status_code=400, detail="that name is reserved by a built-in skill")
     skill = await state.skills.upsert(
         user.id, name.strip(), description=body.description, content=body.content, enabled=body.enabled
     )
@@ -58,6 +69,8 @@ async def upsert_skill(
 async def delete_skill(
     skill_id: str, user: User = Depends(require_operator), state: AppState = Depends(get_state)
 ) -> dict:
+    if skill_id.startswith("builtin:"):
+        raise HTTPException(status_code=400, detail="built-in skills cannot be deleted")
     if not await state.skills.delete(user.id, skill_id):
         raise HTTPException(status_code=404, detail="skill not found")
     return {"deleted": True}
@@ -111,6 +124,10 @@ def _connector_json(c, status: dict | None = None) -> dict:
 
 @router.get("/connectors")
 async def list_connectors(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
+    # Warm-connect enabled connectors so their runtime status is live here (the
+    # composer menu only shows "connected" ones) instead of only after a chat turn.
+    if state.runtime is not None:
+        await state.runtime.warm_connectors(user.id)
     statuses = await state.connectors_mgr.status(user.id)
     return [_connector_json(c, statuses.get(c.name)) for c in await state.connectors.list_for_user(user.id)]
 
@@ -183,11 +200,11 @@ def _schedule_json(s) -> dict:
     }
 
 
-def _initial_next_run(body: ScheduleBody) -> datetime:
+def _initial_next_run(body: ScheduleBody, tz: str = "UTC") -> datetime:
     if body.run_at is not None:
         return body.run_at
     try:
-        next_run = compute_next_run(body.cron, body.interval_seconds)
+        next_run = compute_next_run(body.cron, body.interval_seconds, tz=tz)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if next_run is None:
@@ -218,7 +235,7 @@ async def create_schedule(
         interval_seconds=body.interval_seconds,
         session_id=body.session_id,
         enabled=body.enabled,
-        next_run_at=_initial_next_run(body),
+        next_run_at=_initial_next_run(body, state.settings.scheduler.timezone),
     )
     state.scheduler.notify_changed()
     return _schedule_json(row)
@@ -240,7 +257,7 @@ async def update_schedule(
         interval_seconds=body.interval_seconds,
         session_id=body.session_id,
         enabled=body.enabled,
-        next_run_at=_initial_next_run(body) if body.enabled else None,
+        next_run_at=_initial_next_run(body, state.settings.scheduler.timezone) if body.enabled else None,
     )
     if row is None:
         raise HTTPException(status_code=404, detail="schedule not found")
@@ -313,6 +330,37 @@ class HeartbeatBody(BaseModel):
 @router.get("/usage")
 async def get_usage(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
     return await state.usage.totals_for_user(user.id)
+
+
+# ---------------------------------------------------------------- models (chat picker)
+
+@router.get("/models")
+async def list_models(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    """Enabled models for the chat model picker, plus the effective default.
+
+    Falls back to the env-configured model when no providers are set up, so chat
+    keeps working out of the box.
+    """
+    models = await state.llm_config.enabled_models()
+    default = await state.llm_config.default_model()
+    if not models:
+        env_model = state.settings.llm.model
+        return {
+            "models": [
+                {
+                    "model_id": env_model,
+                    "label": env_model,
+                    "provider": "default",
+                    "is_default": True,
+                    "cost": "medium",
+                    "description": "Default configured model.",
+                }
+            ],
+            "default": env_model,
+        }
+    if not default:
+        default = models[0]["model_id"]
+    return {"models": models, "default": default}
 
 
 # ---------------------------------------------------------------- feedback (self-learning signal)

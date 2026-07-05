@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, WebSocket
 
+from claw.browser.broker import BrowserBrokerStore
 from claw.config import Settings
 from claw.core.bus import EventBus
 from claw.core.connectors import ConnectorManager
@@ -12,10 +13,14 @@ from claw.core.scheduler import SchedulerService
 from claw.db.models import User
 from claw.security.policy import PolicyEngine
 from claw.db.stores import (
+    AuditStore,
     ConnectorStore,
     FeedbackStore,
+    GuardrailStore,
+    LLMConfigStore,
     MemoryStore,
     MessageStore,
+    OAuthAppStore,
     ScheduleStore,
     SessionStore,
     SkillStore,
@@ -42,6 +47,11 @@ class AppState:
     telegram_link: "LinkCodeService"
     usage: UsageStore
     feedback: FeedbackStore
+    guardrails: GuardrailStore
+    llm_config: LLMConfigStore
+    audit: AuditStore
+    oauth_apps: OAuthAppStore
+    browser_broker: BrowserBrokerStore
     telegram: "TelegramChannel | None" = None
 
 

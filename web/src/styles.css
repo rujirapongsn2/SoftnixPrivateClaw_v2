@@ -1,7 +1,77 @@
+/* Self-hosted Noto Sans Thai, restricted to the Thai Unicode block. Placed
+   first in the app font stack so Thai codepoints always render with this
+   known-good font; the unicode-range means Latin/other codepoints skip it
+   and fall through to system-ui. Fixes Safari, where relying on the OS's
+   automatic Thai substitution for `system-ui` (SF Pro) mis-renders Thai in
+   a contenteditable (only the first cluster paints while typing). Self-
+   hosted rather than via Google Fonts because the CDN copy ships Latin
+   subsets too (which would override system-ui for Latin) and, being lazy,
+   never actually loaded while system-ui already covered Thai. */
+@font-face {
+  font-family: "ClawThai";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/noto-sans-thai.woff2") format("woff2");
+  unicode-range: U+0E00-0E7F, U+200C-200D, U+25CC;
+}
+
 html, body, #root {
   height: 100%;
   margin: 0;
 }
+
+/* ChatLayout's root isn't a flex container, so its two children (the
+   message area, then the sticky composer dock) just stack in normal block
+   flow. To keep the composer pinned to the bottom for short conversations,
+   Astryx forces the message area to min-height:100% of the scroll
+   container — but the dock then adds its own height ON TOP of that full
+   100%, so short chats always overflow by exactly the composer's height
+   (forcing a scroll to see a reply that would otherwise fit on screen).
+   Fix: make the root an actual flex column and let the message area
+   flex-grow to fill the *remaining* space instead of a fixed 100% — the
+   dock naturally lands at the bottom with no double-counted height, and
+   long conversations still overflow/scroll normally since flex-grow
+   doesn't prevent a child's real content from exceeding its basis. The
+   empty-state greeting still centers because its own wrapper is flex:1 +
+   centered, so it fills the grown message area.
+
+   Applied in BOTH empty and content states (not just when there are
+   messages): keeping the empty state on the old block + min-height:100%
+   path left the composer's contenteditable in a different layout/paint
+   context than the content state, which on Safari triggered a repaint bug
+   where typing Thai only painted the first cluster. Making both states use
+   the identical flex layout keeps the composer's rendering context
+   constant so Thai types correctly on the greeting screen too. */
+.claw-chat .astryx-chat-layout {
+  display: flex;
+  flex-direction: column;
+}
+/* flex: 1 0 auto — grow to fill the pane when the conversation is short (so
+   the composer sits at the bottom), but NEVER shrink below the content's
+   real height. With flex-shrink:1 a long conversation would be squeezed
+   into the viewport, its overflow spilling out behind the composer while
+   the scroll container never grew — so you'd see the composer floating
+   mid-page over the reply. shrink:0 keeps the area at content height so the
+   root actually scrolls and the sticky composer pins to the bottom. */
+.claw-chat .astryx-chat-layout > div:first-child {
+  min-height: 0 !important;
+  flex: 1 0 auto;
+}
+/* Keep the sticky composer dock from being flex-shrunk when a long
+   conversation overflows. */
+.claw-chat .astryx-chat-layout > div:nth-child(2) {
+  flex-shrink: 0;
+}
+
+/* Thai mark attachment is handled by the font's own GPOS tables (Noto
+   Sans Thai). Do NOT force font-feature-settings or text-rendering on the
+   chat input: on Safari, `text-rendering: optimizeLegibility` on a
+   contenteditable makes WebKit cache the first glyph run and skip
+   repainting later glyphs during incremental typing (only the first
+   character shows), and `font-feature-settings` overrides the font's
+   default complex-shaping features. Let the browser use its default
+   shaping path instead. */
 
 /* ---- app shell: sidebar + main, claude.ai-like ---- */
 .claw-app {
@@ -24,6 +94,17 @@ html, body, #root {
 .claw-sidenav-footer {
   padding: 4px;
 }
+/* Admin console = system-wide settings (affects all users). Separate it from
+   personal "Settings" with a divider + accent icon so it's not mistaken for
+   another personal section. */
+.claw-nav-admin {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border-subtle, #e9ebee);
+}
+.claw-nav-admin svg {
+  color: #b45309;
+}
 /* Wraps a SideNavItem (a real <button>) with a delete IconButton positioned
    as a sibling overlay — nesting a button inside SideNavItem's button would
    be invalid HTML, so the delete control lives next to it, not inside it. */
@@ -43,13 +124,98 @@ html, body, #root {
   opacity: 1;
   pointer-events: auto;
 }
+/* running spinner / new-response dot on a recents row (hidden on hover so the
+   delete control can take the same spot). */
+.claw-recent-status {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  color: var(--color-info, #1f7ac0);
+  pointer-events: none;
+}
+.claw-recent-status svg {
+  animation: claw-spin 0.9s linear infinite;
+}
+.claw-recent-status--done {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-info, #1f7ac0);
+}
+.claw-recent-row:hover .claw-recent-status,
+.claw-recent-row:focus-within .claw-recent-status {
+  opacity: 0;
+}
 
-/* ---- chat column ---- */
-.claw-chat {
-  flex: 1;
-  overflow-y: auto;
+/* Collapsed rail: single "Recents" trigger instead of one icon per chat. */
+.claw-recents-collapsed {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
+.claw-recents-popover {
   display: flex;
   flex-direction: column;
+  gap: 2px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.claw-recents-popover-title {
+  padding: 4px 8px 6px;
+}
+.claw-recents-popover-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.claw-recents-popover-row .claw-recents-popover-item {
+  width: 100%;
+  justify-content: flex-start;
+}
+.claw-recents-popover-row > button:last-child {
+  position: absolute;
+  right: 4px;
+  opacity: 0;
+  pointer-events: none;
+}
+.claw-recents-popover-row:hover > button:last-child,
+.claw-recents-popover-row:focus-within > button:last-child {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ---- chat column ---- */
+/* Row shell: the chat column + the (optional) right execution panel. */
+.claw-chat-shell {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+/* ChatLayout is self-scrolling (its own root gets overflow-y:auto and a
+   sticky composer dock) — this wrapper must NOT also scroll, or the two
+   nested scroll containers fight and the composer's sticky positioning
+   breaks, letting it overlap the last message instead of reserving space. */
+.claw-chat {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+/* Empty landing (claude.ai-style): the greeting + composer + starter chips
+   form one cluster centred in the viewport. The composer stays mounted in
+   ChatLayout's dock in BOTH states (see the Safari/Thai note above) — we only
+   stop the message area from growing and let the layout centre the pair, so
+   the contenteditable's paint context never changes. */
+.claw-chat--empty .astryx-chat-layout {
+  justify-content: center;
+}
+.claw-chat--empty .astryx-chat-layout > div:first-child {
+  flex: 0 1 auto;
 }
 .claw-column,
 .claw-composer {
@@ -87,6 +253,43 @@ html, body, #root {
   text-align: center;
   flex: 1;
   padding: 48px 16px;
+}
+/* Logo sits inline to the left of the greeting line, like claude.ai's accent
+   glyph + "Hey there, <name>". */
+.claw-greeting-title {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.claw-greeting-title picture {
+  display: block;
+  flex-shrink: 0;
+}
+
+/* Starter-prompt chips under the composer on the empty screen. */
+.claw-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.claw-suggestion-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-subtle, #e4e2dd);
+  background: var(--color-background-base, #fff);
+  color: var(--color-text-primary);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.claw-suggestion-chip:hover {
+  background: var(--color-background-section, #f2f0ea);
+  border-color: var(--color-border, #d4d1c9);
 }
 .claw-cursor {
   animation: claw-blink 1s infinite;
@@ -191,4 +394,784 @@ html, body, #root {
   flex-direction: column;
   align-items: center;
   gap: 2px;
+}
+
+/* ---- Connector catalog (categorized grid of preset cards) ---- */
+.claw-connector-category {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Section labels sit clearly BELOW the page title: small uppercase caption,
+   not another display heading. */
+.claw-connector-cat-title {
+  margin: 10px 0 0;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 12px;
+  font-weight: 600;
+}
+.claw-connector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+.claw-connector-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px !important;
+}
+/* Uniform tinted frame + equal inner padding so mismatched brand PNGs read as
+   one consistent icon set instead of ad-hoc logos. */
+.claw-connector-tile {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 9px;
+  border: 1px solid var(--color-border-subtle, #e9ebee);
+  background: var(--color-surface-2, #f5f6f8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 7px;
+}
+.claw-connector-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.claw-connector-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.claw-connector-name {
+  line-height: 1.3;
+}
+.claw-connector-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 0;
+}
+.claw-connector-meta {
+  display: flex;
+  align-items: center;
+  min-height: 18px;
+  margin-top: 2px;
+}
+.claw-connector-auth {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-secondary, #6b7280);
+  background: var(--color-surface-2, #f0f1f4);
+  border-radius: 5px;
+  padding: 1px 7px;
+}
+.claw-connector-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---- Admin console (in-panel) ---- */
+.claw-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+.claw-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.claw-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+.claw-chart-svg {
+  width: 100%;
+  height: 120px;
+  overflow: visible;
+}
+.claw-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-chart-axis span {
+  flex: 1 1 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.claw-model-row {
+  padding: 4px 0;
+}
+.claw-rule-pattern {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+.claw-audit-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.claw-audit-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 160px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border-subtle, #eef0f2);
+}
+.claw-audit-row:last-child {
+  border-bottom: none;
+}
+.claw-audit-payload {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.claw-audit-time {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ---- chat composer: model picker ---- */
+.claw-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* model picker pill (right of composer, next to send) */
+.claw-model-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-primary, #1a1a1a);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  max-width: 220px;
+}
+.claw-model-trigger:hover {
+  background: var(--color-surface-2, #f2f3f5);
+}
+.claw-model-trigger-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "Select model" dropdown */
+.claw-model-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.claw-model-menu-title {
+  padding: 4px 8px 2px;
+}
+.claw-model-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 10px;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.claw-model-option:hover {
+  background: var(--color-surface-2, #f2f3f5);
+}
+.claw-model-option-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.claw-model-option-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.claw-model-option-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-primary, #1a1a1a);
+}
+.claw-model-option-desc {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* Permission-mode pill (Ask / Auto) + dropdown */
+.claw-perm-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-primary, #1a1a1a);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.claw-perm-trigger:hover {
+  background: var(--color-surface-2, #f2f3f5);
+}
+.claw-perm-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.claw-perm-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 10px;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.claw-perm-option:hover {
+  background: var(--color-surface-2, #f2f3f5);
+}
+.claw-perm-option-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.claw-perm-option-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-primary, #1a1a1a);
+}
+.claw-perm-option-desc {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* Ask-mode confirmation card (inline in the transcript) */
+.claw-confirm {
+  align-self: flex-start;
+  max-width: min(680px, 92%);
+  margin: 4px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-left: 3px solid var(--color-warning, #d97706);
+  border-radius: 12px;
+  background: var(--color-surface-1, #fff);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.claw-confirm--approved {
+  border-left-color: var(--color-success, #2f9e6f);
+  opacity: 0.9;
+}
+.claw-confirm--denied {
+  border-left-color: var(--color-error, #dc2626);
+  opacity: 0.85;
+}
+.claw-confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.claw-confirm-cmd {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--color-surface-2, #f2f3f5);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+.claw-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* cost badges (shared by picker + admin) */
+.claw-cost {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.claw-cost-low {
+  color: #1a7f52;
+  background: #e6f6ee;
+}
+.claw-cost-medium {
+  color: #1f7ac0;
+  background: #e6f2fb;
+}
+.claw-cost-high {
+  color: #b7791f;
+  background: #fdf3e2;
+}
+.claw-cost-very_high {
+  color: #d13b6a;
+  background: #fdeaf1;
+}
+
+/* ---- LLM provider admin: presets, segmented cost, inline forms ---- */
+.claw-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+.claw-preset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 8px;
+  border: 1px solid var(--color-border-subtle, #e4e2dd);
+  border-radius: 10px;
+  background: var(--color-background-base, #fff);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.claw-preset-card:hover {
+  border-color: var(--color-border, #cfccc4);
+  background: var(--color-background-section, #f5f4ef);
+}
+.claw-preset-card.is-active {
+  border-color: var(--color-primary, #4b6bfb);
+  border-width: 2px;
+  background: color-mix(in srgb, var(--color-primary, #4b6bfb) 6%, transparent);
+}
+.claw-preset-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+.claw-preset-sub {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* Connected single-select control for the cost tier. */
+.claw-segmented {
+  display: inline-flex;
+  border: 1px solid var(--color-border, #cfccc4);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.claw-segmented button {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  border: none;
+  border-left: 1px solid var(--color-border-subtle, #e4e2dd);
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.claw-segmented button:first-child {
+  border-left: none;
+}
+.claw-segmented button.is-active {
+  background: var(--color-text-primary, #1a1a1a);
+  color: var(--color-background-base, #fff);
+}
+
+/* Inline hint / "editing X" banner inside provider + model forms. */
+.claw-info-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--color-background-section, #f5f4ef);
+}
+.claw-info-box code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--color-text-primary);
+}
+.claw-info-box.is-warning {
+  background: #fdf3e2;
+}
+.claw-row-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: start;
+}
+.claw-toggle-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.claw-link-btn {
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--color-primary, #4b6bfb);
+  cursor: pointer;
+}
+
+/* ---- composer "+" menu (attach / skills / connectors) ---- */
+.claw-plus-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.claw-plus-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  color: var(--color-text-primary, #1a1a1a);
+  text-align: left;
+}
+.claw-plus-item:hover {
+  background: var(--color-surface-2, #f2f3f5);
+}
+.claw-plus-item > span:first-of-type {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claw-plus-back {
+  font-weight: 600;
+}
+.claw-plus-divider {
+  height: 1px;
+  background: var(--color-border-subtle, #e9ebee);
+  margin: 4px 0;
+}
+.claw-plus-empty {
+  padding: 8px 10px;
+}
+.claw-plus-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  background: var(--color-surface-2, #f2f3f5);
+  border-radius: 10px;
+  padding: 1px 7px;
+}
+
+/* ---- guided connector setup (no MCP jargon) ---- */
+.claw-setup {
+  max-width: 560px;
+}
+.claw-setup-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 4px;
+}
+.claw-setup-header > div {
+  min-width: 0;
+}
+.claw-setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.claw-setup-help {
+  margin: 0;
+}
+
+/* ---- right execution panel (vertical timeline) ---- */
+.claw-exec-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 5;
+  background: var(--color-surface-1, #fff);
+  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border-radius: 8px;
+}
+.claw-exec-panel {
+  flex: 0 0 340px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Hold the fixed width: without min-width:0 a long unbreakable step detail
+     (e.g. a one-line shell command) would inflate the flex item's min-content
+     and collapse the chat column. overflow:hidden lets the row ellipsis clip. */
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--color-border-subtle, #e4e6ea);
+  background: var(--color-surface-1, #fff);
+}
+.claw-exec-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border-subtle, #eef0f2);
+  position: sticky;
+  top: 0;
+  background: inherit;
+}
+.claw-exec-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--color-info, #1f7ac0);
+}
+.claw-exec-live svg {
+  animation: claw-spin 0.9s linear infinite;
+}
+.claw-exec-empty {
+  padding: 16px 14px;
+}
+/* ---- minimal execution steps: one dense line per step ---- */
+.claw-xlist {
+  padding: 6px 8px 12px;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.claw-xrow {
+  display: flex;
+  flex-direction: column;
+}
+.claw-xrow-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.claw-xrow-line:disabled {
+  cursor: default;
+}
+.claw-xrow-line:not(:disabled):hover {
+  background: var(--color-surface-2, #f5f6f8);
+}
+/* status dot: colour encodes step state, not lane */
+.claw-xdot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #c4ccd6;
+}
+.claw-xdot--complete {
+  background: #1a9e75;
+}
+.claw-xdot--error {
+  background: #e24b4a;
+}
+.claw-xdot--running {
+  background: #ef9f27;
+  animation: claw-pulse 1.1s ease-in-out infinite;
+}
+.claw-xdot--pending {
+  background: transparent;
+  border: 1.5px solid #c4ccd6;
+}
+.claw-xrow-line svg {
+  flex: 0 0 auto;
+}
+.claw-xname {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--color-text-primary, #1a1a1a);
+}
+.claw-xrow--bookend .claw-xname {
+  font-family: inherit;
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-xdetail {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #9096a0);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.claw-xdur {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #9096a0);
+}
+.claw-xexpand {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 8px 8px 24px;
+  padding-left: 10px;
+  border-left: 2px solid var(--color-border-subtle, #e4e6ea);
+}
+.claw-xexpand-label {
+  font-size: 11px;
+  color: var(--color-text-secondary, #9096a0);
+}
+.claw-xpre {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--color-surface-2, #f5f6f8);
+  border-radius: 6px;
+  padding: 6px 8px;
+  max-height: 180px;
+  overflow: auto;
+}
+.claw-xpre--error {
+  color: #d13b6a;
+  background: #fdeaf1;
+}
+
+@keyframes claw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes claw-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* On narrow viewports, overlay the panel instead of squeezing the chat. */
+@media (max-width: 900px) {
+  .claw-exec-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 88vw;
+    max-width: 360px;
+    z-index: 20;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+  }
+}
+
+/* ---- artifact chips: files the agent created (open/download) ---- */
+.claw-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 2px;
+}
+.claw-artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 7px 12px;
+  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border-radius: 10px;
+  background: var(--color-surface-1, #fff);
+  color: var(--color-text-primary, #1a1a1a);
+  text-decoration: none;
+  font-size: 13px;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.claw-artifact-chip:hover {
+  border-color: var(--color-primary, #4b6bfb);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08);
+}
+.claw-artifact-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.claw-artifact-image {
+  display: block;
+  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--color-surface-1, #fff);
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.claw-artifact-image:hover {
+  border-color: var(--color-primary, #4b6bfb);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08);
+}
+.claw-artifact-image img {
+  display: block;
+  max-width: min(480px, 100%);
+  max-height: 360px;
+  height: auto;
+  object-fit: contain;
 }

@@ -33,14 +33,14 @@ async def test_schedule_tool_create_list_delete(db_factory, stores):
 
     rows = await store.list_for_user(user.id)
     out = await tool.execute(action="delete", schedule_id=rows[0].id)
-    assert out == "Deleted." and sched.notified == 2
+    assert out.startswith("Deleted task") and sched.notified == 2
 
 
 async def test_schedule_tool_validates(db_factory, stores):
     tool = ScheduleTool(ScheduleStore(db_factory), FakeScheduler(), "u1")
     assert (await tool.execute(action="create", name="x")).startswith("Error: create requires a prompt")
     assert (await tool.execute(action="create", prompt="p", cron="not a cron")).startswith("Error:")
-    assert (await tool.execute(action="delete")).startswith("Error: delete requires")
+    assert (await tool.execute(action="delete")).startswith("Error: provide")
 
 
 async def test_schedule_tool_interval(db_factory, stores):
@@ -50,6 +50,48 @@ async def test_schedule_tool_interval(db_factory, stores):
     await tool.execute(action="create", name="hourly", prompt="check", interval_minutes=60)
     rows = await store.list_for_user(user.id)
     assert rows[0].interval_seconds == 3600
+
+
+async def test_schedule_update_by_name_does_not_duplicate(db_factory, stores):
+    store = ScheduleStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("upd@x.y")
+    tool = ScheduleTool(store, FakeScheduler(), user.id)
+
+    await tool.execute(action="create", name="report", prompt="do it", cron="0 9 * * *")
+    # "change the time" via update — must edit in place, not add a row.
+    out = await tool.execute(action="update", name="report", cron="0 18 * * *")
+    assert "report" in out
+    rows = await store.list_for_user(user.id)
+    assert len(rows) == 1
+    assert rows[0].cron == "0 18 * * *"
+
+
+async def test_schedule_create_same_name_upserts(db_factory, stores):
+    store = ScheduleStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("ups@x.y")
+    tool = ScheduleTool(store, FakeScheduler(), user.id)
+    await tool.execute(action="create", name="daily", prompt="p", cron="0 9 * * *")
+    # Agent re-issues create to change the time — should update, not duplicate.
+    out = await tool.execute(action="create", name="daily", prompt="p", cron="0 7 * * *")
+    assert "updated it instead" in out.lower()
+    rows = await store.list_for_user(user.id)
+    assert len(rows) == 1 and rows[0].cron == "0 7 * * *"
+
+
+async def test_schedule_delete_and_pause_by_name(db_factory, stores):
+    store = ScheduleStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("del@x.y")
+    tool = ScheduleTool(store, FakeScheduler(), user.id)
+    await tool.execute(action="create", name="Nightly", prompt="p", cron="0 2 * * *")
+
+    # Pause via update (enabled=false).
+    await tool.execute(action="update", name="Nightly", enabled=False)
+    assert (await store.list_for_user(user.id))[0].enabled is False
+
+    # Cancel via delete by NAME (case-insensitive) — the old tool only took an id.
+    out = await tool.execute(action="delete", name="nightly")
+    assert out.startswith("Deleted task")
+    assert await store.list_for_user(user.id) == []
 
 
 # ---------------------------------------------------------------- document tools

@@ -1,8 +1,44 @@
 """Catalog of known MCP connectors so users can add popular integrations in one
 click instead of hand-writing the command/URL. A preset is a template; the user
-still supplies their own secrets (tokens/keys), which are encrypted at rest."""
+still supplies their own secrets (tokens/keys), which are encrypted at rest.
+
+Connection method mirrors the reference project (softnix-agenticclaw):
+
+* Local integrations run a **self-hosted MCP server** shipped in this repo
+  (``claw/integrations/<name>_mcp_server.py``), launched over stdio with
+  ``python -m claw.integrations.<name>_mcp_server``. The server reads its
+  configuration (tokens, api base, …) from environment variables; non-secret
+  settings default inside the server module.
+* Remote integrations (Composio, Softnix ONE) connect to a hosted MCP endpoint
+  over streamable HTTP. Their auth travels as an HTTP header, expressed as an
+  env var prefixed ``HEADER_`` (e.g. ``HEADER_Authorization``); the connector
+  manager turns those into request headers instead of process env.
+
+Each preset carries a ``setup`` type and human-friendly ``fields`` so the web UI
+can render a guided form (labels/help/secret) instead of exposing raw MCP config:
+
+* ``api_key`` / ``token`` — the user pastes labeled secrets (``fields``).
+* ``oauth`` — one-click "Connect with Google/Microsoft"; tokens are obtained via
+  the OAuth flow (``oauth_provider`` + ``oauth_scopes``) and written under
+  ``env_prefix`` (e.g. ``GMAIL_TOKEN``, ``GMAIL_REFRESH_TOKEN``, …). No fields.
+"""
 
 from dataclasses import asdict, dataclass, field
+
+
+@dataclass(frozen=True, slots=True)
+class FieldSpec:
+    """A single user-entered value in a guided connector setup form."""
+
+    key: str  # env var name stored on the connector (HEADER_* → request header)
+    label: str  # human-friendly field label
+    help: str = ""  # short hint / "where to get this"
+    secret: bool = True  # render as a password input
+    optional: bool = False  # not required to save
+    placeholder: str = ""
+    # Stored value is prefixed with this (e.g. "Bearer ") if not already present,
+    # so the user pastes only the token.
+    prefix: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,18 +48,27 @@ class ConnectorPreset:
     label: str  # human title
     description: str
     transport: str  # stdio | http
+    category: str = "Other"  # catalog group shown in the UI
+    setup: str = "custom"  # api_key | token | oauth | custom
     command: str = ""
     url: str = ""
-    # Env var names the user must fill in (values are secret, encrypted at rest).
-    env_fields: tuple[str, ...] = field(default_factory=tuple)
+    fields: tuple[FieldSpec, ...] = field(default_factory=tuple)
     docs: str = ""
+    # OAuth presets only:
+    oauth_provider: str = ""  # google | microsoft
+    oauth_scopes: str = ""
+    env_prefix: str = ""  # e.g. GMAIL — tokens stored as GMAIL_TOKEN, GMAIL_REFRESH_TOKEN, …
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-# npx-based reference servers + hosted HTTP endpoints. Commands assume Node/npx
-# is available in the agent host; users can edit after adding.
+def _server(module: str) -> str:
+    """Command that launches a built-in stdio MCP server module."""
+    return f"python -m claw.integrations.{module}"
+
+
+# Built-in self-hosted MCP servers (stdio) + hosted remote endpoints (http).
 _PRESETS: tuple[ConnectorPreset, ...] = (
     ConnectorPreset(
         key="github",
@@ -31,59 +76,108 @@ _PRESETS: tuple[ConnectorPreset, ...] = (
         label="GitHub",
         description="Repositories, issues, pull requests, and code search.",
         transport="stdio",
-        command="npx -y @modelcontextprotocol/server-github",
-        env_fields=("GITHUB_PERSONAL_ACCESS_TOKEN",),
-        docs="https://github.com/modelcontextprotocol/servers/tree/main/src/github",
+        category="Productivity",
+        setup="api_key",
+        command=_server("github_mcp_server"),
+        fields=(
+            FieldSpec(
+                key="GITHUB_TOKEN",
+                label="Personal access token",
+                help="Create one at github.com/settings/tokens (needs repo access).",
+                placeholder="ghp_…",
+            ),
+            FieldSpec(
+                key="GITHUB_DEFAULT_REPO",
+                label="Default repository",
+                help="Optional. owner/name to use when you don't specify one.",
+                secret=False,
+                optional=True,
+                placeholder="octocat/hello-world",
+            ),
+        ),
+        docs="https://github.com/settings/tokens",
+    ),
+    ConnectorPreset(
+        key="notion",
+        name="notion",
+        label="Notion",
+        description="Search, read, and update Notion pages and databases.",
+        transport="stdio",
+        category="Productivity",
+        setup="api_key",
+        command=_server("notion_mcp_server"),
+        fields=(
+            FieldSpec(
+                key="NOTION_TOKEN",
+                label="Internal integration secret",
+                help="Create an integration at notion.so/my-integrations, then share your pages with it.",
+                placeholder="secret_…",
+            ),
+            FieldSpec(
+                key="NOTION_DEFAULT_PAGE_ID",
+                label="Default page ID",
+                help="Optional. A page to use by default.",
+                secret=False,
+                optional=True,
+            ),
+        ),
+        docs="https://www.notion.so/my-integrations",
+    ),
+    ConnectorPreset(
+        key="onedrive",
+        name="onedrive",
+        label="OneDrive",
+        description="Browse, search, read, and share files in OneDrive.",
+        transport="stdio",
+        category="Productivity",
+        setup="oauth",
+        command=_server("onedrive_mcp_server"),
+        oauth_provider="microsoft",
+        oauth_scopes="offline_access openid email https://graph.microsoft.com/Files.ReadWrite.All",
+        env_prefix="ONEDRIVE",
+        docs="https://learn.microsoft.com/graph/",
     ),
     ConnectorPreset(
         key="gmail",
         name="gmail",
         label="Gmail",
-        description="Read and search Gmail, send mail, manage labels.",
+        description="Search and read Gmail, manage labels, draft and send mail.",
         transport="stdio",
-        command="npx -y @gongrzhe/server-gmail-autoauth-mcp",
-        env_fields=("GMAIL_OAUTH_CLIENT_ID", "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_OAUTH_REFRESH_TOKEN"),
-        docs="https://github.com/gongrzhe/server-gmail-autoauth-mcp",
+        category="Communication",
+        setup="oauth",
+        command=_server("gmail_mcp_server"),
+        oauth_provider="google",
+        oauth_scopes="openid email https://www.googleapis.com/auth/gmail.modify",
+        env_prefix="GMAIL",
+        docs="https://developers.google.com/gmail/api",
     ),
     ConnectorPreset(
         key="outlook",
         name="outlook",
         label="Outlook / Microsoft 365 Mail",
-        description="Microsoft 365 mail, folders, and messages via Graph.",
+        description="Microsoft 365 mail, folders, drafts, and send via Graph.",
         transport="stdio",
-        command="npx -y @modelcontextprotocol/server-outlook",
-        env_fields=("MS_CLIENT_ID", "MS_CLIENT_SECRET", "MS_TENANT_ID"),
+        category="Communication",
+        setup="oauth",
+        command=_server("outlook_mcp_server"),
+        oauth_provider="microsoft",
+        oauth_scopes="offline_access openid email https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read",
+        env_prefix="OUTLOOK",
         docs="https://learn.microsoft.com/graph/",
     ),
     ConnectorPreset(
         key="outlook-calendar",
         name="outlook-calendar",
         label="Outlook Calendar",
-        description="Microsoft 365 calendar events and scheduling.",
+        description="Microsoft 365 calendar events, search, and scheduling.",
         transport="stdio",
-        command="npx -y @modelcontextprotocol/server-outlook-calendar",
-        env_fields=("MS_CLIENT_ID", "MS_CLIENT_SECRET", "MS_TENANT_ID"),
+        category="Communication",
+        setup="oauth",
+        command=_server("outlook_calendar_mcp_server"),
+        oauth_provider="microsoft",
+        oauth_scopes="offline_access openid https://graph.microsoft.com/Calendars.ReadWrite",
+        env_prefix="OUTLOOK_CALENDAR",
         docs="https://learn.microsoft.com/graph/",
-    ),
-    ConnectorPreset(
-        key="onedrive",
-        name="onedrive",
-        label="OneDrive",
-        description="Browse and read files in OneDrive.",
-        transport="stdio",
-        command="npx -y @modelcontextprotocol/server-onedrive",
-        env_fields=("MS_CLIENT_ID", "MS_CLIENT_SECRET", "MS_TENANT_ID"),
-        docs="https://learn.microsoft.com/graph/",
-    ),
-    ConnectorPreset(
-        key="notion",
-        name="notion",
-        label="Notion",
-        description="Read and update Notion pages and databases.",
-        transport="stdio",
-        command="npx -y @notionhq/notion-mcp-server",
-        env_fields=("NOTION_API_KEY",),
-        docs="https://github.com/makenotion/notion-mcp-server",
     ),
     ConnectorPreset(
         key="tavily",
@@ -91,9 +185,55 @@ _PRESETS: tuple[ConnectorPreset, ...] = (
         label="Tavily Search",
         description="Web search and page extraction for current information.",
         transport="stdio",
-        command="npx -y tavily-mcp",
-        env_fields=("TAVILY_API_KEY",),
-        docs="https://github.com/tavily-ai/tavily-mcp",
+        category="Search",
+        setup="api_key",
+        command=_server("tavily_mcp_server"),
+        fields=(
+            FieldSpec(
+                key="TAVILY_API_KEY",
+                label="API key",
+                help="Get a free key at app.tavily.com.",
+                placeholder="tvly-…",
+            ),
+        ),
+        docs="https://app.tavily.com/",
+    ),
+    ConnectorPreset(
+        key="composio",
+        name="composio",
+        label="Composio",
+        description="Third-party app actions via Composio's hosted MCP endpoint.",
+        transport="http",
+        category="Automation",
+        setup="token",
+        url="https://connect.composio.dev/mcp",
+        fields=(
+            FieldSpec(
+                key="HEADER_x-consumer-api-key",
+                label="Composio API key",
+                help="Find it in your Composio dashboard.",
+            ),
+        ),
+        docs="https://composio.dev/",
+    ),
+    ConnectorPreset(
+        key="softnix-one",
+        name="softnix-one",
+        label="Softnix ONE",
+        description="Softnix ONE tasks, leads, notes, meetings, and AI knowledge.",
+        transport="http",
+        category="Softnix",
+        setup="token",
+        url="https://mcp-softnix-one.softnix.ai/mcp",
+        fields=(
+            FieldSpec(
+                key="HEADER_Authorization",
+                label="Softnix ONE API token",
+                help="Paste your token — the 'Bearer' prefix is added automatically.",
+                prefix="Bearer ",
+            ),
+        ),
+        docs="https://softnix.ai/",
     ),
 )
 

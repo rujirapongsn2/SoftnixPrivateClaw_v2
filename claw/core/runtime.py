@@ -16,10 +16,17 @@ from loguru import logger
 from claw.config import Settings
 from claw.core.bus import EventBus
 from claw.core.context import ContextAssembler, build_runtime_context, build_user_content
-from claw.core.events import TurnCompleted, TurnError, TurnStarted
+from claw.core.events import (
+    ToolConfirmRequest,
+    ToolConfirmResolved,
+    TurnCompleted,
+    TurnError,
+    TurnStarted,
+)
 from claw.core.limits import RateLimiter
 from claw.core.loop import AgentLoop
 from claw.core.memory import MemoryService
+from claw.browser.broker import BrowserBrokerStore
 from claw.browser.manager import BrowserManager
 from claw.core.connectors import ConnectorManager
 from claw.core.subagent import SubagentManager
@@ -41,14 +48,20 @@ from claw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, Write
 from claw.tools.registry import ToolRegistry
 from claw.tools.browser import BrowserTool
 from claw.tools.documents import build_document_tools
+from claw.tools.memory import MemoryTool
 from claw.tools.shell import ExecTool
-from claw.tools.skills import ReadSkillTool, build_skills_summary
+from claw.core.builtin_skills import builtin_skills
+from claw.tools.skills import ManageSkillTool, ReadSkillTool, build_skills_summary
 from claw.tools.spawn import SpawnTool
 from claw.tools.web import WebFetchTool, WebSearchTool
 from claw.tools.workflow import WorkflowTool
 from claw.workflows.service import WorkflowService
 
 _STORED_TOOL_RESULT_CAP = 4000
+
+# How long an "ask"-mode tool waits for the user's approve/deny before it is
+# auto-declined, so a turn can never hang forever on an unanswered card.
+_CONFIRM_TIMEOUT_SECONDS = 600
 
 
 class ClawAgent:
@@ -65,19 +78,26 @@ class ClawAgent:
         skills: SkillStore | None = None,
         policy: PolicyEngine | None = None,
         browser: BrowserManager | None = None,
+        browser_broker: "BrowserBrokerStore | None" = None,
         schedules: "ScheduleStore | None" = None,
         scheduler: "SchedulerService | None" = None,
+        memory: MemoryService | None = None,
     ):
         self.user_id = user_id
         self.workspace = workspace
         self.policy = policy
         self.tools = ToolRegistry(on_execute=self._audit_tool)
         self._audit_store = audit
+        # Network mode of the sandbox exec runs, recorded in the security audit
+        # trail so admins can see when a command had internet access.
+        self._sandbox_network = settings.sandbox.network
         for tool_cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(tool_cls(workspace))
         self.tools.register(ExecTool(sandbox, workspace))
         self.tools.register(WebFetchTool())
         self.tools.register(WebSearchTool())
+        if memory is not None:
+            self.tools.register(MemoryTool(memory, user_id))
         subagents = SubagentManager(
             provider=provider,
             sandbox=sandbox,
@@ -89,10 +109,25 @@ class ClawAgent:
         self.tools.register(
             WorkflowTool(WorkflowService(provider, subagents, model=settings.llm.model))
         )
-        if browser is not None:
+        # One tool named "browser": when client-extension pairing is enabled, the
+        # unified tool prefers the user's paired Chrome and falls back to the
+        # server-side browser; otherwise keep the server-side-only tool.
+        if browser_broker is not None and settings.browser.client_extension_enabled:
+            from claw.tools.client_browser import ClientBrowserTool
+
+            self.tools.register(
+                ClientBrowserTool(
+                    broker=browser_broker,
+                    user_id=user_id,
+                    settings=settings.browser,
+                    server_manager=browser,
+                )
+            )
+        elif browser is not None:
             self.tools.register(BrowserTool(browser, user_id))
         if skills is not None:
             self.tools.register(ReadSkillTool(skills, user_id))
+            self.tools.register(ManageSkillTool(skills, user_id))
         if schedules is not None:
             from claw.tools.schedule import ScheduleTool
 
@@ -107,6 +142,7 @@ class ClawAgent:
             max_tokens=settings.llm.max_tokens,
             temperature=settings.llm.temperature,
             arg_guard=self._guard_tool_args if policy is not None else None,
+            workspace=workspace,
         )
 
     def _guard_tool_args(self, tool_name: str, args: dict) -> tuple[dict, str | None]:
@@ -127,11 +163,25 @@ class ClawAgent:
     def _audit_tool(self, name: str, params: dict, result: str) -> None:
         payload = {"tool": name, "params_preview": str(params)[:500], "result_preview": result[:500]}
         try:
-            asyncio.get_running_loop().create_task(
-                self._audit_store.log("tool_call", payload, user_id=self.user_id)
-            )
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            pass
+            return
+        loop.create_task(self._audit_store.log("tool_call", payload, user_id=self.user_id))
+        # Dedicated security trail for sandbox shell runs — records the command
+        # and whether it had network access, so an admin can review every
+        # potentially unsafe action (esp. when NETWORK=bridge gives internet).
+        if name == "exec":
+            loop.create_task(
+                self._audit_store.log(
+                    "sandbox_exec",
+                    {
+                        "command": str(params.get("command", ""))[:500],
+                        "network": self._sandbox_network,
+                        "error": result.startswith("Error"),
+                    },
+                    user_id=self.user_id,
+                )
+            )
 
     def system_prompt(self, memory_context: str, persona: str = "", skills_summary: str = "") -> str:
         runtime = f"{platform.system()} {platform.machine()}, Python {platform.python_version()}"
@@ -146,7 +196,12 @@ class ClawAgent:
             "- State intent before tool calls; never claim results before receiving them.\n"
             "- Read a file before modifying it. Analyze tool errors before retrying.\n"
             "- Ask for clarification when the request is ambiguous.\n"
-            "- Match the user's language in your replies."
+            "- Match the user's language in your replies.\n"
+            "- You have long-term memory: when the user shares something worth keeping "
+            "(their name, preferences, ongoing work, or asks you to remember something), "
+            "call the `remember` tool to save it. Your saved memory is shown under "
+            "Long-term Memory below and persists across conversations, so don't claim you "
+            "can't remember."
         ]
         if persona:
             parts.append(f"# Persona\n\n{persona}")
@@ -175,9 +230,12 @@ class AgentRuntime:
         usage: "UsageStore | None" = None,
         schedules: ScheduleStore | None = None,
         scheduler: SchedulerService | None = None,
+        llm_config: "LLMConfigStore | None" = None,
+        browser_broker: BrowserBrokerStore | None = None,
     ):
         self.settings = settings
         self.provider = provider
+        self.llm_config = llm_config
         self.bus = bus
         self.users = users
         self.sessions = sessions
@@ -188,6 +246,7 @@ class AgentRuntime:
         self.connectors = connectors
         self.policy = policy
         self.browser = browser
+        self.browser_broker = browser_broker
         self.usage = usage
         self.schedules = schedules
         self.scheduler = scheduler
@@ -203,6 +262,78 @@ class AgentRuntime:
         self._rate_limiter = RateLimiter(settings.turns_per_minute)
         self._background: set[asyncio.Task] = set()
         self._inflight = 0
+        # session_id -> in-flight turn count, so the UI can show "processing"
+        # status in the sidebar even when the client isn't viewing that session.
+        self._active_turns: dict[str, int] = {}
+        # request_id -> pending confirmation (Ask-mode gate). The awaiting turn
+        # holds the future; the WS handler resolves it when the user answers.
+        self._confirmations: dict[str, dict] = {}
+
+    def active_sessions(self) -> set[str]:
+        """Sessions with at least one turn currently processing."""
+        return {sid for sid, n in self._active_turns.items() if n > 0}
+
+    # ------------------------------------------------------------------ Ask-mode
+    async def request_confirmation(
+        self, session_id: str, turn_id: str, tool: str, args_preview: str
+    ) -> bool:
+        """Publish a confirm-request and block until the user answers (or timeout)."""
+        request_id = uuid.uuid4().hex[:12]
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._confirmations[request_id] = {
+            "future": future,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "tool": tool,
+            "args_preview": args_preview,
+        }
+        self.bus.publish(
+            session_id,
+            ToolConfirmRequest(
+                turn_id=turn_id, request_id=request_id, tool=tool, args_preview=args_preview
+            ),
+        )
+        try:
+            approved = await asyncio.wait_for(future, timeout=_CONFIRM_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            approved = False
+            self.bus.publish(
+                session_id,
+                ToolConfirmResolved(turn_id=turn_id, request_id=request_id, approved=False),
+            )
+            logger.info("Confirmation {} timed out — auto-declined", request_id)
+        finally:
+            self._confirmations.pop(request_id, None)
+        return approved
+
+    def resolve_confirmation(self, request_id: str, approved: bool) -> bool:
+        """Answer a pending confirmation from the user's decision. Returns True if it existed."""
+        entry = self._confirmations.get(request_id)
+        if entry is None:
+            return False
+        future: asyncio.Future = entry["future"]
+        if not future.done():
+            future.set_result(approved)
+        self.bus.publish(
+            entry["session_id"],
+            ToolConfirmResolved(
+                turn_id=entry["turn_id"], request_id=request_id, approved=approved
+            ),
+        )
+        return True
+
+    def pending_confirmations(self, session_id: str) -> list[ToolConfirmRequest]:
+        """Open confirmations for a session, so a (re)connecting client can re-render them."""
+        return [
+            ToolConfirmRequest(
+                turn_id=e["turn_id"],
+                request_id=rid,
+                tool=e["tool"],
+                args_preview=e["args_preview"],
+            )
+            for rid, e in self._confirmations.items()
+            if e["session_id"] == session_id and not e["future"].done()
+        ]
 
     def get_agent(self, user_id: str) -> ClawAgent:
         agent = self._agents.get(user_id)
@@ -220,14 +351,29 @@ class AgentRuntime:
             skills=self.skills,
             policy=self.policy,
             browser=self.browser,
+            browser_broker=self.browser_broker,
             schedules=self.schedules,
             scheduler=self.scheduler,
+            memory=self.memory,
         )
         self._agents[user_id] = agent
         self._agents.move_to_end(user_id)
         while len(self._agents) > self.settings.max_resident_agents:
             self._agents.popitem(last=False)
         return agent
+
+    async def warm_connectors(self, user_id: str) -> None:
+        """Connect the user's MCP connectors outside a chat turn so their live
+        status is accurate for the composer's connector menu. Tools are synced
+        into the same per-user registry a chat turn uses, so this both populates
+        status and leaves the connector ready. Cheap when already up to date."""
+        if self.connectors is None:
+            return
+        agent = self.get_agent(user_id)
+        try:
+            await self.connectors.sync_tools(user_id, agent.tools)
+        except Exception:
+            logger.exception("Connector warm failed for {}", user_id)
 
     def _session_lock(self, session_id: str) -> asyncio.Lock:
         lock = self._session_locks.get(session_id)
@@ -252,13 +398,23 @@ class AgentRuntime:
         channel: str = "web",
         locale: str = "en",
         media: list[str] | None = None,
+        model: str | None = None,
+        permission_mode: str = "auto",
     ) -> str | None:
         """Process one user message; tracks in-flight count for graceful shutdown."""
         self._inflight += 1
+        self._active_turns[session_id] = self._active_turns.get(session_id, 0) + 1
         try:
-            return await self._process_turn(user_id, session_id, content, channel, locale, media)
+            return await self._process_turn(
+                user_id, session_id, content, channel, locale, media, model, permission_mode
+            )
         finally:
             self._inflight -= 1
+            remaining = self._active_turns.get(session_id, 1) - 1
+            if remaining <= 0:
+                self._active_turns.pop(session_id, None)
+            else:
+                self._active_turns[session_id] = remaining
 
     async def drain(self, timeout: float = 20.0) -> None:
         """Wait for in-flight turns and background tasks to finish (graceful shutdown)."""
@@ -276,6 +432,8 @@ class AgentRuntime:
         channel: str = "web",
         locale: str = "en",
         media: list[str] | None = None,
+        model: str | None = None,
+        permission_mode: str = "auto",
     ) -> str | None:
         """Process one user message; events stream to the bus, messages persist to DB.
 
@@ -318,11 +476,32 @@ class AgentRuntime:
             self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
             session = await self.sessions.get(session_id)
             after_seq = session.last_consolidated_seq if session else 0
+
+            # Resolve the effective model for this turn: explicit request → sticky
+            # per-chat choice → admin default → env default. Persist an explicit
+            # choice onto the session so it sticks for the whole conversation.
+            effective_model: str | None = None
+            model_key: str | None = None
+            model_base: str | None = None
+            if self.llm_config is not None:
+                requested = model or (session.model if session else None)
+                if requested:
+                    resolved = await self.llm_config.resolve(requested)
+                    if resolved is not None:
+                        effective_model = resolved["model_id"]
+                        model_key = resolved["api_key"] or None
+                        model_base = resolved["api_base"] or None
+                if effective_model is None:
+                    effective_model = await self.llm_config.default_model()
+                if model and session is not None and session.model != model:
+                    self._spawn_background(self.sessions.set_model(session_id, model))
             history = await self.messages.recent(session_id, after_seq=after_seq)
             memory_context = await self.memory.build_context(user_id)
-            skills_summary = ""
+            # Built-in skills are always offered; user skills are merged in.
+            enabled_skills = list(builtin_skills())
             if self.skills is not None:
-                skills_summary = build_skills_summary(await self.skills.enabled_for_user(user_id))
+                enabled_skills += await self.skills.enabled_for_user(user_id)
+            skills_summary = build_skills_summary(enabled_skills)
             if self.connectors is not None:
                 try:
                     await self.connectors.sync_tools(user_id, agent.tools)
@@ -339,23 +518,34 @@ class AgentRuntime:
                     "content": [{"type": "text", "text": runtime_ctx}, *model_content],
                 }
             stored_content = storage_text  # text + attachment names (never base64)
+            # Persist the user message NOW (not at turn end) so it's durable the
+            # instant the turn starts. Otherwise switching away mid-turn and back
+            # would show an empty transcript — listMessages had nothing yet.
+            # history was already loaded above, so this doesn't duplicate the
+            # prompt's user turn.
+            await self.messages.append(session_id, [{"role": "user", "content": stored_content}])
             prompt_messages = self.assembler.assemble(
                 agent.system_prompt(memory_context, skills_summary=skills_summary),
                 history,
                 user_message,
             )
 
+            async def _confirm(t_id: str, tool: str, args_preview: str) -> bool:
+                return await self.request_confirmation(session_id, t_id, tool, args_preview)
+
             try:
                 outcome = await agent.loop.run_turn(
-                    turn_id, prompt_messages, lambda ev: self.bus.publish(session_id, ev)
+                    turn_id, prompt_messages, lambda ev: self.bus.publish(session_id, ev),
+                    model=effective_model, api_key=model_key, api_base=model_base,
+                    permission_mode=permission_mode, confirm=_confirm,
                 )
             except ProviderError as exc:
                 reason = t(classify_error_reason(str(exc)), locale)
                 message = t("error.llm", locale, reason=reason)
                 self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
-                # Persist only the user message — never error text — so a bad
-                # provider response cannot poison future context (legacy #1303).
-                await self.messages.append(session_id, [{"role": "user", "content": stored_content}])
+                # The user message is already persisted (above); never persist the
+                # error text, so a bad provider response can't poison future
+                # context (legacy #1303).
                 return message
 
             final = outcome.final_content
@@ -370,22 +560,36 @@ class AgentRuntime:
                 elif out_decision.masked:
                     final = out_decision.text
 
-            to_store = [{"role": "user", "content": stored_content}]
+            # User message was already persisted at turn start; store only the
+            # new assistant/tool messages this turn produced.
+            to_store = []
             for msg in outcome.new_messages:
                 entry = dict(msg)
                 if entry.get("role") == "tool" and len(entry.get("content") or "") > _STORED_TOOL_RESULT_CAP:
                     entry["content"] = entry["content"][:_STORED_TOOL_RESULT_CAP] + "\n... (truncated)"
                 to_store.append(entry)
-            await self.messages.append(session_id, to_store)
+            # Attach artifacts to the final assistant message so they survive a
+            # reload (rendered as openable file chips in the UI).
+            if outcome.artifacts and to_store:
+                for entry in reversed(to_store):
+                    if entry.get("role") == "assistant" and not entry.get("tool_calls"):
+                        entry["meta"] = {**(entry.get("meta") or {}), "artifacts": outcome.artifacts}
+                        break
+            if to_store:
+                await self.messages.append(session_id, to_store)
 
             self.bus.publish(
                 session_id,
-                TurnCompleted(turn_id=turn_id, content=final or "", usage=outcome.usage),
+                TurnCompleted(
+                    turn_id=turn_id, content=final or "", usage=outcome.usage, artifacts=outcome.artifacts
+                ),
             )
 
         if self.usage is not None:
             self._spawn_background(
-                self.usage.record(user_id, session_id, self.settings.llm.model, outcome.usage)
+                self.usage.record(
+                    user_id, session_id, effective_model or self.settings.llm.model, outcome.usage
+                )
             )
         self._spawn_background(self.memory.maybe_consolidate(user_id, session_id))
         return final

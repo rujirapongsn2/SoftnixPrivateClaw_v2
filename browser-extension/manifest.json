@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Softnix PrivateClaw Browser",
+  "version": "0.1.0",
+  "description": "Pairs your browser with Softnix PrivateClaw so the agent can run approved browser tasks in your own tabs.",
+  "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

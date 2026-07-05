@@ -8,10 +8,13 @@ from loguru import logger
 
 from claw.api.admin import router as admin_router
 from claw.api.auth import router as auth_router
+from claw.api.browser_ext import router as browser_ext_router
+from claw.api.connector_oauth import router as connector_oauth_router
 from claw.api.deps import AppState
 from claw.api.manage import router as manage_router
 from claw.api.routes import router
 from claw.api.telegram import router as telegram_router
+from claw.browser.broker import BrowserBrokerStore
 from claw.config import Settings, load_settings
 from claw.channels.link import LinkCodeService
 from claw.channels.telegram import HttpTelegramTransport, TelegramChannel
@@ -21,14 +24,17 @@ from claw.core.heartbeat import HeartbeatService
 from claw.core.memory import MemoryService
 from claw.core.runtime import AgentRuntime
 from claw.core.scheduler import SchedulerService
-from claw.security.policy import PolicyEngine
+from claw.security.policy import PolicyEngine, builtin_rule_seeds, rule_from_row
 from claw.db.engine import create_engine_and_factory, init_db
 from claw.db.stores import (
     AuditStore,
     ConnectorStore,
     FeedbackStore,
+    GuardrailStore,
+    LLMConfigStore,
     MemoryStore,
     MessageStore,
+    OAuthAppStore,
     ScheduleStore,
     SessionStore,
     SkillStore,
@@ -61,6 +67,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     connectors = ConnectorStore(factory, secret_box=secret_box)
     schedules = ScheduleStore(factory)
     connectors_mgr = ConnectorManager(connectors)
+    guardrails = GuardrailStore(factory)
+    llm_config = LLMConfigStore(factory, secret_box=secret_box)
+    oauth_apps = OAuthAppStore(factory, secret_box=secret_box)
+    browser_broker = BrowserBrokerStore(settings.workspaces_root / "_browser_broker")
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
 
     browser_mgr = None
@@ -71,7 +81,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         browser_mgr = BrowserManager(
             PlaywrightBrowser(settings.browser), settings.browser, settings.workspaces_root
         )
-    memory_service = MemoryService(memories, messages, sessions, provider, model=settings.llm.model)
+    memory_service = MemoryService(
+        memories,
+        messages,
+        sessions,
+        provider,
+        model=settings.llm.model,
+        window=settings.memory.window,
+        keep=settings.memory.keep,
+    )
     runtime = AgentRuntime(
         settings=settings,
         provider=provider,
@@ -87,12 +105,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         browser=browser_mgr,
         usage=usage,
         schedules=schedules,
+        llm_config=llm_config,
+        browser_broker=browser_broker,
     )
 
     async def _scheduled_turn(user_id: str, session_id: str, prompt: str) -> str | None:
         return await runtime.handle_message(user_id, session_id, prompt, channel="schedule")
 
-    scheduler = SchedulerService(schedules, sessions, _scheduled_turn)
+    scheduler = SchedulerService(
+        schedules, sessions, _scheduled_turn, timezone=settings.scheduler.timezone
+    )
     # The schedule tool needs the scheduler to wake it on changes; wire it back now
     # that both exist (scheduler depends on the runtime's turn handler).
     runtime.scheduler = scheduler
@@ -125,6 +147,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await init_db(engine)
         else:
             await init_db(engine)
+        # Seed built-in guardrail rules once, then load persisted rules + toggle
+        # into the live policy engine so enforcement matches the admin config.
+        try:
+            if await guardrails.count() == 0:
+                await guardrails.seed(builtin_rule_seeds())
+            db_rules = await guardrails.list_rules()
+            monitor_only = await guardrails.get_monitor_only(default=not settings.policy_enforce)
+            policy.reload([rule_from_row(r) for r in db_rules], monitor_only=monitor_only)
+        except Exception:
+            logger.exception("Guardrail load failed; using built-in defaults")
         scheduler.start()
         heartbeat.start()
         if telegram is not None:
@@ -171,9 +203,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         usage=usage,
         feedback=feedback,
         telegram=telegram,
+        guardrails=guardrails,
+        llm_config=llm_config,
+        audit=audit,
+        oauth_apps=oauth_apps,
+        browser_broker=browser_broker,
     )
     app.include_router(auth_router)
     app.include_router(admin_router)
+    app.include_router(browser_ext_router)
+    app.include_router(connector_oauth_router)
     app.include_router(router)
     app.include_router(manage_router)
     app.include_router(telegram_router)

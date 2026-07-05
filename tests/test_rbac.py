@@ -23,7 +23,11 @@ async def test_any_user_manages_own_skills(db_factory):
         r = await c.put("/api/skills/s", json=body, headers=_bearer(token))
         assert r.status_code == 200  # own resource — allowed without admin
         r = await c.get("/api/skills", headers=_bearer(token))
-        assert r.status_code == 200 and len(r.json()) == 1
+        assert r.status_code == 200
+        # The list also includes read-only built-in skills; the user's own skill
+        # is the single non-built-in entry.
+        own = [s for s in r.json() if not s.get("builtin")]
+        assert len(own) == 1 and own[0]["name"] == "s"
 
 
 async def test_connectors_and_policy_require_admin(db_factory):
