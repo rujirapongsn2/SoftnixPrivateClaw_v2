@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: claw
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-claw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a strong Postgres password}
       POSTGRES_DB: claw
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -19,15 +19,53 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      CLAW_DATABASE_URL: postgresql+asyncpg://claw:${POSTGRES_PASSWORD:-claw}@postgres:5432/claw
-      CLAW_SECRET_KEY: ${CLAW_SECRET_KEY:?set a strong secret key}
+      CLAW_DATABASE_URL: postgresql+asyncpg://claw:${POSTGRES_PASSWORD:?}@postgres:5432/claw
+      CLAW_SECRET_KEY: ${CLAW_SECRET_KEY:?set a strong secret key (openssl rand -hex 32)}
       CLAW_AUTH_MODE: password
       CLAW_LLM__MODEL: ${CLAW_LLM__MODEL:-openrouter/anthropic/claude-sonnet-5}
       CLAW_LLM__API_KEY: ${CLAW_LLM__API_KEY:?set the LLM API key}
+      # Public https URL the reverse proxy/tunnel serves — drives OIDC + connector
+      # OAuth redirect URIs. Set both to your real domain in production.
       CLAW_PUBLIC_BASE_URL: ${CLAW_PUBLIC_BASE_URL:-http://localhost:8700}
       CLAW_WEB_BASE_URL: ${CLAW_WEB_BASE_URL:-http://localhost:8700}
+      # Persistent data roots. MUST be an absolute host path mounted at the SAME
+      # path inside the container (see the volumes below) — the tool-ephemeral
+      # sandbox bind-mounts workspace.resolve() into a sibling container via the
+      # host daemon, so the path has to resolve identically on host and in-app.
+      CLAW_WORKSPACES_ROOT: ${CLAW_DATA_DIR:?set CLAW_DATA_DIR to an absolute host path}/workspaces
+      CLAW_KNOWLEDGE_ROOT: ${CLAW_DATA_DIR}/knowledge
+      # Tool-ephemeral sandbox (Docker-outside-of-Docker). The image must exist on
+      # the HOST daemon: docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .
+      CLAW_SANDBOX__ENABLED: "true"
+      CLAW_SANDBOX__IMAGE: ${CLAW_SANDBOX__IMAGE:-claw-sandbox:latest}
+      # "bridge" lets the agent pip-install on demand (every exec is audit-logged);
+      # set "none" to fully isolate it to what's baked into the sandbox image.
+      CLAW_SANDBOX__NETWORK: ${CLAW_SANDBOX__NETWORK:-bridge}
+      # Optional speech-to-text (composer mic). Un-prefixed by design.
+      QROQ_KEY: ${QROQ_KEY:-}
+      QROQ_URL: ${QROQ_URL:-https://api.groq.com/openai/v1}
+      QROQ_MODEL: ${QROQ_MODEL:-whisper-large-v3}
+      # Optional: social login + Telegram (leave blank to disable).
+      CLAW_OIDC_GOOGLE_CLIENT_ID: ${CLAW_OIDC_GOOGLE_CLIENT_ID:-}
+      CLAW_OIDC_GOOGLE_CLIENT_SECRET: ${CLAW_OIDC_GOOGLE_CLIENT_SECRET:-}
+      CLAW_OIDC_MICROSOFT_CLIENT_ID: ${CLAW_OIDC_MICROSOFT_CLIENT_ID:-}
+      CLAW_OIDC_MICROSOFT_CLIENT_SECRET: ${CLAW_OIDC_MICROSOFT_CLIENT_SECRET:-}
+      CLAW_OIDC_MICROSOFT_TENANT: ${CLAW_OIDC_MICROSOFT_TENANT:-common}
+      CLAW_TELEGRAM_BOT_TOKEN: ${CLAW_TELEGRAM_BOT_TOKEN:-}
+    volumes:
+      # DooD: let the app drive the host Docker daemon to run sandbox containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent data, mounted at the SAME absolute path the app uses internally
+      # so the sandbox's bind-mount source resolves correctly on the host daemon.
+      - ${CLAW_DATA_DIR}/workspaces:${CLAW_DATA_DIR}/workspaces
+      - ${CLAW_DATA_DIR}/knowledge:${CLAW_DATA_DIR}/knowledge
+    # Bind to localhost only — the reverse proxy / tunnel forwards to it; the app
+    # is never exposed to the public interface directly.
     ports:
-      - "8700:8700"
+      - "127.0.0.1:8700:8700"
+    # runtime.drain() waits up to 20s for in-flight turns; give Docker room past
+    # its default 10s so turns aren't SIGKILLed mid-flight on redeploy.
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8700/api/ready').status==200 else 1)\""]
       interval: 10s

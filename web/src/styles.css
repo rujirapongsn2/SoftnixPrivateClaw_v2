@@ -86,6 +86,9 @@ html {
 .claw-app {
   display: flex;
   height: 100vh;
+  /* dvh tracks iOS Safari's shrinking/expanding toolbar so the composer isn't
+     hidden behind it; 100vh above is the fallback for browsers without dvh. */
+  height: 100dvh;
   background: var(--color-background-wash, #faf9f5);
 }
 .claw-main {
@@ -93,6 +96,26 @@ html {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+/* Mobile top bar (hamburger + current section + logo). Hidden on desktop;
+   shown by the responsive block below when the sidebar is a drawer. */
+.claw-topbar {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 8px 12px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  border-bottom: 1px solid var(--color-border-subtle, #e9ebee);
+  background: var(--color-background-base, #fff);
+}
+.claw-topbar > *:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Soft drop shadow along the sidebar's trailing edge, separating it from the
@@ -496,6 +519,19 @@ html {
 }
 .claw-row-between {
   justify-content: space-between;
+}
+/* Compact numbered setup steps (e.g. Telegram linking). */
+.claw-telegram-steps {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary, #666);
+}
+.claw-telegram-steps li {
+  padding-left: 2px;
 }
 .claw-toggle {
   display: flex;
@@ -1536,6 +1572,81 @@ html {
     z-index: 20;
     box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
   }
+}
+
+/* ============================================================
+   Responsive: tablet & phone (iPad / iPhone).
+   ≤1024px: sidebar becomes an off-canvas drawer + mobile top bar.
+   ≤640px (phone): aggressive — hide the execution panel (see Chat) and
+   keep only the daily-use surfaces; Admin console is gated in App.tsx.
+   Desktop (≥1025px) is untouched by everything below.
+   ============================================================ */
+@media (max-width: 1024px) {
+  .claw-topbar {
+    display: flex;
+  }
+  /* Sidebar slides in from the left over the content instead of taking a
+     fixed column, so the chat gets the full width. */
+  .claw-sidenav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 300px !important;
+    max-width: 85vw;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    z-index: 40;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.18);
+  }
+  .claw-app--nav-open .claw-sidenav {
+    transform: translateX(0);
+  }
+  .claw-nav-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 39;
+  }
+  /* Comfortable tap targets for touch (Apple HIG ~44px). */
+  .claw-recent-row .claw-sidenav-item,
+  .claw-recent-row button {
+    min-height: 40px;
+  }
+}
+
+@media (max-width: 640px) {
+  /* Phone: the execution panel + its toggle are hidden (agent still runs; the
+     step-by-step view is a desktop/tablet affordance). */
+  .claw-exec-panel,
+  .claw-exec-toggle {
+    display: none !important;
+  }
+  /* iOS zooms the page when focusing an input whose font-size < 16px. Force
+     ≥16px on the composer + form inputs on phones to prevent that jump. */
+  .astryx-chat-composer-input [contenteditable],
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+  /* Give the centered content columns the full phone width. */
+  .claw-column,
+  .claw-composer {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+
+/* "This feature needs a bigger screen" placeholder (e.g. Admin on phone). */
+.claw-mobile-blocked {
+  max-width: 420px;
+  margin: 12vh auto 0;
+  padding: 0 20px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 /* ---- artifact chips: files the agent created (open/download) ---- */

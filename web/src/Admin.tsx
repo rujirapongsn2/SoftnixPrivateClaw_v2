@@ -18,6 +18,7 @@ import {
   ChevronRight,
   Cpu,
   Diamond,
+  ExternalLink,
   Globe,
   Info,
   KeyRound,
@@ -54,10 +55,11 @@ import {
   ModelUsagePoint,
   OAuthAppsInfo,
   SessionsByUserPoint,
+  TelegramAdminConfig,
   api,
 } from "./api";
 
-export type AdminSection = "overview" | "providers" | "guardrails" | "oauth" | "audit" | "users";
+export type AdminSection = "overview" | "providers" | "guardrails" | "oauth" | "telegram" | "audit" | "users";
 
 export const COST_LABEL: Record<ModelCost, string> = {
   low: "Low cost",
@@ -71,6 +73,7 @@ export const ADMIN_SECTIONS: { key: AdminSection; label: string; icon: IconType 
   { key: "providers", label: "LLM Providers", icon: Cpu },
   { key: "guardrails", label: "Guardrails", icon: ShieldCheck },
   { key: "oauth", label: "OAuth apps", icon: KeyRound },
+  { key: "telegram", label: "Telegram", icon: Send },
   { key: "audit", label: "Audit Logs", icon: ScrollText },
   { key: "users", label: "Users", icon: Users },
 ];
@@ -88,6 +91,7 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
         {section === "providers" && <ProvidersPanel />}
         {section === "guardrails" && <GuardrailsPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
+        {section === "telegram" && <TelegramConfigPanel />}
         {section === "audit" && <AuditPanel />}
         {section === "users" && <UsersPanel selfId={selfId} />}
       </div>
@@ -1499,6 +1503,115 @@ function OAuthAppCard({
         </div>
       </div>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------- Telegram
+
+function telegramStatusBadge(cfg: TelegramAdminConfig) {
+  if (!cfg.has_token) return <Badge variant="neutral" label="Not configured" />;
+  if (!cfg.running) return <Badge variant="neutral" label="Configured (disabled)" />;
+  return (
+    <Badge
+      variant="success"
+      icon={<Icon icon="check" size="xsm" />}
+      label={cfg.bot_username ? `Connected · @${cfg.bot_username}` : "Connected"}
+    />
+  );
+}
+
+function TelegramConfigPanel() {
+  const [cfg, setCfg] = useState<TelegramAdminConfig | null>(null);
+  const [token, setToken] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const { error, guard } = useAsyncError();
+  const toast = useToast();
+
+  const reload = useCallback(
+    () =>
+      api.adminGetTelegramConfig().then((c) => {
+        setCfg(c);
+        setEnabled(c.enabled);
+      }),
+    [],
+  );
+  useEffect(() => {
+    void guard(async () => await reload());
+  }, [guard, reload]);
+
+  if (error) return <ErrorText>{error}</ErrorText>;
+  if (!cfg) return <Text color="secondary">Loading…</Text>;
+
+  return (
+    <div className="claw-panel">
+      <Text color="secondary">
+        Connect a Telegram bot so users can chat with Claw from Telegram once they link their
+        account in Settings → Telegram. Saving here connects immediately — no server restart needed.
+      </Text>
+      {cfg.source === "env" && (
+        <Text size="sm" color="secondary">
+          Currently running from the CLAW_TELEGRAM_BOT_TOKEN environment variable. Saving below
+          switches to database-managed configuration.
+        </Text>
+      )}
+      <Card padding={2} variant="muted">
+        <Text weight="semibold">4 steps to get a bot token</Text>
+        <ol className="claw-telegram-steps">
+          <li>
+            Open @BotFather in Telegram and send <Text type="code">/newbot</Text>.
+          </li>
+          <li>Follow the prompts to name the bot and choose a username.</li>
+          <li>Copy the token BotFather gives you.</li>
+          <li>Paste it below and click Save.</li>
+        </ol>
+      </Card>
+      <div className="claw-row">
+        <Button
+          label="Open @BotFather in Telegram"
+          icon={<Icon icon={ExternalLink} size="sm" />}
+          variant="secondary"
+          href="https://t.me/BotFather"
+          target="_blank"
+          rel="noopener noreferrer"
+        />
+      </div>
+      <Card padding={2}>
+        <div className="claw-panel">
+          <div className="claw-row">
+            <Text weight="semibold">Bot</Text>
+            {telegramStatusBadge(cfg)}
+          </div>
+          <TextInput
+            label={cfg.has_token ? "Bot token (leave blank to keep current)" : "Bot token"}
+            type="password"
+            value={token}
+            onChange={setToken}
+            placeholder="123456:ABC-DEF..."
+          />
+          <label className="claw-kb-visibility">
+            <Switch value={enabled} changeAction={setEnabled} label="Enabled" />
+            <Text size="sm" color="secondary">
+              {enabled ? "Bot is active" : "Bot is paused"}
+            </Text>
+          </label>
+          <div className="claw-row">
+            <Button
+              label="Save"
+              icon={<Icon icon="check" size="sm" />}
+              clickAction={() =>
+                guard(async () => {
+                  const res = await api.adminSetTelegramConfig({ bot_token: token.trim(), enabled });
+                  setToken("");
+                  setCfg(res);
+                  setEnabled(res.enabled);
+                  toast({ body: "Telegram settings saved", type: "info", autoHideDuration: 2500 });
+                })
+              }
+            />
+          </div>
+        </div>
+      </Card>
+    </div>
   );
 }
 

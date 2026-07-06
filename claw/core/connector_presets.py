@@ -52,6 +52,12 @@ class ConnectorPreset:
     setup: str = "custom"  # api_key | token | oauth | custom
     command: str = ""
     url: str = ""
+    # When True, `url` above is only a prefilled default — the guided setup
+    # form shows an editable endpoint field so a self-hosted/per-tenant
+    # deployment (e.g. a customer's own Softnix ONE instance) can point
+    # elsewhere. False (default) hides the field, for presets with one true
+    # fixed endpoint shared by every user (e.g. Composio's public gateway).
+    url_configurable: bool = False
     fields: tuple[FieldSpec, ...] = field(default_factory=tuple)
     docs: str = ""
     # OAuth presets only:
@@ -225,6 +231,10 @@ _PRESETS: tuple[ConnectorPreset, ...] = (
         category="Softnix",
         setup="token",
         url="https://mcp-softnix-one.softnix.ai/mcp",
+        # Self-hosted/on-prem Softnix ONE deployments live at a customer-specific
+        # URL, unlike Composio's single shared public gateway — let the form
+        # override this default instead of hardcoding one endpoint for everyone.
+        url_configurable=True,
         fields=(
             FieldSpec(
                 key="HEADER_Authorization",

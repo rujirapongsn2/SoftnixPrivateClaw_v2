@@ -18,7 +18,7 @@ from claw.api.telegram import router as telegram_router
 from claw.browser.broker import BrowserBrokerStore
 from claw.config import Settings, load_settings
 from claw.channels.link import LinkCodeService
-from claw.channels.telegram import HttpTelegramTransport, TelegramChannel
+from claw.channels.telegram import TelegramManager
 from claw.core.bus import EventBus
 from claw.core.connectors import ConnectorManager
 from claw.core.heartbeat import HeartbeatService
@@ -40,6 +40,7 @@ from claw.db.stores import (
     ScheduleStore,
     SessionStore,
     SkillStore,
+    TelegramConfigStore,
     UsageStore,
     UserStore,
 )
@@ -132,12 +133,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                  model=settings.llm.model)
 
     telegram_link = LinkCodeService()
-    telegram: TelegramChannel | None = None
-    if settings.telegram_bot_token:
-        telegram = TelegramChannel(
-            runtime, users, sessions,
-            HttpTelegramTransport(settings.telegram_bot_token), telegram_link,
-        )
+    telegram_config = TelegramConfigStore(factory, secret_box=secret_box)
+    telegram_mgr = TelegramManager(runtime, users, sessions, telegram_link)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -165,9 +162,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.exception("Guardrail load failed; using built-in defaults")
         scheduler.start()
         heartbeat.start()
-        if telegram is not None:
-            telegram.start_task()
-            logger.info("Telegram channel enabled")
+        # Telegram: an admin-saved config in the DB is authoritative once it
+        # exists; otherwise fall back to CLAW_TELEGRAM_BOT_TOKEN (env) so
+        # existing infra-managed deployments keep working unchanged.
+        try:
+            tg_cfg = await telegram_config.get()
+            tg_token = (tg_cfg["bot_token"] if tg_cfg["enabled"] else "") if tg_cfg else settings.telegram_bot_token
+            app.state.claw.telegram = await telegram_mgr.ensure_running(tg_token)
+            if app.state.claw.telegram is not None:
+                logger.info("Telegram channel enabled")
+        except Exception:
+            logger.exception("Telegram startup failed")
         logger.info(
             "Softnix PrivateClaw up — model={}, sandbox={}, browser={}",
             settings.llm.model, runtime.sandbox.describe(),
@@ -177,8 +182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Stop intake, then let in-flight turns finish before tearing down.
         await scheduler.stop()
         await heartbeat.stop()
-        if telegram is not None:
-            await telegram.stop()
+        await telegram_mgr.stop()
         await runtime.drain()
         if browser_mgr is not None:
             await browser_mgr.close()
@@ -208,7 +212,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         telegram_link=telegram_link,
         usage=usage,
         feedback=feedback,
-        telegram=telegram,
+        telegram=None,
+        telegram_config=telegram_config,
+        telegram_mgr=telegram_mgr,
         guardrails=guardrails,
         llm_config=llm_config,
         audit=audit,

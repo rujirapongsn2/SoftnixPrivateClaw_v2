@@ -100,6 +100,9 @@ export interface ConnectorPreset {
   setup: "api_key" | "token" | "oauth" | "custom";
   command: string;
   url: string;
+  // When true, `url` is only a prefilled default — the setup form should let
+  // the user override it (e.g. a self-hosted Softnix ONE endpoint).
+  url_configurable: boolean;
   fields: FieldSpec[];
   docs: string;
   oauth_provider: string;
@@ -233,6 +236,16 @@ export interface AuditRow {
   user_label: string;
   session_id: string | null;
   created_at: string;
+}
+
+export interface TelegramAdminConfig {
+  has_token: boolean;
+  enabled: boolean;
+  // "database" once an admin has saved anything here; "env" while still
+  // running off the CLAW_TELEGRAM_BOT_TOKEN fallback; "none" if unconfigured.
+  source: "database" | "env" | "none";
+  running: boolean;
+  bot_username: string;
 }
 
 export interface OAuthAppPublic {
@@ -509,6 +522,10 @@ export const api = {
     provider: "google" | "microsoft",
     body: { client_id: string; client_secret: string; tenant?: string },
   ) => request<OAuthAppPublic>(`/api/admin/oauth-apps/${provider}`, { method: "PUT", body: JSON.stringify(body) }),
+
+  adminGetTelegramConfig: () => request<TelegramAdminConfig>("/api/admin/telegram"),
+  adminSetTelegramConfig: (body: { bot_token: string; enabled: boolean }) =>
+    request<TelegramAdminConfig>("/api/admin/telegram", { method: "PUT", body: JSON.stringify(body) }),
 
   adminAudit: (
     filters: { kind?: string; user_id?: string; search?: string; before?: string; limit?: number } = {},

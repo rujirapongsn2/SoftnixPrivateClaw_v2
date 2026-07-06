@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Softnix PrivateClaw control CLI — start/stop/restart/status/logs/update.
+# Auto-detects the service manager installed by install.sh:
+#   Linux  -> systemd unit  "claw"
+#   macOS  -> launchd agent "com.softnix.claw"
+# Falls back to a plain background process (nohup) when no service is set up.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SERVE="$SCRIPT_DIR/claw-serve.sh"
+
+SYSTEMD_UNIT="claw"
+LAUNCHD_LABEL="com.softnix.claw"
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+PIDFILE="$PROJECT_DIR/.claw.pid"
+LOGFILE="$PROJECT_DIR/claw.log"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Which supervisor is actually managing this install?
+mode() {
+  if have systemctl && systemctl list-unit-files 2>/dev/null | grep -q "^${SYSTEMD_UNIT}.service"; then
+    echo systemd
+  elif [[ "$(uname -s)" == "Darwin" ]] && [[ -f "$LAUNCHD_PLIST" ]]; then
+    echo launchd
+  else
+    echo nohup
+  fi
+}
+
+# systemctl needs sudo unless already root.
+sc() { if [[ $EUID -eq 0 ]]; then systemctl "$@"; else sudo systemctl "$@"; fi; }
+
+port() {
+  local p="8700"
+  [[ -f "$PROJECT_DIR/.env" ]] && p="$(grep -E '^CLAW_PORT=' "$PROJECT_DIR/.env" | tail -1 | cut -d= -f2 || true)"
+  echo "${p:-8700}"
+}
+
+cmd_start() {
+  case "$(mode)" in
+    systemd) sc start "$SYSTEMD_UNIT" ;;
+    launchd) launchctl load -w "$LAUNCHD_PLIST" 2>/dev/null || launchctl start "$LAUNCHD_LABEL" ;;
+    nohup)
+      if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "already running (pid $(cat "$PIDFILE"))"; return 0
+      fi
+      nohup "$SERVE" >>"$LOGFILE" 2>&1 &
+      echo $! >"$PIDFILE"
+      echo "started (pid $!) — logs: $LOGFILE" ;;
+  esac
+}
+
+cmd_stop() {
+  case "$(mode)" in
+    systemd) sc stop "$SYSTEMD_UNIT" ;;
+    launchd) launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || launchctl stop "$LAUNCHD_LABEL" ;;
+    nohup)
+      [[ -f "$PIDFILE" ]] && kill "$(cat "$PIDFILE")" 2>/dev/null || true
+      rm -f "$PIDFILE"; echo "stopped" ;;
+  esac
+}
+
+cmd_restart() {
+  case "$(mode)" in
+    systemd) sc restart "$SYSTEMD_UNIT" ;;
+    *) cmd_stop; sleep 1; cmd_start ;;
+  esac
+}
+
+cmd_status() {
+  echo "supervisor: $(mode)"
+  case "$(mode)" in
+    systemd) sc --no-pager status "$SYSTEMD_UNIT" || true ;;
+    launchd) launchctl list | grep -E "PID|$LAUNCHD_LABEL" || echo "not loaded" ;;
+    nohup)
+      if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "running (pid $(cat "$PIDFILE"))"; else echo "not running"; fi ;;
+  esac
+  echo "--- health ---"
+  if curl -fsS "http://127.0.0.1:$(port)/api/ready" >/dev/null 2>&1; then
+    echo "  /api/ready: OK (http://127.0.0.1:$(port))"
+  else
+    echo "  /api/ready: not responding"
+  fi
+}
+
+cmd_logs() {
+  case "$(mode)" in
+    systemd) sc --no-pager -n "${1:-100}" -f status "$SYSTEMD_UNIT" 2>/dev/null || journalctl -u "$SYSTEMD_UNIT" -n "${1:-100}" -f ;;
+    launchd) tail -n "${1:-100}" -f "$PROJECT_DIR/claw.out.log" "$PROJECT_DIR/claw.err.log" ;;
+    nohup) tail -n "${1:-100}" -f "$LOGFILE" ;;
+  esac
+}
+
+cmd_update() {
+  cd "$PROJECT_DIR"
+  echo "==> git pull"; git pull --ff-only
+  echo "==> uv sync"; uv sync --frozen --no-dev
+  echo "==> rebuild web"; "$PROJECT_DIR/install.sh" --web-only
+  echo "==> migrate"; uv run alembic upgrade head
+  echo "==> restart"; cmd_restart
+}
+
+case "${1:-}" in
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_restart ;;
+  status)  cmd_status ;;
+  logs)    shift; cmd_logs "${1:-100}" ;;
+  update)  cmd_update ;;
+  *) echo "Usage: claw {start|stop|restart|status|logs [N]|update}"; exit 1 ;;
+esac

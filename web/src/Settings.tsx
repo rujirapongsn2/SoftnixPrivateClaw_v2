@@ -43,6 +43,7 @@ import {
   SkillInfo,
   api,
 } from "./api";
+import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 export type SettingsSection =
   | "skills"
@@ -369,6 +370,7 @@ function GuidedSetup({
   onManage: (c: ConnectorInfo) => void;
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
+  const [url, setUrl] = useState(preset.url);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -447,11 +449,13 @@ function GuidedSetup({
         }
         env[f.key] = f.prefix && !raw.startsWith(f.prefix) ? f.prefix + raw : raw;
       }
+      const effectiveUrl = preset.url_configurable ? url.trim() || preset.url : preset.url;
+      if (preset.url_configurable && !effectiveUrl) throw new Error("MCP endpoint URL is required.");
       await api.saveConnector({
         name: preset.name,
         transport: preset.transport,
         command: preset.command,
-        url: preset.url,
+        url: effectiveUrl,
         env,
         enabled: true,
       });
@@ -465,6 +469,21 @@ function GuidedSetup({
   return (
     <div className="claw-panel claw-setup">
       {header}
+      {preset.url_configurable && (
+        <div className="claw-setup-field">
+          <TextInput
+            label="MCP endpoint URL"
+            type="text"
+            value={url}
+            placeholder={preset.url}
+            onChange={setUrl}
+          />
+          <Text size="sm" color="secondary" as="p" className="claw-setup-help">
+            Defaults to Softnix's hosted endpoint. Change this only if your organization runs its
+            own Softnix ONE instance.
+          </Text>
+        </div>
+      )}
       {preset.fields.map((f) => (
         <div key={f.key} className="claw-setup-field">
           <TextInput
@@ -1034,14 +1053,15 @@ function TelegramPanel() {
     return (
       <div className="claw-panel">
         <Text color="secondary">
-          Telegram is not enabled on this server. An administrator must set a bot token
-          (CLAW_TELEGRAM_BOT_TOKEN) to allow linking.
+          Telegram isn't set up on this workspace yet. Ask an administrator to connect a bot in
+          Admin console → Telegram.
         </Text>
       </div>
     );
   }
 
   const botHandle = status.bot_username ? `@${status.bot_username}` : "the bot";
+  const botUrl = status.bot_username ? `https://t.me/${status.bot_username}` : "";
 
   return (
     <div className="claw-panel">
@@ -1073,26 +1093,48 @@ function TelegramPanel() {
         />
       ) : (
         <>
-          <Button
-            label="Generate link code"
-            icon={<Icon icon={Send} size="sm" />}
-            clickAction={() =>
-              guard(async () => {
-                const res = await api.createTelegramLink();
-                setCode(res.code);
-              })
-            }
-          />
+          <Card padding={2} variant="muted">
+            <Text weight="semibold">3 steps to link</Text>
+            <ol className="claw-telegram-steps">
+              <li>
+                Open {botHandle} in Telegram and tap <strong>Start</strong>.
+              </li>
+              <li>Click "Generate link code" below.</li>
+              <li>Send the code back to the bot as a message.</li>
+            </ol>
+          </Card>
+          <div className="claw-row">
+            {botUrl && (
+              <Button
+                label="Open in Telegram"
+                icon={<Icon icon={ExternalLink} size="sm" />}
+                variant="secondary"
+                href={botUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              />
+            )}
+            <Button
+              label="Generate link code"
+              icon={<Icon icon={Send} size="sm" />}
+              clickAction={() =>
+                guard(async () => {
+                  const res = await api.createTelegramLink();
+                  setCode(res.code);
+                })
+              }
+            />
+          </div>
           {code && (
             <Card padding={2} variant="muted">
               <Text weight="semibold">Your link code</Text>
               <Text type="display-3">{code}</Text>
               <Text size="sm" color="secondary" as="p">
-                Open {botHandle} in Telegram and send:
+                Send this to {botHandle} as a message:
               </Text>
               <Text type="code">/link {code}</Text>
               <Text size="sm" color="secondary" as="p">
-                The code expires in a few minutes. After linking, refresh this tab.
+                Expires in a few minutes. Once sent, come back and refresh this page.
               </Text>
             </Card>
           )}
@@ -1114,10 +1156,27 @@ function BrowserExtensionPanel() {
   const [copied, setCopied] = useState(false);
   const { error, guard } = useAsyncError();
 
+  const isMobile = useMediaQuery(MOBILE_QUERY);
+
   const reload = useCallback(() => api.browserExtensionStatus().then(setStatus), []);
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // Pairing installs a Chrome extension on the user's computer — impossible on
+  // iPhone/iPad (no desktop-Chrome extensions on iOS), so guide them to desktop
+  // rather than showing a flow that can't complete here.
+  if (isMobile) {
+    return (
+      <div className="claw-panel">
+        <Text color="secondary">
+          The browser extension pairs Claw with Chrome on your computer, so it's set up on a
+          desktop — not on a phone or tablet. Open Softnix PrivateClaw on your computer, then go to
+          Settings → Browser extension.
+        </Text>
+      </div>
+    );
+  }
 
   if (!status) return <Text color="secondary">Loading…</Text>;
 

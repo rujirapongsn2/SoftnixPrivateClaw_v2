@@ -12,7 +12,7 @@ import {
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useToast } from "@astryxdesign/core/Toast";
-import { AlarmClock, ChevronDown, Loader2, LogOut, MessageCircle, MessageSquare, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
+import { AlarmClock, ChevronDown, Loader2, LogOut, Menu, MessageCircle, MessageSquare, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
@@ -20,6 +20,7 @@ import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
 import { AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
+import { MOBILE_QUERY, PHONE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 const PROVIDER_LABELS: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
 
@@ -387,6 +388,13 @@ export default function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
+  // Responsive shell. Below the tablet width the sidebar becomes an off-canvas
+  // drawer (navOpen); on desktop `collapsed` drives the rail. Admin console is
+  // hidden on phones (see the trade-off note in the render).
+  const isMobile = useMediaQuery(MOBILE_QUERY);
+  const isPhone = useMediaQuery(PHONE_QUERY);
+  const [navOpen, setNavOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   // Per-session "last read" timestamps (id -> epoch ms), persisted to
   // localStorage — see LAST_READ_KEY above for why this replaced an
   // in-memory-only heuristic.
@@ -541,14 +549,33 @@ export default function App() {
   if (checking) return <div className="claw-login"><Text color="secondary">Loading…</Text></div>;
   if (!user) return <Auth onDone={setUser} initialError={authError} />;
 
+  // Selecting anything in the drawer should close it on mobile.
+  const closeDrawer = () => setNavOpen(false);
+  const showAdmin = user.is_admin && !isPhone; // aggressive: no admin console on phones
+  const currentTitle = adminSection
+    ? ADMIN_SECTIONS.find((s) => s.key === adminSection)?.label
+    : settingsSection
+      ? SETTINGS_SECTIONS.find((s) => s.key === settingsSection)?.label
+      : "Chat";
+
   return (
-    <div className="claw-app">
+    <div className={`claw-app${isMobile && navOpen ? " claw-app--nav-open" : ""}`}>
+      {isMobile && navOpen && (
+        <div className="claw-nav-backdrop" onClick={closeDrawer} aria-hidden="true" />
+      )}
       <SideNav
         className="claw-sidenav"
+        // Force full-width (never rail) while in drawer mode; use the rail
+        // toggle only on desktop.
+        collapsible={{
+          isCollapsed: isMobile ? false : collapsed,
+          onCollapsedChange: setCollapsed,
+          hasButton: false,
+        }}
         header={<SidebarBrand />}
         topContent={
           <div className="claw-sidenav-top">
-            <NewChatButton onClick={newChat} />
+            <NewChatButton onClick={() => { newChat(); closeDrawer(); }} />
           </div>
         }
         footer={
@@ -569,11 +596,12 @@ export default function App() {
                       setSettingsSection(s.key);
                       setAdminSection(null);
                       setActive(null);
+                      closeDrawer();
                     }}
                   />
                 ))}
               </SideNavItem>
-              {user.is_admin && (
+              {showAdmin && (
                 <div className="claw-nav-admin">
                   <SideNavItem
                     label="Admin console"
@@ -590,6 +618,7 @@ export default function App() {
                           setAdminSection(s.key);
                           setSettingsSection(null);
                           setActive(null);
+                          closeDrawer();
                         }}
                       />
                     ))}
@@ -600,8 +629,7 @@ export default function App() {
             </SideNavItem>
           </div>
         }
-        footerIcons={<SideNavCollapseButton />}
-        collapsible={{ hasButton: false }}
+        footerIcons={isMobile ? undefined : <SideNavCollapseButton />}
       >
         <RecentsNav
           sessions={sessions}
@@ -611,6 +639,7 @@ export default function App() {
             setActive(id);
             setSettingsSection(null);
             setAdminSection(null);
+            closeDrawer();
           }}
           onDelete={(id) => {
             void api.deleteSession(id).then(() => {
@@ -622,8 +651,30 @@ export default function App() {
       </SideNav>
 
       <main className="claw-main">
+        {/* Mobile top bar: only shown ≤1024px (CSS), gives a way to open the
+            drawer since the sidebar is off-canvas there. */}
+        <div className="claw-topbar">
+          <IconButton
+            label="Open menu"
+            icon={<Icon icon={Menu} size="sm" />}
+            variant="ghost"
+            clickAction={() => setNavOpen(true)}
+          />
+          <Text weight="semibold">{currentTitle}</Text>
+          <SoftnixMark size={20} />
+        </div>
         {adminSection ? (
-          <AdminPanel section={adminSection} selfId={user.id} />
+          isPhone ? (
+            <div className="claw-mobile-blocked">
+              <Text weight="semibold">Admin console isn't available on phones</Text>
+              <Text color="secondary" as="p">
+                It's built for wide screens (charts, tables, audit logs). Please open it on a
+                tablet in landscape or a desktop.
+              </Text>
+            </div>
+          ) : (
+            <AdminPanel section={adminSection} selfId={user.id} />
+          )
         ) : settingsSection ? (
           <SettingsPanel section={settingsSection} />
         ) : (

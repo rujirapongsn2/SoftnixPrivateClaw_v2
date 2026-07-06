@@ -1,0 +1,27 @@
+# Keep the build context small and never bake secrets/data/local state into an image.
+.git/
+.gitignore
+.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node / web build inputs (the image builds the frontend from source in its own stage)
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
+
+# Runtime data + secrets — must never end up in an image layer
+.env
+workspaces/
+knowledge/
+
+# Reference-only legacy repo and local cruft
+softnix-agenticclaw/
+.claude/
+.DS_Store
+*.swp
+Dockerfile
+docker-compose*.yml

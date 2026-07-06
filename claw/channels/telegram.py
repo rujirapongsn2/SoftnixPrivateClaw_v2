@@ -168,3 +168,46 @@ class TelegramChannel(Channel):
             return "❌ That link code is invalid or expired. Generate a new one in the web app."
         await self.users.set_telegram_id(user_id, tg_id)
         return "✅ Your Telegram is now linked. You can chat with Claw here."
+
+
+async def validate_bot_token(token: str) -> dict[str, Any]:
+    """Call Telegram's getMe to confirm a token is real before persisting it —
+    an admin pasting a bad token gets immediate feedback instead of a bot that
+    silently never connects. Raises if the token is invalid/unreachable."""
+    return await HttpTelegramTransport(token).get_me()
+
+
+class TelegramManager:
+    """(Re)starts the Telegram channel from admin-set config, live — no process
+    restart needed. Mirrors ConnectorManager's reconnect-on-change shape: calling
+    ``ensure_running`` with the same token as what's already running is a no-op;
+    a changed (or newly blank) token stops the old channel first.
+    """
+
+    def __init__(self, runtime: AgentRuntime, users: UserStore, sessions: SessionStore, links: LinkCodeService):
+        self.runtime = runtime
+        self.users = users
+        self.sessions = sessions
+        self.links = links
+        self.channel: TelegramChannel | None = None
+        self._token = ""
+
+    async def ensure_running(self, token: str) -> TelegramChannel | None:
+        token = (token or "").strip()
+        if not token:
+            await self.stop()
+            return None
+        if self.channel is not None and self._token == token:
+            return self.channel  # already running with this token
+        await self.stop()
+        channel = TelegramChannel(self.runtime, self.users, self.sessions, HttpTelegramTransport(token), self.links)
+        channel.start_task()
+        self.channel = channel
+        self._token = token
+        return channel
+
+    async def stop(self) -> None:
+        if self.channel is not None:
+            await self.channel.stop()
+            self.channel = None
+            self._token = ""

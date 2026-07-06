@@ -1149,6 +1149,57 @@ class OAuthAppStore:
             await db.commit()
 
 
+class TelegramConfigStore:
+    """Admin-configured Telegram bot token, so the integration is turned on
+    self-service from the Admin console instead of an env var + server restart.
+    The token is encrypted at rest (same scheme as OAuthAppStore/LLMConfigStore).
+
+    ``get()`` returns None when nobody has ever saved a config through the admin
+    UI — callers should fall back to the CLAW_TELEGRAM_BOT_TOKEN env var in that
+    case, so existing infra-managed deployments keep working unchanged. Once an
+    admin saves anything here, this store is authoritative.
+    """
+
+    _KEY = "telegram_bot"
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], secret_box: Any | None = None):
+        self.factory = factory
+        self.secret_box = secret_box
+
+    async def get(self) -> dict[str, Any] | None:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+        if row is None:
+            return None
+        data = dict(row.value or {})
+        token = data.get("bot_token", "")
+        if self.secret_box and token:
+            token = self.secret_box.decrypt(token)
+        return {"bot_token": token, "enabled": bool(data.get("enabled", True))}
+
+    async def public(self) -> dict[str, Any]:
+        """Safe view for the admin UI — never returns the token itself."""
+        data = await self.get()
+        if data is None:
+            return {"has_token": False, "enabled": False}
+        return {"has_token": bool(data["bot_token"]), "enabled": data["enabled"]}
+
+    async def set(self, bot_token: str, enabled: bool) -> None:
+        # Preserve the existing token when the caller submits a blank one (the
+        # admin UI does this when only toggling `enabled`, not the token).
+        existing = await self.get()
+        token = bot_token or (existing["bot_token"] if existing else "")
+        stored_token = self.secret_box.encrypt(token) if (self.secret_box and token) else token
+        value = {"bot_token": stored_token, "enabled": enabled}
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+            if row is None:
+                db.add(AppSetting(key=self._KEY, value=value))
+            else:
+                row.value = value
+            await db.commit()
+
+
 class KnowledgeStore:
     """Knowledge bases (OKF bundles) + their documents and searchable chunks.
 

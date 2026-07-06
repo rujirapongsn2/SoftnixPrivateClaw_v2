@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from claw.api.deps import AppState, get_state, require_admin
 from claw.auth import oidc
 from claw.auth.passwords import hash_password
+from claw.channels.telegram import validate_bot_token
 from claw.db.models import User
 from claw.security.policy import rule_from_row
 
@@ -527,6 +528,65 @@ async def set_oauth_app(
         raise HTTPException(status_code=404, detail="unknown provider")
     await state.oauth_apps.set(provider, body.client_id.strip(), body.client_secret.strip(), body.tenant.strip())
     return await state.oauth_apps.public(provider)
+
+
+# ---------------------------------------------------------------- Telegram
+
+class TelegramConfigBody(BaseModel):
+    bot_token: str = ""  # empty keeps the existing token (e.g. only toggling `enabled`)
+    enabled: bool = True
+
+
+async def _telegram_config_json(state: AppState) -> dict:
+    cfg = await state.telegram_config.get()
+    if cfg is None:
+        # Never configured through this admin UI — report whether the env var
+        # fallback (CLAW_TELEGRAM_BOT_TOKEN) currently supplies a token, so the
+        # admin knows saving here will take over from it.
+        has_env_token = bool(state.settings.telegram_bot_token)
+        pub = {"has_token": has_env_token, "enabled": has_env_token, "source": "env" if has_env_token else "none"}
+    else:
+        pub = {**await state.telegram_config.public(), "source": "database"}
+    return {
+        **pub,
+        "running": state.telegram is not None,
+        "bot_username": getattr(state.telegram, "bot_username", "") if state.telegram is not None else "",
+    }
+
+
+@router.get("/telegram")
+async def get_telegram_config(
+    admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    return await _telegram_config_json(state)
+
+
+@router.put("/telegram")
+async def set_telegram_config(
+    body: TelegramConfigBody,
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    token = body.bot_token.strip()
+    if token:
+        # Confirm the token actually works before persisting it — a pasted-wrong
+        # token fails loudly here instead of the bot silently never connecting.
+        try:
+            await validate_bot_token(token)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422, detail=f"Could not verify this bot token with Telegram: {exc}"
+            ) from exc
+    elif body.enabled:
+        existing = await state.telegram_config.get()
+        if not existing or not existing.get("bot_token"):
+            raise HTTPException(status_code=422, detail="A bot token is required to enable Telegram.")
+
+    await state.telegram_config.set(token, body.enabled)
+    cfg = await state.telegram_config.get()
+    effective_token = (cfg["bot_token"] if cfg["enabled"] else "") if cfg else ""
+    state.telegram = await state.telegram_mgr.ensure_running(effective_token)
+    return await _telegram_config_json(state)
 
 
 # ---------------------------------------------------------------- audit logs

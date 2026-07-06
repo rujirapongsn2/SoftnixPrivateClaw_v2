@@ -16,6 +16,7 @@ from claw.api.routes import router as core_router
 from claw.api.telegram import router as telegram_router
 from claw.browser.broker import BrowserBrokerStore
 from claw.channels.link import LinkCodeService
+from claw.channels.telegram import TelegramManager
 from claw.config import Settings
 from claw.core.connectors import ConnectorManager
 from claw.db.stores import (
@@ -31,6 +32,7 @@ from claw.db.stores import (
     ScheduleStore,
     SessionStore,
     SkillStore,
+    TelegramConfigStore,
     UsageStore,
     UserStore,
 )
@@ -76,6 +78,8 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         browser_broker=BrowserBrokerStore(broker_root),
         knowledge=knowledge_store,
         knowledge_service=KnowledgeService(knowledge_store, knowledge_root),
+        telegram_config=TelegramConfigStore(db_factory),
+        telegram_mgr=TelegramManager(None, UserStore(db_factory), SessionStore(db_factory), LinkCodeService()),
         telegram=None,
     )
     return app
