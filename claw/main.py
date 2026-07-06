@@ -39,6 +39,7 @@ from claw.db.stores import (
     OAuthAppStore,
     ScheduleStore,
     SessionStore,
+    ShareStore,
     SkillStore,
     TelegramConfigStore,
     UsageStore,
@@ -77,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     browser_broker = BrowserBrokerStore(settings.workspaces_root / "_browser_broker")
     knowledge = KnowledgeStore(factory, is_postgres="postgresql" in settings.database_url)
     knowledge_service = KnowledgeService(knowledge, settings.knowledge_root)
+    shares = ShareStore(factory)
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
 
     browser_mgr = None
@@ -222,6 +224,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         browser_broker=browser_broker,
         knowledge=knowledge,
         knowledge_service=knowledge_service,
+        shares=shares,
     )
     app.include_router(auth_router)
     app.include_router(admin_router)
@@ -240,6 +243,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     web_dist = Path(__file__).resolve().parents[1] / "web" / "dist"
     if web_dist.is_dir():
+        # SPA deep link for public share pages: /s/<token> must load index.html
+        # (the StaticFiles mount 404s unknown paths). Registered before the mount
+        # so it wins. The client reads the token from the URL and fetches the
+        # snapshot from /api/share/<token>.
+        from fastapi.responses import FileResponse
+
+        index_html = web_dist / "index.html"
+
+        @app.get("/s/{token}", include_in_schema=False)
+        async def _share_page(token: str) -> FileResponse:  # noqa: ARG001
+            return FileResponse(index_html)
+
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="web")
         logger.info("Serving web frontend from {}", web_dist)
 

@@ -38,6 +38,7 @@ import {
   PenLine,
   Plug,
   Plus,
+  Share2,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
@@ -63,6 +64,32 @@ import {
   openChatSocket,
 } from "./api";
 import { SoftnixLogo } from "./Logo";
+
+// Copy text to the clipboard, falling back to execCommand for non-secure
+// contexts (plain-http LAN/Tailscale IPs) where navigator.clipboard is absent.
+async function writeClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fall through to legacy path */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
 
 const COST_LABEL: Record<string, string> = {
   low: "Low cost",
@@ -246,6 +273,7 @@ export function Chat({
   const [uploading, setUploading] = useState(false);
   const [feedback, setFeedback] = useState<Record<number, "up" | "down">>({});
   const [copied, setCopied] = useState<Record<number, boolean>>({});
+  const [sharing, setSharing] = useState(false);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [model, setModel] = useState<string>(initialModel ?? "");
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -905,6 +933,44 @@ export function Chat({
     [toast],
   );
 
+  // Share one answer (plus its preceding question, for context) as a public,
+  // expiring link. Creates an immutable server-side snapshot, then copies the
+  // capability URL to the clipboard and confirms with a "Link copied" toast.
+  const shareAnswer = useCallback(
+    async (index: number) => {
+      if (!sessionId || sharing) return;
+      const answer = items[index];
+      if (!answer || answer.kind !== "message" || answer.role !== "assistant") return;
+      setSharing(true);
+      try {
+        const msgs: { role: string; content: string; artifacts?: string[] }[] = [];
+        for (let j = index - 1; j >= 0; j--) {
+          const it = items[j];
+          if (it.kind === "message" && it.role === "user") {
+            msgs.push({ role: "user", content: it.content });
+            break;
+          }
+        }
+        msgs.push({ role: "assistant", content: answer.content, artifacts: answer.artifacts });
+        const res = await api.createShare(sessionId, { messages: msgs });
+        // Build the URL from the current origin so the recipient hits the same
+        // host the sharer is on (works on localhost, LAN IP, or a real domain).
+        const url = `${window.location.origin}${res.path}`;
+        const ok = await writeClipboard(url);
+        toast(
+          ok
+            ? { body: "Link copied", type: "info", autoHideDuration: 2500 }
+            : { body: `Share link: ${url}`, type: "info", autoHideDuration: 10000 },
+        );
+      } catch {
+        toast({ body: "Couldn't create the share link", type: "error" });
+      } finally {
+        setSharing(false);
+      }
+    },
+    [sessionId, items, sharing, toast],
+  );
+
   const isEmpty = items.length === 0 && !streaming && !busy;
 
   // Flatten every tool-call group (in order) into the execution timeline.
@@ -1386,7 +1452,7 @@ export function Chat({
                 <ChatMessage key={i} sender={item.role === "user" ? "user" : "assistant"}>
                   {item.role === "assistant" ? (
                     <>
-                      <ChatMessageBubble variant="ghost">
+                      <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
                         <Markdown>{item.content}</Markdown>
                       </ChatMessageBubble>
                       {sessionId && item.artifacts && item.artifacts.length > 0 && (
@@ -1454,6 +1520,16 @@ export function Chat({
                               size="sm"
                               clickAction={() => rate(i, item.content, "down")}
                             />
+                            {sessionId && (
+                              <IconButton
+                                label="Share answer"
+                                icon={<Icon icon={Share2} size="sm" color="secondary" />}
+                                variant="ghost"
+                                size="sm"
+                                isDisabled={sharing}
+                                clickAction={() => shareAnswer(i)}
+                              />
+                            )}
                           </div>
                         }
                       />
@@ -1481,7 +1557,7 @@ export function Chat({
             )}
             {streaming && (
               <ChatMessage sender="assistant">
-                <ChatMessageBubble variant="ghost">
+                <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
                   <Markdown>{streaming}</Markdown>
                   <span className="claw-cursor">▍</span>
                 </ChatMessageBubble>
@@ -1489,7 +1565,7 @@ export function Chat({
             )}
             {busy && !streaming && (
               <ChatMessage sender="assistant">
-                <ChatMessageBubble variant="ghost">
+                <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
                   <span className="claw-thinking">
                     <Spinner size="sm" shade="subtle" /> Thinking…
                   </span>

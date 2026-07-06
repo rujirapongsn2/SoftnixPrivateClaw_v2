@@ -3,11 +3,12 @@
 import asyncio
 import json
 import re
+import shutil
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from claw.api.deps import AppState, current_user, current_user_ws, get_state
@@ -17,6 +18,21 @@ router = APIRouter()
 
 _MAX_ATTACHMENT_BYTES = 20_000_000  # 20 MB per file
 _MAX_ATTACHMENTS = 8
+_SHARE_TTL_DAYS = 7
+_MAX_SHARE_MESSAGES = 100
+_MAX_SHARE_FILES = 20
+
+
+def _shares_root(state: AppState) -> Path:
+    """Per-share snapshot files live here, alongside (not inside) any user's
+    workspace, so the owner-scoped file endpoint can never reach them."""
+    return (state.settings.workspaces_root / "_shares").resolve()
+
+
+def _share_no_index(resp: Response) -> None:
+    """Keep shared pages out of search engines and referrer chains."""
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    resp.headers["Referrer-Policy"] = "no-referrer"
 
 
 def _user_workspace(state: AppState, user_id: str) -> Path:
@@ -44,6 +60,17 @@ class CreateSessionRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str
+
+
+class ShareMessage(BaseModel):
+    role: str  # user|assistant
+    content: str = ""
+    artifacts: list[str] = []
+
+
+class ShareRequest(BaseModel):
+    title: str = "Shared answer"
+    messages: list[ShareMessage] = []
 
 
 @router.get("/api/health")
@@ -163,6 +190,130 @@ async def get_workspace_file(
     workspace = _user_workspace(state, user.id)
     resolved = _resolve_attachment(workspace, path)
     if resolved is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(resolved)
+
+
+# --- Public share links -------------------------------------------------------
+# A share is an immutable, redacted snapshot of one answer (plus its question),
+# reachable by anyone holding the capability URL. It never touches the live
+# session or the owner-scoped file endpoint.
+
+
+@router.post("/api/sessions/{session_id}/share")
+async def create_share(
+    session_id: str,
+    payload: ShareRequest,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    """Snapshot the given messages into a public, expiring share link.
+
+    Only user/assistant text is captured. Any referenced artifact files are
+    validated against the owner's workspace (path-escape-safe) and *copied* into
+    a per-share directory, then exposed through the public share-file route — the
+    owner's token is never embedded in the shared page."""
+    await _owned_session(state, user, session_id)
+
+    incoming = [m for m in payload.messages if m.role in ("user", "assistant") and m.content]
+    if not incoming:
+        raise HTTPException(status_code=400, detail="nothing to share")
+    incoming = incoming[:_MAX_SHARE_MESSAGES]
+
+    workspace = _user_workspace(state, user.id)
+    share_id = uuid.uuid4().hex
+    files_dir = _shares_root(state) / share_id / "files"
+
+    snapshot_messages: list[dict] = []
+    files_copied = 0
+    for msg in incoming:
+        files: list[dict] = []
+        for rel in msg.artifacts or []:
+            if files_copied >= _MAX_SHARE_FILES:
+                break
+            src = _resolve_attachment(workspace, rel)
+            if src is None:
+                continue  # missing or escapes the workspace — skip silently
+            name = f"{files_copied:02d}-{_safe_name(Path(rel).name)}"
+            files_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, files_dir / name)
+            files_copied += 1
+            files.append(
+                {
+                    "name": name,
+                    "is_image": bool(re.search(r"\.(png|jpe?g|gif|webp|svg|bmp)$", name, re.I)),
+                }
+            )
+        snapshot_messages.append({"role": msg.role, "content": msg.content, "files": files})
+
+    share, token = await state.shares.create(
+        user_id=user.id,
+        session_id=session_id,
+        title=payload.title,
+        snapshot={"messages": snapshot_messages},
+        ttl_days=_SHARE_TTL_DAYS,
+    )
+    base = state.settings.public_base_url.rstrip("/")
+    return {
+        "id": share.id,
+        "token": token,
+        "url": f"{base}/s/{token}",
+        "path": f"/s/{token}",
+        "expires_at": share.expires_at.isoformat() if share.expires_at else None,
+    }
+
+
+@router.delete("/api/shares/{share_id}")
+async def revoke_share(
+    share_id: str,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    ok = await state.shares.revoke(share_id, user.id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="share not found")
+    return {"revoked": True}
+
+
+@router.get("/api/share/{token}")
+async def read_share(
+    token: str,
+    response: Response,
+    state: AppState = Depends(get_state),
+) -> dict:
+    """Public, unauthenticated read of a share snapshot. No `current_user`, no
+    token/email fallback — the capability URL is the only credential."""
+    _share_no_index(response)
+    share = await state.shares.get_active_by_token(token)
+    if share is None:
+        raise HTTPException(status_code=404, detail="This link has expired or is no longer available.")
+    return {
+        "title": share.title,
+        "messages": (share.snapshot or {}).get("messages", []),
+        "created_at": share.created_at.isoformat() if share.created_at else None,
+    }
+
+
+@router.get("/api/share/{token}/files/{name}")
+async def read_share_file(
+    token: str,
+    name: str,
+    response: Response,
+    state: AppState = Depends(get_state),
+) -> FileResponse:
+    """Serve a file copied into a share snapshot. Public, but scoped to files
+    that belong to *this* token's share and path-escape-safe."""
+    _share_no_index(response)
+    share = await state.shares.get_active_by_token(token, bump=False)
+    if share is None:
+        raise HTTPException(status_code=404, detail="link expired")
+    files_dir = (_shares_root(state) / share.id / "files").resolve()
+    try:
+        resolved = (files_dir / name).resolve()
+        resolved.relative_to(files_dir)
+    except (ValueError, OSError):
+        raise HTTPException(status_code=404, detail="file not found")
+    if not resolved.is_file():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(resolved)
 

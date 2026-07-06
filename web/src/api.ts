@@ -23,6 +23,31 @@ export interface AttachmentRef {
   is_image: boolean;
 }
 
+export interface ShareFile {
+  name: string;
+  is_image: boolean;
+}
+
+export interface SharedMessage {
+  role: "user" | "assistant";
+  content: string;
+  files: ShareFile[];
+}
+
+export interface SharedConversation {
+  title: string;
+  messages: SharedMessage[];
+  created_at: string | null;
+}
+
+export interface CreatedShare {
+  id: string;
+  token: string;
+  url: string;
+  path: string;
+  expires_at: string | null;
+}
+
 export interface AgentEvent {
   type:
     | "turn_started"
@@ -557,6 +582,17 @@ export const api = {
       body: JSON.stringify({ signal, ...opts }),
     }),
 
+  createShare: (
+    sessionId: string,
+    body: { title?: string; messages: { role: string; content: string; artifacts?: string[] }[] },
+  ) =>
+    request<CreatedShare>(`/api/sessions/${sessionId}/share`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  revokeShare: (id: string) => request<{ revoked: boolean }>(`/api/shares/${id}`, { method: "DELETE" }),
+  getShare: (token: string) => request<SharedConversation>(`/api/share/${encodeURIComponent(token)}`),
+
   getPolicy: () =>
     request<{ monitor_only: boolean; rules: { name: string; action: string; severity: string }[] }>(
       "/api/policy",
@@ -595,4 +631,10 @@ export function openChatSocket(sessionId: string): WebSocket {
 export function fileUrl(sessionId: string, path: string): string {
   const encoded = path.split("/").map(encodeURIComponent).join("/");
   return `/api/sessions/${sessionId}/files/${encoded}?token=${encodeURIComponent(getToken())}`;
+}
+
+/** Public URL for a file copied into a share snapshot. No auth token — the
+ * capability token in the path is the only credential. */
+export function shareFileUrl(token: string, name: string): string {
+  return `/api/share/${encodeURIComponent(token)}/files/${encodeURIComponent(name)}`;
 }

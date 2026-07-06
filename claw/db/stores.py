@@ -24,6 +24,7 @@ from claw.db.models import (
     Memory,
     Message,
     Schedule,
+    Share,
     Skill,
     UsageRecord,
     User,
@@ -1400,3 +1401,79 @@ class KnowledgeStore:
                 )
             ).all()
             return [{"text": r[0], "title": r[1], "kb_id": r[2], "kb_name": "", "score": 1.0} for r in rows]
+
+
+def _hash_token(token: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+class ShareStore:
+    """Public read-only share links. Stores only the SHA-256 of each token, so a
+    DB leak can't reconstruct live links (the plaintext token lives only in the
+    URL). Lookups hash the incoming token and match; expired/revoked shares are
+    treated as gone."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+        self.factory = factory
+
+    async def create(
+        self,
+        *,
+        user_id: str,
+        session_id: str | None,
+        title: str,
+        snapshot: dict[str, Any],
+        ttl_days: int = 7,
+    ) -> tuple[Share, str]:
+        """Create a share; returns (row, plaintext_token). The token is shown to
+        the user once (in the URL) and never stored in the clear."""
+        import secrets
+
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+        async with self.factory() as db:
+            share = Share(
+                token_hash=_hash_token(token),
+                user_id=user_id,
+                session_id=session_id,
+                title=title[:255] or "Shared answer",
+                snapshot=snapshot,
+                expires_at=expires_at,
+            )
+            db.add(share)
+            await db.commit()
+            await db.refresh(share)
+            return share, token
+
+    async def get_active_by_token(self, token: str, *, bump: bool = True) -> Share | None:
+        """Return a live (not revoked, not expired) share for a plaintext token,
+        optionally bumping its view counter. Returns None otherwise."""
+        if not token:
+            return None
+        async with self.factory() as db:
+            share = (
+                await db.scalars(
+                    select(Share).where(Share.token_hash == _hash_token(token))
+                )
+            ).first()
+            if share is None or share.revoked:
+                return None
+            if share.expires_at is not None and share.expires_at < datetime.now(timezone.utc):
+                return None
+            if bump:
+                share.view_count = (share.view_count or 0) + 1
+                await db.commit()
+                await db.refresh(share)
+            return share
+
+    async def revoke(self, share_id: str, user_id: str) -> bool:
+        """Revoke a share the user owns. Returns True if a row was updated."""
+        async with self.factory() as db:
+            share = await db.get(Share, share_id)
+            if share is None or share.user_id != user_id:
+                return False
+            share.revoked = True
+            await db.commit()
+            return True

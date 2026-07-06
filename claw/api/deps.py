@@ -24,6 +24,7 @@ from claw.db.stores import (
     OAuthAppStore,
     ScheduleStore,
     SessionStore,
+    ShareStore,
     SkillStore,
     TelegramConfigStore,
     UsageStore,
@@ -56,6 +57,7 @@ class AppState:
     browser_broker: BrowserBrokerStore
     knowledge: KnowledgeStore
     knowledge_service: "KnowledgeService"
+    shares: ShareStore
     telegram_config: TelegramConfigStore
     telegram_mgr: "TelegramManager"
     telegram: "TelegramChannel | None" = None

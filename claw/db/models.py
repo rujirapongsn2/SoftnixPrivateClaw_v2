@@ -303,3 +303,31 @@ class KnowledgeChunk(Base):
     title: Mapped[str] = mapped_column(String(255), default="")
     text: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class Share(Base):
+    """A public, read-only snapshot of one or more chat answers.
+
+    Security model — capability URL: the link carries a high-entropy token;
+    we store only its SHA-256 hash (like a password) so a DB leak can't
+    reconstruct live links. The snapshot is an immutable copy taken at share
+    time (never the live session) — later private messages in the same chat
+    can never leak, and any referenced files are copied into a per-share
+    directory served through a dedicated public route (never the owner-scoped
+    workspace endpoint, which embeds the owner's token). Expires after a TTL
+    and can be revoked instantly."""
+
+    __tablename__ = "shares"
+    __table_args__ = (Index("ix_shares_user_id", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    session_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    title: Mapped[str] = mapped_column(String(255), default="Shared answer")
+    # {"messages": [{"role", "content", "files": [{"name", "is_image"}]}]}
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    view_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
