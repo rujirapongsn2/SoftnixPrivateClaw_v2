@@ -20,6 +20,15 @@ html, body, #root {
   height: 100%;
   margin: 0;
 }
+/* Global type scale. The design system's font tokens are rem-based (e.g. body =
+   1rem), so at the browser-default 16px root the whole app renders ~1px–2px
+   larger than native macOS UI (13px control text). Drop the root to 87.5% (14px)
+   so all rem typography scales down proportionally to macOS density and lines up
+   with the app's own custom px sizes (12–14px). Spacing tokens are px-based, so
+   layout/spacing is unaffected — only text shrinks. */
+html {
+  font-size: 87.5%;
+}
 
 /* ChatLayout's root isn't a flex container, so its two children (the
    message area, then the sticky composer dock) just stack in normal block
@@ -86,6 +95,14 @@ html, body, #root {
   min-width: 0;
 }
 
+/* Soft drop shadow along the sidebar's trailing edge, separating it from the
+   (slightly off-white) main content without a hard border line. */
+.claw-sidenav {
+  position: relative;
+  z-index: 1;
+  box-shadow: 1px 0 0 rgba(0, 0, 0, 0.06), 6px 0 16px -8px rgba(0, 0, 0, 0.12);
+}
+
 .claw-sidenav-top {
   padding: 8px 12px;
   display: flex;
@@ -148,6 +165,15 @@ html, body, #root {
 .claw-recent-row:hover .claw-recent-status,
 .claw-recent-row:focus-within .claw-recent-status {
   opacity: 0;
+}
+/* Unread: a session with new content the user hasn't opened (a finished
+   background turn, or a scheduled-task session) — bold the title so it stands
+   out and isn't missed. SideNavItem renders a <button>, so this bolds its label. */
+.claw-recent-row--unread button {
+  font-weight: 700;
+}
+.claw-recents-popover-row--unread .claw-recents-popover-item {
+  font-weight: 700;
 }
 
 /* Collapsed rail: single "Recents" trigger instead of one icon per chat. */
@@ -1561,4 +1587,139 @@ html, body, #root {
   max-height: 360px;
   height: auto;
   object-fit: contain;
+}
+
+/* ---- Knowledge (Settings) ---- */
+.claw-kb-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.claw-kb-visibility {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.claw-kb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.claw-kb-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.claw-kb-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.claw-kb-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.claw-kb-desc {
+  line-height: 1.4;
+}
+.claw-kb-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-kb-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.claw-kb-shared {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--color-surface-2, #f2f3f5);
+}
+.claw-kb-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+.claw-kb-docs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border-subtle, #e9ebee);
+}
+.claw-kb-doc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.claw-kb-doc-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claw-kb-doc-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--color-text-secondary, #9096a0);
+}
+.claw-kb-doc-del {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 6px;
+}
+.claw-kb-doc-del:hover {
+  background: var(--color-surface-2, #f2f3f5);
+}
+
+/* Mention chip inserted in the composer (Skills/Connectors/Knowledge picks).
+   Mirrors Astryx Badge's "blue" variant so it reads as the same visual
+   language, plus a remove (x) control since the chip can't be edited as text. */
+.claw-mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 3px 0 8px;
+  border-radius: 999px;
+  background: var(--color-background-blue, #e6f0ff);
+  color: var(--color-text-blue, #1a56db);
+  font-size: 12px;
+  font-weight: 500;
+  vertical-align: middle;
+  line-height: 1;
+}
+.claw-mention-chip-label {
+  white-space: nowrap;
+}
+.claw-mention-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+.claw-mention-chip-remove:hover {
+  background: rgba(0, 0, 0, 0.1);
 }

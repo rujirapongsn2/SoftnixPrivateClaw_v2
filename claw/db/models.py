@@ -251,3 +251,55 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class KnowledgeBase(Base):
+    """A user-created knowledge collection (an OKF "bundle"). Documents uploaded
+    into it are parsed, chunked, and made searchable by the agent. `private`
+    bundles are visible only to their owner; `public` ones to all users."""
+
+    __tablename__ = "knowledge_bases"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    visibility: Mapped[str] = mapped_column(String(16), default="private")  # private | public
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class KnowledgeDoc(Base):
+    """One uploaded source document within a knowledge base — an OKF "concept"
+    markdown file. `concept_id` is its path within the bundle (minus `.md`)."""
+
+    __tablename__ = "knowledge_docs"
+    __table_args__ = (Index("ix_kdocs_kb", "kb_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    kb_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id"), index=True)
+    concept_id: Mapped[str] = mapped_column(String(255))
+    title: Mapped[str] = mapped_column(String(255), default="")
+    filename: Mapped[str] = mapped_column(String(255), default="")
+    mime: Mapped[str] = mapped_column(String(120), default="")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    chars: Mapped[int] = mapped_column(Integer, default=0)
+    chunks: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class KnowledgeChunk(Base):
+    """A retrievable slice of a document's text. Searched via pg_trgm word
+    similarity (language-agnostic — works for Thai and English without an
+    embedding model). A GIN trigram index on `text` is added in the migration."""
+
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (Index("ix_kchunks_kb", "kb_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    kb_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id"), index=True)
+    doc_id: Mapped[str] = mapped_column(ForeignKey("knowledge_docs.id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    text: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

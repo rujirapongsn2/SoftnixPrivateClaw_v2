@@ -11,6 +11,7 @@ from claw.api.auth import router as auth_router
 from claw.api.browser_ext import router as browser_ext_router
 from claw.api.connector_oauth import router as connector_oauth_router
 from claw.api.deps import AppState
+from claw.api.knowledge import router as knowledge_router
 from claw.api.manage import router as manage_router
 from claw.api.routes import router
 from claw.api.telegram import router as telegram_router
@@ -31,6 +32,7 @@ from claw.db.stores import (
     ConnectorStore,
     FeedbackStore,
     GuardrailStore,
+    KnowledgeStore,
     LLMConfigStore,
     MemoryStore,
     MessageStore,
@@ -41,6 +43,7 @@ from claw.db.stores import (
     UsageStore,
     UserStore,
 )
+from claw.knowledge.service import KnowledgeService
 from claw.providers.litellm_provider import LiteLLMProvider
 from claw.security.crypto import SecretBox
 
@@ -71,6 +74,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     llm_config = LLMConfigStore(factory, secret_box=secret_box)
     oauth_apps = OAuthAppStore(factory, secret_box=secret_box)
     browser_broker = BrowserBrokerStore(settings.workspaces_root / "_browser_broker")
+    knowledge = KnowledgeStore(factory, is_postgres="postgresql" in settings.database_url)
+    knowledge_service = KnowledgeService(knowledge, settings.knowledge_root)
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
 
     browser_mgr = None
@@ -107,6 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         schedules=schedules,
         llm_config=llm_config,
         browser_broker=browser_broker,
+        knowledge=knowledge,
     )
 
     async def _scheduled_turn(user_id: str, session_id: str, prompt: str) -> str | None:
@@ -208,11 +214,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         audit=audit,
         oauth_apps=oauth_apps,
         browser_broker=browser_broker,
+        knowledge=knowledge,
+        knowledge_service=knowledge_service,
     )
     app.include_router(auth_router)
     app.include_router(admin_router)
     app.include_router(browser_ext_router)
     app.include_router(connector_oauth_router)
+    app.include_router(knowledge_router)
     app.include_router(router)
     app.include_router(manage_router)
     app.include_router(telegram_router)

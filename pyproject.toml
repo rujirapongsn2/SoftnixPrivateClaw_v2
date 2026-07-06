@@ -19,6 +19,8 @@ dependencies = [
     "croniter>=3.0",
     "alembic>=1.18.5",
     "python-multipart>=0.0.32",
+    "pypdf>=5.0",
+    "python-docx>=1.1",
 ]
 
 [project.optional-dependencies]

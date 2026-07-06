@@ -10,5 +10,6 @@ node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo
 workspaces/
+/knowledge/
 softnix-agenticclaw/
 .DS_Store

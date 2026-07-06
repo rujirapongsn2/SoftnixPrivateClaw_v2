@@ -17,6 +17,7 @@ from claw.db.stores import (
     ConnectorStore,
     FeedbackStore,
     GuardrailStore,
+    KnowledgeStore,
     LLMConfigStore,
     MemoryStore,
     MessageStore,
@@ -52,6 +53,8 @@ class AppState:
     audit: AuditStore
     oauth_apps: OAuthAppStore
     browser_broker: BrowserBrokerStore
+    knowledge: KnowledgeStore
+    knowledge_service: "KnowledgeService"
     telegram: "TelegramChannel | None" = None
 
 

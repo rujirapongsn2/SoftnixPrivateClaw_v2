@@ -9,14 +9,19 @@ import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
+import { useToast } from "@astryxdesign/core/Toast";
 import {
   Brain,
   Puzzle,
   Copy,
   Download,
   ExternalLink,
+  FileText,
+  Globe,
   HeartPulse,
+  Library,
   Link as LinkIcon,
+  Lock,
   Pencil,
   Play,
   Plug,
@@ -24,13 +29,24 @@ import {
   Send,
   Sparkles,
   Trash2,
+  Upload,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
-import { ConnectorInfo, ConnectorPreset, MemoryInfo, ScheduleInfo, SkillInfo, api } from "./api";
+import {
+  ConnectorInfo,
+  ConnectorPreset,
+  KnowledgeBase,
+  KnowledgeDoc,
+  MemoryInfo,
+  ScheduleInfo,
+  SkillInfo,
+  api,
+} from "./api";
 
 export type SettingsSection =
   | "skills"
+  | "knowledge"
   | "memory"
   | "connectors"
   | "schedules"
@@ -40,6 +56,7 @@ export type SettingsSection =
 
 export const SETTINGS_SECTIONS: { key: SettingsSection; label: string; icon: IconType | IconName }[] = [
   { key: "skills", label: "Skills", icon: Sparkles },
+  { key: "knowledge", label: "Knowledge", icon: Library },
   { key: "memory", label: "Memory", icon: Brain },
   { key: "connectors", label: "Connectors", icon: Plug },
   { key: "schedules", label: "Schedule", icon: "calendar" },
@@ -58,6 +75,7 @@ export function SettingsPanel({ section }: { section: SettingsSection }) {
       </div>
       <div className="claw-panel">
         {section === "skills" && <SkillsPanel />}
+        {section === "knowledge" && <KnowledgePanel />}
         {section === "memory" && <MemoryPanel />}
         {section === "connectors" && <ConnectorsPanel />}
         {section === "schedules" && <SchedulesPanel />}
@@ -1210,5 +1228,282 @@ function BrowserExtensionPanel() {
         />
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- Knowledge
+
+const KB_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,.html,.htm,.csv";
+
+function KnowledgePanel() {
+  const [bases, setBases] = useState<KnowledgeBase[]>([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [isPublic, setIsPublic] = useState(false);
+  const toast = useToast();
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api
+      .listKnowledge()
+      .then(setBases)
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => load(), [load]);
+
+  const create = async () => {
+    if (!name.trim()) return;
+    setError("");
+    try {
+      await api.createKnowledge(name.trim(), description.trim(), isPublic ? "public" : "private");
+      setName("");
+      setDescription("");
+      setIsPublic(false);
+      setCreating(false);
+      load();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  return (
+    <div className="claw-panel">
+      <div className="claw-row claw-row-between">
+        <Text color="secondary" size="sm">
+          Upload documents (PDF, Word, text, Markdown, HTML) to build a knowledge base the agent can
+          search when answering. Choose Private (only you) or Public (everyone).
+        </Text>
+        {!creating && (
+          <Button
+            label="New knowledge base"
+            variant="secondary"
+            icon={<Icon icon={Plus} size="sm" />}
+            onClick={() => setCreating(true)}
+          >
+            New
+          </Button>
+        )}
+      </div>
+
+      {error && <ErrorText>{error}</ErrorText>}
+
+      {creating && (
+        <Card padding={3}>
+          <div className="claw-kb-form">
+            <TextInput label="Name" value={name} onChange={setName} placeholder="e.g. Company Handbook" />
+            <TextInput
+              label="Description"
+              value={description}
+              onChange={setDescription}
+              placeholder="What's in this knowledge base?"
+            />
+            <label className="claw-kb-visibility">
+              <Switch value={isPublic} changeAction={setIsPublic} label="Public" />
+              <Text size="sm" color="secondary">
+                {isPublic ? "Public — visible to everyone" : "Private — only you"}
+              </Text>
+            </label>
+            <div className="claw-row">
+              <Button label="Create" variant="primary" onClick={create}>
+                Create
+              </Button>
+              <Button label="Cancel" variant="ghost" onClick={() => setCreating(false)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {loading ? (
+        <Text color="secondary">Loading…</Text>
+      ) : bases.length === 0 && !creating ? (
+        <EmptyState
+          icon={<Icon icon={Library} size="lg" />}
+          title="No knowledge bases yet"
+          description="Create one and upload documents so Claw can answer from them."
+        />
+      ) : (
+        <div className="claw-kb-grid">
+          {bases.map((kb) => (
+            <KnowledgeCard key={kb.id} kb={kb} onChanged={load} toast={toast} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KnowledgeCard({
+  kb,
+  onChanged,
+  toast,
+}: {
+  kb: KnowledgeBase;
+  onChanged: () => void;
+  toast: ReturnType<typeof useToast>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [docs, setDocs] = useState<KnowledgeDoc[] | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const loadDocs = useCallback(() => {
+    api.listKnowledgeDocs(kb.id).then(setDocs).catch(() => setDocs([]));
+  }, [kb.id]);
+
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && docs === null) loadDocs();
+  };
+
+  const onPick = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    try {
+      const res = await api.uploadKnowledgeDocs(kb.id, Array.from(files));
+      if (res.ingested.length) {
+        toast({ body: `Added ${res.ingested.length} document(s) to ${kb.name}`, type: "info", autoHideDuration: 2500 });
+      }
+      if (res.errors.length) {
+        toast({ body: res.errors.join("; "), type: "error" });
+      }
+      loadDocs();
+      setExpanded(true);
+      onChanged();
+    } catch (e) {
+      toast({ body: `Upload failed: ${String(e)}`, type: "error" });
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const removeDoc = async (docId: string) => {
+    setBusy(true);
+    try {
+      await api.deleteKnowledgeDoc(kb.id, docId);
+      loadDocs();
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeBase = async () => {
+    if (!window.confirm(`Delete knowledge base "${kb.name}" and all its documents?`)) return;
+    setBusy(true);
+    try {
+      await api.deleteKnowledge(kb.id);
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card padding={3}>
+      <div className="claw-kb-card">
+        <div className="claw-kb-card-head">
+          <Icon icon={Library} size="md" color="secondary" />
+          <div className="claw-kb-card-title">
+            <Text weight="semibold">{kb.name}</Text>
+            <Badge
+              variant={kb.visibility === "public" ? "success" : "neutral"}
+              icon={<Icon icon={kb.visibility === "public" ? Globe : Lock} size="xsm" />}
+              label={kb.visibility === "public" ? "Public" : "Private"}
+            />
+          </div>
+        </div>
+        {kb.description && (
+          <Text size="sm" color="secondary" className="claw-kb-desc">
+            {kb.description}
+          </Text>
+        )}
+        <div className="claw-kb-meta">
+          <span>
+            <Icon icon={FileText} size="xsm" color="secondary" /> {kb.docs} document{kb.docs === 1 ? "" : "s"}
+          </span>
+          {!kb.is_owner && <span className="claw-kb-shared">shared</span>}
+        </div>
+
+        <input
+          ref={fileRef}
+          type="file"
+          multiple
+          accept={KB_ACCEPT}
+          style={{ display: "none" }}
+          onChange={(e) => void onPick(e.target.files)}
+        />
+        <div className="claw-kb-actions">
+          {kb.is_owner && (
+            <Button
+              label={uploading ? "Uploading…" : "Upload"}
+              variant="secondary"
+              size="sm"
+              isDisabled={uploading}
+              icon={<Icon icon={Upload} size="sm" />}
+              onClick={() => fileRef.current?.click()}
+            />
+          )}
+          <Button label={expanded ? "Hide documents" : "View documents"} variant="ghost" size="sm" onClick={toggle}>
+            {expanded ? "Hide" : "Documents"}
+          </Button>
+          {kb.is_owner && (
+            <Button
+              label="Delete knowledge base"
+              variant="ghost"
+              size="sm"
+              isIconOnly
+              isDisabled={busy}
+              icon={<Icon icon={Trash2} size="sm" color="error" />}
+              onClick={removeBase}
+            />
+          )}
+        </div>
+
+        {expanded && (
+          <div className="claw-kb-docs">
+            {docs === null ? (
+              <Text size="sm" color="secondary">
+                Loading…
+              </Text>
+            ) : docs.length === 0 ? (
+              <Text size="sm" color="secondary">
+                No documents yet — upload one to get started.
+              </Text>
+            ) : (
+              docs.map((d) => (
+                <div key={d.id} className="claw-kb-doc">
+                  <Icon icon={FileText} size="sm" color="secondary" />
+                  <span className="claw-kb-doc-name" title={d.filename}>
+                    {d.title}
+                  </span>
+                  <span className="claw-kb-doc-meta">{d.chunks} chunk{d.chunks === 1 ? "" : "s"}</span>
+                  {kb.is_owner && (
+                    <button
+                      type="button"
+                      className="claw-kb-doc-del"
+                      aria-label="Delete document"
+                      disabled={busy}
+                      onClick={() => removeDoc(d.id)}
+                    >
+                      <Icon icon={Trash2} size="xsm" color="secondary" />
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }

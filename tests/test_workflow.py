@@ -57,14 +57,16 @@ async def test_progress_callback_invoked(tmp_path):
         text_turn("done"),
     ])
     service = WorkflowService(provider, _mgr(provider, tmp_path))
-    events: list[str] = []
+    events: list[dict] = []
 
-    async def on_progress(msg: str) -> None:
-        events.append(msg)
+    # Progress is now a structured payload (stage/label/index/total/status) so
+    # the UI can render a live checklist.
+    async def on_progress(payload: dict) -> None:
+        events.append(payload)
 
     await service.run_request("task", on_progress=on_progress)
-    assert any("Planned" in e for e in events)
-    assert any("Step 1/1" in e for e in events)
+    assert any(e["stage"] == "plan" and "Planned" in e["label"] for e in events)
+    assert any(e["stage"] == "step" and e["index"] == 1 and e["total"] == 1 for e in events)
 
 
 async def test_workflow_tool_output_format(tmp_path):

@@ -33,6 +33,7 @@ from claw.core.subagent import SubagentManager
 from claw.core.scheduler import SchedulerService
 from claw.db.stores import (
     AuditStore,
+    KnowledgeStore,
     MessageStore,
     ScheduleStore,
     SessionStore,
@@ -51,6 +52,7 @@ from claw.tools.documents import build_document_tools
 from claw.tools.memory import MemoryTool
 from claw.tools.shell import ExecTool
 from claw.core.builtin_skills import builtin_skills
+from claw.tools.knowledge import SearchKnowledgeTool
 from claw.tools.skills import ManageSkillTool, ReadSkillTool, build_skills_summary
 from claw.tools.spawn import SpawnTool
 from claw.tools.web import WebFetchTool, WebSearchTool
@@ -82,6 +84,7 @@ class ClawAgent:
         schedules: "ScheduleStore | None" = None,
         scheduler: "SchedulerService | None" = None,
         memory: MemoryService | None = None,
+        knowledge: "KnowledgeStore | None" = None,
     ):
         self.user_id = user_id
         self.workspace = workspace
@@ -128,6 +131,8 @@ class ClawAgent:
         if skills is not None:
             self.tools.register(ReadSkillTool(skills, user_id))
             self.tools.register(ManageSkillTool(skills, user_id))
+        if knowledge is not None:
+            self.tools.register(SearchKnowledgeTool(knowledge, user_id))
         if schedules is not None:
             from claw.tools.schedule import ScheduleTool
 
@@ -196,7 +201,13 @@ class ClawAgent:
                 )
             )
 
-    def system_prompt(self, memory_context: str, persona: str = "", skills_summary: str = "") -> str:
+    def system_prompt(
+        self,
+        memory_context: str,
+        persona: str = "",
+        skills_summary: str = "",
+        knowledge_summary: str = "",
+    ) -> str:
         runtime = f"{platform.system()} {platform.machine()}, Python {platform.python_version()}"
         parts = [
             "# Claw Agent\n\n"
@@ -222,6 +233,8 @@ class ClawAgent:
             parts.append(memory_context)
         if skills_summary:
             parts.append(skills_summary)
+        if knowledge_summary:
+            parts.append(knowledge_summary)
         return "\n\n---\n\n".join(parts)
 
 
@@ -245,10 +258,12 @@ class AgentRuntime:
         scheduler: SchedulerService | None = None,
         llm_config: "LLMConfigStore | None" = None,
         browser_broker: BrowserBrokerStore | None = None,
+        knowledge: "KnowledgeStore | None" = None,
     ):
         self.settings = settings
         self.provider = provider
         self.llm_config = llm_config
+        self.knowledge = knowledge
         self.bus = bus
         self.users = users
         self.sessions = sessions
@@ -368,6 +383,7 @@ class AgentRuntime:
             schedules=self.schedules,
             scheduler=self.scheduler,
             memory=self.memory,
+            knowledge=self.knowledge,
         )
         self._agents[user_id] = agent
         self._agents.move_to_end(user_id)
@@ -515,6 +531,27 @@ class AgentRuntime:
             if self.skills is not None:
                 enabled_skills += await self.skills.enabled_for_user(user_id)
             skills_summary = build_skills_summary(enabled_skills)
+            # Tell the agent which knowledge bases exist so it knows to reach for
+            # the search_knowledge tool when a question may be answered by them.
+            knowledge_summary = ""
+            if self.knowledge is not None:
+                try:
+                    bases = await self.knowledge.list_accessible(user_id)
+                except Exception:
+                    bases = []
+                usable = [b for b in bases if b["docs"] > 0]
+                if usable:
+                    lines = "\n".join(
+                        f"- {b['name']}" + (f": {b['description']}" if b["description"] else "")
+                        for b in usable
+                    )
+                    knowledge_summary = (
+                        "# Knowledge bases\n\n"
+                        "The user has uploaded documents into these knowledge bases. When a "
+                        "question may be answered by them, call the `search_knowledge` tool "
+                        "(optionally with `knowledge_base` to target one) and answer from the "
+                        "returned passages, citing the source.\n\n" + lines
+                    )
             if self.connectors is not None:
                 try:
                     await self.connectors.sync_tools(user_id, agent.tools)
@@ -538,7 +575,9 @@ class AgentRuntime:
             # prompt's user turn.
             await self.messages.append(session_id, [{"role": "user", "content": stored_content}])
             prompt_messages = self.assembler.assemble(
-                agent.system_prompt(memory_context, skills_summary=skills_summary),
+                agent.system_prompt(
+                    memory_context, skills_summary=skills_summary, knowledge_summary=knowledge_summary
+                ),
                 history,
                 user_message,
             )

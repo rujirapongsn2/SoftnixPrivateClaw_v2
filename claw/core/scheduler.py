@@ -107,7 +107,12 @@ class SchedulerService:
         try:
             session_id = job.session_id
             if not session_id:
-                created = await self.sessions.create(job.user_id, title=f"⏰ {job.name}")
+                # A fresh session each run (job.session_id stays None). channel
+                # "schedule" tags it so the UI shows an alarm-clock marker and
+                # can flag it unread; the title stays clean (no emoji prefix).
+                created = await self.sessions.create(
+                    job.user_id, title=job.name, channel="schedule"
+                )
                 session_id = created.id
             logger.info("Schedule {} firing into session {}", job.name, session_id)
             result = await self.handler(job.user_id, session_id, job.prompt)

@@ -164,8 +164,36 @@ async def test_scheduler_creates_session_when_none_given(db_factory, stores):
 
     assert seen_sessions
     created = await stores["sessions"].list_for_user(user.id)
-    assert any(s.id == seen_sessions[0] for s in created)
-    assert any(s.title.startswith("⏰") for s in created)
+    # A scheduled run tags its session with channel="schedule" (for the UI's
+    # alarm-clock marker) and uses the job name as the clean title (no emoji).
+    sess = next(s for s in created if s.id == seen_sessions[0])
+    assert sess.channel == "schedule"
+    assert sess.title == "autosess"
+
+
+async def test_scheduler_creates_a_fresh_session_each_run(db_factory, stores):
+    schedules = ScheduleStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("recur@x.y")
+    seen: list[str] = []
+
+    async def handler(user_id: str, session_id: str, prompt: str) -> str:
+        seen.append(session_id)
+        return "ok"
+
+    job = await schedules.create(
+        user.id, name="daily", prompt="hi", interval_seconds=3600,
+        next_run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    service = SchedulerService(schedules, stores["sessions"], handler)
+    # Fire the same job twice directly — each run must open its own session,
+    # never reuse one (job.session_id stays None across runs).
+    await service._fire(job)
+    job = (await schedules.list_for_user(user.id))[0]
+    await service._fire(job)
+
+    assert len(seen) == 2 and seen[0] != seen[1]
+    created = await stores["sessions"].list_for_user(user.id)
+    assert len([s for s in created if s.channel == "schedule"]) == 2
 
 
 # ---------------------------------------------------------------- connectors store

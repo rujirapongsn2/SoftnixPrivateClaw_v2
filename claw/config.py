@@ -110,6 +110,8 @@ class Settings(BaseSettings):
     port: int = 8700
     # Root directory holding per-user agent workspaces.
     workspaces_root: Path = Path("workspaces")
+    # Root directory holding knowledge-base OKF bundles (one subdir per base).
+    knowledge_root: Path = Path("knowledge")
 
     # When false, the control policy runs in monitor-only mode (logs hits, no mask/block).
     policy_enforce: bool = True

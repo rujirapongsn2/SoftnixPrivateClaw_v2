@@ -1,5 +1,7 @@
 import {
   ChatComposer,
+  ChatComposerInput,
+  type ChatComposerInputHandle,
   ChatLayout,
   ChatMessage,
   ChatMessageBubble,
@@ -29,6 +31,7 @@ import {
   File as FileIcon,
   GitBranch,
   Image as ImageIcon,
+  Library,
   Mic,
   PanelRight,
   Paperclip,
@@ -43,6 +46,7 @@ import {
   ThumbsDown,
   ThumbsUp,
   Users,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
@@ -51,6 +55,7 @@ import {
   AgentEvent,
   AttachmentRef,
   ConnectorInfo,
+  KnowledgeBase,
   ModelOption,
   SkillInfo,
   api,
@@ -245,8 +250,9 @@ export function Chat({
   const [model, setModel] = useState<string>(initialModel ?? "");
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
+  const [knowledge, setKnowledge] = useState<KnowledgeBase[]>([]);
   const [plusOpen, setPlusOpen] = useState(false);
-  const [plusView, setPlusView] = useState<"root" | "skills" | "connectors">("root");
+  const [plusView, setPlusView] = useState<"root" | "skills" | "connectors" | "knowledge">("root");
   const [modelOpen, setModelOpen] = useState(false);
   // Which starter-suggestion category panel is expanded (null = show the chip
   // row). Reset whenever the session changes so a stale panel doesn't linger.
@@ -266,6 +272,9 @@ export function Chat({
   const [execOpen, setExecOpen] = useState(() => localStorage.getItem("claw_exec_open") === "1");
   const socketRef = useRef<WebSocket | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  // Imperative handle for the composer's contentEditable — lets us insert a
+  // styled mention chip (skill/connector/knowledge) instead of raw "@name " text.
+  const composerHandleRef = useRef<ChatComposerInputHandle>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const sentCountRef = useRef(0);
@@ -600,22 +609,78 @@ export function Chat({
       .listConnectors()
       .then((c) => setConnectors(c.filter((x) => x.enabled && x.runtime.status === "connected")))
       .catch(() => setConnectors([]));
+    // Knowledge bases with at least one document (searchable).
+    api
+      .listKnowledge()
+      .then((k) => setKnowledge(k.filter((x) => x.docs > 0)))
+      .catch(() => setKnowledge([]));
   }, [sessionId, running]);
 
   // Insert an "@mention" for a skill/connector at the caret, then refocus so the
   // user can keep typing. The agent already sees enabled skills + connected
   // connector tools in context, so the mention nudges it to use that one.
-  const insertMention = useCallback((name: string) => {
+
+  // Sync the composer's React state after mutating its contentEditable DOM
+  // directly (insertToken / chip removal) — neither fires a native input
+  // event, so nudge it the same way a real keystroke would.
+  const emitComposerInput = useCallback(() => {
     const editable = document.querySelector<HTMLElement>(
       ".astryx-chat-composer-input [contenteditable]",
     );
-    if (editable) {
-      editable.focus();
-      document.execCommand("insertText", false, `@${name} `);
-    }
-    setPlusOpen(false);
-    setPlusView("root");
+    editable?.dispatchEvent(new InputEvent("input", { bubbles: true }));
   }, []);
+
+  // Remove a mention chip the user changed their mind about: drop its token
+  // span (and the trailing NBSP the library inserts after it), then re-sync.
+  const removeMentionChip = useCallback(
+    (target: HTMLElement) => {
+      const span = target.closest<HTMLElement>("[data-astryx-token]");
+      if (!span) return;
+      const next = span.nextSibling;
+      if (next?.nodeType === Node.TEXT_NODE && next.textContent === " ") next.remove();
+      span.remove();
+      emitComposerInput();
+    },
+    [emitComposerInput],
+  );
+
+  const insertMention = useCallback(
+    (name: string, icon: typeof BookOpen) => {
+      const handle = composerHandleRef.current;
+      if (handle) {
+        handle.focus();
+        // Insert as a styled chip (not raw "@name " text) — the submitted value
+        // stays "@name " under the hood so the agent still sees the same mention
+        // cue, but the composer shows a compact pill with a remove (×) control
+        // in case the user changes their mind.
+        handle.insertToken({
+          value: `@${name} `,
+          render: () => (
+            <span className="claw-mention-chip">
+              <Icon icon={icon} size="xsm" />
+              <span className="claw-mention-chip-label">{name}</span>
+              <button
+                type="button"
+                className="claw-mention-chip-remove"
+                aria-label={`Remove ${name}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  removeMentionChip(e.currentTarget);
+                }}
+              >
+                <Icon icon={X} size="xsm" />
+              </button>
+            </span>
+          ),
+        });
+        emitComposerInput();
+      }
+      setPlusOpen(false);
+      setPlusView("root");
+    },
+    [emitComposerInput, removeMentionChip],
+  );
 
   // Seed the composer with a starter phrase from a suggestion chip: clear any
   // existing content, drop in the phrase, and leave the caret at the end so the
@@ -907,6 +972,7 @@ export function Chat({
               onSubmit={send}
               placeholder={isEmpty ? "How can Claw help you today?" : "Message Claw…"}
               isDisabled={false}
+              input={<ChatComposerInput handleRef={composerHandleRef} />}
               footerActions={
                 <div className="claw-composer-actions">
                   <Popover
@@ -954,6 +1020,15 @@ export function Chat({
                               <span>Connectors</span>
                               <Icon icon={ChevronRight} size="sm" color="secondary" />
                             </button>
+                            <button
+                              type="button"
+                              className="claw-plus-item"
+                              onClick={() => setPlusView("knowledge")}
+                            >
+                              <Icon icon={Library} size="sm" color="secondary" />
+                              <span>Knowledge</span>
+                              <Icon icon={ChevronRight} size="sm" color="secondary" />
+                            </button>
                           </>
                         )}
                         {plusView === "skills" && (
@@ -979,7 +1054,7 @@ export function Chat({
                                   key={s.id}
                                   type="button"
                                   className="claw-plus-item"
-                                  onClick={() => insertMention(s.name)}
+                                  onClick={() => insertMention(s.name, BookOpen)}
                                 >
                                   <Icon icon={BookOpen} size="sm" color="secondary" />
                                   <span>{s.name}</span>
@@ -1011,11 +1086,44 @@ export function Chat({
                                   key={c.id}
                                   type="button"
                                   className="claw-plus-item"
-                                  onClick={() => insertMention(c.name)}
+                                  onClick={() => insertMention(c.name, Plug)}
                                 >
                                   <Icon icon={Plug} size="sm" color="secondary" />
                                   <span>{c.name}</span>
                                   <span className="claw-plus-count">{c.runtime.tools ?? 0}</span>
+                                </button>
+                              ))
+                            )}
+                          </>
+                        )}
+                        {plusView === "knowledge" && (
+                          <>
+                            <button
+                              type="button"
+                              className="claw-plus-item claw-plus-back"
+                              onClick={() => setPlusView("root")}
+                            >
+                              <Icon icon={ArrowLeft} size="sm" color="secondary" />
+                              <span>Knowledge</span>
+                            </button>
+                            <div className="claw-plus-divider" />
+                            {knowledge.length === 0 ? (
+                              <div className="claw-plus-empty">
+                                <Text size="sm" color="secondary">
+                                  No knowledge bases with documents yet.
+                                </Text>
+                              </div>
+                            ) : (
+                              knowledge.map((k) => (
+                                <button
+                                  key={k.id}
+                                  type="button"
+                                  className="claw-plus-item"
+                                  onClick={() => insertMention(k.name, Library)}
+                                >
+                                  <Icon icon={Library} size="sm" color="secondary" />
+                                  <span>{k.name}</span>
+                                  <span className="claw-plus-count">{k.docs}</span>
                                 </button>
                               ))
                             )}

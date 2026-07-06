@@ -4,6 +4,9 @@ export interface SessionInfo {
   updated_at: string;
   model?: string | null;
   running?: boolean;
+  // "web" for normal chats, "schedule" for sessions created by a scheduled task
+  // (shown with an alarm-clock marker), "telegram"/"heartbeat" for those channels.
+  channel?: string;
 }
 
 export interface ChatMessage {
@@ -115,6 +118,27 @@ export interface ScheduleInfo {
   next_run_at: string | null;
   last_run_at: string | null;
   last_status: string;
+}
+
+export interface KnowledgeBase {
+  id: string;
+  name: string;
+  description: string;
+  visibility: "private" | "public";
+  is_owner: boolean;
+  docs: number;
+  owner_id?: string;
+}
+
+export interface KnowledgeDoc {
+  id: string;
+  title: string;
+  filename: string;
+  mime: string;
+  size: number;
+  chars: number;
+  chunks: number;
+  created_at: string;
 }
 
 export interface AuthUser {
@@ -360,6 +384,34 @@ export const api = {
   // One-click OAuth: returns the provider authorize URL for the browser to visit.
   connectorOAuthStart: (presetKey: string) =>
     request<{ url: string }>(`/api/connectors/oauth/${encodeURIComponent(presetKey)}/start`),
+
+  // Knowledge bases (OKF): uploaded documents the agent can search to answer from.
+  listKnowledge: () => request<KnowledgeBase[]>("/api/knowledge"),
+  createKnowledge: (name: string, description: string, visibility: "private" | "public") =>
+    request<KnowledgeBase>("/api/knowledge", {
+      method: "POST",
+      body: JSON.stringify({ name, description, visibility }),
+    }),
+  updateKnowledge: (id: string, patch: Partial<Pick<KnowledgeBase, "name" | "description" | "visibility">>) =>
+    request<KnowledgeBase>(`/api/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteKnowledge: (id: string) => request(`/api/knowledge/${id}`, { method: "DELETE" }),
+  listKnowledgeDocs: (id: string) => request<KnowledgeDoc[]>(`/api/knowledge/${id}/documents`),
+  uploadKnowledgeDocs: async (
+    id: string,
+    files: File[],
+  ): Promise<{ ingested: { title: string }[]; errors: string[] }> => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f);
+    const resp = await fetch(`/api/knowledge/${id}/documents`, {
+      method: "POST",
+      headers: authHeaders(), // browser sets multipart boundary
+      body: form,
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+    return resp.json();
+  },
+  deleteKnowledgeDoc: (kbId: string, docId: string) =>
+    request(`/api/knowledge/${kbId}/documents/${docId}`, { method: "DELETE" }),
 
   listSchedules: () => request<ScheduleInfo[]>("/api/schedules"),
   createSchedule: (s: Partial<ScheduleInfo>) =>

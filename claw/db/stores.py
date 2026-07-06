@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import String, bindparam, cast, func, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from claw.db.models import (
@@ -14,6 +15,9 @@ from claw.db.models import (
     ChatSession,
     Feedback,
     GuardrailRule,
+    KnowledgeBase,
+    KnowledgeChunk,
+    KnowledgeDoc,
     LLMModel,
     LLMProvider,
     McpConnector,
@@ -1143,3 +1147,205 @@ class OAuthAppStore:
             else:
                 row.value = value
             await db.commit()
+
+
+class KnowledgeStore:
+    """Knowledge bases (OKF bundles) + their documents and searchable chunks.
+
+    Retrieval uses pg_trgm word-similarity on Postgres (language-agnostic — good
+    for Thai and English without an embedding model); a plain ILIKE fallback
+    keeps it working on SQLite (tests).
+    """
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], is_postgres: bool = True):
+        self.factory = factory
+        self.is_postgres = is_postgres
+
+    # -- bases --------------------------------------------------------------
+    async def create_base(
+        self, owner_id: str, name: str, description: str = "", visibility: str = "private"
+    ) -> KnowledgeBase:
+        async with self.factory() as db:
+            kb = KnowledgeBase(
+                owner_id=owner_id,
+                name=name[:120],
+                description=description,
+                visibility="public" if visibility == "public" else "private",
+            )
+            db.add(kb)
+            await db.commit()
+            await db.refresh(kb)
+            return kb
+
+    async def get_base(self, kb_id: str) -> KnowledgeBase | None:
+        async with self.factory() as db:
+            return await db.get(KnowledgeBase, kb_id)
+
+    async def update_base(self, kb_id: str, **fields: Any) -> KnowledgeBase | None:
+        async with self.factory() as db:
+            kb = await db.get(KnowledgeBase, kb_id)
+            if kb is None:
+                return None
+            if fields.get("name"):
+                kb.name = str(fields["name"])[:120]
+            if fields.get("description") is not None:
+                kb.description = str(fields["description"])
+            if fields.get("visibility") in ("private", "public"):
+                kb.visibility = fields["visibility"]
+            await db.commit()
+            await db.refresh(kb)
+            return kb
+
+    async def list_accessible(self, user_id: str) -> list[dict[str, Any]]:
+        """Bases the user can see (their own + all public), each with a doc count."""
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(KnowledgeBase)
+                    .where(
+                        (KnowledgeBase.owner_id == user_id)
+                        | (KnowledgeBase.visibility == "public")
+                    )
+                    .order_by(KnowledgeBase.updated_at.desc())
+                )
+            ).scalars().all()
+            counts = dict(
+                (
+                    await db.execute(
+                        select(KnowledgeDoc.kb_id, func.count()).group_by(KnowledgeDoc.kb_id)
+                    )
+                ).all()
+            )
+        return [
+            {
+                "id": kb.id,
+                "name": kb.name,
+                "description": kb.description,
+                "visibility": kb.visibility,
+                "owner_id": kb.owner_id,
+                "is_owner": kb.owner_id == user_id,
+                "docs": int(counts.get(kb.id, 0)),
+                "updated_at": kb.updated_at.isoformat(),
+            }
+            for kb in rows
+        ]
+
+    async def accessible_ids(self, user_id: str) -> list[str]:
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(KnowledgeBase.id).where(
+                        (KnowledgeBase.owner_id == user_id)
+                        | (KnowledgeBase.visibility == "public")
+                    )
+                )
+            ).scalars().all()
+        return list(rows)
+
+    async def delete_base(self, kb_id: str) -> None:
+        async with self.factory() as db:
+            await db.execute(KnowledgeChunk.__table__.delete().where(KnowledgeChunk.kb_id == kb_id))
+            await db.execute(KnowledgeDoc.__table__.delete().where(KnowledgeDoc.kb_id == kb_id))
+            kb = await db.get(KnowledgeBase, kb_id)
+            if kb is not None:
+                await db.delete(kb)
+            await db.commit()
+
+    # -- documents ----------------------------------------------------------
+    async def add_doc(
+        self,
+        *,
+        kb_id: str,
+        concept_id: str,
+        title: str,
+        filename: str,
+        mime: str,
+        size: int,
+        chars: int,
+        chunk_texts: list[str],
+    ) -> KnowledgeDoc:
+        async with self.factory() as db:
+            doc = KnowledgeDoc(
+                kb_id=kb_id,
+                concept_id=concept_id,
+                title=title[:255],
+                filename=filename[:255],
+                mime=mime[:120],
+                size=size,
+                chars=chars,
+                chunks=len(chunk_texts),
+            )
+            db.add(doc)
+            await db.flush()
+            for i, text in enumerate(chunk_texts):
+                db.add(
+                    KnowledgeChunk(kb_id=kb_id, doc_id=doc.id, seq=i, title=title[:255], text=text)
+                )
+            kb = await db.get(KnowledgeBase, kb_id)
+            if kb is not None:
+                kb.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(doc)
+            return doc
+
+    async def list_docs(self, kb_id: str) -> list[KnowledgeDoc]:
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(KnowledgeDoc)
+                .where(KnowledgeDoc.kb_id == kb_id)
+                .order_by(KnowledgeDoc.created_at.desc())
+            )
+            return list(rows)
+
+    async def get_doc(self, doc_id: str) -> KnowledgeDoc | None:
+        async with self.factory() as db:
+            return await db.get(KnowledgeDoc, doc_id)
+
+    async def delete_doc(self, doc_id: str) -> KnowledgeDoc | None:
+        async with self.factory() as db:
+            doc = await db.get(KnowledgeDoc, doc_id)
+            if doc is None:
+                return None
+            await db.execute(KnowledgeChunk.__table__.delete().where(KnowledgeChunk.doc_id == doc_id))
+            await db.delete(doc)
+            await db.commit()
+            return doc
+
+    # -- retrieval ----------------------------------------------------------
+    async def search(self, query: str, kb_ids: list[str], limit: int = 6) -> list[dict[str, Any]]:
+        """Top matching chunks across the given bases, best first."""
+        query = (query or "").strip()
+        if not query or not kb_ids:
+            return []
+        like = f"%{query}%"
+        async with self.factory() as db:
+            if self.is_postgres:
+                stmt = (
+                    sa_text(
+                        "SELECT c.text, c.title, c.kb_id, b.name AS kb_name, "
+                        "word_similarity(:q, c.text) AS score "
+                        "FROM knowledge_chunks c JOIN knowledge_bases b ON b.id = c.kb_id "
+                        "WHERE c.kb_id IN :ids "
+                        "AND (word_similarity(:q, c.text) > 0.12 OR c.text ILIKE :like) "
+                        "ORDER BY score DESC LIMIT :limit"
+                    )
+                    .bindparams(bindparam("ids", expanding=True))
+                )
+                rows = (
+                    await db.execute(
+                        stmt, {"q": query, "ids": kb_ids, "like": like, "limit": limit}
+                    )
+                ).all()
+                return [
+                    {"text": r[0], "title": r[1], "kb_id": r[2], "kb_name": r[3], "score": float(r[4])}
+                    for r in rows
+                ]
+            # SQLite fallback: simple substring match.
+            rows = (
+                await db.execute(
+                    select(KnowledgeChunk.text, KnowledgeChunk.title, KnowledgeChunk.kb_id)
+                    .where(KnowledgeChunk.kb_id.in_(kb_ids), KnowledgeChunk.text.ilike(like))
+                    .limit(limit)
+                )
+            ).all()
+            return [{"text": r[0], "title": r[1], "kb_id": r[2], "kb_name": "", "score": 1.0} for r in rows]

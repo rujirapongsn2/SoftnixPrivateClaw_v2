@@ -12,8 +12,8 @@ import {
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useToast } from "@astryxdesign/core/Toast";
-import { ChevronDown, Loader2, LogOut, MessageCircle, MessageSquare, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { AlarmClock, ChevronDown, Loader2, LogOut, MessageCircle, MessageSquare, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
@@ -22,6 +22,30 @@ import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settin
 import { AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 
 const PROVIDER_LABELS: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
+
+// Per-session "last read" timestamps, persisted so the sidebar's unread dot
+// survives a page reload instead of resetting to a fresh (and noisy) guess
+// every time. Keyed by session id -> epoch ms of the last time the user had
+// it open. A session is unread when its `updated_at` is newer than this.
+const LAST_READ_KEY = "claw_last_read";
+const LAST_READ_SEEDED_KEY = "claw_last_read_seeded";
+
+function loadLastRead(): Record<string, number> {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_READ_KEY) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveLastRead(map: Record<string, number>) {
+  try {
+    localStorage.setItem(LAST_READ_KEY, JSON.stringify(map));
+  } catch {
+    // Storage full/unavailable — unread tracking degrades to "no memory",
+    // never to a crash.
+  }
+}
 
 /** "New chat" trigger that collapses to an icon-only button in the rail — a
  * plain full-width Button would overflow the collapsed sidenav's narrow rail. */
@@ -171,10 +195,13 @@ function RecentsNav({
           groups.map((g) => (
             <SideNavSection key={g.key} title={g.label}>
               {g.items.map((s) => (
-                <div key={s.id} className="claw-recent-row">
+                <div
+                  key={s.id}
+                  className={`claw-recent-row${done.has(s.id) ? " claw-recent-row--unread" : ""}`}
+                >
                   <SideNavItem
                     label={s.title}
-                    icon={MessageSquare}
+                    icon={s.channel === "schedule" ? AlarmClock : MessageSquare}
                     isSelected={s.id === active}
                     onClick={() => onSelect(s.id)}
                   />
@@ -240,10 +267,13 @@ function RecentsNav({
                     {g.label}
                   </Text>
                   {g.items.map((s) => (
-                    <div key={s.id} className="claw-recents-popover-row">
+                    <div
+                      key={s.id}
+                      className={`claw-recents-popover-row${done.has(s.id) ? " claw-recents-popover-row--unread" : ""}`}
+                    >
                       <Button
                         label={truncateTitle(s.title)}
-                        icon={<Icon icon={MessageSquare} size="sm" />}
+                        icon={<Icon icon={s.channel === "schedule" ? AlarmClock : MessageSquare} size="sm" />}
                         variant={s.id === active ? "secondary" : "ghost"}
                         size="sm"
                         className="claw-recents-popover-item"
@@ -357,12 +387,21 @@ export default function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
-  // Sessions that finished a turn while the user wasn't viewing them — shown
-  // with a "new response" dot in the sidebar until opened.
-  const [doneSessions, setDoneSessions] = useState<Set<string>>(new Set());
-  const prevRunningRef = useRef<Set<string>>(new Set());
+  // Per-session "last read" timestamps (id -> epoch ms), persisted to
+  // localStorage — see LAST_READ_KEY above for why this replaced an
+  // in-memory-only heuristic.
+  const [lastRead, setLastRead] = useState<Record<string, number>>(loadLastRead);
   const activeRef = useRef<string | null>(null);
   const toast = useToast();
+
+  const markRead = useCallback((id: string, when: number) => {
+    setLastRead((prev) => {
+      if ((prev[id] ?? 0) >= when) return prev; // never move a timestamp backwards
+      const next = { ...prev, [id]: when };
+      saveLastRead(next);
+      return next;
+    });
+  }, []);
 
   // Capture a JWT (or error) returned by the OIDC callback, then restore session.
   useEffect(() => {
@@ -405,13 +444,41 @@ export default function App() {
     if (user) void refresh();
   }, [user, refresh]);
 
-  // Keep `activeRef` in sync so the polling reconciler can read it without
-  // re-subscribing the interval on every navigation.
+  // One-time migration: the very first time a real session list loads on
+  // this browser, treat everything already there as "read" — otherwise
+  // switching to persisted read-tracking would instantly mark the user's
+  // entire existing history as unread (the opposite of what "already read"
+  // should feel like). Real, unread-worthy activity is tracked from here on.
+  useEffect(() => {
+    if (sessions.length === 0) return;
+    if (localStorage.getItem(LAST_READ_SEEDED_KEY) === "1") return;
+    const now = Date.now();
+    setLastRead((prev) => {
+      const next = { ...prev };
+      for (const s of sessions) if (!(s.id in next)) next[s.id] = now;
+      saveLastRead(next);
+      return next;
+    });
+    localStorage.setItem(LAST_READ_SEEDED_KEY, "1");
+  }, [sessions]);
+
+  // Keep `activeRef` in sync, and mark the active session's read watermark up
+  // to its latest known `updated_at` — both the instant it becomes active and
+  // again on every poll tick while it stays open. Anchoring to the session's
+  // own server timestamp (not client wall-clock) matters: a reply that
+  // finishes while the user is watching must be captured as "seen" with no
+  // race against polling cadence. A brand-new draft session isn't in
+  // `sessions` yet (it was created via a separate API call, not the next
+  // poll) — skip marking until a poll resolves it rather than guessing with
+  // `Date.now()`, which could stamp a time later than the server's own
+  // `updated_at` and then get stuck (markRead never moves backwards),
+  // masking a reply that actually arrived after the user left.
   useEffect(() => {
     activeRef.current = active;
-    // Opening a session clears its "new response" marker.
-    if (active) setDoneSessions((prev) => (prev.has(active) ? new Set([...prev].filter((id) => id !== active)) : prev));
-  }, [active]);
+    if (!active) return;
+    const current = sessions.find((s) => s.id === active);
+    if (current) markRead(active, new Date(current.updated_at).getTime());
+  }, [active, sessions, markRead]);
 
   // Poll the session list so the sidebar reflects background turns (running →
   // done) even when the user has navigated away from the processing chat.
@@ -421,21 +488,18 @@ export default function App() {
     return () => clearInterval(id);
   }, [user, refresh]);
 
-  // Detect running→done transitions to flag sessions with a fresh response the
-  // user hasn't seen yet (skip the one they're currently viewing).
-  useEffect(() => {
-    const nowRunning = new Set(sessions.filter((s) => s.running).map((s) => s.id));
-    const prev = prevRunningRef.current;
-    const finished = [...prev].filter((idv) => !nowRunning.has(idv) && idv !== activeRef.current);
-    if (finished.length) {
-      setDoneSessions((cur) => {
-        const next = new Set(cur);
-        finished.forEach((idv) => next.add(idv));
-        return next;
-      });
-    }
-    prevRunningRef.current = nowRunning;
-  }, [sessions]);
+  // A session is unread when it has changed more recently than the last time
+  // the user had it open — persisted, so this survives reloads and doesn't
+  // depend on having observed every intermediate "running" transition live.
+  const doneSessions = useMemo(
+    () =>
+      new Set(
+        sessions
+          .filter((s) => s.id !== active && new Date(s.updated_at).getTime() > (lastRead[s.id] ?? 0))
+          .map((s) => s.id),
+      ),
+    [sessions, active, lastRead],
+  );
 
   // "New chat" just clears the view to the draft landing — no session is
   // created until the user actually sends something (see requireSession),
@@ -480,6 +544,7 @@ export default function App() {
   return (
     <div className="claw-app">
       <SideNav
+        className="claw-sidenav"
         header={<SidebarBrand />}
         topContent={
           <div className="claw-sidenav-top">
