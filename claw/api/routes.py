@@ -70,6 +70,12 @@ async def me(user: User = Depends(current_user)) -> dict:
     return {"id": user.id, "email": user.email, "display_name": user.display_name, "role": user.role}
 
 
+@router.get("/api/features")
+async def features(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    """Optional capabilities the UI conditionally shows (e.g. the composer mic)."""
+    return {"speech_to_text": bool(state.settings.speech_api_key)}
+
+
 @router.get("/api/sessions")
 async def list_sessions(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
     sessions = await state.sessions.list_for_user(user.id)
@@ -199,6 +205,48 @@ async def upload_attachments(
             }
         )
     return result
+
+
+_MAX_AUDIO_BYTES = 25_000_000  # 25 MB — Groq's per-request audio limit
+
+
+@router.post("/api/transcribe")
+async def transcribe(
+    file: UploadFile = File(...),
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    """Speech-to-text for the composer mic: forward recorded audio to Groq's
+    OpenAI-compatible Whisper endpoint and return the transcript text."""
+    import httpx
+
+    key = state.settings.speech_api_key
+    if not key:
+        raise HTTPException(status_code=503, detail="speech-to-text is not configured")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty audio upload")
+    if len(data) > _MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="audio exceeds the 25 MB limit")
+
+    base = state.settings.speech_api_base.rstrip("/")
+    filename = file.filename or "audio.webm"
+    content_type = file.content_type or "audio/webm"
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{base}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {key}"},
+                data={"model": state.settings.speech_model, "response_format": "json"},
+                files={"file": (filename, data, content_type)},
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"speech provider unreachable: {exc}") from exc
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"speech provider error: {resp.text[:300]}")
+    text = (resp.json().get("text") or "").strip()
+    return {"text": text}
 
 
 @router.websocket("/ws/chat/{session_id}")

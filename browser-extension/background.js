@@ -358,11 +358,34 @@ async function blobToDataUrl(blob) {
   return `data:${blob.type || "image/png"};base64,${btoa(binary)}`;
 }
 
+async function closeTrackedTab(task) {
+  // No browser_session_id → fall back to whichever tab this extension last
+  // acted on, so a plain "close browser" after a few open/extract calls still
+  // closes the right tab without the agent having to track a session id.
+  const bySession = await tabFromSession(task.browser_session_id || "");
+  const tab = bySession || (await tabFromSession("_last"));
+  if (!tab || !tab.id) {
+    return { status: "completed", summary: "No open browser tab to close." };
+  }
+  try {
+    await chrome.tabs.remove(tab.id);
+  } catch (_) {
+    // Already closed (e.g. by the user) — that's the desired end state either way.
+  }
+  await forgetTabSession(task.browser_session_id || "");
+  await forgetTabSession("_last");
+  return { status: "completed", summary: "Closed the browser tab.", closed_tab_id: tab.id };
+}
+
 async function runTask(task) {
+  if (task.action === "close") {
+    return closeTrackedTab(task);
+  }
   const tab = await activeOrNewTab(task.url || "", task);
   if (!tab || !tab.id) throw new Error("No active browser tab available");
   await rememberTabSession(task.browser_session_id || "", tab);
   await rememberTabSession(task.task_id || "", tab);
+  await rememberTabSession("_last", tab);
   if (task.action === "open") {
     return {
       status: "completed",

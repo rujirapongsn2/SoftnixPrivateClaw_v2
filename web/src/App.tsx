@@ -12,12 +12,12 @@ import {
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useToast } from "@astryxdesign/core/Toast";
-import { Loader2, LogOut, MessageCircle, MessageSquare, Plus, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
+import { ChevronDown, Loader2, LogOut, MessageCircle, MessageSquare, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
-import { Brand, SoftnixLogo } from "./Logo";
+import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
 import { AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 
@@ -33,10 +33,12 @@ function NewChatButton({ onClick }: { onClick: () => void }) {
   return <Button label="New chat" icon={<Icon icon={Plus} size="sm" />} size="sm" clickAction={onClick} />;
 }
 
-/** Brand lockup that drops the wordmark in the collapsed rail, keeping just the logo mark. */
+/** Brand lockup that drops the wordmark in the collapsed rail, keeping just the
+ * square icon mark — the full wordmark image is too wide for the narrow rail
+ * and gets clipped/squeezed there. */
 function SidebarBrand() {
   const { isCollapsed } = useSideNavCollapse();
-  return <div className="claw-sidenav-brand">{isCollapsed ? <SoftnixLogo height={22} /> : <Brand height={22} />}</div>;
+  return <div className="claw-sidenav-brand">{isCollapsed ? <SoftnixMark size={22} /> : <Brand height={22} />}</div>;
 }
 
 /** Truncate a chat title for the narrow collapsed-rail popover. */
@@ -44,9 +46,64 @@ function truncateTitle(title: string, max = 28) {
   return title.length > max ? title.slice(0, max) + "…" : title;
 }
 
-/** Recent-chats list. Expanded: full SideNavSection (unchanged). Collapsed: the
- * rail would otherwise stack one icon per chat (unbounded height) — instead
- * show a single "Recents" icon that opens a flyout with the same list. */
+const RECENTS_INITIAL = 25;
+const RECENTS_STEP = 50;
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+interface SessionGroup {
+  key: string;
+  label: string;
+  items: SessionInfo[];
+}
+
+/** Bucket sessions (already newest→oldest) into Today / Yesterday / Previous 7
+ * days / Previous 30 days / then per-month, à la Claude & ChatGPT. Insertion
+ * order of the returned groups is newest→oldest since the input is desc-sorted. */
+function groupSessions(sessions: SessionInfo[]): SessionGroup[] {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const DAY = 86_400_000;
+  const order: SessionGroup[] = [];
+  const byKey = new Map<string, SessionGroup>();
+  const push = (key: string, label: string, s: SessionInfo) => {
+    let g = byKey.get(key);
+    if (!g) {
+      g = { key, label, items: [] };
+      byKey.set(key, g);
+      order.push(g);
+    }
+    g.items.push(s);
+  };
+  for (const s of sessions) {
+    const t = new Date(s.updated_at).getTime();
+    if (Number.isNaN(t)) {
+      push("older", "Older", s);
+    } else if (t >= startOfToday) {
+      push("today", "Today", s);
+    } else if (t >= startOfToday - DAY) {
+      push("yesterday", "Yesterday", s);
+    } else if (t >= startOfToday - 7 * DAY) {
+      push("7d", "Previous 7 days", s);
+    } else if (t >= startOfToday - 30 * DAY) {
+      push("30d", "Previous 30 days", s);
+    } else {
+      const d = new Date(t);
+      const label =
+        d.getFullYear() === now.getFullYear()
+          ? MONTH_NAMES[d.getMonth()]
+          : `${MONTH_NAMES[d.getMonth()]} ${d.getFullYear()}`;
+      push(`${d.getFullYear()}-${d.getMonth()}`, label, s);
+    }
+  }
+  return order;
+}
+
+/** Recent-chats list. Grouped by date, search-filterable, and capped to a
+ * window with "Show older" so a long history stays fast and scannable.
+ * Expanded: stacked SideNavSections. Collapsed: a flyout with the same data. */
 function RecentsNav({
   sessions,
   active,
@@ -62,6 +119,17 @@ function RecentsNav({
 }) {
   const { isCollapsed } = useSideNavCollapse();
   const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [visible, setVisible] = useState(RECENTS_INITIAL);
+
+  // A new search starts from the top of its (usually short) result set.
+  useEffect(() => setVisible(RECENTS_INITIAL), [query]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q ? sessions.filter((s) => s.title.toLowerCase().includes(q)) : sessions;
+  const shown = filtered.slice(0, visible);
+  const groups = groupSessions(shown);
+  const hasMore = filtered.length > shown.length;
 
   // Running spinner (turn processing) or a "new response" dot (finished while
   // you were elsewhere) — shown until the row is hovered (which reveals delete).
@@ -74,33 +142,71 @@ function RecentsNav({
       <span className="claw-recent-status claw-recent-status--done" title="New response" />
     ) : null;
 
+  const search = (
+    <div className="claw-recents-search">
+      <TextInput
+        label="Search chats"
+        isLabelHidden
+        size="sm"
+        startIcon={<Icon icon={Search} size="sm" color="secondary" />}
+        placeholder="Search chats…"
+        value={query}
+        onChange={setQuery}
+        hasClear
+      />
+    </div>
+  );
+
   if (!isCollapsed) {
     return (
-      <SideNavSection title="Recents">
-        {sessions.map((s) => (
-          <div key={s.id} className="claw-recent-row">
-            <SideNavItem
-              label={s.title}
-              icon={MessageSquare}
-              isSelected={s.id === active}
-              onClick={() => onSelect(s.id)}
-            />
-            {statusFor(s)}
-            <span className="claw-recent-delete">
-              <IconButton
-                label="Delete chat"
-                icon={<Icon icon="close" size="xsm" />}
-                variant="ghost"
-                size="sm"
-                clickAction={(e) => {
-                  e.stopPropagation();
-                  onDelete(s.id);
-                }}
-              />
-            </span>
+      <>
+        {search}
+        {groups.length === 0 ? (
+          <div className="claw-recents-empty">
+            <Text size="sm" color="secondary">
+              {q ? "No chats match your search." : "No conversations yet."}
+            </Text>
           </div>
-        ))}
-      </SideNavSection>
+        ) : (
+          groups.map((g) => (
+            <SideNavSection key={g.key} title={g.label}>
+              {g.items.map((s) => (
+                <div key={s.id} className="claw-recent-row">
+                  <SideNavItem
+                    label={s.title}
+                    icon={MessageSquare}
+                    isSelected={s.id === active}
+                    onClick={() => onSelect(s.id)}
+                  />
+                  {statusFor(s)}
+                  <span className="claw-recent-delete">
+                    <IconButton
+                      label="Delete chat"
+                      icon={<Icon icon="close" size="xsm" />}
+                      variant="ghost"
+                      size="sm"
+                      clickAction={(e) => {
+                        e.stopPropagation();
+                        onDelete(s.id);
+                      }}
+                    />
+                  </span>
+                </div>
+              ))}
+            </SideNavSection>
+          ))
+        )}
+        {hasMore && (
+          <button
+            type="button"
+            className="claw-recents-more"
+            onClick={() => setVisible((v) => v + RECENTS_STEP)}
+          >
+            <Icon icon={ChevronDown} size="sm" />
+            Show older
+          </button>
+        )}
+      </>
     );
   }
 
@@ -112,7 +218,7 @@ function RecentsNav({
         alignment="start"
         isOpen={isOpen}
         onOpenChange={setIsOpen}
-        width={260}
+        width={280}
         // This flyout is opened by a mouse click far more often than by
         // keyboard, so don't steal focus onto the first row automatically —
         // on macOS Safari with "Full Keyboard Access" on, that paints a
@@ -122,36 +228,51 @@ function RecentsNav({
         hasAutoFocus={false}
         content={
           <div className="claw-recents-popover">
-            <Text size="sm" weight="semibold" color="secondary" className="claw-recents-popover-title">
-              Recents
-            </Text>
-            {sessions.length === 0 ? (
+            {search}
+            {groups.length === 0 ? (
               <Text size="sm" color="secondary">
-                No conversations yet.
+                {q ? "No chats match your search." : "No conversations yet."}
               </Text>
             ) : (
-              sessions.map((s) => (
-                <div key={s.id} className="claw-recents-popover-row">
-                  <Button
-                    label={truncateTitle(s.title)}
-                    icon={<Icon icon={MessageSquare} size="sm" />}
-                    variant={s.id === active ? "secondary" : "ghost"}
-                    size="sm"
-                    className="claw-recents-popover-item"
-                    clickAction={() => {
-                      onSelect(s.id);
-                      setIsOpen(false);
-                    }}
-                  />
-                  <IconButton
-                    label="Delete chat"
-                    icon={<Icon icon="close" size="xsm" />}
-                    variant="ghost"
-                    size="sm"
-                    clickAction={() => onDelete(s.id)}
-                  />
+              groups.map((g) => (
+                <div key={g.key} className="claw-recents-popover-group">
+                  <Text size="sm" weight="semibold" color="secondary" className="claw-recents-popover-title">
+                    {g.label}
+                  </Text>
+                  {g.items.map((s) => (
+                    <div key={s.id} className="claw-recents-popover-row">
+                      <Button
+                        label={truncateTitle(s.title)}
+                        icon={<Icon icon={MessageSquare} size="sm" />}
+                        variant={s.id === active ? "secondary" : "ghost"}
+                        size="sm"
+                        className="claw-recents-popover-item"
+                        clickAction={() => {
+                          onSelect(s.id);
+                          setIsOpen(false);
+                        }}
+                      />
+                      <IconButton
+                        label="Delete chat"
+                        icon={<Icon icon="close" size="xsm" />}
+                        variant="ghost"
+                        size="sm"
+                        clickAction={() => onDelete(s.id)}
+                      />
+                    </div>
+                  ))}
                 </div>
               ))
+            )}
+            {hasMore && (
+              <button
+                type="button"
+                className="claw-recents-more"
+                onClick={() => setVisible((v) => v + RECENTS_STEP)}
+              >
+                <Icon icon={ChevronDown} size="sm" />
+                Show older
+              </button>
             )}
           </div>
         }

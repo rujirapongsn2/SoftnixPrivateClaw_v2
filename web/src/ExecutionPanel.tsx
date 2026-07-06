@@ -15,7 +15,13 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+export interface ExecSubStep {
+  key: string;
+  label: string;
+  status: "running" | "complete" | "error";
+}
 
 export interface ExecStep {
   name: string;
@@ -23,6 +29,9 @@ export interface ExecStep {
   argsPreview?: string;
   resultPreview?: string;
   duration?: string;
+  substeps?: ExecSubStep[];
+  stepIndex?: number;
+  stepTotal?: number;
 }
 
 // Map a tool name to a small lane icon — the category still reads at a glance
@@ -53,6 +62,8 @@ interface Row {
   icon: LucideIcon;
   isError?: boolean;
   stepIndex?: number;
+  substeps?: ExecSubStep[];
+  counter?: string;
 }
 
 /** Minimal, live list of the agent's execution — one dense line per step
@@ -72,6 +83,24 @@ export function ExecutionPanel({
   const anyStepRunning = steps.some((s) => s.status === "running");
   const active = running || anyStepRunning;
 
+  // Live "it's alive" elapsed timer while the agent works — resets when idle.
+  const [elapsed, setElapsed] = useState(0);
+  const startRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!active) {
+      startRef.current = null;
+      setElapsed(0);
+      return;
+    }
+    if (startRef.current == null) startRef.current = Date.now();
+    const id = setInterval(
+      () => setElapsed(Math.floor((Date.now() - (startRef.current ?? Date.now())) / 1000)),
+      1000,
+    );
+    return () => clearInterval(id);
+  }, [active]);
+  const mmss = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
+
   // Build the list: Request → each tool step → Response.
   const rows: Row[] = [];
   if (steps.length > 0 || running) {
@@ -88,6 +117,11 @@ export function ExecutionPanel({
       icon: laneIcon(s.name),
       isError: s.status === "error",
       stepIndex: i,
+      substeps: s.substeps,
+      counter:
+        s.status === "running" && s.stepIndex && s.stepTotal
+          ? `step ${s.stepIndex} of ${s.stepTotal}`
+          : undefined,
     });
   });
   if (steps.length > 0 || running) {
@@ -107,7 +141,7 @@ export function ExecutionPanel({
           {active ? (
             <span className="claw-exec-live">
               <Icon icon={Loader2} size="xsm" />
-              live
+              live · {mmss}
             </span>
           ) : steps.length > 0 ? (
             <Text size="sm" color="secondary">
@@ -150,9 +184,24 @@ export function ExecutionPanel({
                   <span className={`claw-xdot claw-xdot--${row.status}`} aria-hidden="true" />
                   <Icon icon={row.icon} size="xsm" color="secondary" />
                   <span className="claw-xname">{row.title}</span>
-                  {row.detail && !isOpen && <span className="claw-xdetail">{row.detail}</span>}
+                  {row.counter && <span className="claw-xcounter">{row.counter}</span>}
+                  {row.detail && !isOpen && !row.counter && (
+                    <span className="claw-xdetail">{row.detail}</span>
+                  )}
                   {isTool && row.duration && <span className="claw-xdur">{row.duration}</span>}
                 </button>
+                {row.substeps && row.substeps.length > 0 && (
+                  <div className="claw-xsubs">
+                    {row.substeps.map((s) => (
+                      <div key={s.key} className="claw-xsub">
+                        <span className={`claw-xdot claw-xdot--${s.status}`} aria-hidden="true" />
+                        <span className={`claw-xsub-label${s.status === "running" ? " claw-xsub-label--active" : ""}`}>
+                          {s.label}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {isOpen && (
                   <div className="claw-xexpand">
                     {row.detail && (

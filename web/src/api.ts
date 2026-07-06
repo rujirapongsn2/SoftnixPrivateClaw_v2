@@ -27,6 +27,7 @@ export interface AgentEvent {
     | "thinking_delta"
     | "tool_started"
     | "tool_finished"
+    | "tool_progress"
     | "tool_confirm_request"
     | "tool_confirm_resolved"
     | "turn_completed"
@@ -42,6 +43,12 @@ export interface AgentEvent {
   artifacts?: string[];
   request_id?: string;
   approved?: boolean;
+  // tool_progress: live sub-step of a long tool (workflow plan/step/synthesize)
+  label?: string;
+  stage?: string;
+  index?: number;
+  total?: number;
+  status?: string;
 }
 
 export interface SkillInfo {
@@ -129,10 +136,36 @@ export interface ActivityPoint {
   count: number;
 }
 
+export interface ModelUsagePoint {
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  turns: number;
+}
+
+export interface ProviderUsageSummary {
+  name: string;
+  enabled: boolean;
+  has_key: boolean;
+  model_count: number;
+  enabled_model_count: number;
+}
+
+export interface SessionsByUserPoint {
+  user_id: string;
+  label: string;
+  sessions: number;
+}
+
 export interface AdminOverview {
   stats: Record<string, number | boolean>;
   activity_by_day: ActivityPoint[];
   activity_by_hour: ActivityPoint[];
+  usage_by_model: ModelUsagePoint[];
+  providers: ProviderUsageSummary[];
+  sessions_by_user_7d: SessionsByUserPoint[];
+  sessions_by_day_7d: ActivityPoint[];
+  guardrail_hits_by_day: ActivityPoint[];
 }
 
 export type ModelCost = "low" | "medium" | "high" | "very_high";
@@ -173,6 +206,7 @@ export interface AuditRow {
   kind: string;
   payload: Record<string, unknown>;
   user_id: string | null;
+  user_label: string;
   session_id: string | null;
   created_at: string;
 }
@@ -270,6 +304,19 @@ export const api = {
     }),
   me: () => request<AuthUser>("/api/auth/me"),
   providers: () => request<{ providers: string[] }>("/api/auth/providers"),
+  features: () => request<{ speech_to_text: boolean }>("/api/features"),
+
+  transcribe: async (audio: Blob, filename = "audio.webm"): Promise<string> => {
+    const form = new FormData();
+    form.append("file", audio, filename);
+    const resp = await fetch("/api/transcribe", {
+      method: "POST",
+      headers: authHeaders(), // no Content-Type: browser sets multipart boundary
+      body: form,
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+    return (await resp.json()).text as string;
+  },
 
   listSessions: () => request<SessionInfo[]>("/api/sessions"),
   createSession: (title = "New chat") =>

@@ -4,6 +4,7 @@ import { Card } from "@astryxdesign/core/Card";
 import { Divider } from "@astryxdesign/core/Divider";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon, type IconName, type IconType } from "@astryxdesign/core/Icon";
+import { IconButton } from "@astryxdesign/core/IconButton";
 import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
@@ -13,6 +14,8 @@ import {
   Asterisk,
   Ban,
   Brain,
+  ChevronDown,
+  ChevronRight,
   Cpu,
   Diamond,
   Globe,
@@ -24,6 +27,7 @@ import {
   Plus,
   Router,
   ScrollText,
+  Search,
   Send,
   Server,
   Shield,
@@ -32,6 +36,7 @@ import {
   Sparkles,
   Star,
   Trash2,
+  User as UserIcon,
   Users,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -46,7 +51,9 @@ import {
   LLMModelCfg,
   LLMProviderCfg,
   ModelCost,
+  ModelUsagePoint,
   OAuthAppsInfo,
+  SessionsByUserPoint,
   api,
 } from "./api";
 
@@ -204,6 +211,146 @@ function OverviewPanel() {
         <Text weight="semibold">Activity by hour of day</Text>
         <BarChart data={data.activity_by_hour} accent="var(--color-info, #2f9e6f)" />
       </Card>
+
+      <Card padding={3}>
+        <Text weight="semibold">Guardrail hits — last 14 days</Text>
+        <Text size="sm" color="secondary" as="p">
+          Turns where a guardrail rule matched the input, output, or a tool call.
+        </Text>
+        {data.guardrail_hits_by_day.every((d) => d.count === 0) ? (
+          <Text size="sm" color="secondary">
+            No guardrail matches in the last 14 days.
+          </Text>
+        ) : (
+          <BarChart data={data.guardrail_hits_by_day} accent="var(--color-error, #c0392b)" />
+        )}
+      </Card>
+
+      <Card padding={3}>
+        <Text weight="semibold">Sessions started — last 7 days</Text>
+        {data.sessions_by_day_7d.every((d) => d.count === 0) ? (
+          <Text size="sm" color="secondary">
+            No sessions started in the last 7 days.
+          </Text>
+        ) : (
+          <BarChart data={data.sessions_by_day_7d} accent="var(--color-warning, #d97706)" />
+        )}
+      </Card>
+      <Card padding={3}>
+        <Text weight="semibold">Sessions by user — last 7 days</Text>
+        {data.sessions_by_user_7d.length === 0 ? (
+          <Text size="sm" color="secondary">
+            No sessions started in the last 7 days.
+          </Text>
+        ) : (
+          <SessionsByUserList data={data.sessions_by_user_7d} />
+        )}
+      </Card>
+
+      <Card padding={3}>
+        <Text weight="semibold">LLM providers in use</Text>
+        {data.providers.length === 0 ? (
+          <Text size="sm" color="secondary">
+            No providers configured yet — add one in the LLM Providers section.
+          </Text>
+        ) : (
+          <div className="claw-provider-usage-list">
+            {data.providers.map((p) => (
+              <div key={p.name} className="claw-provider-usage-row">
+                <Icon icon={Cpu} size="sm" color="secondary" />
+                <span className="claw-provider-usage-name">{p.name}</span>
+                <Badge
+                  variant={p.enabled ? "success" : "neutral"}
+                  label={p.enabled ? "enabled" : "disabled"}
+                />
+                <Badge
+                  variant={p.has_key ? "neutral" : "warning"}
+                  label={p.has_key ? "key set" : "no key"}
+                />
+                <span className="claw-provider-usage-models">
+                  {p.enabled_model_count}/{p.model_count} models enabled
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card padding={3}>
+        <Text weight="semibold">Tokens used per model</Text>
+        {data.usage_by_model.length === 0 ? (
+          <Text size="sm" color="secondary">
+            No usage recorded yet — token counts appear here after chats run.
+          </Text>
+        ) : (
+          <ModelUsageChart data={data.usage_by_model} />
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function SessionsByUserList({ data }: { data: SessionsByUserPoint[] }) {
+  const max = Math.max(1, ...data.map((d) => d.sessions));
+  return (
+    <div className="claw-model-usage-list">
+      {data.map((d) => (
+        <div key={d.user_id} className="claw-model-usage-row">
+          <div className="claw-model-usage-head">
+            <span className="claw-model-usage-name claw-model-usage-name--user">{d.label}</span>
+            <span className="claw-model-usage-total">
+              {d.sessions.toLocaleString()} session{d.sessions === 1 ? "" : "s"}
+            </span>
+          </div>
+          <div className="claw-model-usage-bar">
+            <div
+              className="claw-model-usage-bar-prompt"
+              style={{ width: `${(d.sessions / max) * 100}%` }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ModelUsageChart({ data }: { data: ModelUsagePoint[] }) {
+  const totals = data.map((d) => d.prompt_tokens + d.completion_tokens);
+  const max = Math.max(1, ...totals);
+  return (
+    <div className="claw-model-usage-list">
+      {data.map((d, i) => {
+        const total = totals[i];
+        const promptPct = (d.prompt_tokens / max) * 100;
+        const completionPct = (d.completion_tokens / max) * 100;
+        return (
+          <div key={d.model} className="claw-model-usage-row">
+            <div className="claw-model-usage-head">
+              <span className="claw-model-usage-name">{d.model}</span>
+              <span className="claw-model-usage-total">
+                {total.toLocaleString()} tokens · {d.turns.toLocaleString()} turns
+              </span>
+            </div>
+            <div className="claw-model-usage-bar">
+              <div className="claw-model-usage-bar-prompt" style={{ width: `${promptPct}%` }} />
+              <div
+                className="claw-model-usage-bar-completion"
+                style={{ width: `${completionPct}%`, left: `${promptPct}%` }}
+              />
+            </div>
+            <div className="claw-model-usage-legend">
+              <span>
+                <i className="claw-legend-dot claw-legend-dot--prompt" /> prompt{" "}
+                {d.prompt_tokens.toLocaleString()}
+              </span>
+              <span>
+                <i className="claw-legend-dot claw-legend-dot--completion" /> completion{" "}
+                {d.completion_tokens.toLocaleString()}
+              </span>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1359,6 +1506,40 @@ function OAuthAppCard({
 
 const AUDIT_PAGE = 50;
 
+// One audit event: a compact clickable header (kind · who · preview · time)
+// that expands to the full, pretty-printed payload.
+function AuditEventRow({ event: e }: { event: AuditRow }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="claw-audit-item">
+      <button
+        type="button"
+        className="claw-audit-head"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <Icon icon={open ? ChevronDown : ChevronRight} size="sm" color="secondary" />
+        <Badge variant="neutral" label={e.kind} />
+        <span className="claw-audit-user">
+          <Icon icon={UserIcon} size="xsm" color="secondary" />
+          {e.user_label}
+        </span>
+        <span className="claw-audit-payload">{JSON.stringify(e.payload)}</span>
+        <span className="claw-audit-time">{new Date(e.created_at).toLocaleString()}</span>
+      </button>
+      {open && (
+        <div className="claw-audit-detail">
+          <div className="claw-audit-detail-meta">
+            <span>Actor: {e.user_label}</span>
+            {e.session_id && <span>Session: {e.session_id}</span>}
+          </div>
+          <pre className="claw-audit-json">{JSON.stringify(e.payload, null, 2)}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AuditPanel() {
   const [events, setEvents] = useState<AuditRow[]>([]);
   const [kinds, setKinds] = useState<string[]>([]);
@@ -1438,15 +1619,7 @@ function AuditPanel() {
         <>
           <div className="claw-audit-table">
             {events.map((e) => (
-              <div key={e.id} className="claw-audit-row">
-                <Badge variant="neutral" label={e.kind} />
-                <Text size="sm" className="claw-audit-payload">
-                  {JSON.stringify(e.payload)}
-                </Text>
-                <Text size="sm" color="secondary" className="claw-audit-time">
-                  {new Date(e.created_at).toLocaleString()}
-                </Text>
-              </div>
+              <AuditEventRow key={e.id} event={e} />
             ))}
           </div>
           {hasMore && (
@@ -1468,6 +1641,8 @@ function AuditPanel() {
 
 // ---------------------------------------------------------------- Users
 
+const USERS_PAGE = 20;
+
 function UsersPanel({ selfId }: { selfId: string }) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [creating, setCreating] = useState(false);
@@ -1475,6 +1650,8 @@ function UsersPanel({ selfId }: { selfId: string }) {
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
+  const [query, setQuery] = useState("");
+  const [visible, setVisible] = useState(USERS_PAGE);
   const { error, guard } = useAsyncError();
   const toast = useToast();
 
@@ -1482,6 +1659,9 @@ function UsersPanel({ selfId }: { selfId: string }) {
   useEffect(() => {
     void guard(async () => await reload());
   }, [guard, reload]);
+
+  // Reset the "load more" window whenever the search changes.
+  useEffect(() => setVisible(USERS_PAGE), [query]);
 
   const resetForm = () => {
     setCreating(false);
@@ -1491,10 +1671,32 @@ function UsersPanel({ selfId }: { selfId: string }) {
     setIsAdmin(false);
   };
 
+  const admins = users.filter((u) => u.is_admin).length;
+  const suspended = users.filter((u) => !u.is_active).length;
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? users.filter(
+        (u) =>
+          (u.display_name || "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q),
+      )
+    : users;
+  const shown = filtered.slice(0, visible);
+
   return (
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
-        <Text color="secondary">Manage everyone with access to this Softnix PrivateClaw deployment.</Text>
+        <div className="claw-panel">
+          <Text color="secondary">
+            Manage everyone with access to this Softnix PrivateClaw deployment.
+          </Text>
+          <div className="claw-row">
+            <Badge variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={`${users.length} users`} />
+            <Badge variant="neutral" icon={<Icon icon={Shield} size="xsm" />} label={`${admins} admins`} />
+            {suspended > 0 && (
+              <Badge variant="neutral" icon={<Icon icon={Ban} size="xsm" />} label={`${suspended} suspended`} />
+            )}
+          </div>
+        </div>
         {!creating && (
           <Button
             label="Add user"
@@ -1505,6 +1707,18 @@ function UsersPanel({ selfId }: { selfId: string }) {
         )}
       </div>
       {error && <ErrorText>{error}</ErrorText>}
+
+      {users.length > USERS_PAGE / 2 && (
+        <TextInput
+          label="Search users"
+          isLabelHidden
+          startIcon={<Icon icon={Search} size="sm" color="secondary" />}
+          placeholder="Search by name or email…"
+          value={query}
+          onChange={setQuery}
+          hasClear
+        />
+      )}
 
       {creating && (
         <Card padding={2}>
@@ -1544,14 +1758,44 @@ function UsersPanel({ selfId }: { selfId: string }) {
         </Card>
       )}
 
-      {users.map((u) => (
-        <UserCard key={u.id} user={u} selfId={selfId} reload={reload} guard={guard} />
-      ))}
+      {filtered.length === 0 ? (
+        <EmptyState
+          title="No users match"
+          description="Try a different name or email."
+        />
+      ) : (
+        <>
+          <div className="claw-user-list">
+            {shown.map((u) => (
+              <UserRow key={u.id} user={u} selfId={selfId} reload={reload} guard={guard} />
+            ))}
+          </div>
+          {filtered.length > shown.length && (
+            <div className="claw-row">
+              <Button
+                label={`Load more (${filtered.length - shown.length})`}
+                variant="secondary"
+                size="sm"
+                clickAction={() => setVisible((v) => v + USERS_PAGE)}
+              />
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
-function UserCard({
+// Initials for the avatar: first letters of the first two name words, else the
+// first two characters of the name/email.
+function userInitials(name: string, email: string): string {
+  const base = (name || email || "?").trim();
+  const parts = base.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return base.slice(0, 2).toUpperCase();
+}
+
+function UserRow({
   user: u,
   selfId,
   reload,
@@ -1567,24 +1811,30 @@ function UserCard({
   const [newPassword, setNewPassword] = useState("");
   const toast = useToast();
   const isSelf = u.id === selfId;
+  const label = u.display_name || u.email;
 
   return (
-    <Card padding={2} variant={u.is_active ? "default" : "muted"}>
-      <div className="claw-row claw-row-between">
-        <div>
-          <div className="claw-row">
-            <Text weight="semibold">{u.display_name || u.email}</Text>
-            {u.is_admin && <Badge variant="purple" icon={<Icon icon={Shield} size="xsm" />} label="admin" />}
+    <div className={`claw-user-row${!u.is_active ? " is-suspended" : ""}`}>
+      <div className="claw-user-head">
+        <div className="claw-user-avatar" aria-hidden="true">
+          {userInitials(u.display_name, u.email)}
+        </div>
+        <div className="claw-user-main">
+          <div className="claw-user-name-line">
+            <span className="claw-user-name">{label}</span>
+            {u.is_admin && (
+              <Badge variant="purple" icon={<Icon icon={Shield} size="xsm" />} label="admin" />
+            )}
+            {isSelf && <Badge variant="neutral" label="you" />}
             {!u.is_active && (
               <Badge variant="error" icon={<Icon icon={ShieldOff} size="xsm" />} label="suspended" />
             )}
-            {u.id === selfId && <Badge variant="neutral" label="you" />}
           </div>
-          <Text size="sm" color="secondary" as="p">
+          <span className="claw-user-meta">
             {u.email} · {u.sessions} sessions · joined {new Date(u.created_at).toLocaleDateString()}
-          </Text>
+          </span>
         </div>
-        <div className="claw-row">
+        <div className="claw-user-actions">
           <label className="claw-toggle">
             <Text size="sm" color="secondary">
               Admin
@@ -1593,7 +1843,7 @@ function UserCard({
               value={u.is_admin}
               label={`Admin ${u.email}`}
               isLabelHidden
-              isDisabled={u.id === selfId}
+              isDisabled={isSelf}
               changeAction={(checked) =>
                 guard(async () => {
                   await api.adminUpdateUser(u.id, { is_admin: checked });
@@ -1610,7 +1860,7 @@ function UserCard({
               value={u.is_active}
               label={`Active ${u.email}`}
               isLabelHidden
-              isDisabled={u.id === selfId}
+              isDisabled={isSelf}
               changeAction={(checked) =>
                 guard(async () => {
                   await api.adminUpdateUser(u.id, { is_active: checked });
@@ -1619,8 +1869,8 @@ function UserCard({
               }
             />
           </label>
-          <Button
-            label="Edit"
+          <IconButton
+            label={editing ? "Close editor" : "Edit user"}
             icon={<Icon icon={Pencil} size="sm" />}
             size="sm"
             variant="ghost"
@@ -1630,59 +1880,65 @@ function UserCard({
               setEditing((e) => !e);
             }}
           />
-          <Button
-            label="Delete"
-            icon={<Icon icon={Trash2} size="sm" />}
-            size="sm"
-            variant="destructive"
-            isDisabled={isSelf}
-            clickAction={() =>
-              guard(async () => {
-                if (!window.confirm(`Delete ${u.display_name || u.email}? This removes their chats, memory, and settings. This cannot be undone.`)) {
-                  return;
-                }
-                await api.adminDeleteUser(u.id);
-                toast({ body: `${u.display_name || u.email} deleted`, type: "info", autoHideDuration: 2500 });
-                await reload();
-              })
-            }
-          />
+          <span className="claw-user-delete">
+            <IconButton
+              label="Delete user"
+              icon={<Icon icon={Trash2} size="sm" />}
+              size="sm"
+              variant="ghost"
+              isDisabled={isSelf}
+              clickAction={() =>
+                guard(async () => {
+                  if (
+                    !window.confirm(
+                      `Delete ${label}? This removes their chats, memory, and settings. This cannot be undone.`,
+                    )
+                  ) {
+                    return;
+                  }
+                  await api.adminDeleteUser(u.id);
+                  toast({ body: `${label} deleted`, type: "info", autoHideDuration: 2500 });
+                  await reload();
+                })
+              }
+            />
+          </span>
         </div>
       </div>
 
       {editing && (
-        <Card padding={2} variant="muted">
-          <div className="claw-panel">
-            <TextInput label="Display name" value={displayName} onChange={setDisplayName} />
-            <TextInput
-              label="Reset password (min 8 chars — leave blank to keep current)"
-              type="password"
-              value={newPassword}
-              onChange={setNewPassword}
+        <div className="claw-user-edit">
+          <TextInput label="Display name" value={displayName} onChange={setDisplayName} />
+          <TextInput
+            label="Reset password"
+            type="password"
+            description="At least 8 characters. Leave blank to keep the current password."
+            value={newPassword}
+            onChange={setNewPassword}
+          />
+          <div className="claw-row">
+            <Button
+              label="Save changes"
+              icon={<Icon icon="check" size="sm" />}
+              size="sm"
+              isDisabled={newPassword.length > 0 && newPassword.length < 8}
+              clickAction={() =>
+                guard(async () => {
+                  await api.adminUpdateUser(u.id, {
+                    display_name: displayName.trim(),
+                    ...(newPassword ? { password: newPassword } : {}),
+                  });
+                  setEditing(false);
+                  setNewPassword("");
+                  toast({ body: "User updated", type: "info", autoHideDuration: 2500 });
+                  await reload();
+                })
+              }
             />
-            <div className="claw-row">
-              <Button
-                label="Save changes"
-                icon={<Icon icon="check" size="sm" />}
-                size="sm"
-                isDisabled={newPassword.length > 0 && newPassword.length < 8}
-                clickAction={() =>
-                  guard(async () => {
-                    await api.adminUpdateUser(u.id, {
-                      display_name: displayName.trim(),
-                      ...(newPassword ? { password: newPassword } : {}),
-                    });
-                    setEditing(false);
-                    setNewPassword("");
-                    await reload();
-                  })
-                }
-              />
-              <Button label="Cancel" variant="ghost" size="sm" clickAction={() => setEditing(false)} />
-            </div>
+            <Button label="Cancel" variant="ghost" size="sm" clickAction={() => setEditing(false)} />
           </div>
-        </Card>
+        </div>
       )}
-    </Card>
+    </div>
   );
 }

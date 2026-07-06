@@ -186,6 +186,44 @@ html, body, #root {
   opacity: 1;
   pointer-events: auto;
 }
+.claw-recents-popover-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.claw-recents-popover-group + .claw-recents-popover-group {
+  margin-top: 6px;
+}
+
+/* Search box above the Recents list. */
+.claw-recents-search {
+  padding: 4px 8px 8px;
+}
+.claw-recents-empty {
+  padding: 6px 12px;
+}
+/* "Show older" — a quiet full-width control that reveals the next page of
+   history without ever loading the whole thing at once. */
+.claw-recents-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--color-text-secondary, #6b7280);
+  cursor: pointer;
+}
+.claw-recents-more:hover {
+  background: var(--color-background-section, #f2f0ea);
+  color: var(--color-text-primary);
+}
 
 /* ---- chat column ---- */
 /* Row shell: the chat column + the (optional) right execution panel. */
@@ -290,6 +328,50 @@ html, body, #root {
 .claw-suggestion-chip:hover {
   background: var(--color-background-section, #f2f0ea);
   border-color: var(--color-border, #d4d1c9);
+}
+
+/* Category panel: replaces the chip row when a category is selected, listing
+ * concrete ready-to-use prompts (à la claude.ai's Write/Learn/Code menus). */
+.claw-suggestion-panel {
+  width: 100%;
+  margin-top: 12px;
+  background: var(--color-background-base, #fff);
+  border: 1px solid var(--color-border-subtle, #e4e2dd);
+  border-radius: 16px;
+  overflow: hidden;
+  text-align: left;
+}
+.claw-suggestion-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 12px 16px;
+  border-bottom: 1px solid var(--color-border-subtle, #e4e2dd);
+}
+.claw-suggestion-panel-header > span:nth-child(2) {
+  flex: 1 1 auto;
+}
+.claw-suggestion-panel-list {
+  display: flex;
+  flex-direction: column;
+}
+.claw-suggestion-panel-item {
+  width: 100%;
+  padding: 14px 16px;
+  border: none;
+  border-bottom: 1px solid var(--color-border-subtle, #eeece6);
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  color: var(--color-text-primary, #1a1a1a);
+  text-align: left;
+  cursor: pointer;
+}
+.claw-suggestion-panel-item:last-child {
+  border-bottom: none;
+}
+.claw-suggestion-panel-item:hover {
+  background: var(--color-background-section, #f2f0ea);
 }
 .claw-cursor {
   animation: claw-blink 1s infinite;
@@ -514,6 +596,110 @@ html, body, #root {
   white-space: nowrap;
   overflow: hidden;
 }
+
+/* Overview: LLM providers in use */
+.claw-provider-usage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.claw-provider-usage-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--color-surface-2, #f2f3f5);
+}
+.claw-provider-usage-name {
+  font-weight: 600;
+  font-size: 14px;
+  margin-right: 2px;
+}
+.claw-provider-usage-models {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* Overview: tokens used per model */
+.claw-model-usage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 10px;
+}
+.claw-model-usage-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.claw-model-usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.claw-model-usage-name {
+  font-weight: 600;
+  font-size: 13px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claw-model-usage-name--user {
+  font-family: inherit;
+}
+.claw-model-usage-total {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  white-space: nowrap;
+}
+.claw-model-usage-bar {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-surface-2, #f2f3f5);
+  overflow: hidden;
+}
+.claw-model-usage-bar-prompt,
+.claw-model-usage-bar-completion {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+}
+.claw-model-usage-bar-prompt {
+  background: var(--color-primary, #4b6bfb);
+}
+.claw-model-usage-bar-completion {
+  background: var(--color-info, #2f9e6f);
+}
+.claw-model-usage-legend {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-model-usage-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.claw-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+}
+.claw-legend-dot--prompt {
+  background: var(--color-primary, #4b6bfb);
+}
+.claw-legend-dot--completion {
+  background: var(--color-info, #2f9e6f);
+}
 .claw-model-row {
   padding: 4px 0;
 }
@@ -528,26 +714,158 @@ html, body, #root {
   border-radius: 10px;
   overflow: hidden;
 }
-.claw-audit-row {
-  display: grid;
-  grid-template-columns: 110px 1fr 160px;
-  gap: 10px;
-  align-items: center;
-  padding: 8px 12px;
+.claw-audit-item {
   border-bottom: 1px solid var(--color-border-subtle, #eef0f2);
 }
-.claw-audit-row:last-child {
+.claw-audit-item:last-child {
   border-bottom: none;
 }
-.claw-audit-payload {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+/* Clickable row header: chevron · kind · actor · payload preview · time. */
+.claw-audit-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.claw-audit-head:hover {
+  background: var(--color-background-section, #f5f4ef);
+}
+.claw-audit-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-width: 160px;
+  font-size: 13px;
+  color: var(--color-text-secondary, #6b7280);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.claw-audit-time {
-  text-align: right;
+.claw-audit-payload {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-audit-time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+}
+/* Expanded detail: full pretty-printed payload + actor/session meta. */
+.claw-audit-detail {
+  padding: 4px 12px 12px 34px;
+  background: var(--color-background-section, #faf9f5);
+}
+.claw-audit-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-audit-json {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text-primary);
+}
+
+/* ---- Users: minimal bordered list (avatar · name/meta · quiet actions) ---- */
+.claw-user-list {
+  border: 1px solid var(--color-border-subtle, #e4e2dd);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.claw-user-row {
+  border-bottom: 1px solid var(--color-border-subtle, #eef0f2);
+}
+.claw-user-row:last-child {
+  border-bottom: none;
+}
+.claw-user-row.is-suspended {
+  background: var(--color-background-section, #f5f4ef);
+}
+.claw-user-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+}
+.claw-user-avatar {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--color-primary, #4b6bfb) 12%, transparent);
+  color: var(--color-primary, #4b6bfb);
+}
+.claw-user-row.is-suspended .claw-user-avatar {
+  background: var(--color-background-base, #ece9e2);
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-user-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.claw-user-name-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.claw-user-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--color-text-primary);
+}
+.claw-user-meta {
+  font-size: 13px;
+  color: var(--color-text-secondary, #6b7280);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.claw-user-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* Destructive intent stays quiet until you reach for it. */
+.claw-user-delete button:not([disabled]):hover svg {
+  color: var(--color-error, #c0392b);
+}
+/* Edit form drops in aligned under the name column (past the avatar). */
+.claw-user-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 14px 16px 62px;
 }
 
 /* ---- chat composer: model picker ---- */
@@ -629,6 +947,40 @@ html, body, #root {
   font-size: 13px;
   line-height: 1.4;
   color: var(--color-text-secondary, #6b7280);
+}
+
+/* Composer mic (speech-to-text) */
+.claw-mic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-primary, #1a1a1a);
+  cursor: pointer;
+  padding: 0;
+}
+.claw-mic:hover {
+  background: var(--color-surface-2, #f2f3f5);
+}
+.claw-mic:disabled {
+  cursor: default;
+}
+/* Recording: red, pulsing so it's obvious the mic is live. */
+.claw-mic--recording {
+  background: var(--color-error, #dc2626);
+  color: #fff;
+  animation: claw-mic-pulse 1.4s ease-in-out infinite;
+}
+.claw-mic--recording:hover {
+  background: var(--color-error, #dc2626);
+}
+@keyframes claw-mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.45); }
+  50% { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
 }
 
 /* Permission-mode pill (Ask / Auto) + dropdown */
@@ -1066,6 +1418,41 @@ html, body, #root {
   padding-left: 8px;
   font-size: 11px;
   color: var(--color-text-secondary, #9096a0);
+}
+/* "step X of N" pill on a running long-tool row */
+.claw-xcounter {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--color-surface-2, #eef1f5);
+  color: var(--color-text-secondary, #6b7280);
+  white-space: nowrap;
+}
+/* Live sub-step checklist nested under a workflow row */
+.claw-xsubs {
+  margin: 2px 0 4px 10px;
+  padding-left: 12px;
+  border-left: 1px solid var(--color-border-subtle, #e9ebee);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.claw-xsub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.claw-xsub-label {
+  font-size: 12.5px;
+  color: var(--color-text-secondary, #6b7280);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.claw-xsub-label--active {
+  color: var(--color-text-primary, #1a1a1a);
 }
 .claw-xexpand {
   display: flex;

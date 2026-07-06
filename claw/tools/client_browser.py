@@ -19,7 +19,7 @@ from claw.tools.base import Tool
 # implements a subset; the rest need an online extension.
 _CLIENT_ACTIONS = [
     "open", "extract_page", "collect_pages", "fill", "click",
-    "select", "scroll", "wait", "screenshot", "submit",
+    "select", "scroll", "wait", "screenshot", "submit", "close",
 ]
 # client action -> server-side manager action (Playwright fallback).
 _SERVER_MAP = {
@@ -39,7 +39,8 @@ class ClientBrowserTool(Tool):
         "browser extension) so it can act on logged-in sites; falls back to an isolated "
         "server-side browser when no paired browser is online. "
         "Actions: open (URL), extract_page (text+links), collect_pages (paginated), "
-        "click, fill, select, scroll, wait, screenshot, submit. Call open first."
+        "click, fill, select, scroll, wait, screenshot, submit, close (close the tab/session — "
+        "call this once you're done with the browser so it doesn't stay open). Call open first."
     )
     parameters = {
         "type": "object",
@@ -108,6 +109,10 @@ class ClientBrowserTool(Tool):
         return f"The paired browser did not complete the task within {timeout}s."
 
     async def _run_server(self, action: str, kwargs: dict[str, Any]) -> str:
+        if action == "close":
+            # execute() only calls _run_server when server_manager is set.
+            await self.server_manager.close_user(self.user_id)  # type: ignore[union-attr]
+            return "Browser session closed."
         mapped = _SERVER_MAP.get(action)
         if mapped is None:
             return (

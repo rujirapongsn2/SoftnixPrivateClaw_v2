@@ -1,8 +1,11 @@
 """Client browser-extension broker + API."""
 
+import asyncio
 import json
 
 from claw.browser.broker import BrowserBrokerStore
+from claw.config import BrowserSettings
+from claw.tools.client_browser import ClientBrowserTool
 from tests.conftest_app import build_api_app, client
 
 
@@ -159,3 +162,65 @@ async def test_disabled_server_hides_feature(db_factory):
         assert init.status_code == 400
         status = await c.get("/api/browser-extension/status", headers=_bearer(token))
         assert status.json()["client_extension_enabled"] is False
+
+
+# ---- ClientBrowserTool "close" action -------------------------------------
+
+
+class FakeServerManager:
+    def __init__(self):
+        self.closed_users: list[str] = []
+
+    async def close_user(self, user_id: str) -> None:
+        self.closed_users.append(user_id)
+
+    async def execute(self, user_id: str, action: str, args: dict) -> str:
+        return f"{action} ok"
+
+
+async def test_close_falls_back_to_server_browser_when_no_paired_extension(tmp_path):
+    broker = BrowserBrokerStore(tmp_path / "broker")
+    manager = FakeServerManager()
+    tool = ClientBrowserTool(
+        broker=broker,
+        user_id="u1",
+        settings=BrowserSettings(client_extension_enabled=True),
+        server_manager=manager,
+    )
+    out = await tool.execute(action="close")
+    assert out == "Browser session closed."
+    assert manager.closed_users == ["u1"]
+
+
+async def test_close_routes_to_paired_extension_when_online(tmp_path):
+    broker = BrowserBrokerStore(tmp_path / "broker")
+    ticket = broker.create_pairing(user_id="u1")["ticket"]
+    ext = broker.complete_pairing(ticket=ticket)
+    tool = ClientBrowserTool(
+        broker=broker,
+        user_id="u1",
+        settings=BrowserSettings(client_extension_enabled=True, poll_timeout_seconds=2),
+        server_manager=None,
+    )
+
+    async def fake_extension():
+        # Wait for the "close" task to be enqueued, then answer it like the
+        # real extension would (see closeTrackedTab in background.js).
+        for _ in range(20):
+            authed = broker.authenticate_extension(
+                extension_id=ext["extension_id"], extension_token=ext["extension_token"]
+            )
+            task = broker.poll_task(extension=authed)
+            if task is not None:
+                assert task["action"] == "close"
+                broker.submit_result(
+                    task_id=task["task_id"],
+                    extension=authed,
+                    result={"status": "completed", "summary": "Closed the browser tab."},
+                )
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError("extension never saw the close task")
+
+    result, _ = await asyncio.gather(tool.execute(action="close"), fake_extension())
+    assert "Closed the browser tab" in result

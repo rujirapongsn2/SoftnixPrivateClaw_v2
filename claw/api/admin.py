@@ -140,7 +140,11 @@ async def _build_stats(state: AppState) -> dict:
         "consolidations": memory["consolidations"],
         "memory_users": memory["memory_users"],
         "policy_enforcing": not state.policy.monitor_only,
-        "browser_enabled": state.settings.browser.enabled,
+        # Browser automation is "on" via EITHER path: the server-side Playwright
+        # browser, or a paired client Chrome extension. Checking only `.enabled`
+        # under-reports capability for deployments that use just the extension.
+        "browser_enabled": state.settings.browser.enabled
+        or state.settings.browser.client_extension_enabled,
         "telegram_enabled": bool(state.settings.telegram_bot_token),
     }
 
@@ -150,12 +154,39 @@ async def stats(admin: User = Depends(require_admin), state: AppState = Depends(
     return await _build_stats(state)
 
 
+async def _provider_summaries(state: AppState) -> list[dict]:
+    """Configured LLM providers + how many models each exposes, for the
+    overview's "which providers are in use" card. No secrets included."""
+    if state.llm_config is None:
+        return []
+    providers = await state.llm_config.list_providers()
+    all_models = await state.llm_config.list_models()
+    out = []
+    for p in providers:
+        models = [m for m in all_models if m.provider_id == p.id]
+        out.append(
+            {
+                "name": p.name,
+                "enabled": p.enabled,
+                "has_key": bool(p.api_key),
+                "model_count": len(models),
+                "enabled_model_count": sum(1 for m in models if m.enabled),
+            }
+        )
+    return out
+
+
 @router.get("/overview")
 async def overview(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
     return {
         "stats": await _build_stats(state),
         "activity_by_day": await state.messages.activity_by_day(14),
         "activity_by_hour": await state.messages.activity_by_hour(),
+        "usage_by_model": await state.usage.by_model(),
+        "providers": await _provider_summaries(state),
+        "sessions_by_user_7d": await state.sessions.by_user_since(7),
+        "sessions_by_day_7d": await state.sessions.by_day_since(7),
+        "guardrail_hits_by_day": await state.audit.policy_hits_by_day(14),
     }
 
 
@@ -521,6 +552,10 @@ async def audit_logs(
     rows = await state.audit.list(
         kind=kind, user_id=user_id, search=search, before=before_dt, limit=limit
     )
+    # Attach a human-readable actor to each row so admins see WHO, not a raw id.
+    labels = {u.id: (u.display_name or u.email) for u in await state.users.list_all()}
+    for r in rows:
+        r["user_label"] = labels.get(r["user_id"], "System" if r["user_id"] is None else "Unknown user")
     # has_more drives the "Load more" button; next cursor is the last row's time.
     return {
         "events": rows,

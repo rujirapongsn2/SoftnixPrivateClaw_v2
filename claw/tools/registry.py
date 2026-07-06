@@ -36,7 +36,9 @@ class ToolRegistry:
     def get_definitions(self) -> list[dict[str, Any]]:
         return [tool.to_schema() for tool in self._tools.values()]
 
-    async def execute(self, name: str, params: dict[str, Any]) -> str:
+    async def execute(
+        self, name: str, params: dict[str, Any], progress: Callable[[dict], None] | None = None
+    ) -> str:
         tool = self._tools.get(name)
         if tool is None:
             return f"Error: tool '{name}' not found. Available: {', '.join(self._tools)}"
@@ -45,8 +47,13 @@ class ToolRegistry:
             result = f"Error: invalid parameters for '{name}': " + "; ".join(errors) + _RETRY_HINT
             self._audit(name, params, result)
             return result
+        # Only tools that opt in receive the progress callback (kept out of the
+        # normal param set so validation and every other tool are unaffected).
+        call_kwargs = dict(params)
+        if progress is not None and getattr(tool, "wants_progress", False):
+            call_kwargs["progress"] = progress
         try:
-            result = await tool.execute(**params)
+            result = await tool.execute(**call_kwargs)
         except Exception as exc:
             logger.warning("Tool {} failed: {}", name, exc)
             result = f"Error executing {name}: {exc}" + _RETRY_HINT

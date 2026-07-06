@@ -17,6 +17,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { useToast } from "@astryxdesign/core/Toast";
 import {
   ArrowLeft,
+  BarChart3,
   BookOpen,
   Box,
   Check,
@@ -26,9 +27,9 @@ import {
   Copy,
   ExternalLink,
   File as FileIcon,
-  GraduationCap,
+  GitBranch,
   Image as ImageIcon,
-  Lightbulb,
+  Mic,
   PanelRight,
   Paperclip,
   PenLine,
@@ -37,9 +38,11 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Square,
   Terminal,
   ThumbsDown,
   ThumbsUp,
+  Users,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
@@ -63,16 +66,86 @@ const COST_LABEL: Record<string, string> = {
   very_high: "Very high cost",
 };
 
-// Starter chips shown on the empty landing screen, à la claude.ai. Clicking one
-// seeds the composer with an opening phrase and refocuses so the user keeps
-// typing — it does not send on its own.
-const SUGGESTIONS: { label: string; icon: typeof Code; prompt: string }[] = [
-  { label: "Write", icon: PenLine, prompt: "Help me write " },
-  { label: "Learn", icon: GraduationCap, prompt: "Explain " },
-  { label: "Code", icon: Code, prompt: "Help me write code that " },
-  { label: "Analyze", icon: Lightbulb, prompt: "Help me analyze " },
-  { label: "Claw's choice", icon: Sparkles, prompt: "Surprise me — " },
+// Starter chips shown on the empty landing screen, à la claude.ai — tailored to
+// Thai enterprise users (this product's actual audience) rather than generic
+// consumer prompts. Clicking a category opens a panel of concrete, ready-to-use
+// prompts for that category; clicking one seeds the composer with the full
+// prompt and refocuses so the user can edit before sending.
+interface SuggestionCategory {
+  key: string;
+  label: string;
+  icon: typeof Code;
+  prompts: string[];
+}
+
+const SUGGESTIONS: SuggestionCategory[] = [
+  {
+    key: "write",
+    label: "เขียนงาน",
+    icon: PenLine,
+    prompts: [
+      "ร่างอีเมลถึงลูกค้าเพื่อแจ้งความคืบหน้าของโครงการอย่างสุภาพและได้ใจความ",
+      "สรุปรายงานการประชุมจากบันทึกคร่าวๆ ให้เป็นข้อความทางการ",
+      "เขียนประกาศ/บันทึกข้อความแจ้งพนักงานภายในองค์กร",
+      "ร่างคำอธิบายลักษณะงาน (Job Description) สำหรับตำแหน่งที่เปิดรับ",
+      "เขียนโพสต์โซเชียลมีเดียประชาสัมพันธ์กิจกรรมของบริษัท",
+    ],
+  },
+  {
+    key: "analyze",
+    label: "วิเคราะห์ข้อมูล",
+    icon: BarChart3,
+    prompts: [
+      "สรุปผลประกอบการจากตัวเลขที่ฉันมีให้ในรูปแบบเข้าใจง่าย",
+      "วิเคราะห์จุดแข็งจุดอ่อนของคู่แข่งจากข้อมูลที่ฉันให้",
+      "สรุปผลแบบสำรวจความพึงพอใจของลูกค้าหรือพนักงาน",
+      "ช่วยตีความและสรุปข้อมูลจากไฟล์ Excel/CSV ที่แนบมา",
+      "คาดการณ์แนวโน้มยอดขายจากข้อมูลย้อนหลัง",
+    ],
+  },
+  {
+    key: "hr",
+    label: "งานบุคคล",
+    icon: Users,
+    prompts: [
+      "ร่างประกาศรับสมัครงานให้น่าสนใจและตรงกลุ่มเป้าหมาย",
+      "ออกแบบแผนการอบรมปฐมนิเทศพนักงานใหม่ 1 สัปดาห์",
+      "ร่างแบบฟอร์มประเมินผลการปฏิบัติงานประจำปี",
+      "เขียนคำถามสัมภาษณ์งานสำหรับตำแหน่งที่ต้องการ",
+      "สรุปนโยบายหรือระเบียบบริษัทให้พนักงานเข้าใจง่าย",
+    ],
+  },
+  {
+    key: "code",
+    label: "ระบบ/โค้ด",
+    icon: Code,
+    prompts: [
+      "เขียนสคริปต์อัตโนมัติสำหรับงานที่ต้องทำซ้ำๆ ทุกวัน",
+      "ช่วยเขียนสูตร Excel/Google Sheets ที่ซับซ้อน",
+      "เขียนคำสั่ง SQL สำหรับดึงรายงานจากฐานข้อมูล",
+      "ตรวจสอบและช่วยแก้บั๊กในโค้ดที่มีปัญหา",
+      "อธิบายโค้ดที่คนอื่นเขียนไว้ให้เข้าใจง่ายขึ้น",
+    ],
+  },
+  {
+    key: "pick",
+    label: "Claw แนะนำ",
+    icon: Sparkles,
+    prompts: [
+      "แนะนำวิธีจัดลำดับความสำคัญของงานประจำวันให้มีประสิทธิภาพขึ้น",
+      "ช่วยคิดหัวข้อและวาระการประชุมทีมประจำสัปดาห์",
+      "แนะนำวิธีเขียนอีเมลปฏิเสธคำขอของลูกค้าอย่างสุภาพ",
+      "สรุปข่าวธุรกิจและเทคโนโลยีที่น่าสนใจวันนี้",
+      "แนะนำแนวทางลดขั้นตอนการทำงานที่ซ้ำซ้อนในทีม",
+    ],
+  },
 ];
+
+interface SubStep {
+  key: string;
+  label: string;
+  status: "running" | "complete" | "error";
+}
 
 interface ToolCallRow {
   name: string;
@@ -81,6 +154,10 @@ interface ToolCallRow {
   resultPreview?: string;
   startedAt: number;
   duration?: string;
+  // Live sub-steps streamed from a long tool (e.g. workflow), + step counter.
+  substeps?: SubStep[];
+  stepIndex?: number;
+  stepTotal?: number;
 }
 
 type PermissionMode = "ask" | "auto";
@@ -90,6 +167,20 @@ interface ConfirmRow {
   tool: string;
   argsPreview?: string;
   status: "pending" | "approved" | "denied";
+}
+
+// Confirmation-card copy per gated tool (Ask mode). The default covers any
+// future gated tool without a code change.
+const CONFIRM_COPY: Record<string, { pending: string; approved: string }> = {
+  exec: { pending: "Run this command in the sandbox?", approved: "Approved — command ran" },
+  workflow: { pending: "Start this multi-step workflow?", approved: "Approved — workflow started" },
+  spawn: { pending: "Run this delegated task?", approved: "Approved — task started" },
+};
+function confirmTitle(tool: string, status: ConfirmRow["status"]): string {
+  const copy = CONFIRM_COPY[tool] ?? { pending: "Run this action?", approved: "Approved" };
+  if (status === "pending") return copy.pending;
+  if (status === "approved") return copy.approved;
+  return "Declined";
 }
 
 type TranscriptItem =
@@ -106,13 +197,13 @@ const PERMISSION_OPTS: {
   {
     key: "ask",
     label: "Ask",
-    desc: "Ask before running commands in the sandbox",
+    desc: "Ask before sandbox commands and multi-step workflows",
     icon: ShieldCheck,
   },
   {
     key: "auto",
     label: "Auto",
-    desc: "Run sandbox commands automatically without asking",
+    desc: "Run everything automatically without asking",
     icon: ShieldAlert,
   },
 ];
@@ -157,17 +248,26 @@ export function Chat({
   const [plusOpen, setPlusOpen] = useState(false);
   const [plusView, setPlusView] = useState<"root" | "skills" | "connectors">("root");
   const [modelOpen, setModelOpen] = useState(false);
+  // Which starter-suggestion category panel is expanded (null = show the chip
+  // row). Reset whenever the session changes so a stale panel doesn't linger.
+  const [suggestionCategory, setSuggestionCategory] = useState<string | null>(null);
   // Permission mode: "ask" pauses for user approval before unsafe sandbox
   // commands; "auto" runs them without asking. Remembered across sessions.
   const [permission, setPermission] = useState<PermissionMode>(
     () => (localStorage.getItem("claw_permission_mode") === "auto" ? "auto" : "ask"),
   );
   const [permOpen, setPermOpen] = useState(false);
+  // Speech-to-text: whether the backend has Groq Whisper configured, and the
+  // mic's live state (idle → recording → transcribing).
+  const [sttEnabled, setSttEnabled] = useState(false);
+  const [micState, setMicState] = useState<"idle" | "recording" | "transcribing">("idle");
   // Right execution panel: remember the user's explicit show/hide choice; a tool
   // starting auto-opens it transiently without overwriting that saved default.
   const [execOpen, setExecOpen] = useState(() => localStorage.getItem("claw_exec_open") === "1");
   const socketRef = useRef<WebSocket | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const sentCountRef = useRef(0);
   // A message typed on the draft landing, held until the freshly-created
   // session's socket opens, then flushed. Lets the composer create the session
@@ -199,6 +299,7 @@ export function Chat({
     setError("");
     setAttachments([]);
     setFeedback({});
+    setSuggestionCategory(null);
     sentCountRef.current = 0;
     sawCompletionRef.current = false;
     prevRunningRef.current = !!running;
@@ -214,33 +315,16 @@ export function Chat({
     // up when reopening a session the backend says is still processing.
     const handoff = pendingRef.current !== null;
     setBusy(handoff || running === true);
-    if (!handoff) {
-      api
-        .listMessages(sessionId)
-        .then((msgs) => {
-          sentCountRef.current = msgs.length;
-          setItems(
-            msgs.map((m) => ({
-              kind: "message",
-              role: m.role,
-              content: m.content,
-              artifacts: m.meta?.artifacts,
-            })),
-          );
-        })
-        .catch((e) => setError(String(e)));
-    }
-
-    const socket = openChatSocket(sessionId);
-    socketRef.current = socket;
-    socket.onopen = () => {
+    let cancelled = false;
+    let socket: WebSocket | null = null;
+    const onOpen = () => {
       const pending = pendingRef.current;
       if (pending) {
         pendingRef.current = null;
         rawSendRef.current(pending.content, pending.atts);
       }
     };
-    socket.onmessage = (raw) => {
+    const onMessage = (raw: MessageEvent) => {
       const event: AgentEvent = JSON.parse(raw.data);
       switch (event.type) {
         case "turn_started":
@@ -294,9 +378,56 @@ export function Chat({
                       status: (event.is_error ? "error" : "complete") as ToolCallRow["status"],
                       resultPreview: event.result_preview,
                       duration: `${((Date.now() - c.startedAt) / 1000).toFixed(1)}s`,
+                      // Any sub-steps still spinning (e.g. synthesize) are done
+                      // once the whole tool finishes.
+                      substeps: c.substeps?.map((s) =>
+                        s.status === "running"
+                          ? { ...s, status: (event.is_error ? "error" : "complete") as SubStep["status"] }
+                          : s,
+                      ),
                     }
                   : c,
               );
+              const next = [...prev];
+              next[gi] = { kind: "tools", calls };
+              return next;
+            }
+            return prev;
+          });
+          break;
+        case "tool_progress":
+          // Live sub-step of a long tool (workflow): attach a checklist to the
+          // most recent still-running tool call.
+          setItems((prev) => {
+            for (let gi = prev.length - 1; gi >= 0; gi--) {
+              const it = prev[gi];
+              if (it.kind !== "tools") continue;
+              let ri = -1;
+              for (let k = it.calls.length - 1; k >= 0; k--) {
+                if (it.calls[k].status === "running") {
+                  ri = k;
+                  break;
+                }
+              }
+              if (ri === -1) continue;
+              const stageKey =
+                event.stage === "step" ? `step-${event.index}` : event.stage || "stage";
+              const st: SubStep["status"] =
+                event.status === "done" ? "complete" : event.status === "error" ? "error" : "running";
+              const calls = it.calls.map((c, k) => {
+                if (k !== ri) return c;
+                const subs = [...(c.substeps ?? [])];
+                const at = subs.findIndex((s) => s.key === stageKey);
+                const row: SubStep = { key: stageKey, label: event.label ?? "", status: st };
+                if (at >= 0) subs[at] = row;
+                else subs.push(row);
+                return {
+                  ...c,
+                  substeps: subs,
+                  stepIndex: event.index || c.stepIndex,
+                  stepTotal: event.total || c.stepTotal,
+                };
+              });
               const next = [...prev];
               next[gi] = { kind: "tools", calls };
               return next;
@@ -359,19 +490,58 @@ export function Chat({
           break;
       }
     };
-    socket.onclose = (ev) => {
+    const onClose = (ev: CloseEvent) => {
       if (ev.code === 4401) setError("Authentication failed — check your token and email.");
     };
+
+    const openSocket = () => {
+      if (cancelled) return;
+      socket = openChatSocket(sessionId);
+      socketRef.current = socket;
+      socket.onopen = onOpen;
+      socket.onmessage = onMessage;
+      socket.onclose = onClose;
+    };
+
+    if (handoff) {
+      // Fresh draft session — connect immediately to flush the pending message.
+      openSocket();
+    } else {
+      // Seed the persisted transcript FIRST, then open the socket. The bus
+      // replays the current turn's live events on connect; connecting only
+      // after listMessages resolves keeps those replayed tool/confirm/sub-step
+      // cards from being clobbered by a late message-list response — the bug
+      // where returning to a still-processing session dropped the live view.
+      api
+        .listMessages(sessionId)
+        .then((msgs) => {
+          if (cancelled) return;
+          sentCountRef.current = msgs.length;
+          setItems(
+            msgs.map((m) => ({
+              kind: "message",
+              role: m.role,
+              content: m.content,
+              artifacts: m.meta?.artifacts,
+            })),
+          );
+        })
+        .catch((e) => {
+          if (!cancelled) setError(String(e));
+        })
+        .finally(() => openSocket());
+    }
+
     return () => {
-      // Closing a socket that's still mid-handshake (e.g. React StrictMode's
-      // dev-only mount→cleanup→remount) logs a spurious "closed before the
-      // connection is established" browser warning. Deferring the close
-      // until it actually opens avoids that noise; already-open/closed
-      // sockets close immediately as before.
-      if (socket.readyState === WebSocket.CONNECTING) {
-        socket.addEventListener("open", () => socket.close());
+      cancelled = true;
+      const s = socket;
+      if (!s) return;
+      // Closing a socket still mid-handshake (React StrictMode remount) logs a
+      // spurious "closed before the connection is established" warning; defer.
+      if (s.readyState === WebSocket.CONNECTING) {
+        s.addEventListener("open", () => s.close());
       } else {
-        socket.close();
+        s.close();
       }
     };
   }, [sessionId]);
@@ -387,6 +557,11 @@ export function Chat({
       })
       .catch(() => setModels([]));
   }, [initialModel]);
+
+  // Show the composer mic only when the backend has speech-to-text configured.
+  useEffect(() => {
+    api.features().then((f) => setSttEnabled(f.speech_to_text)).catch(() => setSttEnabled(false));
+  }, []);
 
   // Recover a completion missed while navigated away: when the parent's poll
   // flips this session running→done but our socket never delivered a
@@ -455,6 +630,67 @@ export function Chat({
     sel?.selectAllChildren(editable);
     document.execCommand("insertText", false, text);
   }, []);
+
+  // Drop transcribed speech in at the caret (or end), adding a leading space so
+  // it doesn't glue onto existing text; keeps the caret after it for more typing.
+  const appendTranscript = useCallback((text: string) => {
+    const editable = document.querySelector<HTMLElement>(
+      ".astryx-chat-composer-input [contenteditable]",
+    );
+    if (!editable) return;
+    editable.focus();
+    const existing = editable.textContent ?? "";
+    const prefix = existing && !/\s$/.test(existing) ? " " : "";
+    document.execCommand("insertText", false, prefix + text);
+  }, []);
+
+  // Mic toggle: first click starts recording from the mic, second click stops
+  // → uploads the audio to /api/transcribe (Groq Whisper) → inserts the text.
+  const toggleMic = useCallback(async () => {
+    // Stop an in-progress recording; the recorder's onstop handles transcription.
+    if (micState === "recording") {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+    if (micState === "transcribing") return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      toast({ body: "Microphone not available in this browser", type: "error" });
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop()); // release the mic
+        const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        if (blob.size === 0) {
+          setMicState("idle");
+          return;
+        }
+        setMicState("transcribing");
+        try {
+          const ext = (recorder.mimeType || "audio/webm").includes("ogg") ? "ogg" : "webm";
+          const text = await api.transcribe(blob, `speech.${ext}`);
+          if (text) appendTranscript(text);
+          else toast({ body: "Didn't catch that — try again", type: "info" });
+        } catch (e) {
+          toast({ body: `Transcription failed: ${String(e)}`, type: "error" });
+        } finally {
+          setMicState("idle");
+        }
+      };
+      recorder.start();
+      setMicState("recording");
+    } catch {
+      toast({ body: "Microphone permission denied", type: "error" });
+      setMicState("idle");
+    }
+  }, [micState, appendTranscript, toast]);
 
   // Push a message over the (open) socket and reflect it locally. Assumes a
   // connected session — the draft path in `send` routes through here only
@@ -835,6 +1071,34 @@ export function Chat({
                       <Icon icon={ChevronDown} size="xsm" color="secondary" />
                     </button>
                   </Popover>
+                  {sttEnabled && (
+                    <button
+                      type="button"
+                      className={`claw-mic claw-mic--${micState}`}
+                      onClick={() => void toggleMic()}
+                      aria-label={
+                        micState === "recording"
+                          ? "Stop recording"
+                          : micState === "transcribing"
+                            ? "Transcribing…"
+                            : "Dictate with your voice"
+                      }
+                      title={
+                        micState === "recording"
+                          ? "Stop recording"
+                          : micState === "transcribing"
+                            ? "Transcribing…"
+                            : "Dictate with your voice"
+                      }
+                      disabled={micState === "transcribing"}
+                    >
+                      {micState === "transcribing" ? (
+                        <Spinner size="sm" shade="subtle" />
+                      ) : (
+                        <Icon icon={micState === "recording" ? Square : Mic} size="sm" />
+                      )}
+                    </button>
+                  )}
                 </div>
               }
               sendActions={
@@ -893,21 +1157,56 @@ export function Chat({
                 ) : undefined
               }
             />
-            {isEmpty && (
-              <div className="claw-suggestions">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s.label}
-                    type="button"
-                    className="claw-suggestion-chip"
-                    onClick={() => fillComposer(s.prompt)}
-                  >
-                    <Icon icon={s.icon} size="sm" color="secondary" />
-                    <span>{s.label}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            {isEmpty && (() => {
+              const activeCategory = SUGGESTIONS.find((c) => c.key === suggestionCategory);
+              if (!activeCategory) {
+                return (
+                  <div className="claw-suggestions">
+                    {SUGGESTIONS.map((s) => (
+                      <button
+                        key={s.key}
+                        type="button"
+                        className="claw-suggestion-chip"
+                        onClick={() => setSuggestionCategory(s.key)}
+                      >
+                        <Icon icon={s.icon} size="sm" color="secondary" />
+                        <span>{s.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                );
+              }
+              return (
+                <div className="claw-suggestion-panel">
+                  <div className="claw-suggestion-panel-header">
+                    <Icon icon={activeCategory.icon} size="sm" color="secondary" />
+                    <Text weight="semibold">{activeCategory.label}</Text>
+                    <IconButton
+                      label="Close"
+                      icon={<Icon icon="close" size="sm" />}
+                      variant="ghost"
+                      size="sm"
+                      clickAction={() => setSuggestionCategory(null)}
+                    />
+                  </div>
+                  <div className="claw-suggestion-panel-list">
+                    {activeCategory.prompts.map((prompt) => (
+                      <button
+                        key={prompt}
+                        type="button"
+                        className="claw-suggestion-panel-item"
+                        onClick={() => {
+                          fillComposer(prompt);
+                          setSuggestionCategory(null);
+                        }}
+                      >
+                        {prompt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         }
       >
@@ -933,16 +1232,22 @@ export function Chat({
                 <div key={i} className={`claw-confirm claw-confirm--${item.row.status}`}>
                   <div className="claw-confirm-head">
                     <Icon
-                      icon={item.row.status === "pending" ? ShieldAlert : item.row.tool === "exec" ? Terminal : ShieldCheck}
+                      icon={
+                        item.row.status === "pending"
+                          ? ShieldAlert
+                          : item.row.status === "approved"
+                            ? item.row.tool === "exec"
+                              ? Terminal
+                              : item.row.tool === "workflow" || item.row.tool === "spawn"
+                                ? GitBranch
+                                : ShieldCheck
+                            : ShieldCheck
+                      }
                       size="sm"
                       color={item.row.status === "denied" ? "error" : item.row.status === "approved" ? "success" : "secondary"}
                     />
                     <Text size="sm" weight="semibold">
-                      {item.row.status === "pending"
-                        ? "Run this command in the sandbox?"
-                        : item.row.status === "approved"
-                          ? "Approved — command ran"
-                          : "Declined"}
+                      {confirmTitle(item.row.tool, item.row.status)}
                     </Text>
                   </div>
                   {item.row.argsPreview && (

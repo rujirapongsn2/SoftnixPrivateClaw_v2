@@ -154,11 +154,24 @@ class ClawAgent:
             if not isinstance(value, str) or not value:
                 continue
             decision = self.policy.enforce(value, scope="tool_args")
+            if decision.matched_rules:
+                self._log_policy_hit("tool_args", decision, tool=tool_name)
             if decision.blocked:
                 return args, decision.message
             if decision.masked:
                 guarded[key] = decision.text
         return guarded, None
+
+    def _log_policy_hit(self, scope: str, decision, **extra) -> None:
+        """Fire-and-forget audit trail for a guardrail match, for the admin
+        overview's "guardrail hits over time" chart. Mirrors `_audit_tool`'s
+        pattern since this is called from sync code inside the async loop."""
+        payload = {"scope": scope, "action": decision.action, "rules": decision.matched_rules, **extra}
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._audit_store.log("policy", payload, user_id=self.user_id))
 
     def _audit_tool(self, name: str, params: dict, result: str) -> None:
         payload = {"tool": name, "params_preview": str(params)[:500], "result_preview": result[:500]}
@@ -555,6 +568,13 @@ class AgentRuntime:
             # Enforce policy on the model's final output before it leaves the system.
             if self.policy is not None and final:
                 out_decision = self.policy.enforce(final, scope="output")
+                if out_decision.matched_rules:
+                    await self.audit.log(
+                        "policy",
+                        {"scope": "output", "action": out_decision.action, "rules": out_decision.matched_rules},
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
                 if out_decision.blocked:
                     final = out_decision.message or "Response withheld by the control policy."
                 elif out_decision.masked:

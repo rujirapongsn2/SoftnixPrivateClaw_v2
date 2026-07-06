@@ -18,6 +18,7 @@ from claw.core.events import (
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ToolFinished,
+    ToolProgress,
     ToolStarted,
 )
 from claw.providers.base import ChatResult, LLMProvider, TextDelta, ThinkingDelta
@@ -32,9 +33,13 @@ ArgGuard = Callable[[str, dict[str, Any]], tuple[dict[str, Any], str | None]]
 # Ask-mode confirmation gate: (turn_id, tool_name, args_preview) -> approved.
 ConfirmFn = Callable[[str, str, str], Awaitable[bool]]
 
-# Tools that touch the sandbox / run arbitrary code — gated behind a user
-# confirmation when the session's permission mode is "ask".
-UNSAFE_TOOLS = {"exec"}
+# Tools gated behind a user confirmation when the session's permission mode is
+# "ask": ones that touch the sandbox / run arbitrary code (`exec`), and ones
+# that launch autonomous multi-step agents which can themselves run those tools
+# with no further prompt (`workflow`, `spawn`) — so the gate can't be bypassed
+# by delegating. `workflow` especially is long-running and expensive, so
+# confirming before it starts is what the user expects.
+UNSAFE_TOOLS = {"exec", "workflow", "spawn"}
 
 _PREVIEW_CHARS = 200
 
@@ -199,7 +204,21 @@ class AgentLoop:
                 if block_message is not None:
                     tool_result = f"Error: {block_message}"
                 else:
-                    tool_result = await self.tools.execute(tc.name, args)
+                    # Sub-step progress for long tools (workflow) → Execution panel.
+                    def _progress(payload: dict, _name: str = tc.name) -> None:
+                        emit(
+                            ToolProgress(
+                                turn_id=turn_id,
+                                tool=_name,
+                                label=str(payload.get("label") or ""),
+                                stage=str(payload.get("stage") or ""),
+                                index=int(payload.get("index") or 0),
+                                total=int(payload.get("total") or 0),
+                                status=str(payload.get("status") or "running"),
+                            )
+                        )
+
+                    tool_result = await self.tools.execute(tc.name, args, progress=_progress)
                 # Track files the agent created/edited (successful write_file /
                 # edit_file) so the UI can offer them as artifacts.
                 if (

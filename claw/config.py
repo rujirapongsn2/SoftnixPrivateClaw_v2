@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -120,6 +120,15 @@ class Settings(BaseSettings):
     turns_per_minute: int = 60
     # Optional Telegram bot token; the channel starts only when set.
     telegram_bot_token: str = ""
+
+    # Speech-to-text (Groq Whisper, OpenAI-compatible /audio/transcriptions).
+    # Env names are un-prefixed (QROQ_*) by request, so read via explicit aliases
+    # rather than the CLAW_ prefix. STT is enabled when the key is set.
+    speech_api_key: str = Field(default="", validation_alias="QROQ_KEY")
+    speech_api_base: str = Field(
+        default="https://api.groq.com/openai/v1", validation_alias="QROQ_URL"
+    )
+    speech_model: str = Field(default="whisper-large-v3", validation_alias="QROQ_MODEL")
 
     llm: LLMSettings = LLMSettings()
     sandbox: SandboxSettings = SandboxSettings()

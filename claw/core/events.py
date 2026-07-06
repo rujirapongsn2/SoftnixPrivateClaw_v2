@@ -54,6 +54,22 @@ class ToolFinished(AgentEvent):
 
 
 @dataclass(slots=True)
+class ToolProgress(AgentEvent):
+    """Sub-step progress emitted from inside a long-running tool (e.g. the
+    workflow's plan → step 1..N → synthesize stages), so the Execution panel can
+    show a live checklist instead of one opaque spinning node."""
+
+    turn_id: str
+    tool: str
+    label: str
+    stage: str = ""  # plan | step | synthesize
+    index: int = 0  # 1-based step number (0 when not a numbered step)
+    total: int = 0
+    status: str = "running"  # running | done | error
+    type: str = field(default="tool_progress", init=False)
+
+
+@dataclass(slots=True)
 class ToolConfirmRequest(AgentEvent):
     """Ask-mode: the agent wants to run a potentially unsafe tool and is waiting
     for the user to approve or decline. The client replies over the WS with

@@ -11,7 +11,10 @@
     {
       "name": "claw-api",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "uvicorn", "claw.main:create_app", "--factory", "--port", "8700"],
+      "runtimeArgs": [
+        "run", "uvicorn", "claw.main:create_app", "--factory", "--port", "8700",
+        "--reload", "--reload-dir", "claw"
+      ],
       "port": 8700,
       "autoPort": true
     }

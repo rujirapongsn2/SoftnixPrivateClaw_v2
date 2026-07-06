@@ -18,7 +18,9 @@ from claw.core.subagent import SubagentManager
 from claw.providers.base import LLMProvider, ProviderError
 from claw.workflows.models import WorkflowPlan, WorkflowResult, WorkflowStep
 
-ProgressCb = Callable[[str], Awaitable[None]] | None
+# Structured progress: receives a dict {stage, label, index, total, status} so
+# the UI can render a live checklist. (stage: plan | step | synthesize)
+ProgressCb = Callable[[dict], Awaitable[None]] | None
 
 _PLAN_TOOL = [
     {
@@ -75,6 +77,13 @@ class WorkflowService:
         steps: list[WorkflowStep] = []
         if result.has_tool_calls:
             raw = result.tool_calls[0].arguments.get("steps") or []
+            # Models don't always honor the array schema: `steps` can come back as
+            # a single step object, or an object keyed by index. Coerce to a list
+            # so a stray shape degrades to a valid plan instead of crashing.
+            if isinstance(raw, dict):
+                raw = [raw] if raw.get("instruction") else list(raw.values())
+            if not isinstance(raw, list):
+                raw = []
             for item in raw[:_MAX_STEPS]:
                 if isinstance(item, dict) and item.get("instruction"):
                     steps.append(
@@ -90,10 +99,13 @@ class WorkflowService:
 
     async def run(self, plan: WorkflowPlan, on_progress: ProgressCb = None) -> WorkflowResult:
         completed: list[str] = []
+        total = len(plan.steps)
         for i, step in enumerate(plan.steps, start=1):
             step.status = "running"
             if on_progress:
-                await on_progress(f"Step {i}/{len(plan.steps)}: {step.title}")
+                await on_progress(
+                    {"stage": "step", "label": step.title, "index": i, "total": total, "status": "running"}
+                )
             context = "\n\n".join(completed) if completed else ""
             try:
                 step.output = await self.subagents.run(step.instruction, context=context)
@@ -102,8 +114,20 @@ class WorkflowService:
                 step.status = "error"
                 step.output = f"error: {exc}"
                 logger.warning("Workflow step {} failed: {}", step.title, exc)
+            if on_progress:
+                await on_progress(
+                    {
+                        "stage": "step",
+                        "label": step.title,
+                        "index": i,
+                        "total": total,
+                        "status": "done" if step.status == "done" else "error",
+                    }
+                )
             completed.append(f"## {step.title}\n{step.output}")
 
+        if on_progress and total > 1:
+            await on_progress({"stage": "synthesize", "label": "Synthesizing answer", "status": "running"})
         final = await self._synthesize(plan, completed)
         status = "failed" if any(s.status == "error" for s in plan.steps) else "completed"
         return WorkflowResult(plan=plan, final_output=final, status=status)
@@ -134,5 +158,9 @@ class WorkflowService:
     async def run_request(self, request: str, on_progress: ProgressCb = None) -> WorkflowResult:
         plan = await self.plan(request)
         if on_progress:
-            await on_progress(f"Planned {len(plan.steps)} step(s)")
+            n = len(plan.steps)
+            await on_progress(
+                {"stage": "plan", "label": f"Planned {n} step{'' if n == 1 else 's'}",
+                 "index": 0, "total": n, "status": "done"}
+            )
         return await self.run(plan, on_progress=on_progress)

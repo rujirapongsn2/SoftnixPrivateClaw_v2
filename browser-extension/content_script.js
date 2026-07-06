@@ -196,6 +196,23 @@ async function visiblePageScan() {
   await sleep(350);
 }
 
+// React (and similar frameworks) install an instance-level `value` setter
+// override to intercept plain assignment, so `el.value = x` updates the DOM
+// but never reaches the framework's own state — the field visually shows the
+// new text yet the app still submits the old value. Calling the native
+// prototype setter directly bypasses that override; dispatching `input`
+// afterwards is what the framework's own listener is bound to, so its state
+// picks up the change correctly either way.
+function setNativeValue(el, value) {
+  const proto = Object.getPrototypeOf(el);
+  const descriptor = proto && Object.getOwnPropertyDescriptor(proto, "value");
+  if (descriptor && descriptor.set) {
+    descriptor.set.call(el, value);
+  } else {
+    el.value = value;
+  }
+}
+
 function optionValueFor(select, value) {
   const raw = String(value || "");
   const wanted = raw.trim().toLowerCase();
@@ -212,22 +229,22 @@ function setValue(el, value) {
   const type = String(el.getAttribute("type") || "").toLowerCase();
   if (type === "checkbox") {
     const normalized = String(value).trim().toLowerCase();
-    el.checked = ["1", "true", "yes", "y", "on", "checked"].includes(normalized);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+    const shouldCheck = ["1", "true", "yes", "y", "on", "checked"].includes(normalized);
+    // A real click — not a `checked` assignment — is what frameworks like React
+    // actually listen for; see setNativeValue's comment for why a direct
+    // property write silently fails to update framework-managed state.
+    if (Boolean(el.checked) !== shouldCheck) el.click();
     return;
   }
   if (type === "radio") {
     const normalized = String(value).trim().toLowerCase();
     const shouldCheck = !normalized || ["1", "true", "yes", "y", "on", "checked"].includes(normalized)
       || String(el.value || "").trim().toLowerCase() === normalized;
-    if (shouldCheck) el.checked = true;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+    if (shouldCheck && !el.checked) el.click();
     return;
   }
   if (tag === "select") {
-    el.value = optionValueFor(el, value);
+    setNativeValue(el, optionValueFor(el, value));
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
     return;
@@ -238,7 +255,7 @@ function setValue(el, value) {
     el.dispatchEvent(new Event("change", { bubbles: true }));
     return;
   }
-  el.value = value;
+  setNativeValue(el, value);
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
 }

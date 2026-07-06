@@ -207,6 +207,57 @@ class SessionStore:
                 session.model = model
                 await db.commit()
 
+    async def by_user_since(self, days: int = 7, limit: int = 20) -> list[dict[str, Any]]:
+        """Sessions created in the last `days` days, grouped by user — highest first.
+
+        Feeds the admin overview's "sessions by user" breakdown.
+        """
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(
+                        ChatSession.user_id,
+                        User.email,
+                        User.display_name,
+                        func.count(),
+                    )
+                    .join(User, User.id == ChatSession.user_id)
+                    .where(ChatSession.created_at >= since)
+                    .group_by(ChatSession.user_id, User.email, User.display_name)
+                    .order_by(func.count().desc())
+                    .limit(limit)
+                )
+            ).all()
+        return [
+            {
+                "user_id": user_id,
+                "label": display_name or email,
+                "sessions": count,
+            }
+            for user_id, email, display_name, count in rows
+        ]
+
+    async def by_day_since(self, days: int = 7) -> list[dict[str, Any]]:
+        """Sessions created per calendar day for the last `days` days, zero-filled."""
+        since = datetime.now(timezone.utc) - timedelta(days=days - 1)
+        bucket = func.date_trunc("day", ChatSession.created_at)
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(bucket.label("day"), func.count())
+                    .where(ChatSession.created_at >= since)
+                    .group_by(bucket)
+                )
+            ).all()
+        counts = {r[0].date().isoformat(): r[1] for r in rows if r[0] is not None}
+        today = datetime.now(timezone.utc).date()
+        series = []
+        for i in range(days - 1, -1, -1):
+            d = (today - timedelta(days=i)).isoformat()
+            series.append({"label": d, "count": counts.get(d, 0)})
+        return series
+
 
 class MemoryStore:
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
@@ -645,6 +696,38 @@ class UsageStore:
             ).one()
         return {"prompt_tokens": row[0], "completion_tokens": row[1], "turns": row[2]}
 
+    async def by_model(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Token usage grouped by model, highest total tokens first — feeds the
+        admin overview's "tokens per model" breakdown."""
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(
+                        UsageRecord.model,
+                        func.coalesce(func.sum(UsageRecord.prompt_tokens), 0),
+                        func.coalesce(func.sum(UsageRecord.completion_tokens), 0),
+                        func.count(),
+                    )
+                    .group_by(UsageRecord.model)
+                    .order_by(
+                        (
+                            func.coalesce(func.sum(UsageRecord.prompt_tokens), 0)
+                            + func.coalesce(func.sum(UsageRecord.completion_tokens), 0)
+                        ).desc()
+                    )
+                    .limit(limit)
+                )
+            ).all()
+        return [
+            {
+                "model": model or "(unknown)",
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "turns": turns,
+            }
+            for model, prompt, completion, turns in rows
+        ]
+
 
 class FeedbackStore:
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
@@ -743,6 +826,27 @@ class AuditStore:
         async with self.factory() as db:
             rows = await db.execute(select(AuditEvent.kind).distinct())
             return sorted(k for (k,) in rows.all() if k)
+
+    async def policy_hits_by_day(self, days: int = 14) -> list[dict[str, Any]]:
+        """Guardrail-match counts (kind="policy" audit events, any scope) per
+        calendar day for the last `days` days — dense/zero-filled like
+        MessageStore.activity_by_day, for the admin overview chart."""
+        since = datetime.now(timezone.utc) - timedelta(days=days - 1)
+        bucket = func.date_trunc("day", AuditEvent.created_at)
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(bucket.label("day"), func.count())
+                    .where(AuditEvent.kind == "policy", AuditEvent.created_at >= since)
+                    .group_by(bucket)
+                )
+            ).all()
+        counts = {r[0].date().isoformat(): r[1] for r in rows if r[0] is not None}
+        today = datetime.now(timezone.utc).date()
+        return [
+            {"label": (d := (today - timedelta(days=i)).isoformat()), "count": counts.get(d, 0)}
+            for i in range(days - 1, -1, -1)
+        ]
 
 
 class LLMConfigStore:

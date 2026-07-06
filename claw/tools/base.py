@@ -21,6 +21,9 @@ class Tool(ABC):
     name: str
     description: str
     parameters: dict[str, Any]
+    # When True, the loop passes a `progress` callback into execute() so a
+    # long-running tool can stream sub-step updates to the Execution panel.
+    wants_progress: bool = False
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str:
