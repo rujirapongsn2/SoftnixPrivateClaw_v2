@@ -1,5 +1,6 @@
 """LiteLLM-backed provider with true token streaming and prompt caching."""
 
+import re
 import secrets
 import string
 from collections.abc import AsyncIterator
@@ -22,9 +23,96 @@ from claw.providers.registry import apply_model_overrides, supports_prompt_cachi
 _ALNUM = string.ascii_letters + string.digits
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
 
+# ---- text tool-call fallback -------------------------------------------------
+# Some open models (gemma, some Qwen/Hermes builds) don't populate the OpenAI
+# `tool_calls` field even when tools are advertised — they emit the call as a
+# JSON blob in the text content (optionally fenced or wrapped in <tool_call>
+# tags). Without normalization that JSON leaks to the user as the final answer
+# and the tool never runs. We detect and convert those below.
+_FENCE_OPEN_RE = re.compile(r"^```[a-zA-Z_]*\s*")
+_FENCE_CLOSE_RE = re.compile(r"\s*```$")
+_TOOLCALL_TAG_RE = re.compile(r"</?tool_call>", re.IGNORECASE)
+# Markers that betray a text-encoded tool call within a leading JSON-ish blob.
+_TOOL_MARKERS = ('"tool_calls"', '"name"', '"function"', '"arguments"', '"parameters"')
+# How many chars to inspect before deciding a leading structured blob is a real
+# answer (e.g. a JSON sample or fenced code) rather than a tool call.
+_DECISION_WINDOW = 200
+
 
 def _short_id() -> str:
     return "".join(secrets.choice(_ALNUM) for _ in range(9))
+
+
+def _tool_names(tools: list[dict[str, Any]] | None) -> set[str]:
+    names: set[str] = set()
+    for t in tools or []:
+        fn = t.get("function") if isinstance(t, dict) else None
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            names.add(fn["name"])
+    return names
+
+
+def _hold_decision(prefix: str) -> bool | None:
+    """Should streaming of `prefix` be withheld pending a tool-call check?
+
+    Returns True (withhold — looks like a text tool call), False (stream — it's
+    a normal answer), or None (undecided — need more tokens). Only leading
+    structured blobs are ever held; prose streams immediately.
+    """
+    s = prefix.lstrip()
+    if not s:
+        return None
+    low = s[:_DECISION_WINDOW].lower()
+    structured = s[0] in "{[" or low.startswith("<tool_call") or s.startswith("```")
+    if not structured:
+        return False
+    if any(m in low for m in _TOOL_MARKERS) or "tool_call" in low or "tool_code" in low:
+        return True
+    if len(s) >= _DECISION_WINDOW:
+        return False  # structured but no tool markers in the window → real content
+    return None
+
+
+def _extract_text_tool_calls(content: str, valid_names: set[str]) -> list[ToolCall]:
+    """Parse tool calls a non-native model encoded as text. [] if none valid.
+
+    Guarded by `valid_names`: a call is only accepted when its name matches a
+    real tool, so a legitimate JSON answer is never mistaken for a tool call.
+    """
+    if not content or not valid_names:
+        return []
+    text = _TOOLCALL_TAG_RE.sub("", content.strip()).strip()
+    if text.startswith("```"):
+        text = _FENCE_CLOSE_RE.sub("", _FENCE_OPEN_RE.sub("", text)).strip()
+    if not text or text[0] not in "{[":
+        return []
+    try:
+        parsed = json_repair.loads(text)
+    except Exception:
+        return []
+    if isinstance(parsed, dict):
+        raw = parsed["tool_calls"] if isinstance(parsed.get("tool_calls"), list) else [parsed]
+    elif isinstance(parsed, list):
+        raw = parsed
+    else:
+        return []
+    calls: list[ToolCall] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        fn = item.get("function") if isinstance(item.get("function"), dict) else item
+        name = fn.get("name") or item.get("name")
+        if not isinstance(name, str) or name not in valid_names:
+            continue
+        args = fn.get("arguments")
+        if args is None:
+            args = fn.get("parameters")
+        if isinstance(args, str):
+            args = json_repair.loads(args) if args.strip() else {}
+        if not isinstance(args, dict):
+            args = {}
+        calls.append(ToolCall(id=_short_id(), name=name, arguments=args))
+    return calls
 
 
 class LiteLLMProvider(LLMProvider):
@@ -135,7 +223,13 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
+        valid_names = _tool_names(tools)
         content_parts: list[str] = []
+        # Streaming gate for the text tool-call fallback: while a leading blob
+        # might be a text-encoded tool call we withhold deltas (`hold`), only
+        # flushing what's past `emit_len` once we're sure it's real content.
+        hold: bool | None = None if valid_names else False
+        emit_len = 0
         # index -> {"id": str, "name": str, "arguments": str}
         pending_tool_calls: dict[int, dict[str, str]] = {}
         finish_reason = "stop"
@@ -166,7 +260,12 @@ class LiteLLMProvider(LLMProvider):
                 text = getattr(delta, "content", None)
                 if text:
                     content_parts.append(text)
-                    yield TextDelta(text=text)
+                    full = "".join(content_parts)
+                    if hold is None:
+                        hold = _hold_decision(full)
+                    if hold is False and len(full) > emit_len:
+                        yield TextDelta(text=full[emit_len:])
+                        emit_len = len(full)
                 for tc in getattr(delta, "tool_calls", None) or []:
                     index = getattr(tc, "index", 0) or 0
                     slot = pending_tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
@@ -192,8 +291,24 @@ class LiteLLMProvider(LLMProvider):
                 args = {}
             tool_calls.append(ToolCall(id=slot["id"] or _short_id(), name=slot["name"], arguments=args))
 
+        full_content = "".join(content_parts)
+        content: str | None = full_content or None
+        # No native tool calls but a model may have encoded them as text — try
+        # to recover so the tool actually runs instead of leaking JSON to the UI.
+        if not tool_calls:
+            text_calls = _extract_text_tool_calls(full_content, valid_names)
+            if text_calls:
+                logger.info("Recovered {} text-encoded tool call(s) from {}", len(text_calls), model)
+                tool_calls = text_calls
+                content = None  # consumed the JSON; it was withheld from streaming
+                finish_reason = "tool_calls"
+        # Flush any withheld text that turned out to be a genuine answer (or that
+        # accompanies native tool calls) so the UI isn't left missing content.
+        if content is not None and len(full_content) > emit_len:
+            yield TextDelta(text=full_content[emit_len:])
+
         yield ChatResult(
-            content="".join(content_parts) or None,
+            content=content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,

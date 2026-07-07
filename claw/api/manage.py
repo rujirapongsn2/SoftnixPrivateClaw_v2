@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from claw.api import llm_shared as llm
 from claw.api.deps import AppState, current_user, get_state, require_admin
 from claw.core.scheduler import compute_next_run
 from claw.db.models import User
@@ -341,7 +342,7 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
     Falls back to the env-configured model when no providers are set up, so chat
     keeps working out of the box.
     """
-    models = await state.llm_config.enabled_models()
+    models = await state.llm_config.enabled_models(user.id)
     default = await state.llm_config.default_model()
     if not models:
         env_model = state.settings.llm.model
@@ -361,6 +362,69 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
     if not default:
         default = models[0]["model_id"]
     return {"models": models, "default": default}
+
+
+# ---------------------------------------------------------------- my LLM providers (BYOK)
+# Users manage their own private providers/models here. These call the SAME shared
+# handlers as the admin Control Plane routes (claw/api/admin.py), scoped to the
+# caller via owner_id=user.id — so provider management stays single-sourced. There
+# is no "set default" on this scope: the auto-selected default is admin-global only.
+
+
+@router.get("/my/llm")
+async def my_list_llm(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    return await llm.list_llm(state, owner_id=user.id)
+
+
+@router.post("/my/providers")
+async def my_create_provider(
+    body: llm.ProviderBody, user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> dict:
+    return await llm.create_provider(state, body, owner_id=user.id)
+
+
+@router.patch("/my/providers/{provider_id}")
+async def my_update_provider(
+    provider_id: str,
+    body: llm.ProviderPatch,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    return await llm.update_provider(state, provider_id, body, owner_id=user.id)
+
+
+@router.delete("/my/providers/{provider_id}")
+async def my_delete_provider(
+    provider_id: str, user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> dict:
+    return await llm.delete_provider(state, provider_id, owner_id=user.id)
+
+
+@router.post("/my/providers/{provider_id}/models")
+async def my_create_model(
+    provider_id: str,
+    body: llm.ModelBody,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    return await llm.create_model(state, provider_id, body, owner_id=user.id)
+
+
+@router.patch("/my/models/{model_pk}")
+async def my_update_model(
+    model_pk: str,
+    body: llm.ModelPatch,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    return await llm.update_model(state, model_pk, body, owner_id=user.id)
+
+
+@router.delete("/my/models/{model_pk}")
+async def my_delete_model(
+    model_pk: str, user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> dict:
+    return await llm.delete_model(state, model_pk, owner_id=user.id)
 
 
 # ---------------------------------------------------------------- feedback (self-learning signal)

@@ -5,6 +5,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from claw.api import llm_shared as llm
 from claw.api.deps import AppState, get_state, require_admin
 from claw.auth import oidc
 from claw.auth.passwords import hash_password
@@ -31,6 +32,8 @@ class CreateUserBody(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     display_name: str = ""
     is_admin: bool = False
+    # Organizational group (optional). Empty/None = ungrouped.
+    group_id: str | None = None
 
 
 class UpdateUserBody(BaseModel):
@@ -39,9 +42,12 @@ class UpdateUserBody(BaseModel):
     display_name: str | None = Field(default=None, max_length=255)
     # Admin-set new password (reset). Validated only when present.
     password: str | None = Field(default=None, min_length=8, max_length=128)
+    # Group assignment. Sentinel "__unset__" (the default) means "leave as-is";
+    # None/"" means "move to ungrouped"; a real id moves to that group.
+    group_id: str | None = "__unset__"
 
 
-def _user_row(user: User, sessions: int) -> dict:
+def _user_row(user: User, sessions: int, group_names: dict[str, str]) -> dict:
     return {
         "id": user.id,
         "email": user.email,
@@ -50,15 +56,32 @@ def _user_row(user: User, sessions: int) -> dict:
         "is_active": user.is_active,
         "role": user.role,
         "sessions": sessions,
+        "group_id": user.group_id,
+        "group_name": group_names.get(user.group_id) if user.group_id else None,
         "created_at": user.created_at.isoformat(),
     }
+
+
+async def _group_names(state: AppState) -> dict[str, str]:
+    return {g.id: g.name for g in await state.groups.list()}
+
+
+async def _valid_group_id(state: AppState, group_id: str | None) -> str | None:
+    """Normalize an incoming group id: blank → None; otherwise 404 if unknown."""
+    if not group_id:
+        return None
+    names = await _group_names(state)
+    if group_id not in names:
+        raise HTTPException(status_code=404, detail="group not found")
+    return group_id
 
 
 @router.get("/users")
 async def list_users(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> list:
     users = await state.users.list_all()
     counts = await state.sessions.count_by_user()
-    return [_user_row(u, counts.get(u.id, 0)) for u in users]
+    names = await _group_names(state)
+    return [_user_row(u, counts.get(u.id, 0), names) for u in users]
 
 
 @router.post("/users")
@@ -67,14 +90,16 @@ async def create_user(
 ) -> dict:
     if await state.users.get_by_email(body.email) is not None:
         raise HTTPException(status_code=409, detail="email already registered")
+    group_id = await _valid_group_id(state, body.group_id)
     user = await state.users.create(
         email=body.email,
         password_hash=hash_password(body.password),
         display_name=body.display_name,
         is_admin=body.is_admin,
         role="admin" if body.is_admin else "user",
+        group_id=group_id,
     )
-    return _user_row(user, 0)
+    return _user_row(user, 0, await _group_names(state))
 
 
 @router.patch("/users/{user_id}")
@@ -101,8 +126,13 @@ async def update_user(
             display_name=body.display_name,
             password_hash=hash_password(body.password) if body.password else None,
         )
+    # "__unset__" means the caller didn't touch the group; anything else assigns.
+    if body.group_id != "__unset__":
+        updated = await state.users.assign_group(
+            user_id, await _valid_group_id(state, body.group_id)
+        )
     counts = await state.sessions.count_by_user()
-    return _user_row(updated, counts.get(updated.id, 0))
+    return _user_row(updated, counts.get(updated.id, 0), await _group_names(state))
 
 
 @router.delete("/users/{user_id}")
@@ -119,6 +149,66 @@ async def delete_user(
         raise HTTPException(status_code=400, detail="cannot delete the last administrator")
     await state.users.delete(user_id)
     return {"deleted": True}
+
+
+# ---------------------------------------------------------------- user groups
+# Groups are organizational only — they carry no policy/permission meaning.
+
+class GroupBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class DefaultGroupBody(BaseModel):
+    # The group new self-registered users join. None clears the default.
+    group_id: str | None = None
+
+
+def _group_row(g, counts: dict[str, int]) -> dict:
+    return {
+        "id": g.id,
+        "name": g.name,
+        "is_default": g.is_default,
+        "user_count": counts.get(g.id, 0),
+    }
+
+
+@router.get("/groups")
+async def list_groups(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> list:
+    groups = await state.groups.list()
+    counts = await state.groups.counts_by_group()
+    return [_group_row(g, counts) for g in groups]
+
+
+@router.post("/groups")
+async def create_group(
+    body: GroupBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    if await state.groups.get_by_name(body.name.strip()) is not None:
+        raise HTTPException(status_code=409, detail="a group with this name already exists")
+    g = await state.groups.create(body.name.strip())
+    return _group_row(g, {})
+
+
+@router.delete("/groups/{group_id}")
+async def delete_group(
+    group_id: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    ok = await state.groups.delete(group_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="group not found")
+    return {"deleted": True}
+
+
+@router.put("/groups/default")
+async def set_default_group(
+    body: DefaultGroupBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    if body.group_id:
+        valid_ids = {g.id for g in await state.groups.list()}
+        if body.group_id not in valid_ids:
+            raise HTTPException(status_code=404, detail="group not found")
+    await state.groups.set_default(body.group_id)
+    return {"default_group_id": body.group_id}
 
 
 async def _build_stats(state: AppState) -> dict:
@@ -192,143 +282,67 @@ async def overview(admin: User = Depends(require_admin), state: AppState = Depen
 
 
 # ---------------------------------------------------------------- LLM providers/models
-
-class ProviderBody(BaseModel):
-    name: str = Field(min_length=1, max_length=64)
-    api_key: str = ""
-    api_base: str = ""
-    enabled: bool = True
-
-
-class ProviderPatch(BaseModel):
-    name: str | None = None
-    api_key: str | None = None  # empty/None keeps the existing key
-    api_base: str | None = None
-    enabled: bool | None = None
-
-
-_COST_RE = r"^(low|medium|high|very_high)$"
-
-
-class ModelBody(BaseModel):
-    model_id: str = Field(min_length=1, max_length=128)
-    label: str = ""
-    enabled: bool = True
-    cost: str = Field(default="medium", pattern=_COST_RE)
-    description: str = ""
-
-
-class ModelPatch(BaseModel):
-    model_id: str | None = Field(default=None, min_length=1, max_length=128)
-    label: str | None = None
-    enabled: bool | None = None
-    is_default: bool | None = None
-    cost: str | None = Field(default=None, pattern=_COST_RE)
-    description: str | None = None
-
-
-def _provider_row(p, models: list) -> dict:
-    return {
-        "id": p.id,
-        "name": p.name,
-        "api_base": p.api_base,
-        "has_key": bool(p.api_key),
-        "enabled": p.enabled,
-        "models": [_model_row(m) for m in models if m.provider_id == p.id],
-    }
-
-
-def _model_row(m) -> dict:
-    return {
-        "id": m.id,
-        "model_id": m.model_id,
-        "label": m.label or m.model_id,
-        "enabled": m.enabled,
-        "is_default": m.is_default,
-        "cost": m.cost or "medium",
-        "description": m.description or "",
-    }
+# These admin routes manage admin-global providers (owner_id=None). The identical
+# per-user "My Models" (BYOK) routes live in claw/api/manage.py and call the same
+# shared handlers with the caller's id — see claw/api/llm_shared.py.
 
 
 @router.get("/llm")
 async def list_llm(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
-    providers = await state.llm_config.list_providers()
-    models = await state.llm_config.list_models()
-    return {"providers": [_provider_row(p, models) for p in providers]}
+    return await llm.list_llm(state, owner_id=None)
 
 
 @router.post("/providers")
 async def create_provider(
-    body: ProviderBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+    body: llm.ProviderBody,
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
 ) -> dict:
-    if await state.llm_config.get_by_name(body.name) is not None:
-        raise HTTPException(status_code=409, detail="a provider with this name already exists")
-    p = await state.llm_config.create_provider(body.name, body.api_key, body.api_base, body.enabled)
-    return _provider_row(p, [])
+    return await llm.create_provider(state, body, owner_id=None)
 
 
 @router.patch("/providers/{provider_id}")
 async def update_provider(
     provider_id: str,
-    body: ProviderPatch,
+    body: llm.ProviderPatch,
     admin: User = Depends(require_admin),
     state: AppState = Depends(get_state),
 ) -> dict:
-    if body.name:
-        existing = await state.llm_config.get_by_name(body.name)
-        if existing is not None and existing.id != provider_id:
-            raise HTTPException(status_code=409, detail="a provider with this name already exists")
-    p = await state.llm_config.update_provider(provider_id, **body.model_dump(exclude_none=True))
-    if p is None:
-        raise HTTPException(status_code=404, detail="provider not found")
-    models = await state.llm_config.list_models()
-    return _provider_row(p, models)
+    return await llm.update_provider(state, provider_id, body, owner_id=None)
 
 
 @router.delete("/providers/{provider_id}")
 async def delete_provider(
     provider_id: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
 ) -> dict:
-    ok = await state.llm_config.delete_provider(provider_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="provider not found")
-    return {"deleted": True}
+    return await llm.delete_provider(state, provider_id, owner_id=None)
 
 
 @router.post("/providers/{provider_id}/models")
 async def create_model(
     provider_id: str,
-    body: ModelBody,
+    body: llm.ModelBody,
     admin: User = Depends(require_admin),
     state: AppState = Depends(get_state),
 ) -> dict:
-    m = await state.llm_config.create_model(
-        provider_id, body.model_id, body.label, body.enabled, body.cost, body.description
-    )
-    return _model_row(m)
+    return await llm.create_model(state, provider_id, body, owner_id=None)
 
 
 @router.patch("/models/{model_pk}")
 async def update_model(
     model_pk: str,
-    body: ModelPatch,
+    body: llm.ModelPatch,
     admin: User = Depends(require_admin),
     state: AppState = Depends(get_state),
 ) -> dict:
-    m = await state.llm_config.update_model(model_pk, **body.model_dump(exclude_none=True))
-    if m is None:
-        raise HTTPException(status_code=404, detail="model not found")
-    return _model_row(m)
+    return await llm.update_model(state, model_pk, body, owner_id=None)
 
 
 @router.delete("/models/{model_pk}")
 async def delete_model(
     model_pk: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
 ) -> dict:
-    ok = await state.llm_config.delete_model(model_pk)
-    if not ok:
-        raise HTTPException(status_code=404, detail="model not found")
-    return {"deleted": True}
+    return await llm.delete_model(state, model_pk, owner_id=None)
 
 
 # ---------------------------------------------------------------- guardrails

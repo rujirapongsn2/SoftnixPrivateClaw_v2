@@ -31,6 +31,7 @@ from claw.db.stores import (
     AuditStore,
     ConnectorStore,
     FeedbackStore,
+    GroupStore,
     GuardrailStore,
     KnowledgeStore,
     LLMConfigStore,
@@ -61,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     bus = EventBus()
     users = UserStore(factory)
+    groups = GroupStore(factory)
     sessions = SessionStore(factory)
     messages = MessageStore(factory)
     memories = MemoryStore(factory)
@@ -202,6 +204,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runtime=runtime,
         bus=bus,
         users=users,
+        groups=groups,
         sessions=sessions,
         messages=messages,
         skills=skills,

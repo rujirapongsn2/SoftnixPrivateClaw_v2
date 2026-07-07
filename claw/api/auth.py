@@ -44,6 +44,16 @@ def _issue(state: AppState, user: User) -> dict:
     return {"access_token": token, "token_type": "bearer", "user": _user_json(user)}
 
 
+async def _log_auth(state: AppState, event: str, user: User, method: str = "password") -> None:
+    """Audit trail for account activity — surfaced in the Control Plane's audit
+    log (kind="auth") so admins can see who signed in/out, and how."""
+    await state.audit.log(
+        "auth",
+        {"event": event, "method": method, "email": user.email},
+        user_id=user.id,
+    )
+
+
 @router.post("/register")
 async def register(body: RegisterBody, state: AppState = Depends(get_state)) -> dict:
     existing = await state.users.get_by_email(body.email)
@@ -56,13 +66,17 @@ async def register(body: RegisterBody, state: AppState = Depends(get_state)) -> 
     if total > 0 and not state.settings.open_registration:
         raise HTTPException(status_code=403, detail="registration is closed; ask an administrator")
 
+    # Self-registered users land in the admin-configured default group (if any).
+    default_group = await state.groups.default_group()
     user = await state.users.create(
         email=body.email,
         password_hash=hash_password(body.password),
         display_name=body.display_name,
         is_admin=(total == 0),
         role="admin" if total == 0 else "user",
+        group_id=default_group.id if default_group else None,
     )
+    await _log_auth(state, "register", user)
     return _issue(state, user)
 
 
@@ -73,7 +87,17 @@ async def login(body: LoginBody, state: AppState = Depends(get_state)) -> dict:
         raise HTTPException(status_code=401, detail="invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="account suspended")
+    await _log_auth(state, "login", user)
     return _issue(state, user)
+
+
+@router.post("/logout")
+async def logout(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    # JWTs are stateless — there's nothing to invalidate server-side. This
+    # endpoint exists purely so the audit trail records the logout, which is
+    # why the frontend must call it BEFORE discarding the token locally.
+    await _log_auth(state, "logout", user)
+    return {"ok": True}
 
 
 @router.get("/me")
@@ -129,11 +153,13 @@ async def _upsert_oidc_user(state: AppState, email: str, name: str) -> User:
     total = await state.users.count()
     if total > 0 and not state.settings.open_registration:
         raise HTTPException(status_code=403, detail="registration is closed; ask an administrator")
+    default_group = await state.groups.default_group()
     return await state.users.create(
         email=email,
         display_name=name or email.split("@")[0],
         is_admin=(total == 0),
         role="admin" if total == 0 else "user",
+        group_id=default_group.id if default_group else None,
     )
 
 
@@ -189,5 +215,6 @@ async def oidc_callback(
         logger.warning("OIDC callback failed for {}: {}", provider, exc)
         return RedirectResponse(f"{web}/?auth_error=exchange_failed", status_code=307)
 
+    await _log_auth(app_state, "login", user, method=provider)
     jwt = create_access_token(user.id, app_state.settings.secret_key, app_state.settings.token_ttl_seconds)
     return RedirectResponse(f"{web}/?token={jwt}", status_code=307)

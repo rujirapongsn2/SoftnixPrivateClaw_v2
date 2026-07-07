@@ -7,7 +7,7 @@ JSON columns use the portable JSON type (JSONB on Postgres via dialect).
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -42,6 +42,26 @@ class User(Base):
     heartbeat_next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Linked Telegram account id (null = not linked). Unique so one Telegram maps to one user.
     telegram_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, unique=True)
+    # Organizational group (purely for management/filtering — NOT a policy or
+    # permission boundary). Null = ungrouped; cleared to null when the group is
+    # deleted (the user is kept).
+    group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_groups.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class UserGroup(Base):
+    """A named group of users, for organization/filtering only. Carries no
+    policy or permission meaning."""
+
+    __tablename__ = "user_groups"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    # When true, self-registered users are placed in this group. At most one
+    # group is the default at a time (enforced by the store).
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -189,17 +209,43 @@ class AuditEvent(Base):
 
 
 class LLMProvider(Base):
-    """Admin-configured upstream LLM provider (OpenRouter, Anthropic, …).
+    """An upstream LLM provider (OpenRouter, Anthropic, …).
 
     The API key is stored encrypted at rest (SecretBox), like connector secrets.
+
+    Ownership scope: ``owner_id`` NULL means an admin-global provider (configured
+    in the Control Plane, offered to everyone). A non-null ``owner_id`` is a
+    private "bring your own key" provider owned by that user — visible and usable
+    only by them. Names are unique per owner (a partial unique index enforces
+    global-name uniqueness among the NULL-owner rows, since Postgres treats NULLs
+    as distinct), mirroring the (user_id, name) pattern on Skill/McpConnector.
     """
 
     __tablename__ = "llm_providers"
+    __table_args__ = (
+        Index("ix_llm_providers_owner_name", "owner_id", "name", unique=True),
+        Index(
+            "ix_llm_providers_global_name",
+            "name",
+            unique=True,
+            postgresql_where=text("owner_id IS NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(String(64), unique=True)
+    # NULL = admin-global; set = private to this user (BYOK).
+    owner_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(64))
     api_key: Mapped[str] = mapped_column(Text, default="")  # encrypted at rest
     api_base: Mapped[str] = mapped_column(String(500), default="")
+    # LiteLLM routing prefix (e.g. "openai", "anthropic", "openrouter") applied
+    # automatically ahead of every model id added under this provider, so admins
+    # type the model's real name (whatever the vendor/gateway documents) instead
+    # of a LiteLLM implementation detail. Blank on providers created before this
+    # existed — those fall back to typing the full id manually.
+    model_prefix: Mapped[str] = mapped_column(String(32), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

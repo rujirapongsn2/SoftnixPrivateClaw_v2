@@ -42,11 +42,13 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { ErrorText } from "./ErrorText";
+import { PasswordField } from "./PasswordField";
 import {
   ActivityPoint,
   AdminOverview,
   AdminUser,
   AuditRow,
+  GroupInfo,
   GuardrailRule,
   GuardrailTestResult,
   LLMModelCfg,
@@ -57,6 +59,8 @@ import {
   SessionsByUserPoint,
   TelegramAdminConfig,
   api,
+  ADMIN_LLM_API,
+  type LlmApi,
 } from "./api";
 
 export type AdminSection = "overview" | "providers" | "guardrails" | "oauth" | "telegram" | "audit" | "users";
@@ -80,15 +84,20 @@ export const ADMIN_SECTIONS: { key: AdminSection; label: string; icon: IconType 
 
 export function AdminPanel({ section, selfId }: { section: AdminSection; selfId: string }) {
   const meta = ADMIN_SECTIONS.find((s) => s.key === section);
+  // LLM Providers is a data table (model id, cost, status, several action
+  // buttons per row) — the shared 720px prose-reading column that suits every
+  // other admin page (forms, prose, short lists) squeezes it into ellipsis
+  // soup. Widen just this one section rather than the whole panel.
+  const isWide = section === "providers";
   return (
     <div className="claw-settings-panel">
-      <div className="claw-settings-panel-header">
+      <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
         <Icon icon={meta?.icon ?? "check"} size="lg" color="secondary" />
         <Text type="display-3">{meta?.label}</Text>
       </div>
-      <div className="claw-panel">
+      <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
         {section === "overview" && <OverviewPanel />}
-        {section === "providers" && <ProvidersPanel />}
+        {section === "providers" && <ProvidersPanel llmApi={ADMIN_LLM_API} scope="admin" />}
         {section === "guardrails" && <GuardrailsPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
@@ -380,6 +389,7 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
   { key: "openai", name: "OpenAI", subtitle: "GPT-4o, o-series", icon: Sparkles, apiBase: "", needsBase: false, prefix: "openai/", example: "openai/gpt-4o" },
   { key: "anthropic", name: "Claude", subtitle: "Anthropic", icon: Asterisk, apiBase: "", needsBase: false, prefix: "anthropic/", example: "anthropic/claude-sonnet-5" },
   { key: "gemini", name: "Gemini", subtitle: "Google", icon: Diamond, apiBase: "", needsBase: false, prefix: "gemini/", example: "gemini/gemini-2.5-pro" },
+  { key: "softnix", name: "Softnix GenAI", subtitle: "Private GenAI Platform", icon: Cpu, apiBase: "https://genai.softnix.ai/external/openai", needsBase: false, prefix: "openai/", example: "openai/gemini-3.1-pro-preview" },
   { key: "openrouter", name: "OpenRouter", subtitle: "Any model", icon: Router, apiBase: "https://openrouter.ai/api/v1", needsBase: false, prefix: "openrouter/", example: "openrouter/anthropic/claude-sonnet-5" },
   { key: "compatible", name: "OpenAI-compatible", subtitle: "vLLM, Ollama, LM Studio", icon: Server, apiBase: "", needsBase: true, prefix: "openai/", example: "openai/your-model" },
 ];
@@ -396,6 +406,7 @@ const PROVIDER_LOGO: Record<string, string> = {
   openrouter: "/llm-providers/openrouter.png",
   deepseek: "/llm-providers/deepseek.png",
   groq: "/llm-providers/groq.svg",
+  softnix: "/llm-providers/softnix.png",
 };
 
 function logoForModelId(modelId: string): string | null {
@@ -403,12 +414,29 @@ function logoForModelId(modelId: string): string | null {
   return PROVIDER_LOGO[prefix] ?? null;
 }
 
-// Same tile treatment as connector brand logos (ConnectorBrandTile) — a
-// tinted frame so mismatched brand assets read as one consistent icon set.
-function ProviderBrandTile({ logo, fallback }: { logo: string | null; fallback: IconType }) {
+// Provider brand mark: a fixed-HEIGHT, auto-width lockup (no square frame) so
+// square icon glyphs (OpenAI, Anthropic, …) and wide wordmarks (Softnix) both
+// render at a legible, consistent size instead of being crushed into a small
+// square tile. Only the no-logo fallback gets a neutral badge for visual anchor.
+function ProviderBrandTile({
+  logo,
+  fallback,
+  size = "sm",
+}: {
+  logo: string | null;
+  fallback: IconType;
+  size?: "sm" | "lg";
+}) {
+  if (!logo) {
+    return (
+      <div className={`claw-provider-logo-fallback claw-provider-logo-fallback--${size}`}>
+        <Icon icon={fallback} size={size === "lg" ? "lg" : "md"} color="secondary" />
+      </div>
+    );
+  }
   return (
-    <div className="claw-connector-tile">
-      {logo ? <img src={logo} alt="" aria-hidden="true" /> : <Icon icon={fallback} size="md" color="secondary" />}
+    <div className={`claw-provider-logo claw-provider-logo--${size}`}>
+      <img src={logo} alt="" aria-hidden="true" />
     </div>
   );
 }
@@ -432,6 +460,21 @@ function modelPrefixWarning(modelId: string): string | null {
   return "Start the model id with a provider prefix — e.g. openrouter/, openai/, anthropic/, gemini/. Without it the model can't be reached.";
 }
 
+// When a provider has a known LiteLLM prefix, admins only ever type the part
+// after it — these two helpers move between "what's stored" (the full id
+// LiteLLM needs) and "what's typed" (the model's real name, per the vendor's
+// own docs) so the prefix never has to be remembered or re-typed.
+function stripKnownPrefix(prefix: string, fullId: string): string {
+  if (!prefix) return fullId;
+  const withSlash = `${prefix}/`;
+  return fullId.startsWith(withSlash) ? fullId.slice(withSlash.length) : fullId;
+}
+
+function composeModelId(prefix: string, rest: string): string {
+  const cleaned = rest.trim().replace(/^\/+/, "");
+  return prefix ? `${prefix}/${cleaned}` : cleaned;
+}
+
 // Single-select cost tier — a connected segmented control, not a row of
 // independent buttons (which read as separate actions).
 function CostSegmented({ value, onChange }: { value: ModelCost; onChange: (c: ModelCost) => void }) {
@@ -452,12 +495,18 @@ function CostSegmented({ value, onChange }: { value: ModelCost; onChange: (c: Mo
   );
 }
 
-function ProvidersPanel() {
+// Ownership scope: "admin" drives the global Control Plane (all users see the
+// models); "user" drives a person's own private "bring your own key" providers,
+// visible only to them. Both mount this same component with a different `llmApi`
+// (ADMIN_LLM_API vs USER_LLM_API) so there is one implementation to maintain.
+export type ProvidersScope = "admin" | "user";
+
+export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: ProvidersScope }) {
   const [providers, setProviders] = useState<LLMProviderCfg[]>([]);
   const [adding, setAdding] = useState(false);
   const { error, guard } = useAsyncError();
 
-  const reload = useCallback(() => api.adminListLLM().then((r) => setProviders(r.providers)), []);
+  const reload = useCallback(() => llmApi.list().then((r) => setProviders(r.providers)), [llmApi]);
   useEffect(() => {
     void guard(async () => await reload());
   }, [guard, reload]);
@@ -466,8 +515,9 @@ function ProvidersPanel() {
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
         <Text color="secondary">
-          Configure upstream LLM providers and the models users can pick in chat. API keys are stored
-          encrypted.
+          {scope === "user"
+            ? "Add your own LLM providers with your own API key. They're private to you and appear in your chat model picker alongside the built-in models. Keys are stored encrypted."
+            : "Configure upstream LLM providers and the models users can pick in chat. API keys are stored encrypted."}
         </Text>
         {!adding && (
           <Button
@@ -481,23 +531,34 @@ function ProvidersPanel() {
       {error && <ErrorText>{error}</ErrorText>}
 
       {adding && (
-        <AddProviderForm guard={guard} reload={reload} onClose={() => setAdding(false)} />
+        <AddProviderForm llmApi={llmApi} guard={guard} reload={reload} onClose={() => setAdding(false)} />
       )}
 
       {providers.length === 0 && !adding ? (
-        <EmptyState title="No providers" description="Add a provider to let users choose models in chat." />
+        <EmptyState
+          title="No providers"
+          description={
+            scope === "user"
+              ? "Add a provider to use your own models in chat."
+              : "Add a provider to let users choose models in chat."
+          }
+        />
       ) : (
-        providers.map((p) => <ProviderCard key={p.id} provider={p} reload={reload} guard={guard} />)
+        providers.map((p) => (
+          <ProviderCard key={p.id} provider={p} reload={reload} guard={guard} llmApi={llmApi} scope={scope} />
+        ))
       )}
     </div>
   );
 }
 
 function AddProviderForm({
+  llmApi,
   guard,
   reload,
   onClose,
 }: {
+  llmApi: LlmApi;
   guard: (fn: () => Promise<void>) => Promise<void>;
   reload: () => Promise<void>;
   onClose: () => void;
@@ -530,7 +591,9 @@ function AddProviderForm({
               className={`claw-preset-card${preset?.key === p.key ? " is-active" : ""}`}
               onClick={() => pick(p)}
             >
-              <ProviderBrandTile logo={PROVIDER_LOGO[p.key] ?? null} fallback={p.icon} />
+              <div className="claw-preset-logo-band">
+                <ProviderBrandTile logo={PROVIDER_LOGO[p.key] ?? null} fallback={p.icon} size="lg" />
+              </div>
               <span className="claw-preset-name">{p.name}</span>
               <span className="claw-preset-sub">{p.subtitle}</span>
             </button>
@@ -581,22 +644,25 @@ function AddProviderForm({
             <div className="claw-info-box">
               <Icon icon={Info} size="sm" color="secondary" />
               <Text size="sm" color="secondary">
-                Model ids for this type start with <code>{preset.prefix}</code> — e.g.{" "}
-                <code>{preset.example}</code>. You'll add models after creating the provider.
+                You'll add models after creating the provider — just the model's real name (e.g.{" "}
+                <code>{preset.example.replace(preset.prefix, "")}</code>). We prepend{" "}
+                <code>{preset.prefix}</code> automatically so you don't need to know it.
               </Text>
             </div>
 
             <div className="claw-row">
               <Button
                 label="Create provider"
+                variant="primary"
                 icon={<Icon icon="check" size="sm" />}
                 isDisabled={!name.trim() || (preset.needsBase && !apiBase.trim())}
                 clickAction={() =>
                   guard(async () => {
-                    await api.adminCreateProvider({
+                    await llmApi.createProvider({
                       name: name.trim(),
                       api_key: apiKey,
                       api_base: apiBase.trim(),
+                      model_prefix: preset.prefix.replace(/\/$/, ""),
                     });
                     toast({ body: `${name.trim()} added`, type: "info", autoHideDuration: 2500 });
                     onClose();
@@ -617,16 +683,21 @@ function ProviderCard({
   provider,
   reload,
   guard,
+  llmApi,
+  scope,
 }: {
   provider: LLMProviderCfg;
   reload: () => Promise<void>;
   guard: (fn: () => Promise<void>) => Promise<void>;
+  llmApi: LlmApi;
+  scope: ProvidersScope;
 }) {
   const [editing, setEditing] = useState(false);
   const [addingModel, setAddingModel] = useState(false);
   const [name, setName] = useState(provider.name);
   const [apiBase, setApiBase] = useState(provider.api_base);
   const [apiKey, setApiKey] = useState("");
+  const [modelPrefix, setModelPrefix] = useState(provider.model_prefix);
   const toast = useToast();
 
   const logo = provider.models.length > 0 ? logoForModelId(provider.models[0].model_id) : null;
@@ -659,7 +730,7 @@ function ProviderCard({
               isLabelHidden
               changeAction={(checked) =>
                 guard(async () => {
-                  await api.adminUpdateProvider(provider.id, { enabled: checked });
+                  await llmApi.updateProvider(provider.id, { enabled: checked });
                   await reload();
                 })
               }
@@ -674,6 +745,7 @@ function ProviderCard({
               setName(provider.name);
               setApiBase(provider.api_base);
               setApiKey("");
+              setModelPrefix(provider.model_prefix);
               setEditing((e) => !e);
             }}
           />
@@ -684,7 +756,7 @@ function ProviderCard({
             variant="destructive"
             clickAction={() =>
               guard(async () => {
-                await api.adminDeleteProvider(provider.id);
+                await llmApi.deleteProvider(provider.id);
                 toast({ body: `${provider.name} deleted`, type: "info", autoHideDuration: 2500 });
                 await reload();
               })
@@ -704,17 +776,31 @@ function ProviderCard({
               value={apiKey}
               onChange={setApiKey}
             />
+            <TextInput
+              label="Model id prefix (advanced)"
+              description={
+                provider.model_prefix
+                  ? "Prepended automatically to every model id you add below."
+                  : "Set this once and adding models below just needs the model's real name — " +
+                    "no LiteLLM prefix to remember. Leave blank to keep typing full ids manually."
+              }
+              placeholder="openai"
+              value={modelPrefix}
+              onChange={(v) => setModelPrefix(v.trim().toLowerCase())}
+            />
             <div className="claw-row">
               <Button
                 label="Save changes"
+                variant="primary"
                 icon={<Icon icon="check" size="sm" />}
                 size="sm"
                 clickAction={() =>
                   guard(async () => {
-                    await api.adminUpdateProvider(provider.id, {
+                    await llmApi.updateProvider(provider.id, {
                       name: name.trim(),
                       api_base: apiBase.trim(),
                       api_key: apiKey.trim(),
+                      model_prefix: modelPrefix,
                     });
                     setEditing(false);
                     toast({ body: "Provider updated", type: "info", autoHideDuration: 2500 });
@@ -737,15 +823,52 @@ function ProviderCard({
           No models yet. Add one so it appears in the chat picker.
         </Text>
       )}
-      {provider.models.map((m) => (
-        <ModelRow key={m.id} model={m} reload={reload} guard={guard} />
-      ))}
+      {provider.models.length > 0 && (
+        // One grid spanning the header AND every model row (not one grid per
+        // row) so columns size and align from the widest cell across the
+        // whole table — real table column behavior, without a <table> element
+        // (which would fight the inline Edit-expands-to-a-form pattern below).
+        <div className={`claw-models-grid claw-models-grid-${scope}`}>
+          <Text size="2xs" color="secondary" className="claw-models-grid-head">
+            Model
+          </Text>
+          <Text size="2xs" color="secondary" className="claw-models-grid-head">
+            Cost
+          </Text>
+          <Text size="2xs" color="secondary" className="claw-models-grid-head">
+            Model ID
+          </Text>
+          <Text size="2xs" color="secondary" className="claw-models-grid-head">
+            Status
+          </Text>
+          {scope === "admin" && (
+            <Text size="2xs" color="secondary" className="claw-models-grid-head">
+              Default
+            </Text>
+          )}
+          <span className="claw-models-grid-head" />
+          <span className="claw-models-grid-head" />
+          {provider.models.map((m) => (
+            <ModelRow
+              key={m.id}
+              model={m}
+              modelPrefix={provider.model_prefix}
+              reload={reload}
+              guard={guard}
+              llmApi={llmApi}
+              scope={scope}
+            />
+          ))}
+        </div>
+      )}
 
       {addingModel ? (
         <AddModelForm
           providerId={provider.id}
+          modelPrefix={provider.model_prefix}
           guard={guard}
           reload={reload}
+          llmApi={llmApi}
           onClose={() => setAddingModel(false)}
         />
       ) : (
@@ -765,15 +888,28 @@ function ProviderCard({
 // demand (so the model id / label / cost can actually be corrected in place).
 function ModelRow({
   model,
+  modelPrefix,
   reload,
   guard,
+  llmApi,
+  scope,
 }: {
   model: LLMModelCfg;
+  modelPrefix: string;
   reload: () => Promise<void>;
   guard: (fn: () => Promise<void>) => Promise<void>;
+  llmApi: LlmApi;
+  scope: ProvidersScope;
 }) {
   const [editing, setEditing] = useState(false);
-  const [modelId, setModelId] = useState(model.model_id);
+  // Whether this model's stored id actually starts with the provider's known
+  // prefix — decided silently from the data, never exposed as a UI choice.
+  // Mismatched/legacy rows (no prefix, or an id that predates one) fall back
+  // to plain full-id editing with no visible difference in the form.
+  const prefixApplies = Boolean(modelPrefix) && model.model_id.startsWith(`${modelPrefix}/`);
+  const [modelId, setModelId] = useState(
+    prefixApplies ? stripKnownPrefix(modelPrefix, model.model_id) : model.model_id,
+  );
   const [label, setLabel] = useState(model.label);
   const [cost, setCost] = useState<ModelCost>(model.cost);
   const [description, setDescription] = useState(model.description);
@@ -781,24 +917,26 @@ function ModelRow({
 
   if (editing) {
     return (
-      <Card padding={2} variant="muted">
+      // Spans every column of the shared models grid — the edit form is a
+      // free-form multi-field layout, not another row of table cells.
+      <Card padding={2} variant="muted" className="claw-models-grid-span">
         <div className="claw-panel">
           <div className="claw-info-box">
             <Icon icon={Pencil} size="sm" color="secondary" />
             <Text size="sm" color="secondary">
-              Editing <b>{model.label || model.model_id}</b>
+              Editing <b>{model.label || stripKnownPrefix(modelPrefix, model.model_id)}</b>
             </Text>
           </div>
           <div className="claw-row claw-row-2col">
             <TextInput
               label="Model id"
-              placeholder="anthropic/claude-sonnet-5"
+              placeholder={prefixApplies ? "your-model-name" : "anthropic/claude-sonnet-5"}
               value={modelId}
               onChange={setModelId}
             />
             <TextInput label="Display name" placeholder={modelId} value={label} onChange={setLabel} />
           </div>
-          {modelPrefixWarning(modelId) && (
+          {!prefixApplies && modelPrefixWarning(modelId) && (
             <div className="claw-info-box is-warning">
               <Icon icon={Info} size="sm" color="warning" />
               <Text size="sm" color="secondary">
@@ -821,13 +959,14 @@ function ModelRow({
           <div className="claw-row">
             <Button
               label="Save changes"
+              variant="primary"
               icon={<Icon icon="check" size="sm" />}
               size="sm"
               isDisabled={!modelId.trim()}
               clickAction={() =>
                 guard(async () => {
-                  await api.adminUpdateModel(model.id, {
-                    model_id: modelId.trim(),
+                  await llmApi.updateModel(model.id, {
+                    model_id: prefixApplies ? composeModelId(modelPrefix, modelId) : modelId.trim(),
                     label: label.trim(),
                     cost,
                     description: description.trim(),
@@ -843,7 +982,7 @@ function ModelRow({
               variant="ghost"
               size="sm"
               clickAction={() => {
-                setModelId(model.model_id);
+                setModelId(prefixApplies ? stripKnownPrefix(modelPrefix, model.model_id) : model.model_id);
                 setLabel(model.label);
                 setCost(model.cost);
                 setDescription(model.description);
@@ -857,34 +996,36 @@ function ModelRow({
   }
 
   return (
-    <div className="claw-row claw-row-between claw-model-row">
-      <div className="claw-row">
-        <Text>{model.label || model.model_id}</Text>
-        <span className={`claw-cost claw-cost-${model.cost}`}>{COST_LABEL[model.cost]}</span>
-        <Text size="sm" color="secondary">
-          {model.model_id}
-        </Text>
+    <>
+      <div className="claw-model-name-cell">
+        <Text className="claw-model-label">{model.label || stripKnownPrefix(modelPrefix, model.model_id)}</Text>
         {model.is_default && (
           <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default" />
         )}
       </div>
-      <div className="claw-row">
-        <label className="claw-toggle-inline">
-          <Text size="sm" color="secondary">
-            {model.enabled ? "On" : "Off"}
-          </Text>
-          <Switch
-            value={model.enabled}
-            label={`Enable ${model.label}`}
-            isLabelHidden
-            changeAction={(checked) =>
-              guard(async () => {
-                await api.adminUpdateModel(model.id, { enabled: checked });
-                await reload();
-              })
-            }
-          />
-        </label>
+      <span className={`claw-cost claw-cost-${model.cost}`}>{COST_LABEL[model.cost]}</span>
+      <Text size="sm" color="secondary" className="claw-model-id">
+        {stripKnownPrefix(modelPrefix, model.model_id)}
+      </Text>
+      <label className="claw-toggle-inline">
+        <Text size="sm" color="secondary">
+          {model.enabled ? "On" : "Off"}
+        </Text>
+        <Switch
+          value={model.enabled}
+          label={`Enable ${model.label}`}
+          isLabelHidden
+          changeAction={(checked) =>
+            guard(async () => {
+              await llmApi.updateModel(model.id, { enabled: checked });
+              await reload();
+            })
+          }
+        />
+      </label>
+      {/* The auto-selected default is an admin-global concept; a user's private
+          model is never the global default, so this control is admin-only. */}
+      {scope === "admin" && (
         <Button
           label={model.is_default ? "Default" : "Set default"}
           size="sm"
@@ -892,44 +1033,48 @@ function ModelRow({
           isDisabled={model.is_default || !model.enabled}
           clickAction={() =>
             guard(async () => {
-              await api.adminUpdateModel(model.id, { is_default: true });
+              await llmApi.updateModel(model.id, { is_default: true });
               await reload();
             })
           }
         />
-        <Button
-          label="Edit"
-          icon={<Icon icon={Pencil} size="sm" />}
-          size="sm"
-          variant="ghost"
-          clickAction={() => setEditing(true)}
-        />
-        <Button
-          label="Remove"
-          icon={<Icon icon={Trash2} size="sm" />}
-          size="sm"
-          variant="ghost"
-          clickAction={() =>
-            guard(async () => {
-              await api.adminDeleteModel(model.id);
-              await reload();
-            })
-          }
-        />
-      </div>
-    </div>
+      )}
+      <Button
+        label="Edit"
+        icon={<Icon icon={Pencil} size="sm" />}
+        size="sm"
+        variant="ghost"
+        clickAction={() => setEditing(true)}
+      />
+      <Button
+        label="Remove"
+        icon={<Icon icon={Trash2} size="sm" />}
+        size="sm"
+        variant="ghost"
+        clickAction={() =>
+          guard(async () => {
+            await llmApi.deleteModel(model.id);
+            await reload();
+          })
+        }
+      />
+    </>
   );
 }
 
 function AddModelForm({
   providerId,
+  modelPrefix,
   guard,
   reload,
+  llmApi,
   onClose,
 }: {
   providerId: string;
+  modelPrefix: string;
   guard: (fn: () => Promise<void>) => Promise<void>;
   reload: () => Promise<void>;
+  llmApi: LlmApi;
   onClose: () => void;
 }) {
   const [modelId, setModelId] = useState("");
@@ -938,19 +1083,27 @@ function AddModelForm({
   const [description, setDescription] = useState("");
   const toast = useToast();
 
+  const hasPrefix = Boolean(modelPrefix);
+
   return (
     <Card padding={2} variant="muted">
       <div className="claw-panel">
+        <div className="claw-info-box">
+          <Icon icon={Plus} size="sm" color="secondary" />
+          <Text size="sm" color="secondary">
+            Adding a new model to this provider
+          </Text>
+        </div>
         <div className="claw-row claw-row-2col">
           <TextInput
             label="Model id"
-            placeholder="anthropic/claude-sonnet-5"
+            placeholder={hasPrefix ? "your-model-name" : "anthropic/claude-sonnet-5"}
             value={modelId}
             onChange={setModelId}
           />
           <TextInput label="Display name" placeholder={modelId || "Claude Sonnet 5"} value={label} onChange={setLabel} />
         </div>
-        {modelPrefixWarning(modelId) && (
+        {!hasPrefix && modelPrefixWarning(modelId) && (
           <div className="claw-info-box is-warning">
             <Icon icon={Info} size="sm" color="warning" />
             <Text size="sm" color="secondary">
@@ -973,13 +1126,14 @@ function AddModelForm({
         <div className="claw-row">
           <Button
             label="Add model"
+            variant="primary"
             icon={<Icon icon={Plus} size="sm" />}
             size="sm"
             isDisabled={!modelId.trim()}
             clickAction={() =>
               guard(async () => {
-                await api.adminCreateModel(providerId, {
-                  model_id: modelId.trim(),
+                await llmApi.createModel(providerId, {
+                  model_id: hasPrefix ? composeModelId(modelPrefix, modelId) : modelId.trim(),
                   label: label.trim(),
                   cost,
                   description: description.trim(),
@@ -1036,6 +1190,7 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
         <div className="claw-row">
           <Button
             label="Run test"
+            variant="primary"
             size="sm"
             isDisabled={!text.trim()}
             clickAction={() =>
@@ -1211,6 +1366,7 @@ function GuardrailsPanel() {
             <div className="claw-row">
               <Button
                 label="Create rule"
+                variant="primary"
                 icon={<Icon icon="check" size="sm" />}
                 isDisabled={!name.trim() || !pattern.trim()}
                 clickAction={() =>
@@ -1353,6 +1509,7 @@ function RuleCard({
             <div className="claw-row">
               <Button
                 label="Save changes"
+                variant="primary"
                 icon={<Icon icon="check" size="sm" />}
                 size="sm"
                 clickAction={() =>
@@ -1421,6 +1578,100 @@ function OAuthAppsPanel() {
   );
 }
 
+// Concise, do-able setup steps + the exact scopes this app actually requests
+// (sign-in via OIDC + the connector OAuth flows). Kept in sync with
+// claw/auth/oidc.py and claw/core/connector_presets.py.
+const OAUTH_GUIDE: Record<
+  "google" | "microsoft",
+  {
+    consoleUrl: string;
+    consoleLabel: string;
+    steps: string[];
+    scopes: { label: string; items: string[] }[];
+  }
+> = {
+  google: {
+    consoleUrl: "https://console.cloud.google.com/apis/credentials",
+    consoleLabel: "Open Google Cloud Console",
+    steps: [
+      "APIs & Services → Credentials → Create credentials → OAuth client ID.",
+      "Application type: Web application.",
+      "Add BOTH redirect URIs below under “Authorized redirect URIs”.",
+      "OAuth consent screen: add the scopes below; add yourself as a Test user while unpublished.",
+      "Copy the Client ID and Client secret into the fields below, then Save.",
+    ],
+    scopes: [
+      { label: "Sign-in", items: ["openid", "email", "profile"] },
+      { label: "Gmail connector", items: ["https://www.googleapis.com/auth/gmail.modify"] },
+    ],
+  },
+  microsoft: {
+    consoleUrl:
+      "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+    consoleLabel: "Open Microsoft Entra admin center",
+    steps: [
+      "App registrations → New registration (multi-tenant → keep Tenant = common).",
+      "Authentication → Add a platform → Web: add BOTH redirect URIs below.",
+      "Certificates & secrets → New client secret → copy the Value.",
+      "API permissions → Microsoft Graph → Delegated: add the scopes below, then Grant admin consent.",
+      "Copy the Application (client) ID, secret, and Tenant ID into the fields below, then Save.",
+    ],
+    scopes: [
+      { label: "Sign-in", items: ["openid", "email", "profile"] },
+      {
+        label: "Connectors (Microsoft Graph, delegated)",
+        items: [
+          "offline_access",
+          "User.Read",
+          "Mail.ReadWrite",
+          "Mail.Send",
+          "Calendars.ReadWrite",
+          "Files.ReadWrite.All",
+        ],
+      },
+    ],
+  },
+};
+
+function OAuthQuickStart({ provider }: { provider: "google" | "microsoft" }) {
+  const guide = OAUTH_GUIDE[provider];
+  return (
+    <details className="claw-guide">
+      <summary>Quick start guide</summary>
+      <div className="claw-guide-body">
+        <ol className="claw-telegram-steps">
+          {guide.steps.map((step, i) => (
+            <li key={i}>{step}</li>
+          ))}
+        </ol>
+        {guide.scopes.map((group) => (
+          <div key={group.label} className="claw-setup-field">
+            <Text size="sm" color="secondary">
+              {group.label} scopes:
+            </Text>
+            <div className="claw-scope-chips">
+              {group.items.map((scope) => (
+                <code key={scope}>{scope}</code>
+              ))}
+            </div>
+          </div>
+        ))}
+        <div className="claw-row">
+          <Button
+            label={guide.consoleLabel}
+            icon={<Icon icon={ExternalLink} size="sm" />}
+            variant="secondary"
+            size="sm"
+            href={guide.consoleUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          />
+        </div>
+      </div>
+    </details>
+  );
+}
+
 function OAuthAppCard({
   provider,
   label,
@@ -1456,6 +1707,7 @@ function OAuthAppCard({
             <Badge variant="neutral" label="Not configured" />
           )}
         </div>
+        <OAuthQuickStart provider={provider} />
         <div className="claw-setup-field">
           <Text size="sm" color="secondary">
             Redirect URIs — add BOTH to your {label} app's authorized redirect URIs:
@@ -1486,6 +1738,7 @@ function OAuthAppCard({
         <div className="claw-row">
           <Button
             label="Save"
+            variant="primary"
             icon={<Icon icon="check" size="sm" />}
             clickAction={() =>
               guard(async () => {
@@ -1597,6 +1850,7 @@ function TelegramConfigPanel() {
           <div className="claw-row">
             <Button
               label="Save"
+              variant="primary"
               icon={<Icon icon="check" size="sm" />}
               clickAction={() =>
                 guard(async () => {
@@ -1756,25 +2010,222 @@ function AuditPanel() {
 
 const USERS_PAGE = 20;
 
+// Single-select group picker (chips) for the Add/Edit user forms, with an
+// inline "create group" so a group can be added without leaving the form.
+function GroupPicker({
+  groups,
+  value,
+  onChange,
+  onCreate,
+}: {
+  groups: GroupInfo[];
+  value: string | null;
+  onChange: (id: string | null) => void;
+  onCreate: (name: string) => Promise<GroupInfo>;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const create = () =>
+    void onCreate(name.trim()).then((g) => {
+      onChange(g.id);
+      setName("");
+      setAdding(false);
+    });
+  return (
+    <div className="claw-field-group">
+      <Text size="sm" color="secondary">
+        Group
+      </Text>
+      <div className="claw-row">
+        <Button
+          label="No group"
+          size="sm"
+          variant={value === null ? "primary" : "secondary"}
+          clickAction={() => onChange(null)}
+        />
+        {groups.map((g) => (
+          <Button
+            key={g.id}
+            label={g.name}
+            size="sm"
+            variant={value === g.id ? "primary" : "secondary"}
+            clickAction={() => onChange(g.id)}
+          />
+        ))}
+        {adding ? (
+          <>
+            <TextInput
+              label="New group name"
+              isLabelHidden
+              placeholder="e.g. Engineering"
+              value={name}
+              onChange={setName}
+              onEnter={create}
+            />
+            <Button label="Add" size="sm" variant="primary" isDisabled={!name.trim()} clickAction={create} />
+            <Button label="Cancel" size="sm" variant="ghost" clickAction={() => { setName(""); setAdding(false); }} />
+          </>
+        ) : (
+          <Button
+            label="New group"
+            icon={<Icon icon={Plus} size="xsm" />}
+            size="sm"
+            variant="ghost"
+            clickAction={() => setAdding(true)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Housekeeping card: create/delete groups and choose which one new self-signups
+// land in. Groups are organizational only — no permission effect.
+function GroupsManager({
+  groups,
+  reload,
+  guard,
+}: {
+  groups: GroupInfo[];
+  reload: () => Promise<void>;
+  guard: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const toast = useToast();
+
+  const addGroup = () =>
+    guard(async () => {
+      await api.adminCreateGroup(name.trim());
+      setName("");
+      setAdding(false);
+      await reload();
+    });
+
+  return (
+    <Card padding={2} variant="muted">
+      <div className="claw-panel">
+        <div>
+          <Text weight="semibold">Groups</Text>
+          <Text size="sm" color="secondary" as="p">
+            Organize users for easier management. New sign-ups join the default group. Groups don't
+            affect permissions.
+          </Text>
+        </div>
+        {groups.length === 0 && (
+          <Text size="sm" color="secondary">
+            No groups yet.
+          </Text>
+        )}
+        {groups.map((g) => (
+          <div key={g.id} className="claw-row claw-row-between claw-model-row">
+            <div className="claw-row">
+              <Icon icon={Users} size="sm" color="secondary" />
+              <Text>{g.name}</Text>
+              <Text size="sm" color="secondary">
+                {g.user_count} {g.user_count === 1 ? "user" : "users"}
+              </Text>
+              {g.is_default && (
+                <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default sign-up" />
+              )}
+            </div>
+            <div className="claw-row">
+              <Button
+                label={g.is_default ? "Default sign-up group" : "Set as default"}
+                size="sm"
+                variant={g.is_default ? "secondary" : "ghost"}
+                clickAction={() =>
+                  guard(async () => {
+                    await api.adminSetDefaultGroup(g.is_default ? null : g.id);
+                    await reload();
+                  })
+                }
+              />
+              <IconButton
+                label="Delete group"
+                icon={<Icon icon={Trash2} size="sm" />}
+                size="sm"
+                variant="ghost"
+                clickAction={() =>
+                  guard(async () => {
+                    if (
+                      !window.confirm(
+                        `Delete group “${g.name}”? Its ${g.user_count} member(s) become ungrouped. The users themselves are not deleted.`,
+                      )
+                    ) {
+                      return;
+                    }
+                    await api.adminDeleteGroup(g.id);
+                    toast({ body: `Group “${g.name}” deleted`, type: "info", autoHideDuration: 2500 });
+                    await reload();
+                  })
+                }
+              />
+            </div>
+          </div>
+        ))}
+        {adding ? (
+          <div className="claw-row">
+            <TextInput
+              label="Group name"
+              isLabelHidden
+              placeholder="e.g. Engineering"
+              value={name}
+              onChange={setName}
+              onEnter={() => name.trim() && addGroup()}
+            />
+            <Button label="Create" size="sm" variant="primary" isDisabled={!name.trim()} clickAction={addGroup} />
+            <Button label="Cancel" size="sm" variant="ghost" clickAction={() => { setName(""); setAdding(false); }} />
+          </div>
+        ) : (
+          <Button
+            label="Add group"
+            icon={<Icon icon={Plus} size="sm" />}
+            size="sm"
+            variant="secondary"
+            clickAction={() => setAdding(true)}
+          />
+        )}
+      </div>
+    </Card>
+  );
+}
+
 function UsersPanel({ selfId }: { selfId: string }) {
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [groups, setGroups] = useState<GroupInfo[]>([]);
   const [creating, setCreating] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
+  const [newGroupId, setNewGroupId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [visible, setVisible] = useState(USERS_PAGE);
+  // Group filter: "all" | "none" (ungrouped) | a group id.
+  const [groupFilter, setGroupFilter] = useState<string>("all");
+  const [managingGroups, setManagingGroups] = useState(false);
   const { error, guard } = useAsyncError();
   const toast = useToast();
 
-  const reload = useCallback(() => api.adminListUsers().then(setUsers), []);
-  useEffect(() => {
-    void guard(async () => await reload());
-  }, [guard, reload]);
+  const reloadUsers = useCallback(() => api.adminListUsers().then(setUsers), []);
+  const reloadGroups = useCallback(() => api.adminListGroups().then(setGroups), []);
+  // Group changes (create/delete/default, or assigning a user) affect both
+  // lists — a deleted group ungroups its members, counts shift, etc.
+  const reloadAll = useCallback(async () => {
+    await Promise.all([reloadUsers(), reloadGroups()]);
+  }, [reloadUsers, reloadGroups]);
 
-  // Reset the "load more" window whenever the search changes.
-  useEffect(() => setVisible(USERS_PAGE), [query]);
+  useEffect(() => {
+    void guard(async () => await reloadAll());
+  }, [guard, reloadAll]);
+
+  // Reset the "load more" window whenever the search or group filter changes.
+  useEffect(() => setVisible(USERS_PAGE), [query, groupFilter]);
+  // A default group is a fine starting selection for a new user.
+  useEffect(() => {
+    setNewGroupId(groups.find((g) => g.is_default)?.id ?? null);
+  }, [groups, creating]);
 
   const resetForm = () => {
     setCreating(false);
@@ -1784,16 +2235,28 @@ function UsersPanel({ selfId }: { selfId: string }) {
     setIsAdmin(false);
   };
 
+  // Inline "create group" from a form's GroupPicker: persist, refresh, return it.
+  const createGroup = useCallback(
+    async (name: string): Promise<GroupInfo> => {
+      const g = await api.adminCreateGroup(name);
+      await reloadGroups();
+      return g;
+    },
+    [reloadGroups],
+  );
+
   const admins = users.filter((u) => u.is_admin).length;
   const suspended = users.filter((u) => !u.is_active).length;
   const q = query.trim().toLowerCase();
-  const filtered = q
-    ? users.filter(
-        (u) =>
-          (u.display_name || "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q),
-      )
-    : users;
+  const filtered = users.filter((u) => {
+    if (groupFilter === "none" && u.group_id) return false;
+    if (groupFilter !== "all" && groupFilter !== "none" && u.group_id !== groupFilter) return false;
+    if (q && !(u.display_name || "").toLowerCase().includes(q) && !u.email.toLowerCase().includes(q))
+      return false;
+    return true;
+  });
   const shown = filtered.slice(0, visible);
+  const ungrouped = users.filter((u) => !u.group_id).length;
 
   return (
     <div className="claw-panel">
@@ -1810,16 +2273,27 @@ function UsersPanel({ selfId }: { selfId: string }) {
             )}
           </div>
         </div>
-        {!creating && (
+        <div className="claw-row">
           <Button
-            label="Add user"
-            icon={<Icon icon={Plus} size="sm" />}
+            label="Manage groups"
+            icon={<Icon icon={Users} size="sm" />}
             size="sm"
-            clickAction={() => setCreating(true)}
+            variant={managingGroups ? "secondary" : "ghost"}
+            clickAction={() => setManagingGroups((m) => !m)}
           />
-        )}
+          {!creating && (
+            <Button
+              label="Add user"
+              icon={<Icon icon={Plus} size="sm" />}
+              size="sm"
+              clickAction={() => setCreating(true)}
+            />
+          )}
+        </div>
       </div>
       {error && <ErrorText>{error}</ErrorText>}
+
+      {managingGroups && <GroupsManager groups={groups} reload={reloadAll} guard={guard} />}
 
       {users.length > USERS_PAGE / 2 && (
         <TextInput
@@ -1833,18 +2307,50 @@ function UsersPanel({ selfId }: { selfId: string }) {
         />
       )}
 
+      {/* Filter by group — only shown once groups exist. */}
+      {groups.length > 0 && (
+        <div className="claw-row">
+          <Text size="sm" color="secondary">
+            Group
+          </Text>
+          <Button
+            label="All"
+            size="sm"
+            variant={groupFilter === "all" ? "primary" : "secondary"}
+            clickAction={() => setGroupFilter("all")}
+          />
+          {groups.map((g) => (
+            <Button
+              key={g.id}
+              label={`${g.name} (${g.user_count})`}
+              size="sm"
+              variant={groupFilter === g.id ? "primary" : "secondary"}
+              clickAction={() => setGroupFilter(g.id)}
+            />
+          ))}
+          {ungrouped > 0 && (
+            <Button
+              label={`No group (${ungrouped})`}
+              size="sm"
+              variant={groupFilter === "none" ? "primary" : "secondary"}
+              clickAction={() => setGroupFilter("none")}
+            />
+          )}
+        </div>
+      )}
+
       {creating && (
         <Card padding={2}>
           <div className="claw-panel">
             <TextInput label="Full name" placeholder="Jane Doe" value={displayName} onChange={setDisplayName} />
             <TextInput label="Email" type="email" placeholder="jane@company.com" value={email} onChange={setEmail} />
-            <TextInput
+            <PasswordField
               label="Password"
-              type="password"
               description="At least 8 characters."
               value={password}
               onChange={setPassword}
             />
+            <GroupPicker groups={groups} value={newGroupId} onChange={setNewGroupId} onCreate={createGroup} />
             <label className="claw-toggle-inline">
               <Switch value={isAdmin} label="Make administrator" isLabelHidden changeAction={setIsAdmin} />
               <Text size="sm" color="secondary">
@@ -1854,14 +2360,15 @@ function UsersPanel({ selfId }: { selfId: string }) {
             <div className="claw-row">
               <Button
                 label="Create user"
+                variant="primary"
                 icon={<Icon icon={Plus} size="sm" />}
                 isDisabled={!email.trim() || password.length < 8}
                 clickAction={() =>
                   guard(async () => {
-                    await api.adminCreateUser(email.trim(), password, isAdmin, displayName.trim());
+                    await api.adminCreateUser(email.trim(), password, isAdmin, displayName.trim(), newGroupId);
                     toast({ body: `${displayName.trim() || email.trim()} added`, type: "info", autoHideDuration: 2500 });
                     resetForm();
-                    await reload();
+                    await reloadAll();
                   })
                 }
               />
@@ -1874,13 +2381,23 @@ function UsersPanel({ selfId }: { selfId: string }) {
       {filtered.length === 0 ? (
         <EmptyState
           title="No users match"
-          description="Try a different name or email."
+          description={
+            groupFilter !== "all" ? "No users in this group match your search." : "Try a different name or email."
+          }
         />
       ) : (
         <>
           <div className="claw-user-list">
             {shown.map((u) => (
-              <UserRow key={u.id} user={u} selfId={selfId} reload={reload} guard={guard} />
+              <UserRow
+                key={u.id}
+                user={u}
+                selfId={selfId}
+                groups={groups}
+                reload={reloadAll}
+                createGroup={createGroup}
+                guard={guard}
+              />
             ))}
           </div>
           {filtered.length > shown.length && (
@@ -1911,17 +2428,22 @@ function userInitials(name: string, email: string): string {
 function UserRow({
   user: u,
   selfId,
+  groups,
   reload,
+  createGroup,
   guard,
 }: {
   user: AdminUser;
   selfId: string;
+  groups: GroupInfo[];
   reload: () => Promise<void>;
+  createGroup: (name: string) => Promise<GroupInfo>;
   guard: (fn: () => Promise<void>) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [displayName, setDisplayName] = useState(u.display_name);
   const [newPassword, setNewPassword] = useState("");
+  const [groupId, setGroupId] = useState<string | null>(u.group_id);
   const toast = useToast();
   const isSelf = u.id === selfId;
   const label = u.display_name || u.email;
@@ -1939,6 +2461,9 @@ function UserRow({
               <Badge variant="purple" icon={<Icon icon={Shield} size="xsm" />} label="admin" />
             )}
             {isSelf && <Badge variant="neutral" label="you" />}
+            {u.group_name && (
+              <Badge variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={u.group_name} />
+            )}
             {!u.is_active && (
               <Badge variant="error" icon={<Icon icon={ShieldOff} size="xsm" />} label="suspended" />
             )}
@@ -1990,6 +2515,7 @@ function UserRow({
             clickAction={() => {
               setDisplayName(u.display_name);
               setNewPassword("");
+              setGroupId(u.group_id);
               setEditing((e) => !e);
             }}
           />
@@ -2022,16 +2548,17 @@ function UserRow({
       {editing && (
         <div className="claw-user-edit">
           <TextInput label="Display name" value={displayName} onChange={setDisplayName} />
-          <TextInput
+          <PasswordField
             label="Reset password"
-            type="password"
             description="At least 8 characters. Leave blank to keep the current password."
             value={newPassword}
             onChange={setNewPassword}
           />
+          <GroupPicker groups={groups} value={groupId} onChange={setGroupId} onCreate={createGroup} />
           <div className="claw-row">
             <Button
               label="Save changes"
+              variant="primary"
               icon={<Icon icon="check" size="sm" />}
               size="sm"
               isDisabled={newPassword.length > 0 && newPassword.length < 8}
@@ -2039,6 +2566,7 @@ function UserRow({
                 guard(async () => {
                   await api.adminUpdateUser(u.id, {
                     display_name: displayName.trim(),
+                    group_id: groupId,
                     ...(newPassword ? { password: newPassword } : {}),
                   });
                   setEditing(false);

@@ -515,7 +515,7 @@ class AgentRuntime:
             if self.llm_config is not None:
                 requested = model or (session.model if session else None)
                 if requested:
-                    resolved = await self.llm_config.resolve(requested)
+                    resolved = await self.llm_config.resolve(requested, user_id)
                     if resolved is not None:
                         effective_model = resolved["model_id"]
                         model_key = resolved["api_key"] or None

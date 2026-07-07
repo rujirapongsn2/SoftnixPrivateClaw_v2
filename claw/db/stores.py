@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import String, bindparam, cast, func, select
+from sqlalchemy import String, bindparam, cast, func, or_, select
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -28,6 +28,7 @@ from claw.db.models import (
     Skill,
     UsageRecord,
     User,
+    UserGroup,
 )
 
 
@@ -521,6 +522,7 @@ class UserStore:
         display_name: str = "",
         is_admin: bool = False,
         role: str = "user",
+        group_id: str | None = None,
     ) -> User:
         async with self.factory() as db:
             user = User(
@@ -529,8 +531,19 @@ class UserStore:
                 password_hash=password_hash,
                 is_admin=is_admin,
                 role=role,
+                group_id=group_id,
             )
             db.add(user)
+            await db.commit()
+            return user
+
+    async def assign_group(self, user_id: str, group_id: str | None) -> User | None:
+        """Set (or clear, with None) a user's organizational group."""
+        async with self.factory() as db:
+            user = await db.get(User, user_id)
+            if user is None:
+                return None
+            user.group_id = group_id
             await db.commit()
             return user
 
@@ -564,6 +577,17 @@ class UserStore:
             if session_ids:
                 await db.execute(
                     Message.__table__.delete().where(Message.session_id.in_(session_ids))
+                )
+            # Private (BYOK) providers and their models are owned via owner_id.
+            provider_ids = (
+                await db.scalars(select(LLMProvider.id).where(LLMProvider.owner_id == user_id))
+            ).all()
+            if provider_ids:
+                await db.execute(
+                    LLMModel.__table__.delete().where(LLMModel.provider_id.in_(provider_ids))
+                )
+                await db.execute(
+                    LLMProvider.__table__.delete().where(LLMProvider.owner_id == user_id)
                 )
             for model in (ChatSession, Memory, Skill, McpConnector, Schedule, UsageRecord, Feedback):
                 await db.execute(model.__table__.delete().where(model.user_id == user_id))
@@ -650,6 +674,69 @@ class UserStore:
                 )
             )
             return list(rows)
+
+
+class GroupStore:
+    """User groups — organization/filtering only, no policy or permission meaning."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+        self.factory = factory
+
+    async def list(self) -> list[UserGroup]:
+        async with self.factory() as db:
+            rows = await db.scalars(select(UserGroup).order_by(UserGroup.name))
+            return list(rows)
+
+    async def get_by_name(self, name: str) -> UserGroup | None:
+        async with self.factory() as db:
+            return await db.scalar(select(UserGroup).where(UserGroup.name == name))
+
+    async def create(self, name: str) -> UserGroup:
+        async with self.factory() as db:
+            row = UserGroup(name=name)
+            db.add(row)
+            await db.commit()
+            return row
+
+    async def delete(self, group_id: str) -> bool:
+        """Remove a group; members are kept but become ungrouped (group_id → NULL).
+        Done explicitly so it works even where the FK's ON DELETE isn't enforced
+        (e.g. SQLite in tests)."""
+        async with self.factory() as db:
+            row = await db.get(UserGroup, group_id)
+            if row is None:
+                return False
+            await db.execute(
+                User.__table__.update().where(User.group_id == group_id).values(group_id=None)
+            )
+            await db.delete(row)
+            await db.commit()
+            return True
+
+    async def set_default(self, group_id: str | None) -> None:
+        """Make `group_id` the sole registration-default group, or clear the
+        default entirely when None. Exactly one default at a time."""
+        async with self.factory() as db:
+            await db.execute(UserGroup.__table__.update().values(is_default=False))
+            if group_id is not None:
+                row = await db.get(UserGroup, group_id)
+                if row is not None:
+                    row.is_default = True
+            await db.commit()
+
+    async def default_group(self) -> UserGroup | None:
+        async with self.factory() as db:
+            return await db.scalar(select(UserGroup).where(UserGroup.is_default.is_(True)).limit(1))
+
+    async def counts_by_group(self) -> dict[str, int]:
+        """user_id count per group_id (excludes ungrouped)."""
+        async with self.factory() as db:
+            rows = await db.execute(
+                select(User.group_id, func.count())
+                .where(User.group_id.is_not(None))
+                .group_by(User.group_id)
+            )
+            return {gid: n for gid, n in rows.all()}
 
 
 class UsageStore:
@@ -867,31 +954,71 @@ class LLMConfigStore:
     def _dec(self, value: str) -> str:
         return self.secret_box.decrypt(value) if (self.secret_box and value) else value
 
+    @staticmethod
+    def _clean_key(value: str) -> str:
+        """Strip everything that isn't a printable ASCII, non-space character.
+
+        API keys are ASCII; pasting one from a web page or chat easily smuggles
+        in a non-breaking space (\\xa0), stray whitespace, or other unicode.
+        Those aren't encodable in an HTTP Authorization header, so LiteLLM/httpx
+        raise a cryptic `'ascii' codec can't encode` error surfaced to the user
+        as a generic "internal error." Sanitizing here turns that into (at worst)
+        a clear upstream auth error instead of a crash."""
+        return "".join(ch for ch in (value or "") if 33 <= ord(ch) <= 126)
+
     # -- providers ----------------------------------------------------------
-    async def list_providers(self) -> list[LLMProvider]:
+    # Ownership scope: owner_id=None operates on admin-global providers (owner_id
+    # IS NULL); a non-null owner_id operates on that user's own private (BYOK)
+    # providers. The same methods serve both — the Control Plane passes None, the
+    # per-user "My Models" API passes the caller's id — so there is a single
+    # implementation to maintain.
+    async def list_providers(self, owner_id: str | None = None) -> list[LLMProvider]:
         async with self.factory() as db:
-            rows = await db.scalars(select(LLMProvider).order_by(LLMProvider.name))
+            rows = await db.scalars(
+                select(LLMProvider)
+                .where(LLMProvider.owner_id == owner_id)
+                .order_by(LLMProvider.name)
+            )
             return list(rows)
 
-    async def get_by_name(self, name: str) -> LLMProvider | None:
+    async def get_by_name(self, name: str, owner_id: str | None = None) -> LLMProvider | None:
         async with self.factory() as db:
-            return await db.scalar(select(LLMProvider).where(LLMProvider.name == name))
+            return await db.scalar(
+                select(LLMProvider).where(
+                    LLMProvider.name == name, LLMProvider.owner_id == owner_id
+                )
+            )
 
     async def create_provider(
-        self, name: str, api_key: str, api_base: str, enabled: bool = True
+        self,
+        name: str,
+        api_key: str,
+        api_base: str,
+        enabled: bool = True,
+        model_prefix: str = "",
+        owner_id: str | None = None,
     ) -> LLMProvider:
         async with self.factory() as db:
             row = LLMProvider(
-                name=name, api_key=self._enc(api_key), api_base=api_base, enabled=enabled
+                name=name,
+                api_key=self._enc(self._clean_key(api_key)),
+                api_base=api_base,
+                enabled=enabled,
+                model_prefix=model_prefix,
+                owner_id=owner_id,
             )
             db.add(row)
             await db.commit()
             return row
 
-    async def update_provider(self, provider_id: str, **fields: Any) -> LLMProvider | None:
+    async def update_provider(
+        self, provider_id: str, owner_id: str | None = None, **fields: Any
+    ) -> LLMProvider | None:
         async with self.factory() as db:
             row = await db.get(LLMProvider, provider_id)
-            if row is None:
+            # Ownership guard: a caller can only touch rows in its own scope, so a
+            # user can never edit another user's (or a global) provider.
+            if row is None or row.owner_id != owner_id:
                 return None
             if "name" in fields and fields["name"]:
                 row.name = fields["name"]
@@ -899,27 +1026,38 @@ class LLMConfigStore:
                 row.api_base = fields["api_base"]
             if "enabled" in fields and fields["enabled"] is not None:
                 row.enabled = fields["enabled"]
+            if "model_prefix" in fields and fields["model_prefix"] is not None:
+                row.model_prefix = fields["model_prefix"]
             # Only overwrite the key when a non-empty value is supplied.
             if fields.get("api_key"):
-                row.api_key = self._enc(fields["api_key"])
+                row.api_key = self._enc(self._clean_key(fields["api_key"]))
             await db.commit()
             return row
 
-    async def delete_provider(self, provider_id: str) -> bool:
+    async def delete_provider(self, provider_id: str, owner_id: str | None = None) -> bool:
         async with self.factory() as db:
-            await db.execute(LLMModel.__table__.delete().where(LLMModel.provider_id == provider_id))
             row = await db.get(LLMProvider, provider_id)
-            if row is None:
+            if row is None or row.owner_id != owner_id:
                 return False
+            await db.execute(LLMModel.__table__.delete().where(LLMModel.provider_id == provider_id))
             await db.delete(row)
             await db.commit()
             return True
 
     # -- models -------------------------------------------------------------
-    async def list_models(self) -> list[LLMModel]:
+    async def list_models(self, owner_id: str | None = None) -> list[LLMModel]:
         async with self.factory() as db:
-            rows = await db.scalars(select(LLMModel).order_by(LLMModel.label))
+            rows = await db.scalars(
+                select(LLMModel)
+                .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+                .where(LLMProvider.owner_id == owner_id)
+                .order_by(LLMModel.label)
+            )
             return list(rows)
+
+    async def _owns_provider(self, db: AsyncSession, provider_id: str, owner_id: str | None) -> bool:
+        row = await db.get(LLMProvider, provider_id)
+        return row is not None and row.owner_id == owner_id
 
     async def create_model(
         self,
@@ -929,8 +1067,13 @@ class LLMConfigStore:
         enabled: bool = True,
         cost: str = "medium",
         description: str = "",
-    ) -> LLMModel:
+        owner_id: str | None = None,
+    ) -> LLMModel | None:
         async with self.factory() as db:
+            # The model inherits its provider's scope; only add it if the caller
+            # owns that provider (global for admin, own for a user).
+            if not await self._owns_provider(db, provider_id, owner_id):
+                return None
             row = LLMModel(
                 provider_id=provider_id,
                 model_id=model_id,
@@ -943,41 +1086,62 @@ class LLMConfigStore:
             await db.commit()
             return row
 
-    async def update_model(self, model_id_pk: str, **fields: Any) -> LLMModel | None:
+    async def update_model(
+        self, model_id_pk: str, owner_id: str | None = None, **fields: Any
+    ) -> LLMModel | None:
         async with self.factory() as db:
             row = await db.get(LLMModel, model_id_pk)
-            if row is None:
+            if row is None or not await self._owns_provider(db, row.provider_id, owner_id):
                 return None
             for key in ("model_id", "label", "enabled", "cost", "description"):
                 if key in fields and fields[key] is not None:
                     setattr(row, key, fields[key])
-            if fields.get("is_default"):
-                # Exactly one default across all models.
-                await db.execute(LLMModel.__table__.update().values(is_default=False))
+            # The auto-selected default is an admin-global concept only; private
+            # models are never the global default (owner_id=None gates it).
+            if owner_id is None and fields.get("is_default"):
+                # Exactly one default across all global models.
+                await db.execute(
+                    LLMModel.__table__.update()
+                    .where(
+                        LLMModel.provider_id.in_(
+                            select(LLMProvider.id).where(LLMProvider.owner_id.is_(None))
+                        )
+                    )
+                    .values(is_default=False)
+                )
                 row.is_default = True
-            elif fields.get("is_default") is False:
+            elif owner_id is None and fields.get("is_default") is False:
                 row.is_default = False
             await db.commit()
             return row
 
-    async def delete_model(self, model_id_pk: str) -> bool:
+    async def delete_model(self, model_id_pk: str, owner_id: str | None = None) -> bool:
         async with self.factory() as db:
             row = await db.get(LLMModel, model_id_pk)
-            if row is None:
+            if row is None or not await self._owns_provider(db, row.provider_id, owner_id):
                 return False
             await db.delete(row)
             await db.commit()
             return True
 
     # -- resolution (used by chat/runtime) ----------------------------------
-    async def enabled_models(self) -> list[dict[str, Any]]:
-        """Enabled models joined with their (enabled) provider, for the chat picker."""
+    async def enabled_models(self, user_id: str | None = None) -> list[dict[str, Any]]:
+        """Enabled models for the chat picker: admin-global models merged with the
+        caller's own private (BYOK) models. Each carries a ``scope`` marker
+        ("global" | "private") so the UI can badge the user's own."""
         async with self.factory() as db:
             rows = (
                 await db.execute(
                     select(LLMModel, LLMProvider)
                     .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
-                    .where(LLMModel.enabled.is_(True), LLMProvider.enabled.is_(True))
+                    .where(
+                        LLMModel.enabled.is_(True),
+                        LLMProvider.enabled.is_(True),
+                        or_(
+                            LLMProvider.owner_id.is_(None),
+                            LLMProvider.owner_id == user_id,
+                        ),
+                    )
                     .order_by(LLMProvider.name, LLMModel.label)
                 )
             ).all()
@@ -989,6 +1153,7 @@ class LLMConfigStore:
                 "is_default": m.is_default,
                 "cost": m.cost or "medium",
                 "description": m.description or "",
+                "scope": "private" if p.owner_id else "global",
             }
             for m, p in rows
         ]
@@ -1009,8 +1174,13 @@ class LLMConfigStore:
             ).scalar_one_or_none()
             return row.model_id if row else None
 
-    async def resolve(self, model_id: str) -> dict[str, str] | None:
-        """Given an enabled model id, return its provider credentials (decrypted)."""
+    async def resolve(self, model_id: str, user_id: str | None = None) -> dict[str, str] | None:
+        """Given an enabled model id, return its provider credentials (decrypted).
+
+        Scope: admin-global providers plus the caller's own private ones. If the
+        same model id exists in both scopes, the user's own wins (ordered first) —
+        so a user's key is used for their model and one user can never resolve
+        another user's credentials."""
         async with self.factory() as db:
             row = (
                 await db.execute(
@@ -1020,14 +1190,27 @@ class LLMConfigStore:
                         LLMModel.model_id == model_id,
                         LLMModel.enabled.is_(True),
                         LLMProvider.enabled.is_(True),
+                        or_(
+                            LLMProvider.owner_id.is_(None),
+                            LLMProvider.owner_id == user_id,
+                        ),
                     )
+                    # Prefer the caller's own provider (owner_id NOT NULL) on a tie:
+                    # is_(None) is False(0) for private rows, so ascending puts them first.
+                    .order_by(LLMProvider.owner_id.is_(None))
                     .limit(1)
                 )
             ).first()
         if row is None:
             return None
         m, p = row
-        return {"model_id": m.model_id, "api_key": self._dec(p.api_key), "api_base": p.api_base}
+        # Sanitize on read too, so keys stored before sanitization existed (or
+        # any stray whitespace) can't crash the outbound HTTP header encoding.
+        return {
+            "model_id": m.model_id,
+            "api_key": self._clean_key(self._dec(p.api_key)),
+            "api_base": p.api_base,
+        }
 
 
 class GuardrailStore:

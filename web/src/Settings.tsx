@@ -14,6 +14,7 @@ import {
   Brain,
   Puzzle,
   Copy,
+  Cpu,
   Download,
   ExternalLink,
   FileText,
@@ -32,6 +33,7 @@ import {
   Upload,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ProvidersPanel } from "./Admin";
 import { ErrorText } from "./ErrorText";
 import {
   ConnectorInfo,
@@ -41,6 +43,7 @@ import {
   MemoryInfo,
   ScheduleInfo,
   SkillInfo,
+  USER_LLM_API,
   api,
 } from "./api";
 import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
@@ -49,6 +52,7 @@ export type SettingsSection =
   | "skills"
   | "knowledge"
   | "memory"
+  | "models"
   | "connectors"
   | "schedules"
   | "heartbeat"
@@ -59,6 +63,7 @@ export const SETTINGS_SECTIONS: { key: SettingsSection; label: string; icon: Ico
   { key: "skills", label: "Skills", icon: Sparkles },
   { key: "knowledge", label: "Knowledge", icon: Library },
   { key: "memory", label: "Memory", icon: Brain },
+  { key: "models", label: "My Models", icon: Cpu },
   { key: "connectors", label: "Connectors", icon: Plug },
   { key: "schedules", label: "Schedule", icon: "calendar" },
   { key: "heartbeat", label: "Heartbeat", icon: HeartPulse },
@@ -68,16 +73,21 @@ export const SETTINGS_SECTIONS: { key: SettingsSection; label: string; icon: Ico
 
 export function SettingsPanel({ section }: { section: SettingsSection }) {
   const meta = SETTINGS_SECTIONS.find((s) => s.key === section);
+  // My Models is a data table, same reasoning as the admin LLM Providers page
+  // (see AdminPanel) — give it the wider column instead of the shared 720px
+  // prose width.
+  const isWide = section === "models";
   return (
     <div className="claw-settings-panel">
-      <div className="claw-settings-panel-header">
+      <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
         <Icon icon={meta?.icon ?? "check"} size="lg" color="secondary" />
         <Text type="display-3">{meta?.label}</Text>
       </div>
-      <div className="claw-panel">
+      <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
         {section === "skills" && <SkillsPanel />}
         {section === "knowledge" && <KnowledgePanel />}
         {section === "memory" && <MemoryPanel />}
+        {section === "models" && <ProvidersPanel llmApi={USER_LLM_API} scope="user" />}
         {section === "connectors" && <ConnectorsPanel />}
         {section === "schedules" && <SchedulesPanel />}
         {section === "heartbeat" && <HeartbeatPanel />}
@@ -400,7 +410,7 @@ function GuidedSetup({
         setBusy(false);
         setError(
           /not_configured/.test(msg)
-            ? `${provider} sign-in isn't set up yet. Ask your administrator to enable it in the Admin console.`
+            ? `${provider} sign-in isn't set up yet. Ask your administrator to enable it in the Control Plane.`
             : "Couldn't start sign-in. Please try again.",
         );
       }
@@ -1054,7 +1064,7 @@ function TelegramPanel() {
       <div className="claw-panel">
         <Text color="secondary">
           Telegram isn't set up on this workspace yet. Ask an administrator to connect a bot in
-          Admin console → Telegram.
+          Control Plane → Telegram.
         </Text>
       </div>
     );

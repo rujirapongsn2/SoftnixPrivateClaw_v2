@@ -18,11 +18,21 @@ import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
+import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
 import { AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 import { MOBILE_QUERY, PHONE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 const PROVIDER_LABELS: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
+const PROVIDER_LOGO: Record<string, string> = {
+  // Filename intentionally distinct from the original "google.png" — that
+  // path was overwritten in place while fixing its transparent background,
+  // and browsers cache images by URL, so anyone who'd already loaded the
+  // login page kept seeing the old white-background version. A fresh
+  // filename guarantees a real fetch regardless of any cache layer.
+  google: "/oauth-providers/google-g.png",
+  microsoft: "/oauth-providers/microsoft.png",
+};
 
 // Per-session "last read" timestamps, persisted so the sidebar's unread dot
 // survives a page reload instead of resetting to a fresh (and noisy) guess
@@ -316,6 +326,7 @@ function RecentsNav({
 
 function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; initialError?: string }) {
   const [mode, setMode] = useState<"login" | "register">("login");
+  const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState(initialError ?? "");
@@ -330,7 +341,10 @@ function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; init
     setBusy(true);
     setError("");
     try {
-      const res = mode === "login" ? await api.login(email, password) : await api.register(email, password);
+      const res =
+        mode === "login"
+          ? await api.login(email, password)
+          : await api.register(email, password, displayName.trim());
       setToken(res.access_token);
       onDone(res.user);
     } catch (e) {
@@ -345,8 +359,20 @@ function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; init
       <SoftnixLogo height={44} />
       <Text type="display-3">PrivateClaw</Text>
       <Text color="secondary">Your personal AI agent</Text>
-      <TextInput label="Email" type="email" value={email} onChange={setEmail} />
-      <TextInput label="Password" type="password" value={password} onChange={setPassword} />
+      {mode === "register" && (
+        <TextInput label="Full name" placeholder="Jane Doe" value={displayName} onChange={setDisplayName} />
+      )}
+      <TextInput label="Email" type="email" placeholder="jane@company.com" value={email} onChange={setEmail} />
+      {mode === "register" ? (
+        <PasswordField
+          label="Password"
+          description="At least 8 characters."
+          value={password}
+          onChange={setPassword}
+        />
+      ) : (
+        <TextInput label="Password" type="password" value={password} onChange={setPassword} />
+      )}
       {error && <ErrorText>{error}</ErrorText>}
       <Button
         label={busy ? "…" : mode === "login" ? "Log in" : "Create account"}
@@ -368,6 +394,11 @@ function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; init
             <Button
               key={p}
               label={PROVIDER_LABELS[p] ?? p}
+              icon={
+                PROVIDER_LOGO[p] ? (
+                  <img src={PROVIDER_LOGO[p]} alt="" aria-hidden="true" className="claw-oauth-logo" />
+                ) : undefined
+              }
               variant="secondary"
               clickAction={() => {
                 window.location.href = `/api/auth/oidc/${p}/login`;
@@ -389,7 +420,7 @@ export default function App() {
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
   // Responsive shell. Below the tablet width the sidebar becomes an off-canvas
-  // drawer (navOpen); on desktop `collapsed` drives the rail. Admin console is
+  // drawer (navOpen); on desktop `collapsed` drives the rail. Control Plane is
   // hidden on phones (see the trade-off note in the render).
   const isMobile = useMediaQuery(MOBILE_QUERY);
   const isPhone = useMediaQuery(PHONE_QUERY);
@@ -538,6 +569,10 @@ export default function App() {
   );
 
   const logout = () => {
+    // Audit the logout while the token is still valid — clearing it first
+    // would make this call 401. A failure here (e.g. offline) shouldn't block
+    // signing out locally, so it's fire-and-forget.
+    void api.logout().catch(() => undefined);
     clearToken();
     setUser(null);
     setSessions([]);
@@ -604,7 +639,7 @@ export default function App() {
               {showAdmin && (
                 <div className="claw-nav-admin">
                   <SideNavItem
-                    label="Admin console"
+                    label="Control Plane"
                     icon={Shield}
                     collapsible={{ defaultIsCollapsed: true }}
                   >
@@ -666,7 +701,7 @@ export default function App() {
         {adminSection ? (
           isPhone ? (
             <div className="claw-mobile-blocked">
-              <Text weight="semibold">Admin console isn't available on phones</Text>
+              <Text weight="semibold">Control Plane isn't available on phones</Text>
               <Text color="secondary" as="p">
                 It's built for wide screens (charts, tables, audit logs). Please open it on a
                 tablet in landscape or a desktop.
@@ -686,6 +721,10 @@ export default function App() {
             onActivity={refresh}
             running={active ? (sessions.find((s) => s.id === active)?.running ?? false) : false}
             initialModel={active ? sessions.find((s) => s.id === active)?.model ?? null : null}
+            onOpenSettings={(section) => {
+              setSettingsSection(section);
+              setAdminSection(null);
+            }}
           />
         )}
       </main>

@@ -180,7 +180,16 @@ export interface AuthUser {
 export interface AdminUser extends AuthUser {
   is_active: boolean;
   sessions: number;
+  group_id: string | null;
+  group_name: string | null;
   created_at: string;
+}
+
+export interface GroupInfo {
+  id: string;
+  name: string;
+  is_default: boolean;
+  user_count: number;
 }
 
 export interface ActivityPoint {
@@ -238,6 +247,10 @@ export interface LLMProviderCfg {
   api_base: string;
   has_key: boolean;
   enabled: boolean;
+  // LiteLLM routing prefix auto-applied to model ids added under this provider
+  // (e.g. "openai", "openrouter"). Empty on providers created before this
+  // existed — those still type the full model id manually.
+  model_prefix: string;
   models: LLMModelCfg[];
 }
 
@@ -301,6 +314,52 @@ export interface ModelOption {
   is_default: boolean;
   cost: ModelCost;
   description: string;
+  // "global" = admin-configured (Control Plane); "private" = the user's own
+  // bring-your-own-key model. Absent on the env-fallback option.
+  scope?: "global" | "private";
+}
+
+// Provider/model management API surface — one shape, two scopes. The admin
+// Control Plane binds it to /api/admin/*, the per-user "My Models" screen binds
+// it to /api/my/*. Both drive the SAME Providers UI (see LlmProviders in
+// Admin.tsx), so there is a single implementation to maintain.
+export interface LlmProviderCreate {
+  name: string;
+  api_key: string;
+  api_base: string;
+  enabled?: boolean;
+  model_prefix?: string;
+}
+export interface LlmProviderPatch {
+  name?: string;
+  api_key?: string;
+  api_base?: string;
+  enabled?: boolean;
+  model_prefix?: string;
+}
+export interface LlmModelCreate {
+  model_id: string;
+  label: string;
+  enabled?: boolean;
+  cost?: ModelCost;
+  description?: string;
+}
+export interface LlmModelPatch {
+  model_id?: string;
+  label?: string;
+  enabled?: boolean;
+  is_default?: boolean;
+  cost?: ModelCost;
+  description?: string;
+}
+export interface LlmApi {
+  list: () => Promise<{ providers: LLMProviderCfg[] }>;
+  createProvider: (p: LlmProviderCreate) => Promise<LLMProviderCfg>;
+  updateProvider: (id: string, p: LlmProviderPatch) => Promise<LLMProviderCfg>;
+  deleteProvider: (id: string) => Promise<unknown>;
+  createModel: (providerId: string, m: LlmModelCreate) => Promise<LLMModelCfg>;
+  updateModel: (id: string, m: LlmModelPatch) => Promise<LLMModelCfg>;
+  deleteModel: (id: string) => Promise<unknown>;
 }
 
 export interface BrowserExtensionInstance {
@@ -365,6 +424,7 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
   me: () => request<AuthUser>("/api/auth/me"),
+  logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   providers: () => request<{ providers: string[] }>("/api/auth/providers"),
   features: () => request<{ speech_to_text: boolean }>("/api/features"),
 
@@ -463,48 +523,43 @@ export const api = {
   adminListUsers: () => request<AdminUser[]>("/api/admin/users"),
   adminStats: () =>
     request<Record<string, number | boolean>>("/api/admin/stats"),
-  adminCreateUser: (email: string, password: string, is_admin: boolean, display_name = "") =>
+  adminCreateUser: (
+    email: string,
+    password: string,
+    is_admin: boolean,
+    display_name = "",
+    group_id: string | null = null,
+  ) =>
     request<AdminUser>("/api/admin/users", {
       method: "POST",
-      body: JSON.stringify({ email, password, is_admin, display_name }),
+      body: JSON.stringify({ email, password, is_admin, display_name, group_id }),
     }),
   adminUpdateUser: (
     id: string,
-    patch: { is_admin?: boolean; is_active?: boolean; display_name?: string; password?: string },
+    // Omit group_id to leave the group unchanged; pass null to move to ungrouped.
+    patch: {
+      is_admin?: boolean;
+      is_active?: boolean;
+      display_name?: string;
+      password?: string;
+      group_id?: string | null;
+    },
   ) => request<AdminUser>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   adminDeleteUser: (id: string) => request(`/api/admin/users/${id}`, { method: "DELETE" }),
 
+  // -- admin: user groups (organizational only) --
+  adminListGroups: () => request<GroupInfo[]>("/api/admin/groups"),
+  adminCreateGroup: (name: string) =>
+    request<GroupInfo>("/api/admin/groups", { method: "POST", body: JSON.stringify({ name }) }),
+  adminDeleteGroup: (id: string) => request(`/api/admin/groups/${id}`, { method: "DELETE" }),
+  adminSetDefaultGroup: (group_id: string | null) =>
+    request<{ default_group_id: string | null }>("/api/admin/groups/default", {
+      method: "PUT",
+      body: JSON.stringify({ group_id }),
+    }),
+
   // -- admin: overview / LLM providers / guardrails / audit --
   adminOverview: () => request<AdminOverview>("/api/admin/overview"),
-
-  adminListLLM: () => request<{ providers: LLMProviderCfg[] }>("/api/admin/llm"),
-  adminCreateProvider: (p: { name: string; api_key: string; api_base: string; enabled?: boolean }) =>
-    request<LLMProviderCfg>("/api/admin/providers", { method: "POST", body: JSON.stringify(p) }),
-  adminUpdateProvider: (
-    id: string,
-    p: { name?: string; api_key?: string; api_base?: string; enabled?: boolean },
-  ) => request<LLMProviderCfg>(`/api/admin/providers/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
-  adminDeleteProvider: (id: string) => request(`/api/admin/providers/${id}`, { method: "DELETE" }),
-  adminCreateModel: (
-    providerId: string,
-    m: { model_id: string; label: string; enabled?: boolean; cost?: ModelCost; description?: string },
-  ) =>
-    request<LLMModelCfg>(`/api/admin/providers/${providerId}/models`, {
-      method: "POST",
-      body: JSON.stringify(m),
-    }),
-  adminUpdateModel: (
-    id: string,
-    m: {
-      model_id?: string;
-      label?: string;
-      enabled?: boolean;
-      is_default?: boolean;
-      cost?: ModelCost;
-      description?: string;
-    },
-  ) => request<LLMModelCfg>(`/api/admin/models/${id}`, { method: "PATCH", body: JSON.stringify(m) }),
-  adminDeleteModel: (id: string) => request(`/api/admin/models/${id}`, { method: "DELETE" }),
 
   adminGuardrails: () =>
     request<{ monitor_only: boolean; rules: GuardrailRule[] }>("/api/admin/guardrails"),
@@ -618,6 +673,31 @@ export const api = {
   browserExtensionUnpair: () =>
     request<{ unpaired: number }>("/api/browser-extension/pairing", { method: "DELETE" }),
 };
+
+// One factory, two scopes: the admin Control Plane (/api/admin) and the per-user
+// "My Models" screen (/api/my). Both bind the identical Providers UI, so provider
+// management is defined once.
+function makeLlmApi(base: string): LlmApi {
+  return {
+    list: () => request<{ providers: LLMProviderCfg[] }>(`${base}/llm`),
+    createProvider: (p) =>
+      request<LLMProviderCfg>(`${base}/providers`, { method: "POST", body: JSON.stringify(p) }),
+    updateProvider: (id, p) =>
+      request<LLMProviderCfg>(`${base}/providers/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+    deleteProvider: (id) => request(`${base}/providers/${id}`, { method: "DELETE" }),
+    createModel: (providerId, m) =>
+      request<LLMModelCfg>(`${base}/providers/${providerId}/models`, {
+        method: "POST",
+        body: JSON.stringify(m),
+      }),
+    updateModel: (id, m) =>
+      request<LLMModelCfg>(`${base}/models/${id}`, { method: "PATCH", body: JSON.stringify(m) }),
+    deleteModel: (id) => request(`${base}/models/${id}`, { method: "DELETE" }),
+  };
+}
+
+export const ADMIN_LLM_API: LlmApi = makeLlmApi("/api/admin");
+export const USER_LLM_API: LlmApi = makeLlmApi("/api/my");
 
 export function openChatSocket(sessionId: string): WebSocket {
   const proto = location.protocol === "https:" ? "wss" : "ws";

@@ -64,6 +64,7 @@ import {
   openChatSocket,
 } from "./api";
 import { SoftnixLogo } from "./Logo";
+import { sanitizeModelMarkdown } from "./markdown";
 
 // Copy text to the clipboard, falling back to execCommand for non-secure
 // contexts (plain-http LAN/Tailscale IPs) where navigator.clipboard is absent.
@@ -254,6 +255,11 @@ interface ChatProps {
    * a completion event missed while the socket was closed. */
   running?: boolean;
   initialModel?: string | null;
+  /** Jump to the given Settings section (e.g. from a "Manage" link in the "+"
+   * menu or the model picker) so Skills/Connectors/Knowledge/My Models stay one
+   * click away from where the user actually uses them, instead of a dead end
+   * when the list is empty. */
+  onOpenSettings?: (section: "skills" | "connectors" | "knowledge" | "models") => void;
 }
 
 export function Chat({
@@ -264,6 +270,7 @@ export function Chat({
   onActivity,
   running,
   initialModel,
+  onOpenSettings,
 }: ChatProps) {
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streaming, setStreaming] = useState("");
@@ -275,6 +282,7 @@ export function Chat({
   const [copied, setCopied] = useState<Record<number, boolean>>({});
   const [sharing, setSharing] = useState(false);
   const [models, setModels] = useState<ModelOption[]>([]);
+  const [defaultModel, setDefaultModel] = useState<string>("");
   const [model, setModel] = useState<string>(initialModel ?? "");
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
@@ -309,8 +317,12 @@ export function Chat({
   // A message typed on the draft landing, held until the freshly-created
   // session's socket opens, then flushed. Lets the composer create the session
   // lazily (like claude.ai) instead of on page load.
-  const pendingRef = useRef<{ content: string; atts: AttachmentRef[] } | null>(null);
-  const rawSendRef = useRef<(content: string, atts: AttachmentRef[]) => void>(() => {});
+  // Captures the model chosen at send-click too, so the flush uses exactly what
+  // the user picked even if `model` state changes during the create handoff.
+  const pendingRef = useRef<{ content: string; atts: AttachmentRef[]; model: string } | null>(null);
+  const rawSendRef = useRef<(content: string, atts: AttachmentRef[], modelOverride?: string) => void>(
+    () => {},
+  );
   // Did this mount's socket deliver turn_completed? If the parent's poll sees
   // the session finish and we DIDN'T (event missed while navigated away), we
   // refetch the persisted answer instead of losing it.
@@ -358,7 +370,7 @@ export function Chat({
       const pending = pendingRef.current;
       if (pending) {
         pendingRef.current = null;
-        rawSendRef.current(pending.content, pending.atts);
+        rawSendRef.current(pending.content, pending.atts, pending.model);
       }
     };
     const onMessage = (raw: MessageEvent) => {
@@ -583,17 +595,37 @@ export function Chat({
     };
   }, [sessionId]);
 
-  // Load the model picker options once. Default to the chat's sticky model,
-  // otherwise the admin-configured default.
+  // Load the model picker options + the admin-configured default once.
   useEffect(() => {
     api
       .listModels()
       .then((r) => {
         setModels(r.models);
-        setModel((cur) => cur || initialModel || r.default || "");
+        setDefaultModel(r.default || "");
       })
       .catch(() => setModels([]));
-  }, [initialModel]);
+  }, []);
+
+  // The picker must always reflect the ACTIVE session's model — its sticky
+  // per-session model, else the global default. Because <Chat> isn't remounted
+  // when you switch sessions (no key), this has to re-sync on sessionId change;
+  // otherwise the previous session's selection leaks / the label reverts to the
+  // default and misleads the user about what's actually running. Keying on
+  // initialModel too means a just-persisted model (after send) stays in sync,
+  // while an unsent in-session pick is never clobbered by the background poll
+  // (initialModel only changes once the choice is persisted).
+  const prevSessionIdRef = useRef<string | null>(sessionId);
+  useEffect(() => {
+    const prev = prevSessionIdRef.current;
+    prevSessionIdRef.current = sessionId;
+    // Draft (null) → its own freshly-created session: the user's just-picked
+    // model must carry over. Resetting here would clobber it (the new session's
+    // persisted model isn't known yet, so we'd wrongly fall back to default —
+    // and since the queued first message is flushed reading `model`, the turn
+    // would even RUN on the wrong model). Keep the current selection.
+    if (prev === null && sessionId !== null) return;
+    setModel(initialModel || defaultModel || "");
+  }, [sessionId, initialModel, defaultModel]);
 
   // Show the composer mic only when the backend has speech-to-text configured.
   useEffect(() => {
@@ -710,6 +742,23 @@ export function Chat({
     [emitComposerInput, removeMentionChip],
   );
 
+  // Jump from the "+" menu straight to the matching Settings section — keeps
+  // the "where do I manage this?" answer one click away instead of a dead end.
+  const manageSettings = useCallback(
+    (section: "skills" | "connectors" | "knowledge") => {
+      setPlusOpen(false);
+      setPlusView("root");
+      onOpenSettings?.(section);
+    },
+    [onOpenSettings],
+  );
+
+  // Same idea for the model picker's "Manage my models" footer link.
+  const manageModelSettings = useCallback(() => {
+    setModelOpen(false);
+    onOpenSettings?.("models");
+  }, [onOpenSettings]);
+
   // Seed the composer with a starter phrase from a suggestion chip: clear any
   // existing content, drop in the phrase, and leave the caret at the end so the
   // user just keeps typing.
@@ -789,7 +838,7 @@ export function Chat({
   // connected session — the draft path in `send` routes through here only
   // after the new session's socket opens.
   const rawSend = useCallback(
-    (content: string, atts: AttachmentRef[]) => {
+    (content: string, atts: AttachmentRef[], modelOverride?: string) => {
       if (socketRef.current?.readyState !== WebSocket.OPEN) return;
       if (sentCountRef.current === 0 && content) onFirstMessage?.(content);
       sentCountRef.current += 1;
@@ -797,7 +846,7 @@ export function Chat({
         JSON.stringify({
           content,
           attachments: atts.map((a) => a.path),
-          model: model || undefined,
+          model: (modelOverride ?? model) || undefined,
           permission_mode: permission,
         }),
       );
@@ -842,7 +891,7 @@ export function Chat({
       // Draft landing: create the session first, then flush this message once
       // its socket connects (handled in the session effect's onopen).
       if (!sessionId) {
-        pendingRef.current = { content, atts };
+        pendingRef.current = { content, atts, model };
         setAttachments([]);
         setError("");
         onRequireSession?.().catch((e) => {
@@ -855,7 +904,7 @@ export function Chat({
       rawSend(content, atts);
       setAttachments([]);
     },
-    [attachments, sessionId, onRequireSession, rawSend],
+    [attachments, sessionId, onRequireSession, rawSend, model],
   );
 
   const onPickFiles = useCallback(
@@ -1127,6 +1176,15 @@ export function Chat({
                                 </button>
                               ))
                             )}
+                            <div className="claw-plus-divider" />
+                            <button
+                              type="button"
+                              className="claw-plus-item claw-plus-manage"
+                              onClick={() => manageSettings("skills")}
+                            >
+                              <Icon icon={ExternalLink} size="sm" color="secondary" />
+                              <span>Manage skills in Settings</span>
+                            </button>
                           </>
                         )}
                         {plusView === "connectors" && (
@@ -1160,6 +1218,15 @@ export function Chat({
                                 </button>
                               ))
                             )}
+                            <div className="claw-plus-divider" />
+                            <button
+                              type="button"
+                              className="claw-plus-item claw-plus-manage"
+                              onClick={() => manageSettings("connectors")}
+                            >
+                              <Icon icon={ExternalLink} size="sm" color="secondary" />
+                              <span>Manage connectors in Settings</span>
+                            </button>
                           </>
                         )}
                         {plusView === "knowledge" && (
@@ -1193,6 +1260,15 @@ export function Chat({
                                 </button>
                               ))
                             )}
+                            <div className="claw-plus-divider" />
+                            <button
+                              type="button"
+                              className="claw-plus-item claw-plus-manage"
+                              onClick={() => manageSettings("knowledge")}
+                            >
+                              <Icon icon={ExternalLink} size="sm" color="secondary" />
+                              <span>Manage knowledge in Settings</span>
+                            </button>
                           </>
                         )}
                       </div>
@@ -1306,6 +1382,9 @@ export function Chat({
                             <div className="claw-model-option-main">
                               <div className="claw-model-option-head">
                                 <span className="claw-model-option-name">{m.label}</span>
+                                {m.scope === "private" && (
+                                  <span className="claw-model-option-private">Private</span>
+                                )}
                                 <span className={`claw-cost claw-cost-${m.cost}`}>{COST_LABEL[m.cost]}</span>
                               </div>
                               {m.description && (
@@ -1317,6 +1396,15 @@ export function Chat({
                             )}
                           </button>
                         ))}
+                        <div className="claw-plus-divider" />
+                        <button
+                          type="button"
+                          className="claw-plus-item claw-plus-manage"
+                          onClick={manageModelSettings}
+                        >
+                          <Icon icon={ExternalLink} size="sm" color="secondary" />
+                          <span>Manage my models in Settings</span>
+                        </button>
                       </div>
                     }
                   >
@@ -1453,7 +1541,7 @@ export function Chat({
                   {item.role === "assistant" ? (
                     <>
                       <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
-                        <Markdown>{item.content}</Markdown>
+                        <Markdown>{sanitizeModelMarkdown(item.content)}</Markdown>
                       </ChatMessageBubble>
                       {sessionId && item.artifacts && item.artifacts.length > 0 && (
                         <div className="claw-artifacts">

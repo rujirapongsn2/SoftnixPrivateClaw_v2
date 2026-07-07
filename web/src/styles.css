@@ -477,6 +477,12 @@ html {
 .claw-login picture {
   width: auto;
 }
+/* Google/Microsoft brand mark on the "continue with" buttons. */
+.claw-oauth-logo {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
 
 /* Brand lockup: Softnix wordmark + PrivateClaw */
 .claw-brand {
@@ -508,16 +514,37 @@ html {
   overflow-y: auto;
   max-height: 60vh;
 }
+/* The Control Plane / Settings scroller. It spans the full main content width
+   (not a narrow centered column) so its scrollbar sits at the true right edge
+   of the content area — like the sidebar's — instead of floating at the inner
+   720px column edge. Content is still centered via the max-width on the direct
+   children below. scrollbar-gutter keeps the layout from shifting when a page
+   toggles between scrolling and not. */
 .claw-settings-panel {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   width: 100%;
-  max-width: 720px;
-  margin: 0 auto;
   padding: 32px 24px 48px;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 20px;
+}
+.claw-settings-panel-header,
+.claw-settings-panel > .claw-panel {
+  width: 100%;
+  max-width: 720px;
+}
+/* Data-table pages (LLM Providers, My Models) need more than the 720px prose
+   column every other settings/admin page uses — that width is fine for forms
+   and short lists, but crams a 7-column model table into ellipsis soup.
+   Higher specificity than the rule above (extra class) so it wins regardless
+   of source order. */
+.claw-settings-panel > .claw-panel.claw-panel-wide,
+.claw-settings-panel-header.claw-panel-wide {
+  max-width: 1080px;
 }
 .claw-settings-panel-header {
   display: flex;
@@ -551,6 +578,49 @@ html {
 }
 .claw-telegram-steps li {
   padding-left: 2px;
+}
+/* Collapsible "Quick start guide" — minimal, closed by default. */
+.claw-guide {
+  border: 1px solid var(--color-border-subtle, #e9ebee);
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: var(--color-surface-2, #f7f8fa);
+}
+.claw-guide > summary {
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-secondary, #555);
+  list-style: none;
+}
+.claw-guide > summary::-webkit-details-marker {
+  display: none;
+}
+.claw-guide > summary::before {
+  content: "▸ ";
+}
+.claw-guide[open] > summary::before {
+  content: "▾ ";
+}
+.claw-guide-body {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.claw-scope-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+.claw-scope-chips code {
+  font-size: 0.75rem;
+  background: var(--color-surface-3, #eef0f3);
+  border: 1px solid var(--color-border-subtle, #e2e4e8);
+  border-radius: 4px;
+  padding: 1px 6px;
+  word-break: break-all;
 }
 .claw-toggle {
   display: flex;
@@ -781,8 +851,59 @@ html {
 .claw-legend-dot--completion {
   background: var(--color-info, #2f9e6f);
 }
-.claw-model-row {
-  padding: 4px 0;
+/* Table-like column layout for the model list (LLM Providers / My Models).
+   One grid spans the header AND every model row (cells are flat siblings,
+   not nested per-row divs) so column widths are computed once from the
+   widest cell in each column across the whole table — real table sizing,
+   without a <table> element (which would fight the inline Edit-expands-to-
+   a-form pattern used below). Only the model id column is flexible/truncating;
+   every other column sizes to its content (`max-content`) and stays put. */
+.claw-models-grid {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.2fr) max-content minmax(90px, 1.4fr) max-content max-content max-content max-content;
+  align-items: center;
+  column-gap: 12px;
+}
+.claw-models-grid-user {
+  /* No "Set default" column — that control is admin-only. */
+  grid-template-columns: minmax(150px, 1.2fr) max-content minmax(90px, 1.4fr) max-content max-content max-content;
+}
+.claw-models-grid > * {
+  padding-block: 6px;
+}
+.claw-models-grid-head {
+  padding-block: 0 6px;
+  border-bottom: 1px solid var(--color-border-subtle, #e4e6ea);
+  align-self: end;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+/* The edit-mode form isn't table cells — let it span every column. */
+.claw-models-grid-span {
+  grid-column: 1 / -1;
+}
+.claw-model-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* The label is the primary identifier — give it first claim on the cell's
+   width and only the "default" badge (fixed, less essential) yields; on truly
+   long labels the text itself ellipsizes rather than wrapping to a second
+   line, which broke row height consistency. */
+.claw-model-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claw-model-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .claw-rule-pattern {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -948,6 +1069,12 @@ html {
   gap: 12px;
   padding: 4px 14px 16px 62px;
 }
+/* Label-above-chips field (e.g. the group picker) inside a form column. */
+.claw-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
 /* ---- chat composer: model picker ---- */
 .claw-composer-actions {
@@ -1040,6 +1167,16 @@ html {
   font-size: 13px;
   line-height: 1.4;
   color: var(--color-text-secondary, #6b7280);
+}
+/* Marks a user's own bring-your-own-key model in the picker. */
+.claw-model-option-private {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 6px;
+  color: var(--color-accent-purple, #7c3aed);
+  background: var(--color-accent-purple-subtle, rgba(124, 58, 237, 0.12));
 }
 
 /* Composer mic (speech-to-text) */
@@ -1206,17 +1343,17 @@ html {
 /* ---- LLM provider admin: presets, segmented cost, inline forms ---- */
 .claw-preset-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
 }
 .claw-preset-card {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 12px 8px;
+  gap: 8px;
+  padding: 16px 10px;
   border: 1px solid var(--color-border-subtle, #e4e2dd);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--color-background-base, #fff);
   cursor: pointer;
   text-align: center;
@@ -1231,6 +1368,14 @@ html {
   border-width: 2px;
   background: color-mix(in srgb, var(--color-primary, #4b6bfb) 6%, transparent);
 }
+/* Fixed-height band so every card's logo sits on the same baseline regardless
+   of whether the brand mark is a square glyph or a wide wordmark. */
+.claw-preset-logo-band {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+}
 .claw-preset-name {
   font-size: 13px;
   font-weight: 500;
@@ -1239,6 +1384,50 @@ html {
 .claw-preset-sub {
   font-size: 11px;
   color: var(--color-text-secondary, #6b7280);
+}
+
+/* ---- Provider brand marks: fixed height, natural width, no square frame ----
+   A square icon glyph and a wide wordmark both read clearly at a shared
+   height instead of being squeezed into a small square tile. */
+.claw-provider-logo {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.claw-provider-logo img {
+  display: block;
+  height: 100%;
+  width: auto;
+  object-fit: contain;
+}
+.claw-provider-logo--sm {
+  height: 30px;
+}
+.claw-provider-logo--sm img {
+  max-width: 96px;
+}
+.claw-provider-logo--lg {
+  height: 40px;
+}
+.claw-provider-logo--lg img {
+  max-width: 128px;
+}
+/* No-logo fallback keeps a neutral badge so the row still has a visual anchor. */
+.claw-provider-logo-fallback {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  background: var(--color-background-section, #f2f0ea);
+}
+.claw-provider-logo-fallback--sm {
+  width: 30px;
+  height: 30px;
+}
+.claw-provider-logo-fallback--lg {
+  width: 40px;
+  height: 40px;
 }
 
 /* Connected single-select control for the cost tier. */
@@ -1306,6 +1495,16 @@ html {
   cursor: pointer;
 }
 
+.claw-password-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.claw-password-actions {
+  display: flex;
+  gap: 12px;
+}
+
 /* ---- composer "+" menu (attach / skills / connectors) ---- */
 .claw-plus-menu {
   display: flex;
@@ -1358,6 +1557,15 @@ html {
   background: var(--color-surface-2, #f2f3f5);
   border-radius: 10px;
   padding: 1px 7px;
+}
+/* "Manage in Settings" footer link: same layout as a list item, but muted so
+   it reads as a navigational aside rather than another selectable entry. */
+.claw-plus-manage {
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 13px;
+}
+.claw-plus-manage:hover {
+  color: var(--color-text-primary, #1a1a1a);
 }
 
 /* ---- guided connector setup (no MCP jargon) ---- */

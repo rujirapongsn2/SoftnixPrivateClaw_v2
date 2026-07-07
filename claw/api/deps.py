@@ -16,6 +16,7 @@ from claw.db.stores import (
     AuditStore,
     ConnectorStore,
     FeedbackStore,
+    GroupStore,
     GuardrailStore,
     KnowledgeStore,
     LLMConfigStore,
@@ -38,6 +39,7 @@ class AppState:
     runtime: AgentRuntime
     bus: EventBus
     users: UserStore
+    groups: GroupStore
     sessions: SessionStore
     messages: MessageStore
     skills: SkillStore
