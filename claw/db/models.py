@@ -336,6 +336,12 @@ class KnowledgeDoc(Base):
     size: Mapped[int] = mapped_column(Integer, default=0)
     chars: Mapped[int] = mapped_column(Integer, default=0)
     chunks: Mapped[int] = mapped_column(Integer, default=0)
+    # Ingestion lifecycle: pending → processing → ready | failed. Documents are
+    # parsed by a background worker, so a freshly uploaded doc is "pending" until
+    # the worker finishes. server_default 'ready' keeps every pre-existing row
+    # (already fully ingested) valid after the migration.
+    status: Mapped[str] = mapped_column(String(16), default="ready", server_default="ready")
+    error: Mapped[str] = mapped_column(Text, default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -353,6 +359,10 @@ class KnowledgeChunk(Base):
     seq: Mapped[int] = mapped_column(Integer, default=0)
     title: Mapped[str] = mapped_column(String(255), default="")
     text: Mapped[str] = mapped_column(Text, default="")
+    # 1-based source page this chunk came from (PDF); null for formats without
+    # pages (docx/html/txt) or chunks ingested before page tracking existed.
+    # Used only to enrich citations — never affects retrieval.
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

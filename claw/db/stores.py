@@ -1555,8 +1555,11 @@ class KnowledgeStore:
         mime: str,
         size: int,
         chars: int,
-        chunk_texts: list[str],
+        chunk_records: list[tuple[int | None, str]],
     ) -> KnowledgeDoc:
+        """Persist a document and its chunks. `chunk_records` is a list of
+        (page, text) — page is the 1-based PDF page or None for paged-less
+        formats; it enriches citations and never affects retrieval."""
         async with self.factory() as db:
             doc = KnowledgeDoc(
                 kb_id=kb_id,
@@ -1566,13 +1569,15 @@ class KnowledgeStore:
                 mime=mime[:120],
                 size=size,
                 chars=chars,
-                chunks=len(chunk_texts),
+                chunks=len(chunk_records),
             )
             db.add(doc)
             await db.flush()
-            for i, text in enumerate(chunk_texts):
+            for i, (page, text) in enumerate(chunk_records):
                 db.add(
-                    KnowledgeChunk(kb_id=kb_id, doc_id=doc.id, seq=i, title=title[:255], text=text)
+                    KnowledgeChunk(
+                        kb_id=kb_id, doc_id=doc.id, seq=i, title=title[:255], text=text, page=page
+                    )
                 )
             kb = await db.get(KnowledgeBase, kb_id)
             if kb is not None:
@@ -1587,6 +1592,79 @@ class KnowledgeStore:
                 select(KnowledgeDoc)
                 .where(KnowledgeDoc.kb_id == kb_id)
                 .order_by(KnowledgeDoc.created_at.desc())
+            )
+            return list(rows)
+
+    # -- background ingestion (queue) ---------------------------------------
+    async def create_pending_doc(
+        self, *, kb_id: str, title: str, filename: str, mime: str, size: int
+    ) -> KnowledgeDoc:
+        """Register an uploaded document before it is parsed. The background
+        worker fills in concept_id/chars/chunks and flips status to ready."""
+        async with self.factory() as db:
+            doc = KnowledgeDoc(
+                kb_id=kb_id,
+                concept_id="",
+                title=title[:255],
+                filename=filename[:255],
+                mime=mime[:120],
+                size=size,
+                chars=0,
+                chunks=0,
+                status="pending",
+            )
+            db.add(doc)
+            await db.commit()
+            await db.refresh(doc)
+            return doc
+
+    async def finalize_doc(
+        self,
+        *,
+        doc_id: str,
+        concept_id: str,
+        chars: int,
+        chunk_records: list[tuple[int | None, str]],
+    ) -> KnowledgeDoc | None:
+        """Attach parsed chunks to a pending doc and mark it ready."""
+        async with self.factory() as db:
+            doc = await db.get(KnowledgeDoc, doc_id)
+            if doc is None:
+                return None
+            # Clear any prior chunks (e.g. a retried ingest) before re-inserting.
+            await db.execute(KnowledgeChunk.__table__.delete().where(KnowledgeChunk.doc_id == doc_id))
+            for i, (page, text) in enumerate(chunk_records):
+                db.add(
+                    KnowledgeChunk(
+                        kb_id=doc.kb_id, doc_id=doc.id, seq=i, title=doc.title, text=text, page=page
+                    )
+                )
+            doc.concept_id = concept_id
+            doc.chars = chars
+            doc.chunks = len(chunk_records)
+            doc.status = "ready"
+            doc.error = ""
+            kb = await db.get(KnowledgeBase, doc.kb_id)
+            if kb is not None:
+                kb.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(doc)
+            return doc
+
+    async def set_doc_status(self, doc_id: str, status: str, error: str = "") -> None:
+        async with self.factory() as db:
+            doc = await db.get(KnowledgeDoc, doc_id)
+            if doc is None:
+                return
+            doc.status = status
+            doc.error = (error or "")[:2000]
+            await db.commit()
+
+    async def docs_to_recover(self) -> list[KnowledgeDoc]:
+        """Docs left mid-ingest by a crash/restart (pending or processing)."""
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(KnowledgeDoc).where(KnowledgeDoc.status.in_(("pending", "processing")))
             )
             return list(rows)
 
@@ -1605,43 +1683,99 @@ class KnowledgeStore:
             return doc
 
     # -- retrieval ----------------------------------------------------------
+    # Recall threshold for word_similarity. Kept at the original 0.12 so this
+    # rewrite preserves what the agent used to retrieve — the change is purely
+    # that the query now uses the pg_trgm OPERATOR form (`<%`, ILIKE), which the
+    # GIN trigram index can serve, instead of the FUNCTION form (which forced a
+    # sequential scan computing similarity for every chunk in scope).
+    _WORD_SIM_THRESHOLD = 0.12
+    # Cap query variants per search so the OR-expansion stays bounded.
+    _MAX_QUERIES = 5
+
     async def search(self, query: str, kb_ids: list[str], limit: int = 6) -> list[dict[str, Any]]:
-        """Top matching chunks across the given bases, best first."""
-        query = (query or "").strip()
-        if not query or not kb_ids:
+        """Top matching chunks across the given bases, best first (single query)."""
+        return await self.search_multi([query], kb_ids, limit=limit)
+
+    async def search_multi(
+        self, queries: list[str], kb_ids: list[str], limit: int = 6
+    ) -> list[dict[str, Any]]:
+        """Top matching chunks for ANY of several query phrasings (synonyms, the
+        other language, keyword variants), scored by the BEST-matching variant.
+
+        This is lexical multi-query expansion — recall approaching semantic search
+        for paraphrased questions, at zero extra infrastructure: it's still one
+        GIN-indexed SQL statement, just OR-ing the variants' pg_trgm predicates
+        and taking GREATEST() of their word-similarities as the rank.
+        """
+        # Dedupe (case-insensitively), drop blanks, and cap the fan-out.
+        seen: dict[str, str] = {}
+        for q in queries:
+            q = (q or "").strip()
+            if q and q.lower() not in seen:
+                seen[q.lower()] = q
+        qs = list(seen.values())[: self._MAX_QUERIES]
+        if not qs or not kb_ids:
             return []
-        like = f"%{query}%"
         async with self.factory() as db:
             if self.is_postgres:
+                # Transaction-local so it never leaks to other pooled connections.
+                await db.execute(
+                    sa_text(
+                        f"SET LOCAL pg_trgm.word_similarity_threshold = {self._WORD_SIM_THRESHOLD}"
+                    )
+                )
+                sims = ", ".join(f"word_similarity(:q{i}, c.text)" for i in range(len(qs)))
+                score_expr = f"GREATEST({sims})" if len(qs) > 1 else sims
+                # Each variant contributes two GIN-servable predicates (`<%`, ILIKE),
+                # OR-ed together, so the planner BitmapOrs index scans — no full scan.
+                where_ors = " OR ".join(
+                    f"(:q{i} <% c.text OR c.text ILIKE :like{i})" for i in range(len(qs))
+                )
                 stmt = (
                     sa_text(
-                        "SELECT c.text, c.title, c.kb_id, b.name AS kb_name, "
-                        "word_similarity(:q, c.text) AS score "
+                        f"SELECT c.text, c.title, c.page, c.kb_id, b.name AS kb_name, "
+                        f"{score_expr} AS score "
                         "FROM knowledge_chunks c JOIN knowledge_bases b ON b.id = c.kb_id "
                         "WHERE c.kb_id IN :ids "
-                        "AND (word_similarity(:q, c.text) > 0.12 OR c.text ILIKE :like) "
+                        f"AND ({where_ors}) "
                         "ORDER BY score DESC LIMIT :limit"
                     )
                     .bindparams(bindparam("ids", expanding=True))
                 )
-                rows = (
-                    await db.execute(
-                        stmt, {"q": query, "ids": kb_ids, "like": like, "limit": limit}
-                    )
-                ).all()
+                params: dict[str, Any] = {"ids": kb_ids, "limit": limit}
+                for i, q in enumerate(qs):
+                    params[f"q{i}"] = q
+                    params[f"like{i}"] = f"%{q}%"
+                rows = (await db.execute(stmt, params)).all()
                 return [
-                    {"text": r[0], "title": r[1], "kb_id": r[2], "kb_name": r[3], "score": float(r[4])}
+                    {
+                        "text": r[0],
+                        "title": r[1],
+                        "page": r[2],
+                        "kb_id": r[3],
+                        "kb_name": r[4],
+                        "score": float(r[5]),
+                    }
                     for r in rows
                 ]
-            # SQLite fallback: simple substring match.
+            # SQLite fallback: substring match on any variant.
+            clauses = [KnowledgeChunk.text.ilike(f"%{q}%") for q in qs]
             rows = (
                 await db.execute(
-                    select(KnowledgeChunk.text, KnowledgeChunk.title, KnowledgeChunk.kb_id)
-                    .where(KnowledgeChunk.kb_id.in_(kb_ids), KnowledgeChunk.text.ilike(like))
+                    select(
+                        KnowledgeChunk.text,
+                        KnowledgeChunk.title,
+                        KnowledgeChunk.page,
+                        KnowledgeChunk.kb_id,
+                    )
+                    .where(KnowledgeChunk.kb_id.in_(kb_ids), or_(*clauses))
                     .limit(limit)
                 )
             ).all()
-            return [{"text": r[0], "title": r[1], "kb_id": r[2], "kb_name": "", "score": 1.0} for r in rows]
+            return [
+                {"text": r[0], "title": r[1], "page": r[2], "kb_id": r[3], "kb_name": "", "score": 1.0}
+                for r in rows
+            ]
 
 
 def _hash_token(token: str) -> str:

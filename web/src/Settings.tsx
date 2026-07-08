@@ -1427,6 +1427,16 @@ function KnowledgeCard({
     api.listKnowledgeDocs(kb.id).then(setDocs).catch(() => setDocs([]));
   }, [kb.id]);
 
+  // While any document is still being parsed in the background, poll the list so
+  // its status flips to ready/failed without the user refreshing.
+  useEffect(() => {
+    if (!expanded || !docs) return;
+    const busy = docs.some((d) => d.status === "pending" || d.status === "processing");
+    if (!busy) return;
+    const t = setInterval(loadDocs, 2000);
+    return () => clearInterval(t);
+  }, [expanded, docs, loadDocs]);
+
   const toggle = () => {
     const next = !expanded;
     setExpanded(next);
@@ -1439,7 +1449,7 @@ function KnowledgeCard({
     try {
       const res = await api.uploadKnowledgeDocs(kb.id, Array.from(files));
       if (res.ingested.length) {
-        toast({ body: `Added ${res.ingested.length} document(s) to ${kb.name}`, type: "info", autoHideDuration: 2500 });
+        toast({ body: `Queued ${res.ingested.length} document(s) in ${kb.name} — processing…`, type: "info", autoHideDuration: 2500 });
       }
       if (res.errors.length) {
         toast({ body: res.errors.join("; "), type: "error" });
@@ -1555,7 +1565,17 @@ function KnowledgeCard({
                   <span className="claw-kb-doc-name" title={d.filename}>
                     {d.title}
                   </span>
-                  <span className="claw-kb-doc-meta">{d.chunks} chunk{d.chunks === 1 ? "" : "s"}</span>
+                  {d.status === "failed" ? (
+                    <span className="claw-kb-doc-meta claw-kb-doc-failed" title={d.error}>
+                      Failed
+                    </span>
+                  ) : d.status === "pending" || d.status === "processing" ? (
+                    <span className="claw-kb-doc-meta claw-kb-doc-processing">Processing…</span>
+                  ) : (
+                    <span className="claw-kb-doc-meta">
+                      {d.chunks} chunk{d.chunks === 1 ? "" : "s"}
+                    </span>
+                  )}
                   {kb.is_owner && (
                     <button
                       type="button"

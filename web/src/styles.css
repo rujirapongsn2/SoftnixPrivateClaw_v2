@@ -2114,6 +2114,13 @@ html {
   font-size: 11px;
   color: var(--color-text-secondary, #9096a0);
 }
+.claw-kb-doc-processing {
+  color: var(--color-accent-purple, #7c3aed);
+}
+.claw-kb-doc-failed {
+  color: var(--color-text-error, #dc2626);
+  cursor: help;
+}
 .claw-kb-doc-del {
   flex: 0 0 auto;
   border: none;

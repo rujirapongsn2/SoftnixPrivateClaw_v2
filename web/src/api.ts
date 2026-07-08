@@ -175,6 +175,9 @@ export interface KnowledgeDoc {
   size: number;
   chars: number;
   chunks: number;
+  // Background ingestion lifecycle: pending → processing → ready | failed.
+  status: "pending" | "processing" | "ready" | "failed";
+  error: string;
   created_at: string;
 }
 
@@ -506,16 +509,29 @@ export const api = {
   uploadKnowledgeDocs: async (
     id: string,
     files: File[],
+    onProgress?: (done: number, total: number) => void,
   ): Promise<{ ingested: { title: string }[]; errors: string[] }> => {
-    const form = new FormData();
-    for (const f of files) form.append("files", f);
-    const resp = await fetch(`/api/knowledge/${id}/documents`, {
-      method: "POST",
-      headers: authHeaders(), // browser sets multipart boundary
-      body: form,
-    });
-    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
-    return resp.json();
+    // The backend accepts at most 10 files per request, so send them in
+    // sequential batches and merge the results. This lets a user pick 100 files
+    // at once without hitting a 413, while keeping the same return shape.
+    const BATCH = 10;
+    const ingested: { title: string }[] = [];
+    const errors: string[] = [];
+    for (let i = 0; i < files.length; i += BATCH) {
+      const form = new FormData();
+      for (const f of files.slice(i, i + BATCH)) form.append("files", f);
+      const resp = await fetch(`/api/knowledge/${id}/documents`, {
+        method: "POST",
+        headers: authHeaders(), // browser sets multipart boundary
+        body: form,
+      });
+      if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+      const batch = (await resp.json()) as { ingested: { title: string }[]; errors: string[] };
+      ingested.push(...batch.ingested);
+      errors.push(...batch.errors);
+      onProgress?.(Math.min(i + BATCH, files.length), files.length);
+    }
+    return { ingested, errors };
   },
   deleteKnowledgeDoc: (kbId: string, docId: string) =>
     request(`/api/knowledge/${kbId}/documents/${docId}`, { method: "DELETE" }),

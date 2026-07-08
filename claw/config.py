@@ -71,6 +71,29 @@ class MemorySettings(BaseModel):
     keep: int = 12
 
 
+class KnowledgeSettings(BaseModel):
+    """Knowledge-base ingestion (upload → parse → chunk → index)."""
+
+    # Max size of a single uploaded document. Uploads stream to a staging file on
+    # disk, so this is bounded by disk, not memory.
+    max_doc_mb: int = 150
+    # Files accepted per upload request (the web UI batches large selections to
+    # stay under this). The real capacity comes from the background queue below.
+    max_docs_per_upload: int = 10
+    # How many documents the background ingest worker parses at once. Kept small
+    # so ingestion never starves the event loop / chat responsiveness.
+    ingest_concurrency: int = 2
+    # OCR fallback for scanned/image-only PDFs. Off by default (needs the
+    # `ocrmypdf` CLI + tesseract installed on the host). When on, a PDF that
+    # yields almost no extractable text is run through OCR before chunking.
+    ocr_enabled: bool = False
+    # A PDF whose total extracted text is below this many characters is treated
+    # as scanned (OCR candidate).
+    ocr_min_chars: int = 20
+    # Hard cap on how long a single OCR pass may run (seconds).
+    ocr_timeout_seconds: int = 600
+
+
 class SchedulerSettings(BaseModel):
     """Recurring/one-shot scheduled tasks."""
 
@@ -137,6 +160,7 @@ class Settings(BaseSettings):
     browser: BrowserSettings = BrowserSettings()
     memory: MemorySettings = MemorySettings()
     scheduler: SchedulerSettings = SchedulerSettings()
+    knowledge: KnowledgeSettings = KnowledgeSettings()
 
 
 def load_settings() -> Settings:

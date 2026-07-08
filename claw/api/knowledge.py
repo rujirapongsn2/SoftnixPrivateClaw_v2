@@ -5,7 +5,11 @@ the user never deals with formats. Private bases are visible only to their
 owner; public ones to everyone. Only the owner may modify or delete a base.
 """
 
+import os
+import tempfile
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from claw.api.deps import AppState, current_user, get_state
@@ -13,8 +17,7 @@ from claw.db.models import User
 
 router = APIRouter(prefix="/api/knowledge")
 
-_MAX_DOC_BYTES = 25_000_000  # 25 MB per document
-_MAX_DOCS_PER_UPLOAD = 10
+_UPLOAD_CHUNK = 1024 * 1024  # 1 MB stream chunks
 
 
 class CreateKBBody(BaseModel):
@@ -38,6 +41,8 @@ def _doc_row(d) -> dict:
         "size": d.size,
         "chars": d.chars,
         "chunks": d.chunks,
+        "status": getattr(d, "status", "ready"),
+        "error": getattr(d, "error", ""),
         "created_at": d.created_at.isoformat(),
     }
 
@@ -111,33 +116,65 @@ async def list_documents(
     return [_doc_row(d) for d in docs]
 
 
+async def _stage_upload(upload: UploadFile, staging_dir, max_bytes: int) -> tuple[str | None, str]:
+    """Stream an upload to a temp file in the staging dir (never fully into
+    memory), enforcing the size cap. Returns (temp_path, error)."""
+    fd, tmp_path = tempfile.mkstemp(dir=str(staging_dir), suffix=".part")
+    total = 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = await upload.read(_UPLOAD_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    return None, f"exceeds the {max_bytes // 1_000_000} MB limit"
+                out.write(chunk)
+        if total == 0:
+            return None, "empty file"
+        return tmp_path, ""
+    finally:
+        # On any early return/error, drop the partial temp file.
+        if total == 0 or total > max_bytes:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 @router.post("/{kb_id}/documents")
 async def upload_documents(
     kb_id: str,
     files: list[UploadFile] = File(...),
     user: User = Depends(current_user),
     state: AppState = Depends(get_state),
-) -> dict:
-    """Upload one or more documents; each is parsed, chunked, and indexed."""
+):
+    """Accept one or more documents, stage them to disk, and queue them for
+    background parsing. Returns 202 with each doc in `pending` status — poll the
+    documents list to watch them turn `ready` (or `failed`)."""
     await _owned_base(state, user, kb_id)
-    if len(files) > _MAX_DOCS_PER_UPLOAD:
-        raise HTTPException(status_code=413, detail=f"at most {_MAX_DOCS_PER_UPLOAD} files per upload")
-    ingested, errors = [], []
+    svc = state.knowledge_service
+    kcfg = state.settings.knowledge
+    if len(files) > kcfg.max_docs_per_upload:
+        raise HTTPException(
+            status_code=413, detail=f"at most {kcfg.max_docs_per_upload} files per upload"
+        )
+    queued, errors = [], []
     for upload in files:
-        data = await upload.read()
-        if len(data) > _MAX_DOC_BYTES:
-            errors.append(f"{upload.filename}: exceeds the 25 MB limit")
+        name = upload.filename or "document"
+        tmp_path, err = await _stage_upload(upload, svc.staging_dir, svc.max_doc_bytes)
+        if err or tmp_path is None:
+            errors.append(f"{name}: {err}")
             continue
-        try:
-            result = await state.knowledge_service.ingest(
-                kb_id, upload.filename or "document", upload.content_type or "", data
-            )
-            ingested.append(result)
-        except ValueError as exc:
-            errors.append(str(exc))
-    if not ingested and errors:
+        size = os.path.getsize(tmp_path)
+        result = await svc.enqueue_upload(kb_id, name, upload.content_type or "", tmp_path, size)
+        queued.append(result)
+    if not queued and errors:
         raise HTTPException(status_code=400, detail="; ".join(errors))
-    return {"ingested": ingested, "errors": errors}
+    # `ingested` is kept in the payload for backward compatibility with the
+    # existing client; these are queued (pending), not yet fully ingested.
+    return JSONResponse(status_code=202, content={"ingested": queued, "errors": errors})
 
 
 @router.delete("/{kb_id}/documents/{doc_id}")

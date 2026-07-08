@@ -79,7 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     oauth_apps = OAuthAppStore(factory, secret_box=secret_box)
     browser_broker = BrowserBrokerStore(settings.workspaces_root / "_browser_broker")
     knowledge = KnowledgeStore(factory, is_postgres="postgresql" in settings.database_url)
-    knowledge_service = KnowledgeService(knowledge, settings.knowledge_root)
+    knowledge_service = KnowledgeService(knowledge, settings.knowledge_root, settings.knowledge)
     shares = ShareStore(factory)
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
 
@@ -167,6 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.exception("Guardrail load failed; using built-in defaults")
         scheduler.start()
         heartbeat.start()
+        await knowledge_service.start()
         # Telegram: an admin-saved config in the DB is authoritative once it
         # exists; otherwise fall back to CLAW_TELEGRAM_BOT_TOKEN (env) so
         # existing infra-managed deployments keep working unchanged.
@@ -187,6 +188,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Stop intake, then let in-flight turns finish before tearing down.
         await scheduler.stop()
         await heartbeat.stop()
+        await knowledge_service.stop()
         await telegram_mgr.stop()
         await runtime.drain()
         if browser_mgr is not None:
