@@ -56,6 +56,7 @@ export interface AgentEvent {
     | "tool_started"
     | "tool_finished"
     | "tool_progress"
+    | "plan_updated"
     | "tool_confirm_request"
     | "tool_confirm_resolved"
     | "turn_completed"
@@ -77,6 +78,14 @@ export interface AgentEvent {
   index?: number;
   total?: number;
   status?: string;
+  // plan_updated: the agent's current working plan (goal + step checklist)
+  goal?: string;
+  steps?: { step: string; status: string }[];
+}
+
+export interface WorkingPlan {
+  goal: string;
+  steps: { step: string; status: string }[];
 }
 
 export interface SkillInfo {

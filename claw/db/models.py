@@ -77,6 +77,11 @@ class ChatSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     last_consolidated_seq: Mapped[int] = mapped_column(Integer, default=0)
+    # Working plan for the current task: {"goal": str, "steps": [{"step", "status"}]}.
+    # Pinned into the system prompt every turn (never trimmed) so the agent keeps
+    # the thread on long/autonomous runs even after early messages scroll out of
+    # context. Maintained by the agent via the `update_plan` tool. Null = no plan.
+    plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class Message(Base):
@@ -368,7 +373,9 @@ class Share(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    # Indexed via the explicit Index in __table_args__ above; no index=True here
+    # or create_all would try to build the same-named index twice (SQLite errors).
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     session_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     title: Mapped[str] = mapped_column(String(255), default="Shared answer")
     # {"messages": [{"role", "content", "files": [{"name", "is_image"}]}]}

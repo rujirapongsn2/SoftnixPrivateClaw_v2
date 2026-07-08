@@ -15,7 +15,13 @@ from loguru import logger
 
 from claw.config import Settings
 from claw.core.bus import EventBus
-from claw.core.context import ContextAssembler, build_runtime_context, build_user_content
+from claw.core.context import (
+    ContextAssembler,
+    build_runtime_context,
+    build_user_content,
+    render_plan,
+)
+from claw.core.turn_context import current_session_id
 from claw.core.events import (
     ToolConfirmRequest,
     ToolConfirmResolved,
@@ -49,7 +55,8 @@ from claw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, Write
 from claw.tools.registry import ToolRegistry
 from claw.tools.browser import BrowserTool
 from claw.tools.documents import build_document_tools
-from claw.tools.memory import MemoryTool
+from claw.tools.memory import MemoryTool, RecallMemoryTool
+from claw.tools.plan import PlanTool
 from claw.tools.shell import ExecTool
 from claw.core.builtin_skills import builtin_skills
 from claw.tools.knowledge import SearchKnowledgeTool
@@ -85,6 +92,7 @@ class ClawAgent:
         scheduler: "SchedulerService | None" = None,
         memory: MemoryService | None = None,
         knowledge: "KnowledgeStore | None" = None,
+        sessions: SessionStore | None = None,
     ):
         self.user_id = user_id
         self.workspace = workspace
@@ -101,6 +109,9 @@ class ClawAgent:
         self.tools.register(WebSearchTool())
         if memory is not None:
             self.tools.register(MemoryTool(memory, user_id))
+            self.tools.register(RecallMemoryTool(memory, user_id))
+        if sessions is not None:
+            self.tools.register(PlanTool(sessions))
         subagents = SubagentManager(
             provider=provider,
             sandbox=sandbox,
@@ -207,6 +218,7 @@ class ClawAgent:
         persona: str = "",
         skills_summary: str = "",
         knowledge_summary: str = "",
+        plan_context: str = "",
     ) -> str:
         runtime = f"{platform.system()} {platform.machine()}, Python {platform.python_version()}"
         parts = [
@@ -221,12 +233,20 @@ class ClawAgent:
             "- Read a file before modifying it. Analyze tool errors before retrying.\n"
             "- Ask for clarification when the request is ambiguous.\n"
             "- Match the user's language in your replies.\n"
+            "- For a multi-step or long-running task, call `update_plan` to record the goal "
+            "and steps, and keep it updated as you progress. The plan stays pinned in your "
+            "context, so you keep the thread even after earlier messages scroll away — lean "
+            "on it instead of losing track of the original request.\n"
             "- You have long-term memory: when the user shares something worth keeping "
             "(their name, preferences, ongoing work, or asks you to remember something), "
             "call the `remember` tool to save it. Your saved memory is shown under "
             "Long-term Memory below and persists across conversations, so don't claim you "
             "can't remember."
         ]
+        # The pinned plan goes right after the base prompt (ahead of persona/memory)
+        # so it's the first thing the model orients on each turn.
+        if plan_context:
+            parts.append(plan_context)
         if persona:
             parts.append(f"# Persona\n\n{persona}")
         if memory_context:
@@ -384,6 +404,7 @@ class AgentRuntime:
             scheduler=self.scheduler,
             memory=self.memory,
             knowledge=self.knowledge,
+            sessions=self.sessions,
         )
         self._agents[user_id] = agent
         self._agents.move_to_end(user_id)
@@ -576,7 +597,13 @@ class AgentRuntime:
             await self.messages.append(session_id, [{"role": "user", "content": stored_content}])
             prompt_messages = self.assembler.assemble(
                 agent.system_prompt(
-                    memory_context, skills_summary=skills_summary, knowledge_summary=knowledge_summary
+                    memory_context,
+                    skills_summary=skills_summary,
+                    knowledge_summary=knowledge_summary,
+                    # Pin the session's working plan into the (never-trimmed)
+                    # system prompt so the agent keeps the thread across a long
+                    # conversation and updates it via the update_plan tool.
+                    plan_context=render_plan(session.plan if session else None),
                 ),
                 history,
                 user_message,
@@ -585,6 +612,9 @@ class AgentRuntime:
             async def _confirm(t_id: str, tool: str, args_preview: str) -> bool:
                 return await self.request_confirmation(session_id, t_id, tool, args_preview)
 
+            # Expose the active session to session-scoped tools (update_plan) for
+            # the duration of the turn; reset after so it never leaks to another.
+            _session_token = current_session_id.set(session_id)
             try:
                 outcome = await agent.loop.run_turn(
                     turn_id, prompt_messages, lambda ev: self.bus.publish(session_id, ev),
@@ -599,6 +629,8 @@ class AgentRuntime:
                 # error text, so a bad provider response can't poison future
                 # context (legacy #1303).
                 return message
+            finally:
+                current_session_id.reset(_session_token)
 
             final = outcome.final_content
             if outcome.reached_max_iterations and not final:

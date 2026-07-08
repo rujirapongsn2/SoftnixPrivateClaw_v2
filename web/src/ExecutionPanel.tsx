@@ -3,9 +3,11 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { Text } from "@astryxdesign/core/Text";
 import {
   Brain,
+  Check,
   FileText,
   GitBranch,
   Globe,
+  ListChecks,
   Loader2,
   type LucideIcon,
   MessageSquare,
@@ -16,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import type { WorkingPlan } from "./api";
 
 export interface ExecSubStep {
   key: string;
@@ -69,16 +72,29 @@ interface Row {
 /** Minimal, live list of the agent's execution — one dense line per step
  * (status dot · lane icon · tool name · faint detail · duration), click to
  * expand a step's input/result. Replaces the earlier card-per-step diagram. */
+// Map a plan step's status to the shared status-dot modifier.
+const PLAN_DOT: Record<string, RowStatus> = {
+  done: "complete",
+  in_progress: "running",
+  pending: "pending",
+};
+
 export function ExecutionPanel({
   steps,
+  plan,
   running,
   onClose,
 }: {
   steps: ExecStep[];
+  plan?: WorkingPlan | null;
   running: boolean;
   onClose: () => void;
 }) {
   const [expanded, setExpanded] = useState<number | null>(null);
+
+  const planSteps = plan?.steps ?? [];
+  const planDone = planSteps.filter((s) => s.status === "done").length;
+  const hasPlan = Boolean(plan && (plan.goal || planSteps.length > 0));
 
   const anyStepRunning = steps.some((s) => s.status === "running");
   const active = running || anyStepRunning;
@@ -158,7 +174,39 @@ export function ExecutionPanel({
         />
       </div>
 
-      {rows.length === 0 ? (
+      {hasPlan && (
+        <div className="claw-plan-card">
+          <div className="claw-plan-head">
+            <Icon icon={ListChecks} size="xsm" color="secondary" />
+            <span className="claw-plan-title">Plan</span>
+            {planSteps.length > 0 && (
+              <span className="claw-plan-progress">
+                {planDone}/{planSteps.length}
+              </span>
+            )}
+          </div>
+          {plan?.goal && <div className="claw-plan-goal">{plan.goal}</div>}
+          {planSteps.length > 0 && (
+            <div className="claw-plan-steps">
+              {planSteps.map((s, i) => {
+                const dot = PLAN_DOT[s.status] ?? "pending";
+                return (
+                  <div key={i} className={`claw-plan-step claw-plan-step--${dot}`}>
+                    {s.status === "done" ? (
+                      <Icon icon={Check} size="xsm" />
+                    ) : (
+                      <span className={`claw-xdot claw-xdot--${dot}`} aria-hidden="true" />
+                    )}
+                    <span className="claw-plan-step-label">{s.step}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {rows.length === 0 && !hasPlan ? (
         <div className="claw-exec-empty">
           <Text size="sm" color="secondary">
             No activity yet — steps appear here while Claw works.

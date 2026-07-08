@@ -23,6 +23,7 @@ from claw.db.stores import (
     AuditStore,
     ConnectorStore,
     FeedbackStore,
+    GroupStore,
     GuardrailStore,
     KnowledgeStore,
     LLMConfigStore,
@@ -31,6 +32,7 @@ from claw.db.stores import (
     OAuthAppStore,
     ScheduleStore,
     SessionStore,
+    ShareStore,
     SkillStore,
     TelegramConfigStore,
     UsageStore,
@@ -81,6 +83,8 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         telegram_config=TelegramConfigStore(db_factory),
         telegram_mgr=TelegramManager(None, UserStore(db_factory), SessionStore(db_factory), LinkCodeService()),
         telegram=None,
+        groups=GroupStore(db_factory),
+        shares=ShareStore(db_factory),
     )
     return app
 

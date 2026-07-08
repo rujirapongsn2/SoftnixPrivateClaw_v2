@@ -213,6 +213,20 @@ class SessionStore:
                 session.model = model
                 await db.commit()
 
+    async def set_plan(
+        self, session_id: str, goal: str, steps: list[dict[str, Any]]
+    ) -> None:
+        """Replace the session's working plan (goal + ordered step checklist).
+
+        Full-replace (not partial) so the agent sends its complete current plan
+        each time — idempotent, no drift between stored and intended state.
+        """
+        async with self.factory() as db:
+            session = await db.get(ChatSession, session_id)
+            if session is not None:
+                session.plan = {"goal": goal, "steps": steps}
+                await db.commit()
+
     async def by_user_since(self, days: int = 7, limit: int = 20) -> list[dict[str, Any]]:
         """Sessions created in the last `days` days, grouped by user — highest first.
 
@@ -303,6 +317,50 @@ class MemoryStore:
                 .limit(limit)
             )
             return [row.content for row in reversed(list(rows))]
+
+    async def search_history(
+        self, user_id: str, query: str, *, is_postgres: bool = True, limit: int = 8
+    ) -> list[str]:
+        """Best-matching consolidated history entries for a free-text query.
+
+        These entries (one per consolidation pass) are the durable record of
+        past conversations but aren't injected into context — this lets the
+        agent pull the relevant ones back on demand. pg_trgm word-similarity on
+        Postgres (language-agnostic, good for Thai/English, no embedding model);
+        plain substring match on SQLite (tests).
+        """
+        query = (query or "").strip()
+        if not query:
+            return []
+        like = f"%{query}%"
+        async with self.factory() as db:
+            if is_postgres:
+                stmt = sa_text(
+                    "SELECT content, word_similarity(:q, content) AS score "
+                    "FROM memories "
+                    "WHERE user_id = :uid AND kind = 'history' "
+                    "AND (word_similarity(:q, content) > 0.12 OR content ILIKE :like) "
+                    "ORDER BY score DESC LIMIT :limit"
+                )
+                rows = (
+                    await db.execute(
+                        stmt, {"q": query, "uid": user_id, "like": like, "limit": limit}
+                    )
+                ).all()
+                return [r[0] for r in rows]
+            rows = (
+                await db.execute(
+                    select(Memory.content)
+                    .where(
+                        Memory.user_id == user_id,
+                        Memory.kind == "history",
+                        Memory.content.ilike(like),
+                    )
+                    .order_by(Memory.created_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+            return [r[0] for r in rows]
 
     async def stats(self) -> dict[str, int]:
         """Fleet-wide learning metrics for the admin overview: how many

@@ -138,6 +138,41 @@ def build_user_content(
     return [*image_blocks, {"type": "text", "text": text_part}], stored
 
 
+_PLAN_MARKS = {"done": "[x]", "in_progress": "[→]", "pending": "[ ]"}
+
+
+def render_plan(plan: dict[str, Any] | None) -> str:
+    """Render the session's working plan as a pinned system-prompt block.
+
+    Empty string when there's no plan yet — so a fresh chat pays no token cost
+    for it. The block is placed high in the system prompt (see runtime) and the
+    system prompt is never trimmed, which is the whole point: the goal and open
+    steps stay in front of the model even after early turns scroll out.
+    """
+    if not plan:
+        return ""
+    goal = str(plan.get("goal") or "").strip()
+    steps = plan.get("steps") or []
+    if not goal and not steps:
+        return ""
+    lines = [
+        "# Current Plan",
+        "(You maintain this with the update_plan tool. It is pinned here every "
+        "turn — it stays even if earlier messages scroll out of context, so use "
+        "it to keep the thread and finish what you started.)",
+    ]
+    if goal:
+        lines.append(f"\n**Goal:** {goal}")
+    if steps:
+        lines.append("")
+        for s in steps:
+            if not isinstance(s, dict):
+                continue
+            mark = _PLAN_MARKS.get(s.get("status", "pending"), "[ ]")
+            lines.append(f"- {mark} {str(s.get('step') or '').strip()}")
+    return "\n".join(lines)
+
+
 def build_runtime_context(channel: str, locale: str | None = None) -> str:
     """Small untrusted metadata block prepended to the user message."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")

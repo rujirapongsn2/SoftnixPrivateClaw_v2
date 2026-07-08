@@ -50,6 +50,7 @@ class MemoryService:
         model: str | None = None,
         window: int = 60,
         keep: int = 20,
+        is_postgres: bool = True,
     ):
         self.memories = memories
         self.messages = messages
@@ -58,6 +59,16 @@ class MemoryService:
         self.model = model
         self.window = window
         self.keep = keep
+        self.is_postgres = is_postgres
+
+    async def recall(self, user_id: str, query: str, limit: int = 8) -> list[str]:
+        """Search the append-only consolidated history for entries matching a
+        free-text query. These summaries record past conversations but aren't
+        injected into context, so this is how the agent pulls back "what did we
+        decide about X" from earlier sessions on demand."""
+        return await self.memories.search_history(
+            user_id, query, is_postgres=self.is_postgres, limit=limit
+        )
 
     async def build_context(self, user_id: str) -> str:
         core = await self.memories.get_core(user_id)

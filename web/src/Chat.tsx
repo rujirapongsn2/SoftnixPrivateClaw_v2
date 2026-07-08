@@ -59,6 +59,7 @@ import {
   KnowledgeBase,
   ModelOption,
   SkillInfo,
+  WorkingPlan,
   api,
   fileUrl,
   openChatSocket,
@@ -306,6 +307,9 @@ export function Chat({
   // Right execution panel: remember the user's explicit show/hide choice; a tool
   // starting auto-opens it transiently without overwriting that saved default.
   const [execOpen, setExecOpen] = useState(() => localStorage.getItem("claw_exec_open") === "1");
+  // The agent's live working plan (from plan_updated events), shown pinned atop
+  // the Execution panel. Null until the agent sets one this session.
+  const [plan, setPlan] = useState<WorkingPlan | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   // Imperative handle for the composer's contentEditable — lets us insert a
@@ -348,6 +352,7 @@ export function Chat({
     setError("");
     setAttachments([]);
     setFeedback({});
+    setPlan(null); // plan is per-session; don't leak one chat's plan into another
     setSuggestionCategory(null);
     sentCountRef.current = 0;
     sawCompletionRef.current = false;
@@ -483,6 +488,11 @@ export function Chat({
             }
             return prev;
           });
+          break;
+        case "plan_updated":
+          // The agent revised its working plan — show it pinned in the panel.
+          setExecOpen(true);
+          setPlan({ goal: event.goal ?? "", steps: event.steps ?? [] });
           break;
         case "tool_confirm_request":
           setExecOpen(true);
@@ -1666,7 +1676,7 @@ export function Chat({
       </ChatLayout>
     </div>
       {!isEmpty && execOpen && (
-        <ExecutionPanel steps={execSteps} running={busy} onClose={() => toggleExec(false)} />
+        <ExecutionPanel steps={execSteps} plan={plan} running={busy} onClose={() => toggleExec(false)} />
       )}
     </div>
   );

@@ -15,6 +15,7 @@ from loguru import logger
 
 from claw.core.events import (
     AgentEvent,
+    PlanUpdated,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ToolFinished,
@@ -241,6 +242,18 @@ class AgentLoop:
                     for rel, mtime in _snapshot_workspace(self.workspace).items():
                         if (rel not in baseline or mtime > baseline[rel]) and rel not in artifacts:
                             artifacts.append(rel)
+                # Surface a plan revision to the Execution panel in real time, from
+                # the args the model just sent (already persisted by the tool).
+                elif tc.name == "update_plan" and not tool_result.startswith("Error"):
+                    raw_steps = args.get("steps") if isinstance(args, dict) else None
+                    steps = [s for s in (raw_steps or []) if isinstance(s, dict)]
+                    emit(
+                        PlanUpdated(
+                            turn_id=turn_id,
+                            goal=str(args.get("goal") or "") if isinstance(args, dict) else "",
+                            steps=steps,
+                        )
+                    )
                 emit(
                     ToolFinished(
                         turn_id=turn_id,

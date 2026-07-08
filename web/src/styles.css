@@ -1636,6 +1636,74 @@ html {
 .claw-exec-empty {
   padding: 16px 14px;
 }
+/* ---- pinned working-plan card (goal + step checklist), realtime ---- */
+.claw-plan-card {
+  margin: 8px 10px 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border-radius: 10px;
+  background: var(--color-surface-2, #f7f8fa);
+}
+.claw-plan-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.claw-plan-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-plan-progress {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  background: var(--color-surface-1, #fff);
+  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border-radius: 10px;
+  padding: 0 8px;
+}
+.claw-plan-goal {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary, #1a1a1a);
+}
+.claw-plan-steps {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.claw-plan-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-text-primary, #1a1a1a);
+}
+.claw-plan-step svg,
+.claw-plan-step .claw-xdot {
+  flex: 0 0 auto;
+  position: relative;
+  top: 2px;
+}
+.claw-plan-step svg {
+  color: #1a9e75;
+}
+.claw-plan-step-label {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+.claw-plan-step--complete .claw-plan-step-label {
+  color: var(--color-text-secondary, #6b7280);
+  text-decoration: line-through;
+}
+.claw-plan-step--running .claw-plan-step-label {
+  font-weight: 600;
+}
 /* ---- minimal execution steps: one dense line per step ---- */
 .claw-xlist {
   padding: 6px 8px 12px;

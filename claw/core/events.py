@@ -70,6 +70,18 @@ class ToolProgress(AgentEvent):
 
 
 @dataclass(slots=True)
+class PlanUpdated(AgentEvent):
+    """The agent revised its working plan (via the update_plan tool). Carries the
+    full current goal + step checklist so the Execution panel can show live
+    progress, and so a client joining mid-turn gets the latest plan at once."""
+
+    turn_id: str
+    goal: str
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    type: str = field(default="plan_updated", init=False)
+
+
+@dataclass(slots=True)
 class ToolConfirmRequest(AgentEvent):
     """Ask-mode: the agent wants to run a potentially unsafe tool and is waiting
     for the user to approve or decline. The client replies over the WS with
