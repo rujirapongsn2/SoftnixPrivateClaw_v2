@@ -11,6 +11,8 @@
 #     ./install.sh                 # interactive install / upgrade (idempotent)
 #     ./install.sh --yes           # non-interactive (reads config from env)
 #     ./install.sh --no-service    # set up but don't install a system service
+#     ./install.sh --macos-daemon  # macOS: boot-time LaunchDaemon (headless server)
+#                                  # instead of the default per-login LaunchAgent
 #     ./install.sh --web-only      # just rebuild the web frontend (used by `claw update`)
 #
 # Config via env (all optional): CLAW_LLM__API_KEY, CLAW_LLM__MODEL, CLAW_PORT,
@@ -37,6 +39,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSUME_YES=0
 INSTALL_SERVICE=1
 WEB_ONLY=0
+MACOS_DAEMON=0
 APP_PORT="${CLAW_PORT:-8700}"
 PG_PORT="${CLAW_PG_PORT:-5442}"
 DATA_DIR="${CLAW_DATA_DIR:-$PROJECT_DIR/data}"
@@ -49,6 +52,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -y|--yes) ASSUME_YES=1 ;;
     --no-service) INSTALL_SERVICE=0 ;;
+    --macos-daemon) MACOS_DAEMON=1 ;;
     --web-only) WEB_ONLY=1 ;;
     --port) APP_PORT="$2"; shift ;;
     --pg-port) PG_PORT="$2"; shift ;;
@@ -296,10 +300,53 @@ EOF
     sudo systemctl restart claw
     ok "systemd service 'claw' enabled + started (auto-starts on boot)"
   elif [[ "$OS" == "macos" ]]; then
-    step "Installing launchd agent (com.softnix.claw)"
-    local plist="$HOME/Library/LaunchAgents/com.softnix.claw.plist"
-    mkdir -p "$HOME/Library/LaunchAgents"
-    cat > "$plist" <<EOF
+    # Offer the boot-time daemon on an interactive install (default: per-login agent).
+    if [[ $MACOS_DAEMON -eq 0 && $ASSUME_YES -eq 0 && -t 0 ]]; then
+      if confirm "Install as a boot-time LaunchDaemon (starts before login — for a headless Mac server) instead of a per-login agent?"; then
+        MACOS_DAEMON=1
+      fi
+    fi
+    if [[ $MACOS_DAEMON -eq 1 ]]; then
+      # LaunchDaemon: runs at boot (before any GUI login), as the invoking user
+      # so it keeps that user's PATH/HOME (needed to find uv/.venv and the
+      # per-user Docker socket). Writing to /Library/LaunchDaemons needs sudo.
+      step "Installing launchd daemon (com.softnix.claw, boot-time)"
+      local svc_user="${SUDO_USER:-$USER}"
+      local svc_home; svc_home="$(eval echo "~${svc_user}")"
+      local plist="/Library/LaunchDaemons/com.softnix.claw.plist"
+      local tmp="/tmp/com.softnix.claw.plist.$$"
+      cat > "$tmp" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.softnix.claw</string>
+  <key>UserName</key><string>${svc_user}</string>
+  <key>ProgramArguments</key>
+  <array><string>${PROJECT_DIR}/scripts/claw-serve.sh</string></array>
+  <key>WorkingDirectory</key><string>${PROJECT_DIR}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${PROJECT_DIR}/claw.out.log</string>
+  <key>StandardErrorPath</key><string>${PROJECT_DIR}/claw.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>${svc_home}/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string>${svc_home}</string>
+  </dict>
+</dict></plist>
+EOF
+      sudo install -m 644 -o root -g wheel "$tmp" "$plist" && rm -f "$tmp"
+      sudo launchctl unload "$plist" 2>/dev/null || true
+      sudo launchctl load -w "$plist"
+      ok "launchd daemon loaded + started (auto-starts at boot)"
+      warn "macOS caveat: Docker Desktop only runs after a user logs in, so its"
+      warn "Postgres container isn't up until then. For true headless boot, use a"
+      warn "login-independent Docker (Colima/OrbStack). KeepAlive retries until it's up."
+    else
+      step "Installing launchd agent (com.softnix.claw)"
+      local plist="$HOME/Library/LaunchAgents/com.softnix.claw.plist"
+      mkdir -p "$HOME/Library/LaunchAgents"
+      cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -315,9 +362,10 @@ EOF
   <dict><key>PATH</key><string>${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
 </dict></plist>
 EOF
-    launchctl unload "$plist" 2>/dev/null || true
-    launchctl load -w "$plist"
-    ok "launchd agent loaded + started (auto-starts on login)"
+      launchctl unload "$plist" 2>/dev/null || true
+      launchctl load -w "$plist"
+      ok "launchd agent loaded + started (auto-starts on login)"
+    fi
   else
     warn "no systemd/launchd — start manually with: ./scripts/claw start"
     INSTALL_SERVICE=0

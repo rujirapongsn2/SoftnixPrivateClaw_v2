@@ -1,6 +1,9 @@
 services:
   postgres:
     image: postgres:16-alpine
+    # Come back automatically after a crash or host reboot (only stays down if
+    # you explicitly `docker compose stop` it).
+    restart: unless-stopped
     environment:
       POSTGRES_USER: claw
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a strong Postgres password}
@@ -15,6 +18,8 @@ services:
 
   app:
     build: .
+    # Keep the app running across crashes and host reboots.
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy

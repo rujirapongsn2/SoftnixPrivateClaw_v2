@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Softnix PrivateClaw control CLI — start/stop/restart/status/logs/update.
 # Auto-detects the service manager installed by install.sh:
-#   Linux  -> systemd unit  "claw"
-#   macOS  -> launchd agent "com.softnix.claw"
+#   Linux  -> systemd unit    "claw"
+#   macOS  -> launchd daemon  "com.softnix.claw" (boot-time), or
+#             launchd agent   "com.softnix.claw" (per-login)
 # Falls back to a plain background process (nohup) when no service is set up.
 set -euo pipefail
 
@@ -13,6 +14,7 @@ SERVE="$SCRIPT_DIR/claw-serve.sh"
 SYSTEMD_UNIT="claw"
 LAUNCHD_LABEL="com.softnix.claw"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+LAUNCHD_DAEMON_PLIST="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
 PIDFILE="$PROJECT_DIR/.claw.pid"
 LOGFILE="$PROJECT_DIR/claw.log"
 
@@ -22,6 +24,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 mode() {
   if have systemctl && systemctl list-unit-files 2>/dev/null | grep -q "^${SYSTEMD_UNIT}.service"; then
     echo systemd
+  elif [[ "$(uname -s)" == "Darwin" ]] && [[ -f "$LAUNCHD_DAEMON_PLIST" ]]; then
+    echo launchd-daemon
   elif [[ "$(uname -s)" == "Darwin" ]] && [[ -f "$LAUNCHD_PLIST" ]]; then
     echo launchd
   else
@@ -31,6 +35,8 @@ mode() {
 
 # systemctl needs sudo unless already root.
 sc() { if [[ $EUID -eq 0 ]]; then systemctl "$@"; else sudo systemctl "$@"; fi; }
+# launchctl for the system-domain daemon needs sudo unless already root.
+lcd() { if [[ $EUID -eq 0 ]]; then launchctl "$@"; else sudo launchctl "$@"; fi; }
 
 port() {
   local p="8700"
@@ -41,6 +47,7 @@ port() {
 cmd_start() {
   case "$(mode)" in
     systemd) sc start "$SYSTEMD_UNIT" ;;
+    launchd-daemon) lcd load -w "$LAUNCHD_DAEMON_PLIST" 2>/dev/null || lcd start "$LAUNCHD_LABEL" ;;
     launchd) launchctl load -w "$LAUNCHD_PLIST" 2>/dev/null || launchctl start "$LAUNCHD_LABEL" ;;
     nohup)
       if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -55,6 +62,7 @@ cmd_start() {
 cmd_stop() {
   case "$(mode)" in
     systemd) sc stop "$SYSTEMD_UNIT" ;;
+    launchd-daemon) lcd unload -w "$LAUNCHD_DAEMON_PLIST" 2>/dev/null || lcd stop "$LAUNCHD_LABEL" ;;
     launchd) launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || launchctl stop "$LAUNCHD_LABEL" ;;
     nohup)
       [[ -f "$PIDFILE" ]] && kill "$(cat "$PIDFILE")" 2>/dev/null || true
@@ -73,6 +81,7 @@ cmd_status() {
   echo "supervisor: $(mode)"
   case "$(mode)" in
     systemd) sc --no-pager status "$SYSTEMD_UNIT" || true ;;
+    launchd-daemon) lcd list | grep -E "PID|$LAUNCHD_LABEL" || echo "not loaded" ;;
     launchd) launchctl list | grep -E "PID|$LAUNCHD_LABEL" || echo "not loaded" ;;
     nohup)
       if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -89,7 +98,7 @@ cmd_status() {
 cmd_logs() {
   case "$(mode)" in
     systemd) sc --no-pager -n "${1:-100}" -f status "$SYSTEMD_UNIT" 2>/dev/null || journalctl -u "$SYSTEMD_UNIT" -n "${1:-100}" -f ;;
-    launchd) tail -n "${1:-100}" -f "$PROJECT_DIR/claw.out.log" "$PROJECT_DIR/claw.err.log" ;;
+    launchd-daemon|launchd) tail -n "${1:-100}" -f "$PROJECT_DIR/claw.out.log" "$PROJECT_DIR/claw.err.log" ;;
     nohup) tail -n "${1:-100}" -f "$LOGFILE" ;;
   esac
 }
