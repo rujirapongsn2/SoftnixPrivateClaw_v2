@@ -25,7 +25,12 @@ from claw.core.heartbeat import HeartbeatService
 from claw.core.memory import MemoryService
 from claw.core.runtime import AgentRuntime
 from claw.core.scheduler import SchedulerService
-from claw.security.policy import PolicyEngine, builtin_rule_seeds, rule_from_row
+from claw.security.policy import (
+    DEFAULT_TOOL_ARGS_EXEMPT,
+    PolicyEngine,
+    builtin_rule_seeds,
+    rule_from_row,
+)
 from claw.db.engine import create_engine_and_factory, init_db
 from claw.db.stores import (
     AuditStore,
@@ -162,7 +167,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await guardrails.seed(builtin_rule_seeds())
             db_rules = await guardrails.list_rules()
             monitor_only = await guardrails.get_monitor_only(default=not settings.policy_enforce)
-            policy.reload([rule_from_row(r) for r in db_rules], monitor_only=monitor_only)
+            exempt = await guardrails.get_tool_args_exempt(default=list(DEFAULT_TOOL_ARGS_EXEMPT))
+            policy.reload(
+                [rule_from_row(r) for r in db_rules],
+                monitor_only=monitor_only,
+                tool_args_exempt=exempt,
+            )
         except Exception:
             logger.exception("Guardrail load failed; using built-in defaults")
         scheduler.start()

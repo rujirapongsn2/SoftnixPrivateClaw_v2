@@ -23,6 +23,7 @@ import {
   Info,
   KeyRound,
   LayoutDashboard,
+  Mail,
   MessageSquare,
   Pencil,
   Plus,
@@ -36,8 +37,10 @@ import {
   ShieldOff,
   Sparkles,
   Star,
+  Terminal,
   Trash2,
   User as UserIcon,
+  UserPlus,
   Users,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -1255,6 +1258,8 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
 function GuardrailsPanel() {
   const [rules, setRules] = useState<GuardrailRule[]>([]);
   const [monitorOnly, setMonitorOnly] = useState(false);
+  const [exempt, setExempt] = useState<string[]>([]);
+  const [newExempt, setNewExempt] = useState("");
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [pattern, setPattern] = useState("");
@@ -1267,9 +1272,16 @@ function GuardrailsPanel() {
       api.adminGuardrails().then((r) => {
         setRules(r.rules);
         setMonitorOnly(r.monitor_only);
+        setExempt(r.tool_args_exempt);
       }),
     [],
   );
+
+  const saveExempt = (next: string[]) =>
+    guard(async () => {
+      const r = await api.adminSetToolArgsExempt(monitorOnly, next);
+      setExempt(r.tool_args_exempt);
+    });
   useEffect(() => {
     void guard(async () => await reload());
   }, [guard, reload]);
@@ -1302,6 +1314,61 @@ function GuardrailsPanel() {
               }
             />
           </label>
+        </div>
+      </Card>
+
+      <Card padding={2} variant="muted">
+        <div className="claw-panel">
+          <div>
+            <Text weight="semibold">Tools exempt from argument masking</Text>
+            <Text size="sm" color="secondary" as="p">
+              Matches (e.g. an email address) are still logged for audit, but never masked or blocked
+              in these tools' arguments — so email/calendar connectors receive the real recipient
+              instead of <code>[REDACTED_EMAIL]</code>. Use tool-name globs like{" "}
+              <code>mcp_outlook_*</code> or <code>mcp_*_send_*</code>. Input and output masking are
+              unaffected.
+            </Text>
+          </div>
+          <div className="claw-chip-list">
+            {exempt.length === 0 ? (
+              <Text size="sm" color="secondary">
+                No exemptions — every tool's arguments are masked.
+              </Text>
+            ) : (
+              exempt.map((g) => (
+                <span key={g} className="claw-chip">
+                  <code>{g}</code>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${g}`}
+                    className="claw-chip-x"
+                    onClick={() => saveExempt(exempt.filter((x) => x !== g))}
+                  >
+                    <Icon icon="close" size="xsm" />
+                  </button>
+                </span>
+              ))
+            )}
+          </div>
+          <div className="claw-row">
+            <TextInput
+              label="Add exemption"
+              isLabelHidden
+              placeholder="mcp_outlook_*"
+              value={newExempt}
+              onChange={setNewExempt}
+            />
+            <Button
+              label="Add"
+              size="sm"
+              variant="secondary"
+              icon={<Icon icon={Plus} size="sm" />}
+              isDisabled={!newExempt.trim() || exempt.includes(newExempt.trim())}
+              clickAction={() =>
+                saveExempt([...exempt, newExempt.trim()]).then(() => setNewExempt(""))
+              }
+            />
+          </div>
         </div>
       </Card>
 
@@ -2416,6 +2483,34 @@ function UsersPanel({ selfId }: { selfId: string }) {
   );
 }
 
+// How an account was created — informational badge in the Users list. Brand
+// logos for OAuth providers reuse the login page's assets; other methods get a
+// plain lucide glyph.
+const SIGNUP_METHOD_META: Record<string, { label: string; icon: IconType; logo?: string }> = {
+  password: { label: "Password", icon: Mail },
+  google: { label: "Google", icon: Mail, logo: "/oauth-providers/google-g.png" },
+  microsoft: { label: "Microsoft", icon: Mail, logo: "/oauth-providers/microsoft.png" },
+  admin_created: { label: "Added by admin", icon: UserPlus },
+  dev_token: { label: "Dev token", icon: Terminal },
+};
+
+function SignupMethodBadge({ method }: { method: string }) {
+  const meta = SIGNUP_METHOD_META[method] ?? SIGNUP_METHOD_META.password;
+  return (
+    <Badge
+      variant="neutral"
+      icon={
+        meta.logo ? (
+          <img src={meta.logo} alt="" aria-hidden="true" className="claw-signup-logo" />
+        ) : (
+          <Icon icon={meta.icon} size="xsm" />
+        )
+      }
+      label={meta.label}
+    />
+  );
+}
+
 // Initials for the avatar: first letters of the first two name words, else the
 // first two characters of the name/email.
 function userInitials(name: string, email: string): string {
@@ -2461,6 +2556,7 @@ function UserRow({
               <Badge variant="purple" icon={<Icon icon={Shield} size="xsm" />} label="admin" />
             )}
             {isSelf && <Badge variant="neutral" label="you" />}
+            <SignupMethodBadge method={u.signup_method} />
             {u.group_name && (
               <Badge variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={u.group_name} />
             )}

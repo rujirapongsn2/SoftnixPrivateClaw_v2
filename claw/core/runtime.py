@@ -162,16 +162,25 @@ class ClawAgent:
         )
 
     def _guard_tool_args(self, tool_name: str, args: dict) -> tuple[dict, str | None]:
-        """Apply the control policy to each string argument before a tool runs."""
+        """Apply the control policy to each string argument before a tool runs.
+
+        Trusted tools (e.g. email/calendar connectors, per the admin exemption
+        list) are "log-but-allow": their arguments are still checked so a match
+        is recorded in the audit trail, but never masked or blocked — otherwise a
+        legitimate recipient email would be redacted and the action would break.
+        """
         if self.policy is None:
             return args, None
+        exempt = self.policy.is_tool_exempt(tool_name)
         guarded = dict(args)
         for key, value in args.items():
             if not isinstance(value, str) or not value:
                 continue
             decision = self.policy.enforce(value, scope="tool_args")
             if decision.matched_rules:
-                self._log_policy_hit("tool_args", decision, tool=tool_name)
+                self._log_policy_hit("tool_args", decision, tool=tool_name, exempt=exempt)
+            if exempt:
+                continue  # detected + logged, but pass the original value through
             if decision.blocked:
                 return args, decision.message
             if decision.masked:
@@ -182,7 +191,10 @@ class ClawAgent:
         """Fire-and-forget audit trail for a guardrail match, for the admin
         overview's "guardrail hits over time" chart. Mirrors `_audit_tool`'s
         pattern since this is called from sync code inside the async loop."""
-        payload = {"scope": scope, "action": decision.action, "rules": decision.matched_rules, **extra}
+        # An exempt tool detected PII but was allowed through — record it as
+        # observed (monitor), not enforced, so the trail is honest.
+        action = "monitor" if extra.get("exempt") else decision.action
+        payload = {"scope": scope, "action": action, "rules": decision.matched_rules, **extra}
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:

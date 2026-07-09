@@ -30,6 +30,13 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True)
     display_name: Mapped[str] = mapped_column(String(255), default="")
     password_hash: Mapped[str] = mapped_column(String(255), default="")
+    # How this account was created: password | google | microsoft | admin_created |
+    # dev_token. Stamped once at creation time, purely informational (shown in
+    # the Control Plane's Users list) — never a permission boundary. Existing
+    # rows predating this column default to "password" (the oldest signup path),
+    # which may not be accurate for accounts that actually first signed in via
+    # OAuth before this was tracked.
+    signup_method: Mapped[str] = mapped_column(String(16), default="password", server_default="password")
     # Display label ("admin"/"user"). System-admin capability is is_admin, not role.
     role: Mapped[str] = mapped_column(String(16), default="user")
     # Cross-user/system administration (manage other users, global policy).

@@ -75,6 +75,7 @@ async def register(body: RegisterBody, state: AppState = Depends(get_state)) -> 
         is_admin=(total == 0),
         role="admin" if total == 0 else "user",
         group_id=default_group.id if default_group else None,
+        signup_method="password",
     )
     await _log_auth(state, "register", user)
     return _issue(state, user)
@@ -140,7 +141,7 @@ async def _resolve_providers(state: AppState) -> dict:
     return out
 
 
-async def _upsert_oidc_user(state: AppState, email: str, name: str) -> User:
+async def _upsert_oidc_user(state: AppState, provider: str, email: str, name: str) -> User:
     """Find or create a Claw user for an OIDC identity.
 
     Registration rules mirror password sign-up: the first account bootstraps the
@@ -160,6 +161,7 @@ async def _upsert_oidc_user(state: AppState, email: str, name: str) -> User:
         is_admin=(total == 0),
         role="admin" if total == 0 else "user",
         group_id=default_group.id if default_group else None,
+        signup_method=provider,
     )
 
 
@@ -174,7 +176,7 @@ async def oidc_authenticate(
     email, name = await oidc.fetch_identity(cfg, tokens, http)
     if not email:
         raise HTTPException(status_code=400, detail="provider did not return an email")
-    user = await _upsert_oidc_user(state, email, name)
+    user = await _upsert_oidc_user(state, provider, email, name)
     if not user.is_active:
         raise HTTPException(status_code=403, detail="account suspended")
     return user

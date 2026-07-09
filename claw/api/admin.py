@@ -11,7 +11,7 @@ from claw.auth import oidc
 from claw.auth.passwords import hash_password
 from claw.channels.telegram import validate_bot_token
 from claw.db.models import User
-from claw.security.policy import rule_from_row
+from claw.security.policy import DEFAULT_TOOL_ARGS_EXEMPT, rule_from_row
 
 router = APIRouter(prefix="/api/admin")
 
@@ -24,7 +24,12 @@ async def _reload_policy(state: AppState) -> None:
     monitor_only = await state.guardrails.get_monitor_only(
         default=not state.settings.policy_enforce
     )
-    state.policy.reload([rule_from_row(r) for r in rules], monitor_only=monitor_only)
+    exempt = await state.guardrails.get_tool_args_exempt(default=list(DEFAULT_TOOL_ARGS_EXEMPT))
+    state.policy.reload(
+        [rule_from_row(r) for r in rules],
+        monitor_only=monitor_only,
+        tool_args_exempt=exempt,
+    )
 
 
 class CreateUserBody(BaseModel):
@@ -55,6 +60,7 @@ def _user_row(user: User, sessions: int, group_names: dict[str, str]) -> dict:
         "is_admin": user.is_admin,
         "is_active": user.is_active,
         "role": user.role,
+        "signup_method": user.signup_method,
         "sessions": sessions,
         "group_id": user.group_id,
         "group_name": group_names.get(user.group_id) if user.group_id else None,
@@ -98,6 +104,7 @@ async def create_user(
         is_admin=body.is_admin,
         role="admin" if body.is_admin else "user",
         group_id=group_id,
+        signup_method="admin_created",
     )
     return _user_row(user, 0, await _group_names(state))
 
@@ -349,6 +356,9 @@ async def delete_model(
 
 class MonitorBody(BaseModel):
     monitor_only: bool
+    # Optional: replace the tool-args exemption list (tool-name globs). Omitted =
+    # leave unchanged. Each entry is a short glob like "mcp_outlook_*".
+    tool_args_exempt: list[str] | None = Field(default=None, max_length=100)
 
 
 class RuleBody(BaseModel):
@@ -390,7 +400,12 @@ async def get_guardrails(
 ) -> dict:
     rules = await state.guardrails.list_rules()
     monitor_only = await state.guardrails.get_monitor_only(default=not state.settings.policy_enforce)
-    return {"monitor_only": monitor_only, "rules": [_rule_row(r) for r in rules]}
+    exempt = await state.guardrails.get_tool_args_exempt(default=list(DEFAULT_TOOL_ARGS_EXEMPT))
+    return {
+        "monitor_only": monitor_only,
+        "tool_args_exempt": exempt,
+        "rules": [_rule_row(r) for r in rules],
+    }
 
 
 @router.put("/guardrails")
@@ -398,8 +413,13 @@ async def set_guardrails(
     body: MonitorBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
 ) -> dict:
     await state.guardrails.set_monitor_only(body.monitor_only)
+    if body.tool_args_exempt is not None:
+        # Normalize: trim, drop blanks, dedupe, bound length.
+        cleaned = list(dict.fromkeys(g.strip()[:100] for g in body.tool_args_exempt if g.strip()))
+        await state.guardrails.set_tool_args_exempt(cleaned)
     await _reload_policy(state)
-    return {"monitor_only": body.monitor_only}
+    exempt = await state.guardrails.get_tool_args_exempt(default=list(DEFAULT_TOOL_ARGS_EXEMPT))
+    return {"monitor_only": body.monitor_only, "tool_args_exempt": exempt}
 
 
 @router.post("/guardrails/rules")

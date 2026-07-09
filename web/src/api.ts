@@ -191,6 +191,10 @@ export interface AuthUser {
 
 export interface AdminUser extends AuthUser {
   is_active: boolean;
+  // How the account was created — informational only, shown as a badge in the
+  // Control Plane's Users list. Accounts predating this field default to
+  // "password" (the oldest signup path), which may not be exact for them.
+  signup_method: "password" | "google" | "microsoft" | "admin_created" | "dev_token";
   sessions: number;
   group_id: string | null;
   group_name: string | null;
@@ -587,11 +591,20 @@ export const api = {
   adminOverview: () => request<AdminOverview>("/api/admin/overview"),
 
   adminGuardrails: () =>
-    request<{ monitor_only: boolean; rules: GuardrailRule[] }>("/api/admin/guardrails"),
+    request<{ monitor_only: boolean; tool_args_exempt: string[]; rules: GuardrailRule[] }>(
+      "/api/admin/guardrails",
+    ),
   adminSetMonitorOnly: (monitor_only: boolean) =>
     request<{ monitor_only: boolean }>("/api/admin/guardrails", {
       method: "PUT",
       body: JSON.stringify({ monitor_only }),
+    }),
+  // Replace the tool-args exemption list (tool-name globs). monitor_only must be
+  // sent too (the endpoint owns both) — pass the current value through.
+  adminSetToolArgsExempt: (monitor_only: boolean, tool_args_exempt: string[]) =>
+    request<{ monitor_only: boolean; tool_args_exempt: string[] }>("/api/admin/guardrails", {
+      method: "PUT",
+      body: JSON.stringify({ monitor_only, tool_args_exempt }),
     }),
   adminCreateRule: (r: {
     name: string;

@@ -2117,6 +2117,39 @@ html {
 .claw-kb-doc-processing {
   color: var(--color-accent-purple, #7c3aed);
 }
+/* Brand logo inside a Badge (e.g. signup-method: Google/Microsoft). */
+.claw-signup-logo {
+  width: 12px;
+  height: 12px;
+  object-fit: contain;
+}
+
+/* Removable chips (e.g. guardrail tool-args exemption globs). */
+.claw-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.claw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--color-surface-secondary, rgba(0, 0, 0, 0.05));
+  font-size: 12px;
+}
+.claw-chip-x {
+  display: inline-flex;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-chip-x:hover {
+  color: var(--color-text-error, #dc2626);
+}
 .claw-kb-doc-failed {
   color: var(--color-text-error, #dc2626);
   cursor: help;

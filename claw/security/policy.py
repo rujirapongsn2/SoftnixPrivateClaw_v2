@@ -11,6 +11,7 @@ engine never calls an LLM. Built-in PII/secret patterns ship enabled; operators
 can add custom rules per instance.
 """
 
+import fnmatch
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -91,15 +92,44 @@ _BUILTINS: tuple[PolicyRule, ...] = (
 )
 
 
+# Tools exempt from tool_args enforcement by default: the bundled communication
+# connectors whose payload legitimately IS PII (a recipient email, an attendee).
+# Masking their arguments would break the action (e.g. an Outlook draft created
+# with a [REDACTED_EMAIL] recipient). MCP tools are named mcp_{connector}_{tool},
+# so these globs target whole connectors. Admins can edit the list at runtime.
+DEFAULT_TOOL_ARGS_EXEMPT: tuple[str, ...] = (
+    "mcp_outlook_*",
+    "mcp_outlook-calendar_*",
+    "mcp_gmail_*",
+)
+
+
 class PolicyEngine:
-    def __init__(self, rules: Iterable[PolicyRule] | None = None, *, monitor_only: bool = False):
+    def __init__(
+        self,
+        rules: Iterable[PolicyRule] | None = None,
+        *,
+        monitor_only: bool = False,
+        tool_args_exempt: Iterable[str] | None = None,
+    ):
         self.rules: list[PolicyRule] = list(rules if rules is not None else _BUILTINS)
         # Global kill-switch: when True, block/mask are downgraded to monitor
         # so operators can observe hits before enforcing.
         self.monitor_only = monitor_only
+        # Tool-name globs exempt from tool_args masking/blocking (input/output
+        # scopes are never exempt). Defaults cover the communication connectors.
+        self.tool_args_exempt: list[str] = list(
+            tool_args_exempt if tool_args_exempt is not None else DEFAULT_TOOL_ARGS_EXEMPT
+        )
 
-    def reload(self, rules: Iterable[PolicyRule], monitor_only: bool | None = None) -> None:
-        """Swap the active ruleset (and optionally the monitor toggle) atomically.
+    def reload(
+        self,
+        rules: Iterable[PolicyRule],
+        monitor_only: bool | None = None,
+        tool_args_exempt: Iterable[str] | None = None,
+    ) -> None:
+        """Swap the active ruleset (and optionally the monitor toggle / tool-args
+        exemption list) atomically.
 
         Called at startup and after any admin guardrail edit so enforcement in
         `enforce()` reflects the persisted configuration without a restart.
@@ -107,6 +137,16 @@ class PolicyEngine:
         self.rules = list(rules)
         if monitor_only is not None:
             self.monitor_only = monitor_only
+        if tool_args_exempt is not None:
+            self.tool_args_exempt = list(tool_args_exempt)
+
+    def is_tool_exempt(self, tool_name: str) -> bool:
+        """True when `tool_name` matches any exemption glob — its arguments skip
+        tool_args masking/blocking (they are still detected + audited upstream)."""
+        if not tool_name:
+            return False
+        name = tool_name.lower()
+        return any(fnmatch.fnmatch(name, glob.lower()) for glob in self.tool_args_exempt)
 
     def enforce(self, text: str, scope: Scope) -> PolicyDecision:
         if not text:

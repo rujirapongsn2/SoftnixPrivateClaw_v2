@@ -555,11 +555,17 @@ class UserStore:
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
         self.factory = factory
 
-    async def get_or_create_by_email(self, email: str, display_name: str = "") -> User:
+    async def get_or_create_by_email(
+        self, email: str, display_name: str = "", signup_method: str = "dev_token"
+    ) -> User:
         async with self.factory() as db:
             user = await db.scalar(select(User).where(User.email == email))
             if user is None:
-                user = User(email=email, display_name=display_name or email.split("@")[0])
+                user = User(
+                    email=email,
+                    display_name=display_name or email.split("@")[0],
+                    signup_method=signup_method,
+                )
                 db.add(user)
                 await db.commit()
             return user
@@ -581,6 +587,7 @@ class UserStore:
         is_admin: bool = False,
         role: str = "user",
         group_id: str | None = None,
+        signup_method: str = "password",
     ) -> User:
         async with self.factory() as db:
             user = User(
@@ -590,6 +597,7 @@ class UserStore:
                 is_admin=is_admin,
                 role=role,
                 group_id=group_id,
+                signup_method=signup_method,
             )
             db.add(user)
             await db.commit()
@@ -1272,9 +1280,11 @@ class LLMConfigStore:
 
 
 class GuardrailStore:
-    """Persists control-policy rules + the monitor-only toggle."""
+    """Persists control-policy rules + the monitor-only toggle + the tool-args
+    exemption list."""
 
     _MONITOR_KEY = "guardrail_monitor_only"
+    _EXEMPT_KEY = "guardrail_tool_args_exempt"
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
         self.factory = factory
@@ -1337,6 +1347,25 @@ class GuardrailStore:
                 db.add(AppSetting(key=self._MONITOR_KEY, value={"value": value}))
             else:
                 row.value = {"value": value}
+            await db.commit()
+
+    async def get_tool_args_exempt(self, default: list[str]) -> list[str]:
+        """Tool-name globs exempt from tool_args masking. Returns `default` (the
+        built-in list) until an admin has customized it."""
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._EXEMPT_KEY)
+            if row is None or "value" not in (row.value or {}):
+                return list(default)
+            value = row.value.get("value")
+            return list(value) if isinstance(value, list) else list(default)
+
+    async def set_tool_args_exempt(self, globs: list[str]) -> None:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._EXEMPT_KEY)
+            if row is None:
+                db.add(AppSetting(key=self._EXEMPT_KEY, value={"value": globs}))
+            else:
+                row.value = {"value": globs}
             await db.commit()
 
 
