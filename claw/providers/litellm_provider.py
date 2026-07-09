@@ -23,6 +23,14 @@ from claw.providers.registry import apply_model_overrides, supports_prompt_cachi
 _ALNUM = string.ascii_letters + string.digits
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
 
+# Degeneration guard: some models (seen with qwen builds) fall into a repetition
+# loop and emit the same glyph until they hit max_tokens (e.g. "ณณณณ…"×3600),
+# producing a garbage answer that also poisons the next turn's context. If a
+# single character repeats this many times in a row we cut the stream off and
+# drop the runaway tail. The bound is far above anything real prose produces
+# (a markdown rule is ~3–80 chars), so normal output is never affected.
+_MAX_CHAR_RUN = 300
+
 # ---- text tool-call fallback -------------------------------------------------
 # Some open models (gemma, some Qwen/Hermes builds) don't populate the OpenAI
 # `tool_calls` field even when tools are advertised — they emit the call as a
@@ -234,6 +242,10 @@ class LiteLLMProvider(LLMProvider):
         pending_tool_calls: dict[int, dict[str, str]] = {}
         finish_reason = "stop"
         usage: dict[str, int] = {}
+        # Trailing single-char run tracker for the degeneration guard.
+        run_char = ""
+        run_len = 0
+        truncated_repeat = False
 
         try:
             stream = await acompletion(**kwargs)
@@ -266,6 +278,16 @@ class LiteLLMProvider(LLMProvider):
                     if hold is False and len(full) > emit_len:
                         yield TextDelta(text=full[emit_len:])
                         emit_len = len(full)
+                    # Track the trailing run of one character; a huge run means
+                    # the model is stuck in a repetition loop — stop consuming.
+                    for ch in text:
+                        if ch == run_char:
+                            run_len += 1
+                        else:
+                            run_char, run_len = ch, 1
+                    if run_len >= _MAX_CHAR_RUN:
+                        truncated_repeat = True
+                        break
                 for tc in getattr(delta, "tool_calls", None) or []:
                     index = getattr(tc, "index", 0) or 0
                     slot = pending_tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
@@ -292,6 +314,14 @@ class LiteLLMProvider(LLMProvider):
             tool_calls.append(ToolCall(id=slot["id"] or _short_id(), name=slot["name"], arguments=args))
 
         full_content = "".join(content_parts)
+        if truncated_repeat and run_char:
+            # Drop the whole runaway tail so it doesn't persist in history or
+            # bloat the next turn's context; keep the good prefix.
+            full_content = full_content.rstrip(run_char)
+            finish_reason = "length"
+            logger.warning(
+                "Cut a runaway repetition loop from {} (char {!r})", model, run_char
+            )
         content: str | None = full_content or None
         # No native tool calls but a model may have encoded them as text — try
         # to recover so the tool actually runs instead of leaking JSON to the UI.
