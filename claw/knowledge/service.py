@@ -201,6 +201,53 @@ class KnowledgeService:
         await self.store.delete_doc(doc_id)
         await self._refresh_bundle(kb_id, bundle, action="Deletion", title=doc.title, concept_id=doc.concept_id)
 
+    # -- preview ------------------------------------------------------------
+    async def preview_document(self, doc_id: str, *, offset: int = 0, limit: int = 50_000) -> dict:
+        """A bounded slice of a document's extracted text, for the UI preview.
+
+        Reads the canonical OKF concept body (what the agent actually sees), not
+        the original file (which isn't retained). Paged via offset so long docs
+        don't ship megabytes at once.
+        """
+        doc = await self.store.get_doc(doc_id)
+        if doc is None:
+            return {"available": False, "status": "missing"}
+        if doc.status != "ready" or not doc.concept_id:
+            return {"available": False, "status": doc.status}
+
+        offset = max(0, offset)
+        body = await asyncio.to_thread(self._read_concept_body, doc.kb_id, doc.concept_id)
+        if body is None:
+            return {"available": False, "status": "missing"}
+        slice_ = body[offset : offset + limit]
+        next_offset = offset + len(slice_)
+        return {
+            "available": True,
+            "title": doc.title,
+            "filename": doc.filename,
+            "total_chars": len(body),
+            "offset": offset,
+            "next_offset": next_offset,
+            "has_more": next_offset < len(body),
+            "text": slice_,
+        }
+
+    def _read_concept_body(self, kb_id: str, concept_id: str) -> str | None:
+        """Read the OKF concept file and strip its YAML frontmatter. Returns None
+        if the file is missing or escapes the knowledge root (defensive)."""
+        path = (self.root / kb_id / f"{concept_id}.md").resolve()
+        root = self.root.resolve()
+        if root not in path.parents or not path.is_file():
+            return None
+        raw = path.read_text("utf-8")
+        # Frontmatter is a leading `---\n … \n---\n` block; body is what follows.
+        if raw.startswith("---"):
+            end = raw.find("\n---", 3)
+            if end != -1:
+                nl = raw.find("\n", end + 1)
+                raw = raw[nl + 1 :] if nl != -1 else ""
+        return raw.lstrip("\n")
+
     async def _refresh_bundle(
         self, kb_id: str, bundle: OkfBundle, *, action: str, title: str, concept_id: str
     ) -> None:

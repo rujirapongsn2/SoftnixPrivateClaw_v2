@@ -2117,6 +2117,28 @@ html {
 .claw-kb-doc-processing {
   color: var(--color-accent-purple, #7c3aed);
 }
+/* Inline preview of a document's extracted text. */
+.claw-kb-doc-preview {
+  margin: 4px 0 10px 26px;
+  border: 1px solid var(--color-border, rgba(0, 0, 0, 0.1));
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--color-surface-secondary, rgba(0, 0, 0, 0.03));
+}
+.claw-kb-doc-preview-head {
+  margin-bottom: 6px;
+}
+.claw-kb-doc-preview-body {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--color-text-primary, #1a1a1a);
+}
 /* Brand logo inside a Badge (e.g. signup-method: Google/Microsoft). */
 .claw-signup-logo {
   width: 12px;

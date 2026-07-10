@@ -17,6 +17,7 @@ import {
   Cpu,
   Download,
   ExternalLink,
+  Eye,
   FileText,
   Globe,
   HeartPulse,
@@ -1422,6 +1423,55 @@ function KnowledgeCard({
   const [uploading, setUploading] = useState(false);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  // Extracted-text preview (one open at a time), paged via next_offset.
+  const [previewFor, setPreviewFor] = useState<string | null>(null);
+  const [previewText, setPreviewText] = useState("");
+  const [previewTotal, setPreviewTotal] = useState(0);
+  const [previewNext, setPreviewNext] = useState(0);
+  const [previewMore, setPreviewMore] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  // Bumped on every preview request; a response only writes state if its token
+  // is still current, so a slow reply can't clobber a doc the user switched to.
+  const previewReq = useRef(0);
+
+  const openPreview = async (docId: string) => {
+    if (previewFor === docId) {
+      setPreviewFor(null);
+      return;
+    }
+    const token = ++previewReq.current;
+    setPreviewFor(docId);
+    setPreviewText("");
+    setPreviewLoading(true);
+    try {
+      const r = await api.previewKnowledgeDoc(kb.id, docId, 0);
+      if (token !== previewReq.current) return;
+      setPreviewText(r.text ?? "");
+      setPreviewTotal(r.total_chars ?? 0);
+      setPreviewNext(r.next_offset ?? 0);
+      setPreviewMore(Boolean(r.has_more));
+    } catch (e) {
+      if (token !== previewReq.current) return;
+      setPreviewText(`Preview unavailable: ${String(e)}`);
+      setPreviewMore(false);
+    } finally {
+      if (token === previewReq.current) setPreviewLoading(false);
+    }
+  };
+
+  const loadMorePreview = async (docId: string) => {
+    const token = ++previewReq.current;
+    setPreviewLoading(true);
+    try {
+      const r = await api.previewKnowledgeDoc(kb.id, docId, previewNext);
+      if (token !== previewReq.current) return;
+      setPreviewText((t) => t + (r.text ?? ""));
+      setPreviewNext(r.next_offset ?? previewNext);
+      setPreviewMore(Boolean(r.has_more));
+    } finally {
+      if (token === previewReq.current) setPreviewLoading(false);
+    }
+  };
 
   const loadDocs = useCallback(() => {
     api.listKnowledgeDocs(kb.id).then(setDocs).catch(() => setDocs([]));
@@ -1560,32 +1610,65 @@ function KnowledgeCard({
               </Text>
             ) : (
               docs.map((d) => (
-                <div key={d.id} className="claw-kb-doc">
-                  <Icon icon={FileText} size="sm" color="secondary" />
-                  <span className="claw-kb-doc-name" title={d.filename}>
-                    {d.title}
-                  </span>
-                  {d.status === "failed" ? (
-                    <span className="claw-kb-doc-meta claw-kb-doc-failed" title={d.error}>
-                      Failed
+                <div key={d.id}>
+                  <div className="claw-kb-doc">
+                    <Icon icon={FileText} size="sm" color="secondary" />
+                    <span className="claw-kb-doc-name" title={d.filename}>
+                      {d.title}
                     </span>
-                  ) : d.status === "pending" || d.status === "processing" ? (
-                    <span className="claw-kb-doc-meta claw-kb-doc-processing">Processing…</span>
-                  ) : (
-                    <span className="claw-kb-doc-meta">
-                      {d.chunks} chunk{d.chunks === 1 ? "" : "s"}
-                    </span>
-                  )}
-                  {kb.is_owner && (
-                    <button
-                      type="button"
-                      className="claw-kb-doc-del"
-                      aria-label="Delete document"
-                      disabled={busy}
-                      onClick={() => removeDoc(d.id)}
-                    >
-                      <Icon icon={Trash2} size="xsm" color="secondary" />
-                    </button>
+                    {d.status === "failed" ? (
+                      <span className="claw-kb-doc-meta claw-kb-doc-failed" title={d.error}>
+                        Failed
+                      </span>
+                    ) : d.status === "pending" || d.status === "processing" ? (
+                      <span className="claw-kb-doc-meta claw-kb-doc-processing">Processing…</span>
+                    ) : (
+                      <span className="claw-kb-doc-meta">
+                        {d.chunks} chunk{d.chunks === 1 ? "" : "s"}
+                      </span>
+                    )}
+                    {d.status === "ready" && (
+                      <button
+                        type="button"
+                        className="claw-kb-doc-del"
+                        aria-label="Preview extracted text"
+                        onClick={() => openPreview(d.id)}
+                      >
+                        <Icon icon={Eye} size="xsm" color={previewFor === d.id ? "primary" : "secondary"} />
+                      </button>
+                    )}
+                    {kb.is_owner && (
+                      <button
+                        type="button"
+                        className="claw-kb-doc-del"
+                        aria-label="Delete document"
+                        disabled={busy}
+                        onClick={() => removeDoc(d.id)}
+                      >
+                        <Icon icon={Trash2} size="xsm" color="secondary" />
+                      </button>
+                    )}
+                  </div>
+                  {previewFor === d.id && (
+                    <div className="claw-kb-doc-preview">
+                      <div className="claw-kb-doc-preview-head">
+                        <Text size="sm" color="secondary">
+                          Extracted text{" "}
+                          {previewTotal > 0 &&
+                            `· ${previewText.length.toLocaleString()} / ${previewTotal.toLocaleString()} chars`}
+                        </Text>
+                      </div>
+                      <pre className="claw-kb-doc-preview-body">{previewText}</pre>
+                      {previewMore && (
+                        <Button
+                          label={previewLoading ? "Loading…" : "Load more"}
+                          size="sm"
+                          variant="ghost"
+                          isDisabled={previewLoading}
+                          onClick={() => loadMorePreview(d.id)}
+                        />
+                      )}
+                    </div>
                   )}
                 </div>
               ))

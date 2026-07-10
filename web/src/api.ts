@@ -181,6 +181,18 @@ export interface KnowledgeDoc {
   created_at: string;
 }
 
+export interface KnowledgeDocPreview {
+  available: boolean;
+  status?: string; // set when available is false (e.g. pending/failed/missing)
+  title?: string;
+  filename?: string;
+  total_chars?: number;
+  offset?: number;
+  next_offset?: number;
+  has_more?: boolean;
+  text?: string;
+}
+
 export interface AuthUser {
   id: string;
   email: string;
@@ -539,6 +551,10 @@ export const api = {
   },
   deleteKnowledgeDoc: (kbId: string, docId: string) =>
     request(`/api/knowledge/${kbId}/documents/${docId}`, { method: "DELETE" }),
+  previewKnowledgeDoc: (kbId: string, docId: string, offset = 0) =>
+    request<KnowledgeDocPreview>(
+      `/api/knowledge/${kbId}/documents/${docId}/preview?offset=${offset}`,
+    ),
 
   listSchedules: () => request<ScheduleInfo[]>("/api/schedules"),
   createSchedule: (s: Partial<ScheduleInfo>) =>

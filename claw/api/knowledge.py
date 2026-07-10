@@ -116,6 +116,22 @@ async def list_documents(
     return [_doc_row(d) for d in docs]
 
 
+@router.get("/{kb_id}/documents/{doc_id}/preview")
+async def preview_document(
+    kb_id: str,
+    doc_id: str,
+    offset: int = 0,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    """A bounded slice of the document's extracted text (paged via `offset`)."""
+    await _readable_base(state, user, kb_id)
+    doc = await state.knowledge.get_doc(doc_id)
+    if doc is None or doc.kb_id != kb_id:
+        raise HTTPException(status_code=404, detail="document not found")
+    return await state.knowledge_service.preview_document(doc_id, offset=max(0, offset))
+
+
 async def _stage_upload(upload: UploadFile, staging_dir, max_bytes: int) -> tuple[str | None, str]:
     """Stream an upload to a temp file in the staging dir (never fully into
     memory), enforcing the size cap. Returns (temp_path, error)."""
