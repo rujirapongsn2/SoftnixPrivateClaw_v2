@@ -33,7 +33,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ProvidersPanel } from "./Admin";
 import { ErrorText } from "./ErrorText";
 import {
@@ -1409,6 +1409,13 @@ function KnowledgePanel() {
   );
 }
 
+// Unicode code-point count, matching Python's len() on the backend — JS's
+// .length counts UTF-16 code units, which over-counts surrogate-pair (e.g.
+// emoji) characters relative to total_chars from the API.
+function codePointLength(s: string): number {
+  return s.length - (s.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)?.length ?? 0);
+}
+
 function KnowledgeCard({
   kb,
   onChanged,
@@ -1433,6 +1440,7 @@ function KnowledgeCard({
   // Bumped on every preview request; a response only writes state if its token
   // is still current, so a slow reply can't clobber a doc the user switched to.
   const previewReq = useRef(0);
+  const previewLoadedChars = useMemo(() => codePointLength(previewText), [previewText]);
 
   const openPreview = async (docId: string) => {
     if (previewFor === docId) {
@@ -1655,7 +1663,7 @@ function KnowledgeCard({
                         <Text size="sm" color="secondary">
                           Extracted text{" "}
                           {previewTotal > 0 &&
-                            `· ${previewText.length.toLocaleString()} / ${previewTotal.toLocaleString()} chars`}
+                            `· ${previewLoadedChars.toLocaleString()} / ${previewTotal.toLocaleString()} chars`}
                         </Text>
                       </div>
                       <pre className="claw-kb-doc-preview-body">{previewText}</pre>

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from loguru import logger
@@ -198,6 +199,7 @@ class KnowledgeService:
         bundle = OkfBundle(self.root, kb_id)
         if doc.concept_id:
             bundle.remove_concept(doc.concept_id)
+            self._read_concept_body.cache_clear()
         await self.store.delete_doc(doc_id)
         await self._refresh_bundle(kb_id, bundle, action="Deletion", title=doc.title, concept_id=doc.concept_id)
 
@@ -232,9 +234,13 @@ class KnowledgeService:
             "text": slice_,
         }
 
+    @lru_cache(maxsize=8)
     def _read_concept_body(self, kb_id: str, concept_id: str) -> str | None:
         """Read the OKF concept file and strip its YAML frontmatter. Returns None
-        if the file is missing or escapes the knowledge root (defensive)."""
+        if the file is missing or escapes the knowledge root (defensive).
+
+        Cached (a doc's concept file is immutable once ingested) so paging
+        through a large preview doesn't re-read the whole file per page."""
         path = (self.root / kb_id / f"{concept_id}.md").resolve()
         root = self.root.resolve()
         if root not in path.parents or not path.is_file():
