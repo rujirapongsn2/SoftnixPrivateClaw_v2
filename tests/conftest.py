@@ -56,8 +56,8 @@ async def db_factory(tmp_path):
 async def stores(db_factory):
     return {
         "users": UserStore(db_factory),
-        "sessions": SessionStore(db_factory),
-        "messages": MessageStore(db_factory),
+        "sessions": SessionStore(db_factory, is_postgres=False),
+        "messages": MessageStore(db_factory, is_postgres=False),
         "memories": MemoryStore(db_factory),
         "audit": AuditStore(db_factory, is_postgres=False),
     }

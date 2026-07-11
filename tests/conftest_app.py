@@ -61,8 +61,8 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         runtime=None,
         bus=None,
         users=UserStore(db_factory),
-        sessions=SessionStore(db_factory),
-        messages=MessageStore(db_factory),
+        sessions=SessionStore(db_factory, is_postgres=False),
+        messages=MessageStore(db_factory, is_postgres=False),
         skills=SkillStore(db_factory),
         memories=MemoryStore(db_factory),
         connectors=ConnectorStore(db_factory),
@@ -81,7 +81,9 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         knowledge=knowledge_store,
         knowledge_service=KnowledgeService(knowledge_store, knowledge_root),
         telegram_config=TelegramConfigStore(db_factory),
-        telegram_mgr=TelegramManager(None, UserStore(db_factory), SessionStore(db_factory), LinkCodeService()),
+        telegram_mgr=TelegramManager(
+            None, UserStore(db_factory), SessionStore(db_factory, is_postgres=False), LinkCodeService()
+        ),
         telegram=None,
         groups=GroupStore(db_factory),
         shares=ShareStore(db_factory),

@@ -66,13 +66,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         default_model=settings.llm.model,
     )
     bus = EventBus()
+    is_postgres = "postgresql" in settings.database_url
     users = UserStore(factory)
     groups = GroupStore(factory)
-    sessions = SessionStore(factory)
-    messages = MessageStore(factory)
+    sessions = SessionStore(factory, is_postgres=is_postgres)
+    messages = MessageStore(factory, is_postgres=is_postgres)
     memories = MemoryStore(factory)
-    audit = AuditStore(factory, is_postgres="postgresql" in settings.database_url)
-    usage = UsageStore(factory, is_postgres="postgresql" in settings.database_url)
+    audit = AuditStore(factory, is_postgres=is_postgres)
+    usage = UsageStore(factory, is_postgres=is_postgres)
     feedback = FeedbackStore(factory)
     skills = SkillStore(factory)
     secret_box = SecretBox(settings.secret_key)
@@ -83,7 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     llm_config = LLMConfigStore(factory, secret_box=secret_box)
     oauth_apps = OAuthAppStore(factory, secret_box=secret_box)
     browser_broker = BrowserBrokerStore(settings.workspaces_root / "_browser_broker")
-    knowledge = KnowledgeStore(factory, is_postgres="postgresql" in settings.database_url)
+    knowledge = KnowledgeStore(factory, is_postgres=is_postgres)
     knowledge_service = KnowledgeService(knowledge, settings.knowledge_root, settings.knowledge)
     shares = ShareStore(factory)
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
@@ -104,7 +105,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         model=settings.llm.model,
         window=settings.memory.window,
         keep=settings.memory.keep,
-        is_postgres="postgresql" in settings.database_url,
+        is_postgres=is_postgres,
     )
     runtime = AgentRuntime(
         settings=settings,

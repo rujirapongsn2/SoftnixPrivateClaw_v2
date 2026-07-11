@@ -35,9 +35,16 @@ from claw.db.models import (
 )
 
 
+def _day_key(bucket_value: Any) -> str:
+    """Normalize a date_trunc (datetime, Postgres) or strftime (str, SQLite)
+    day bucket into a plain "YYYY-MM-DD" key."""
+    return bucket_value.date().isoformat() if hasattr(bucket_value, "date") else str(bucket_value)
+
+
 class MessageStore:
-    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+    def __init__(self, factory: async_sessionmaker[AsyncSession], is_postgres: bool = True):
         self.factory = factory
+        self.is_postgres = is_postgres
 
     async def append(self, session_id: str, entries: list[dict[str, Any]]) -> None:
         """Append turn messages atomically with monotonic per-session seq."""
@@ -110,7 +117,11 @@ class MessageStore:
         Returns a dense series (zero-filled) oldest→newest so the chart never has gaps.
         """
         since = datetime.now(timezone.utc) - timedelta(days=days - 1)
-        bucket = func.date_trunc("day", Message.created_at)
+        bucket = (
+            func.date_trunc("day", Message.created_at)
+            if self.is_postgres
+            else func.strftime("%Y-%m-%d", Message.created_at)
+        )
         async with self.factory() as db:
             rows = (
                 await db.execute(
@@ -119,7 +130,7 @@ class MessageStore:
                     .group_by(bucket)
                 )
             ).all()
-        counts = {r[0].date().isoformat(): r[1] for r in rows if r[0] is not None}
+        counts = {_day_key(r[0]): r[1] for r in rows if r[0] is not None}
         today = datetime.now(timezone.utc).date()
         series = []
         for i in range(days - 1, -1, -1):
@@ -143,8 +154,9 @@ class MessageStore:
 
 
 class SessionStore:
-    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+    def __init__(self, factory: async_sessionmaker[AsyncSession], is_postgres: bool = True):
         self.factory = factory
+        self.is_postgres = is_postgres
 
     async def create(self, user_id: str, title: str = "New chat", channel: str = "web") -> ChatSession:
         async with self.factory() as db:
@@ -264,7 +276,11 @@ class SessionStore:
     async def by_day_since(self, days: int = 7) -> list[dict[str, Any]]:
         """Sessions created per calendar day for the last `days` days, zero-filled."""
         since = datetime.now(timezone.utc) - timedelta(days=days - 1)
-        bucket = func.date_trunc("day", ChatSession.created_at)
+        bucket = (
+            func.date_trunc("day", ChatSession.created_at)
+            if self.is_postgres
+            else func.strftime("%Y-%m-%d", ChatSession.created_at)
+        )
         async with self.factory() as db:
             rows = (
                 await db.execute(
@@ -273,7 +289,7 @@ class SessionStore:
                     .group_by(bucket)
                 )
             ).all()
-        counts = {r[0].date().isoformat(): r[1] for r in rows if r[0] is not None}
+        counts = {_day_key(r[0]): r[1] for r in rows if r[0] is not None}
         today = datetime.now(timezone.utc).date()
         series = []
         for i in range(days - 1, -1, -1):
