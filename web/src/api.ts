@@ -206,7 +206,7 @@ export interface AdminUser extends AuthUser {
   // How the account was created — informational only, shown as a badge in the
   // Control Plane's Users list. Accounts predating this field default to
   // "password" (the oldest signup path), which may not be exact for them.
-  signup_method: "password" | "google" | "microsoft" | "admin_created" | "dev_token";
+  signup_method: "password" | "google" | "microsoft" | "admin_created" | "dev_token" | "imported";
   sessions: number;
   group_id: string | null;
   group_name: string | null;
@@ -218,6 +218,36 @@ export interface GroupInfo {
   name: string;
   is_default: boolean;
   user_count: number;
+}
+
+// Bulk user import (CSV/XLSX) — parse is stateless: the browser holds the
+// full parsed grid and posts it back (with the chosen mapping) on commit.
+export interface UserImportParseResult {
+  columns: string[];
+  rows: string[][];
+  row_count: number;
+}
+export interface UserImportMapping {
+  email_col: number;
+  name_mode: "full" | "split" | "none";
+  full_name_col?: number | null;
+  first_name_col?: number | null;
+  last_name_col?: number | null;
+}
+export type UserImportRowStatus =
+  | "created"
+  | "duplicate_in_file"
+  | "already_exists"
+  | "invalid_email"
+  | "missing_email";
+export interface UserImportRowResult {
+  row_index: number;
+  email: string;
+  status: UserImportRowStatus;
+}
+export interface UserImportCommitResult {
+  created: number;
+  results: UserImportRowResult[];
 }
 
 export interface ActivityPoint {
@@ -483,6 +513,24 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+// Extends Error additively (status/body) so existing catch blocks that only
+// read `.message`/`String(e)` see no change, while a caller that needs to
+// branch on the server's structured error (e.g. a 403 with a `reason` field)
+// can inspect `.status`/`.body` instead of parsing the message string.
+export class ApiError extends Error {
+  status: number;
+  body: unknown;
+  constructor(status: number, text: string) {
+    super(`${status} ${text}`);
+    this.status = status;
+    try {
+      this.body = JSON.parse(text);
+    } catch {
+      this.body = undefined;
+    }
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
     ...init,
@@ -490,7 +538,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!resp.ok) {
     if (resp.status === 401) clearToken();
-    throw new Error(`${resp.status} ${await resp.text()}`);
+    throw new ApiError(resp.status, await resp.text());
   }
   return resp.json();
 }
@@ -505,6 +553,14 @@ export const api = {
     request<{ access_token: string; user: AuthUser }>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
+    }),
+  // For a bulk-imported user (no password yet): login() 403s with a
+  // registration_incomplete signal instead — this sets their password and
+  // logs them in immediately, same response shape as login/register.
+  completeRegistration: (email: string, password: string, display_name?: string) =>
+    request<{ access_token: string; user: AuthUser }>("/api/auth/complete-registration", {
+      method: "POST",
+      body: JSON.stringify({ email, password, display_name }),
     }),
   me: () => request<AuthUser>("/api/auth/me"),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
@@ -646,6 +702,30 @@ export const api = {
     },
   ) => request<AdminUser>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   adminDeleteUser: (id: string) => request(`/api/admin/users/${id}`, { method: "DELETE" }),
+
+  // Bulk user import — parse returns the full grid (no server-side state);
+  // commit takes the same rows back along with the column mapping.
+  adminImportUsersParse: async (file: File): Promise<UserImportParseResult> => {
+    const form = new FormData();
+    form.append("file", file);
+    const resp = await fetch("/api/admin/users/import/parse", {
+      method: "POST",
+      headers: authHeaders(), // no Content-Type: browser sets multipart boundary
+      body: form,
+    });
+    if (!resp.ok) throw new ApiError(resp.status, await resp.text());
+    return resp.json();
+  },
+  adminImportUsersCommit: (payload: {
+    columns: string[];
+    rows: string[][];
+    mapping: UserImportMapping;
+    group_id?: string | null;
+  }) =>
+    request<UserImportCommitResult>("/api/admin/users/import/commit", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 
   // -- admin: user groups (organizational only) --
   adminListGroups: () => request<GroupInfo[]>("/api/admin/groups"),

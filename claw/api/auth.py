@@ -29,6 +29,12 @@ class LoginBody(BaseModel):
     password: str
 
 
+class CompleteRegistrationBody(BaseModel):
+    email: str = Field(pattern=_EMAIL_RE, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+    display_name: str | None = None
+
+
 def _user_json(user: User) -> dict:
     return {
         "id": user.id,
@@ -58,6 +64,14 @@ async def _log_auth(state: AppState, event: str, user: User, method: str = "pass
 async def register(body: RegisterBody, state: AppState = Depends(get_state)) -> dict:
     existing = await state.users.get_by_email(body.email)
     if existing is not None:
+        # A bulk-imported, not-yet-activated row — guide them to the same
+        # complete-registration flow login() redirects to, instead of a flat
+        # "already registered" dead-end for an account they can't yet use.
+        if existing.signup_method == "imported" and not existing.password_hash:
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": "registration_incomplete", "display_name": existing.display_name},
+            )
         raise HTTPException(status_code=409, detail="email already registered")
 
     # The very first account bootstraps the system administrator; afterwards
@@ -84,12 +98,45 @@ async def register(body: RegisterBody, state: AppState = Depends(get_state)) -> 
 @router.post("/login")
 async def login(body: LoginBody, state: AppState = Depends(get_state)) -> dict:
     user = await state.users.get_by_email(body.email)
+    # A bulk-imported user has no password yet (password_hash == "") — but so
+    # can an OIDC-only account, which must keep failing here exactly as
+    # before. Gate tightly on signup_method == "imported" so this branch only
+    # ever fires for rows created by the CSV/XLSX import, never lets someone
+    # "claim" a Google/Microsoft-only account by setting a password for it.
+    if user is not None and user.signup_method == "imported" and not user.password_hash:
+        raise HTTPException(
+            status_code=403,
+            detail={"reason": "registration_incomplete", "display_name": user.display_name},
+        )
     if user is None or not user.password_hash or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="account suspended")
     await _log_auth(state, "login", user)
     return _issue(state, user)
+
+
+@router.post("/complete-registration")
+async def complete_registration(body: CompleteRegistrationBody, state: AppState = Depends(get_state)) -> dict:
+    """Lets a bulk-imported user (signup_method="imported", no password yet)
+    set their own password and get logged in immediately — mirrors register()
+    but for a row an admin already created via CSV/XLSX import instead of a
+    brand-new account. Matched by email only (no invite token — this
+    codebase has no email-sending infra); acceptable for an admin-curated
+    import list, but anyone who knows an imported email can claim it."""
+    user = await state.users.get_by_email(body.email)
+    if user is None or user.signup_method != "imported" or user.password_hash:
+        raise HTTPException(status_code=404, detail="no pending registration for this email")
+    if not user.is_active:
+        # Suspended between import and first login — must not be able to
+        # self-activate around that suspension, same as login()'s check.
+        raise HTTPException(status_code=403, detail="account suspended")
+    await state.users.update_profile(
+        user.id, display_name=body.display_name or None, password_hash=hash_password(body.password)
+    )
+    updated = await state.users.get_by_email(body.email)
+    await _log_auth(state, "complete_registration", updated)
+    return _issue(state, updated)
 
 
 @router.post("/logout")

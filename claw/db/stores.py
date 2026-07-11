@@ -562,7 +562,7 @@ class UserStore:
         self, email: str, display_name: str = "", signup_method: str = "dev_token"
     ) -> User:
         async with self.factory() as db:
-            user = await db.scalar(select(User).where(User.email == email))
+            user = await db.scalar(select(User).where(func.lower(User.email) == email.lower()))
             if user is None:
                 user = User(
                     email=email,
@@ -574,8 +574,12 @@ class UserStore:
             return user
 
     async def get_by_email(self, email: str) -> User | None:
+        """Case-insensitive lookup — email addresses aren't meaningfully
+        case-sensitive in practice, and a bulk-imported row is normalized to
+        lowercase (see admin.py's import_users_commit) while a person typing
+        their own email rarely matches that exactly."""
         async with self.factory() as db:
-            return await db.scalar(select(User).where(User.email == email))
+            return await db.scalar(select(User).where(func.lower(User.email) == email.lower()))
 
     async def labels(self, ids: list[str]) -> dict[str, str]:
         """Map user ids → a display label (name, else email, else id) — for
@@ -618,6 +622,46 @@ class UserStore:
             db.add(user)
             await db.commit()
             return user
+
+    async def existing_emails(self, emails: list[str]) -> set[str]:
+        """Case-insensitive membership check for many emails in one round
+        trip — lets a bulk import dedupe against the DB without a query per
+        row. Returned emails are lowercased."""
+        if not emails:
+            return set()
+        lowered = [e.lower() for e in emails]
+        async with self.factory() as db:
+            rows = await db.execute(select(User.email).where(func.lower(User.email).in_(lowered)))
+            return {email.lower() for (email,) in rows.all()}
+
+    async def bulk_create_imported(self, rows: list[dict[str, Any]]) -> set[str]:
+        """Create many bulk-imported users in as few round trips as possible
+        — one transaction for the whole batch in the common case. Returns
+        the subset of emails (lowercased) that failed because they lost a
+        race against a concurrent insert between the caller's own dedup
+        check and this call; everything else in `rows` was created."""
+        if not rows:
+            return set()
+        async with self.factory() as db:
+            for r in rows:
+                db.add(User(**r))
+            try:
+                await db.commit()
+                return set()
+            except IntegrityError:
+                await db.rollback()
+        # Something in this batch raced a concurrent insert — retry one at a
+        # time to isolate exactly which email(s) conflicted, keeping the rest.
+        failed: set[str] = set()
+        for r in rows:
+            async with self.factory() as db:
+                db.add(User(**r))
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    await db.rollback()
+                    failed.add(r["email"].lower())
+        return failed
 
     async def assign_group(self, user_id: str, group_id: str | None) -> User | None:
         """Set (or clear, with None) a user's organizational group."""

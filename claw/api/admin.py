@@ -1,10 +1,13 @@
 """System administration API — manage all users. Requires the is_admin flag."""
 
+import csv
+import io
 import re
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+import openpyxl
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from claw.api import llm_shared as llm
@@ -158,6 +161,177 @@ async def delete_user(
         raise HTTPException(status_code=400, detail="cannot delete the last administrator")
     await state.users.delete(user_id)
     return {"deleted": True}
+
+
+# ---------------------------------------------------------------- bulk user import
+# CSV/XLSX -> preview/map -> commit. Stateless: the parse step returns the full
+# parsed grid to the browser (bounded by the caps below) and the commit step
+# takes the same rows back, so there's no server-side staging/session to clean
+# up. Imported rows get no password (password_hash stays "") and are created
+# with signup_method="imported" — the imported-user first-login flow in
+# claw/api/auth.py's login()/complete_registration() is keyed off exactly that
+# pair, and is_admin is intentionally never settable via import.
+
+_MAX_IMPORT_ROWS = 5000
+_MAX_IMPORT_BYTES = 5 * 1024 * 1024
+_IMPORT_UPLOAD_CHUNK = 65536
+
+
+class ImportMapping(BaseModel):
+    email_col: int
+    name_mode: str = "none"  # "full" | "split" | "none"
+    full_name_col: int | None = None
+    first_name_col: int | None = None
+    last_name_col: int | None = None
+
+
+class ImportCommitBody(BaseModel):
+    columns: list[str]
+    rows: list[list[str]]
+    mapping: ImportMapping
+    group_id: str | None = None
+
+
+def _cell(row: list[str], idx: int | None) -> str:
+    if idx is None or idx < 0 or idx >= len(row):
+        return ""
+    return (row[idx] or "").strip()
+
+
+def _import_display_name(row: list[str], mapping: ImportMapping) -> str:
+    if mapping.name_mode == "full":
+        return _cell(row, mapping.full_name_col)
+    if mapping.name_mode == "split":
+        first = _cell(row, mapping.first_name_col)
+        last = _cell(row, mapping.last_name_col)
+        return f"{first} {last}".strip()
+    return ""
+
+
+async def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
+    """Stream an upload into memory, rejecting it once it exceeds max_bytes —
+    never fully buffers an oversized file before checking."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_IMPORT_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=400, detail=f"file exceeds the {max_bytes // 1_000_000} MB limit"
+            )
+        chunks.append(chunk)
+    if total == 0:
+        raise HTTPException(status_code=400, detail="empty file")
+    return b"".join(chunks)
+
+
+def _decode_csv_bytes(raw: bytes) -> str:
+    """Try encodings that decode cleanly (no replacement chars) before
+    falling back to a lossy utf-8-sig decode — an Excel export in a regional
+    codepage (e.g. Windows-1252, Thai TIS-620) would otherwise have every
+    non-ASCII character silently mangled with no error surfaced."""
+    for enc in ("utf-8-sig", "cp1252", "cp874"):
+        try:
+            text = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        if "�" not in text:
+            return text
+    return raw.decode("utf-8-sig", errors="replace")
+
+
+@router.post("/users/import/parse")
+async def import_users_parse(
+    file: UploadFile = File(...), admin: User = Depends(require_admin)
+) -> dict:
+    """Parse an uploaded CSV/XLSX into a column grid for the import wizard's
+    preview + mapping step. Nothing is persisted here — the browser holds the
+    parsed rows and posts them back (with the chosen mapping) to /import/commit."""
+    name = (file.filename or "").lower()
+    raw = await _read_capped(file, _MAX_IMPORT_BYTES)
+    if name.endswith(".csv"):
+        rows = list(csv.reader(_decode_csv_bytes(raw).splitlines()))
+    elif name.endswith(".xlsx"):
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        sheet = wb.worksheets[0]
+        rows = [["" if c is None else str(c) for c in r] for r in sheet.iter_rows(values_only=True)]
+    else:
+        raise HTTPException(status_code=400, detail="only .csv and .xlsx files are supported")
+
+    rows = [r for r in rows if any((c or "").strip() for c in r)]  # drop blank lines
+    if len(rows) < 2:
+        raise HTTPException(status_code=400, detail="file has no data rows")
+    if len(rows) - 1 > _MAX_IMPORT_ROWS:
+        raise HTTPException(status_code=400, detail=f"file has more than {_MAX_IMPORT_ROWS} rows")
+
+    columns = [c.strip() for c in rows[0]]
+    data_rows = rows[1:]
+    return {"columns": columns, "rows": data_rows, "row_count": len(data_rows)}
+
+
+@router.post("/users/import/commit")
+async def import_users_commit(
+    body: ImportCommitBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    """Create users from previously-parsed+mapped rows. No password is set —
+    imported users complete their own registration on their first login
+    attempt (see claw/api/auth.py). Existence-checks and creates are batched
+    (one round trip each in the common case) instead of one query per row —
+    a 5,000-row import doing 10,000 sequential DB round trips would risk a
+    multi-minute request and a client/proxy timeout."""
+    if len(body.rows) > _MAX_IMPORT_ROWS:
+        raise HTTPException(status_code=400, detail=f"more than {_MAX_IMPORT_ROWS} rows")
+    group_id = await _valid_group_id(state, body.group_id)
+    email_re = re.compile(_EMAIL_RE)
+
+    # Pass 1: validate + dedupe in-file only — no DB access yet.
+    results: dict[int, dict] = {}
+    seen: set[str] = set()
+    candidates: list[tuple[int, str, str]] = []  # (row_index, email, display_name)
+    for i, row in enumerate(body.rows):
+        email = _cell(row, body.mapping.email_col).lower()
+        if not email:
+            results[i] = {"row_index": i, "email": "", "status": "missing_email"}
+            continue
+        if not email_re.match(email):
+            results[i] = {"row_index": i, "email": email, "status": "invalid_email"}
+            continue
+        if email in seen:
+            results[i] = {"row_index": i, "email": email, "status": "duplicate_in_file"}
+            continue
+        seen.add(email)
+        candidates.append((i, email, _import_display_name(row, body.mapping)))
+
+    # Pass 2: one round trip to find which candidate emails already exist.
+    existing = await state.users.existing_emails([email for _, email, _ in candidates])
+    to_create = [
+        {
+            "email": email,
+            "password_hash": "",
+            "display_name": name,
+            "group_id": group_id,
+            "signup_method": "imported",
+        }
+        for _, email, name in candidates
+        if email not in existing
+    ]
+
+    # Pass 3: one transaction for the whole batch — falls back to per-row
+    # only for whatever (rare) row loses a race against a concurrent insert.
+    raced = await state.users.bulk_create_imported(to_create)
+
+    created = 0
+    for i, email, _ in candidates:
+        if email in existing or email in raced:
+            results[i] = {"row_index": i, "email": email, "status": "already_exists"}
+        else:
+            results[i] = {"row_index": i, "email": email, "status": "created"}
+            created += 1
+
+    return {"created": created, "results": [results[i] for i in range(len(body.rows))]}
 
 
 # ---------------------------------------------------------------- user groups

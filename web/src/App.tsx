@@ -20,7 +20,7 @@ import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
 import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
-import { AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
+import { ApiError, AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 import { MOBILE_QUERY, PHONE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 const PROVIDER_LABELS: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
@@ -325,7 +325,7 @@ function RecentsNav({
 }
 
 function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; initialError?: string }) {
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [mode, setMode] = useState<"login" | "register" | "complete-setup">("login");
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -342,12 +342,28 @@ function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; init
     setError("");
     try {
       const res =
-        mode === "login"
-          ? await api.login(email, password)
-          : await api.register(email, password, displayName.trim());
+        mode === "complete-setup"
+          ? await api.completeRegistration(email, password, displayName.trim())
+          : mode === "login"
+            ? await api.login(email, password)
+            : await api.register(email, password, displayName.trim());
       setToken(res.access_token);
       onDone(res.user);
     } catch (e) {
+      // A bulk-imported user has no password yet — login() signals this with
+      // a 403 (register() with a 409, if they land on the wrong tab first)
+      // instead of the usual error, so redirect to a "finish setting up your
+      // account" screen (fields pre-filled) instead of a bare error.
+      const detail =
+        (mode === "login" || mode === "register") && e instanceof ApiError && (e.status === 403 || e.status === 409)
+          ? (e.body as { detail?: { reason?: string; display_name?: string } } | undefined)?.detail
+          : undefined;
+      if (detail?.reason === "registration_incomplete") {
+        setDisplayName(detail.display_name ?? "");
+        setPassword("");
+        setMode("complete-setup");
+        return;
+      }
       setError(mode === "login" ? "Invalid email or password." : String(e).replace(/^Error:\s*/, ""));
     } finally {
       setBusy(false);
@@ -359,11 +375,23 @@ function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; init
       <SoftnixLogo height={44} />
       <Text type="display-3">PrivateClaw</Text>
       <Text color="secondary">Your personal AI agent</Text>
-      {mode === "register" && (
+      {mode === "complete-setup" && (
+        <Text size="sm" color="secondary">
+          An account for {email} is waiting for you — set a password to finish activating it.
+        </Text>
+      )}
+      {(mode === "register" || mode === "complete-setup") && (
         <TextInput label="Full name" placeholder="Jane Doe" value={displayName} onChange={setDisplayName} />
       )}
-      <TextInput label="Email" type="email" placeholder="jane@company.com" value={email} onChange={setEmail} />
-      {mode === "register" ? (
+      <TextInput
+        label="Email"
+        type="email"
+        placeholder="jane@company.com"
+        value={email}
+        onChange={setEmail}
+        isDisabled={mode === "complete-setup"}
+      />
+      {mode === "register" || mode === "complete-setup" ? (
         <PasswordField
           label="Password"
           description="At least 8 characters."
@@ -375,19 +403,31 @@ function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; init
       )}
       {error && <ErrorText>{error}</ErrorText>}
       <Button
-        label={busy ? "…" : mode === "login" ? "Log in" : "Create account"}
+        label={busy ? "…" : mode === "login" ? "Log in" : mode === "register" ? "Create account" : "Activate account"}
         isDisabled={busy || !email || password.length < 8}
         clickAction={submit}
       />
-      <Button
-        label={mode === "login" ? "Need an account? Register" : "Have an account? Log in"}
-        variant="ghost"
-        clickAction={() => {
-          setMode(mode === "login" ? "register" : "login");
-          setError("");
-        }}
-      />
-      {providers.length > 0 && (
+      {mode === "complete-setup" ? (
+        <Button
+          label="Back to login"
+          variant="ghost"
+          clickAction={() => {
+            setMode("login");
+            setPassword("");
+            setError("");
+          }}
+        />
+      ) : (
+        <Button
+          label={mode === "login" ? "Need an account? Register" : "Have an account? Log in"}
+          variant="ghost"
+          clickAction={() => {
+            setMode(mode === "login" ? "register" : "login");
+            setError("");
+          }}
+        />
+      )}
+      {mode !== "complete-setup" && providers.length > 0 && (
         <>
           <Text size="sm" color="secondary">or continue with</Text>
           {providers.map((p) => (

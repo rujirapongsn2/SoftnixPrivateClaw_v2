@@ -1,10 +1,12 @@
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
+import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Divider } from "@astryxdesign/core/Divider";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon, type IconName, type IconType } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
+import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { Switch } from "@astryxdesign/core/Switch";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
@@ -42,11 +44,12 @@ import {
   Star,
   Terminal,
   Trash2,
+  Upload,
   User as UserIcon,
   UserPlus,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
 import {
@@ -68,6 +71,9 @@ import {
   type TokenUsageReport,
   type TokenUsageSeries,
   type UsageDimensions,
+  type UserImportCommitResult,
+  type UserImportMapping,
+  type UserImportParseResult,
   api,
   ADMIN_LLM_API,
   type LlmApi,
@@ -2646,6 +2652,354 @@ function GroupsManager({
   );
 }
 
+type ImportStep = "upload" | "map" | "confirm" | "results";
+
+// Mirrors claw/api/admin.py's _EMAIL_RE so the wizard's preview count
+// matches what the backend will actually accept on commit.
+const IMPORT_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+// Target fields a column can map to. Each field can be claimed by at most one
+// column (picking a field elsewhere clears it from its previous column).
+const IMPORT_FIELD_OPTIONS: { value: string; label: string }[] = [
+  { value: "skip", label: "Skip" },
+  { value: "email", label: "Email" },
+  { value: "full_name", label: "Full Name" },
+  { value: "first_name", label: "First Name" },
+  { value: "last_name", label: "Last Name" },
+];
+
+const IMPORT_STATUS_LABEL: Record<string, string> = {
+  duplicate_in_file: "duplicate in file",
+  already_exists: "already exists",
+  invalid_email: "invalid email",
+  missing_email: "missing email",
+};
+
+// Bulk user import — upload -> map columns -> confirm -> results. Stateless:
+// the parse step returns the full grid and this dialog holds it in memory
+// while the admin maps columns, then posts the same rows back on commit (no
+// server-side staging). No password is set for imported rows — each person
+// sets their own the first time they try to log in (see Auth's
+// "complete-setup" mode in App.tsx).
+function UserImportDialog({
+  isOpen,
+  onOpenChange,
+  groups,
+  onCreateGroup,
+  onImported,
+}: {
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+  groups: GroupInfo[];
+  onCreateGroup: (name: string) => Promise<GroupInfo>;
+  onImported: () => void;
+}) {
+  const [step, setStep] = useState<ImportStep>("upload");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [parsed, setParsed] = useState<UserImportParseResult | null>(null);
+  const [fieldByCol, setFieldByCol] = useState<string[]>([]);
+  const [groupId, setGroupId] = useState<string | null>(null);
+  const [result, setResult] = useState<UserImportCommitResult | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const reset = () => {
+    setStep("upload");
+    setError("");
+    setParsed(null);
+    setFieldByCol([]);
+    setGroupId(null);
+    setResult(null);
+  };
+
+  const close = () => {
+    onOpenChange(false);
+    reset();
+  };
+
+  const onPick = async (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await api.adminImportUsersParse(file);
+      setParsed(res);
+      setFieldByCol(res.columns.map(() => "skip"));
+      setStep("map");
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const setColumnField = (col: number, value: string) => {
+    setFieldByCol((prev) => {
+      const next = [...prev];
+      if (value !== "skip") {
+        for (let j = 0; j < next.length; j++) if (next[j] === value) next[j] = "skip";
+      }
+      next[col] = value;
+      return next;
+    });
+  };
+
+  const emailCol = fieldByCol.indexOf("email");
+  const fullNameCol = fieldByCol.indexOf("full_name");
+  const firstNameCol = fieldByCol.indexOf("first_name");
+  const lastNameCol = fieldByCol.indexOf("last_name");
+  const nameMode: UserImportMapping["name_mode"] =
+    firstNameCol >= 0 || lastNameCol >= 0 ? "split" : fullNameCol >= 0 ? "full" : "none";
+  const mapping: UserImportMapping | null =
+    emailCol >= 0
+      ? {
+          email_col: emailCol,
+          name_mode: nameMode,
+          full_name_col: fullNameCol >= 0 ? fullNameCol : undefined,
+          first_name_col: firstNameCol >= 0 ? firstNameCol : undefined,
+          last_name_col: lastNameCol >= 0 ? lastNameCol : undefined,
+        }
+      : null;
+
+  const computeDisplayName = (row: string[]): string => {
+    if (nameMode === "full" && fullNameCol >= 0) return (row[fullNameCol] || "").trim();
+    if (nameMode === "split") {
+      const first = firstNameCol >= 0 ? (row[firstNameCol] || "").trim() : "";
+      const last = lastNameCol >= 0 ? (row[lastNameCol] || "").trim() : "";
+      return `${first} ${last}`.trim();
+    }
+    return "";
+  };
+
+  // Client-side validation summary — mirrors the backend's commit-time dedup
+  // logic so the admin sees accurate counts before committing anything.
+  const summary = useMemo(() => {
+    if (!parsed || !mapping) return null;
+    const seen = new Set<string>();
+    let valid = 0;
+    let dup = 0;
+    let missing = 0;
+    let invalid = 0;
+    for (const row of parsed.rows) {
+      const email = (row[mapping.email_col] || "").trim().toLowerCase();
+      if (!email) {
+        missing++;
+        continue;
+      }
+      if (!IMPORT_EMAIL_RE.test(email)) {
+        invalid++;
+        continue;
+      }
+      if (seen.has(email)) {
+        dup++;
+        continue;
+      }
+      seen.add(email);
+      valid++;
+    }
+    return { valid, dup, missing, invalid };
+  }, [parsed, mapping]);
+
+  const commit = async () => {
+    if (!parsed || !mapping) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await api.adminImportUsersCommit({
+        columns: parsed.columns,
+        rows: parsed.rows,
+        mapping,
+        group_id: groupId,
+      });
+      setResult(res);
+      setStep("results");
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const done = () => {
+    onImported();
+    close();
+  };
+
+  return (
+    <Dialog isOpen={isOpen} onOpenChange={(open: boolean) => (open ? onOpenChange(true) : close())} variant="fullscreen" purpose="info">
+      <Layout
+        header={
+          <DialogHeader
+            title="Import users"
+            subtitle="From a CSV or Excel file"
+            onOpenChange={(open: boolean) => (open ? undefined : close())}
+          />
+        }
+        content={
+          <LayoutContent>
+            <div className="claw-panel">
+              {error && <ErrorText>{error}</ErrorText>}
+              {step === "upload" && (
+                <>
+                  <Text color="secondary">
+                    Upload a CSV or .xlsx file with one row per user. You'll map columns to fields
+                    next — no password is set here; each imported person sets their own the first
+                    time they try to log in.
+                  </Text>
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".csv,.xlsx"
+                    style={{ display: "none" }}
+                    onChange={(e) => void onPick(e.target.files)}
+                  />
+                  <Button
+                    label={busy ? "Uploading…" : "Choose file"}
+                    icon={<Icon icon={Upload} size="sm" />}
+                    isDisabled={busy}
+                    clickAction={() => fileRef.current?.click()}
+                  />
+                </>
+              )}
+              {step === "map" && parsed && (
+                <>
+                  <Text weight="semibold">Map columns ({parsed.row_count} rows)</Text>
+                  <div className="claw-import-map-grid">
+                    {parsed.columns.map((col, i) => (
+                      <div key={i} className="claw-import-map-row">
+                        <Text size="sm">{col || `Column ${i + 1}`}</Text>
+                        <select
+                          className="claw-token-filter"
+                          value={fieldByCol[i] ?? "skip"}
+                          onChange={(e) => setColumnField(i, e.target.value)}
+                        >
+                          {IMPORT_FIELD_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                  {!mapping && <ErrorText>Map a column to Email to continue.</ErrorText>}
+                  {summary && (
+                    <div className="claw-row">
+                      <Badge variant="success" label={`${summary.valid} will import`} />
+                      {summary.dup > 0 && (
+                        <Badge variant="neutral" label={`${summary.dup} duplicate in file`} />
+                      )}
+                      {summary.missing > 0 && (
+                        <Badge variant="neutral" label={`${summary.missing} missing email`} />
+                      )}
+                      {summary.invalid > 0 && (
+                        <Badge variant="neutral" label={`${summary.invalid} invalid email`} />
+                      )}
+                    </div>
+                  )}
+                  <Text weight="semibold" size="sm">
+                    Preview
+                  </Text>
+                  <div className="claw-import-preview-table">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Email</th>
+                          <th>Display name</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {parsed.rows.slice(0, 20).map((row, i) => (
+                          <tr key={i}>
+                            <td>{mapping ? row[mapping.email_col] || "—" : "—"}</td>
+                            <td>{computeDisplayName(row) || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+              {step === "confirm" && summary && (
+                <>
+                  <Text weight="semibold">Confirm import</Text>
+                  <Text color="secondary">
+                    {summary.valid} users will be created. Duplicates, invalid, and missing emails
+                    are skipped.
+                  </Text>
+                  <GroupPicker groups={groups} value={groupId} onChange={setGroupId} onCreate={onCreateGroup} />
+                </>
+              )}
+              {step === "results" && result && (
+                <>
+                  <Text weight="semibold">Import complete</Text>
+                  <div className="claw-row">
+                    <Badge variant="success" label={`${result.created} created`} />
+                    {Object.entries(IMPORT_STATUS_LABEL).map(([status, label]) => {
+                      const n = result.results.filter((r) => r.status === status).length;
+                      return n > 0 ? <Badge key={status} variant="neutral" label={`${n} ${label}`} /> : null;
+                    })}
+                  </div>
+                  {result.results.some((r) => r.status !== "created") && (
+                    <div className="claw-import-preview-table">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>File row</th>
+                            <th>Email</th>
+                            <th>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {result.results
+                            .filter((r) => r.status !== "created")
+                            .map((r) => (
+                              // +2, not +1: row_index is 0-based over data rows with the header
+                              // already stripped server-side, and the header itself occupies
+                              // line 1 of the admin's actual source file.
+                              <tr key={r.row_index}>
+                                <td>{r.row_index + 2}</td>
+                                <td>{r.email || "—"}</td>
+                                <td>{IMPORT_STATUS_LABEL[r.status] ?? r.status}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter hasDivider>
+            {step === "map" && (
+              <>
+                <Button label="Cancel" variant="ghost" clickAction={close} />
+                <Button label="Next" isDisabled={!mapping} clickAction={() => setStep("confirm")} />
+              </>
+            )}
+            {step === "confirm" && (
+              <>
+                <Button label="Back" variant="ghost" clickAction={() => setStep("map")} />
+                <Button
+                  label={busy ? "Importing…" : `Import ${summary?.valid ?? 0} users`}
+                  isDisabled={busy}
+                  clickAction={commit}
+                />
+              </>
+            )}
+            {step === "results" && <Button label="Done" clickAction={done} />}
+          </LayoutFooter>
+        }
+      />
+    </Dialog>
+  );
+}
+
 function UsersPanel({ selfId }: { selfId: string }) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [groups, setGroups] = useState<GroupInfo[]>([]);
@@ -2660,6 +3014,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
   // Group filter: "all" | "none" (ungrouped) | a group id.
   const [groupFilter, setGroupFilter] = useState<string>("all");
   const [managingGroups, setManagingGroups] = useState(false);
+  const [importing, setImporting] = useState(false);
   const { error, guard } = useAsyncError();
   const toast = useToast();
 
@@ -2736,6 +3091,13 @@ function UsersPanel({ selfId }: { selfId: string }) {
             variant={managingGroups ? "secondary" : "ghost"}
             clickAction={() => setManagingGroups((m) => !m)}
           />
+          <Button
+            label="Import"
+            icon={<Icon icon={Upload} size="sm" />}
+            size="sm"
+            variant="secondary"
+            clickAction={() => setImporting(true)}
+          />
           {!creating && (
             <Button
               label="Add user"
@@ -2747,6 +3109,17 @@ function UsersPanel({ selfId }: { selfId: string }) {
         </div>
       </div>
       {error && <ErrorText>{error}</ErrorText>}
+
+      <UserImportDialog
+        isOpen={importing}
+        onOpenChange={setImporting}
+        groups={groups}
+        onCreateGroup={createGroup}
+        onImported={() => {
+          void reloadAll();
+          toast({ body: "Users imported", type: "info", autoHideDuration: 3000 });
+        }}
+      />
 
       {managingGroups && <GroupsManager groups={groups} reload={reloadAll} guard={guard} />}
 
@@ -2880,6 +3253,7 @@ const SIGNUP_METHOD_META: Record<string, { label: string; icon: IconType; logo?:
   microsoft: { label: "Microsoft", icon: Mail, logo: "/oauth-providers/microsoft.png" },
   admin_created: { label: "Added by admin", icon: UserPlus },
   dev_token: { label: "Dev token", icon: Terminal },
+  imported: { label: "Imported", icon: Upload },
 };
 
 function SignupMethodBadge({ method }: { method: string }) {
