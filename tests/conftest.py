@@ -59,5 +59,5 @@ async def stores(db_factory):
         "sessions": SessionStore(db_factory),
         "messages": MessageStore(db_factory),
         "memories": MemoryStore(db_factory),
-        "audit": AuditStore(db_factory),
+        "audit": AuditStore(db_factory, is_postgres=False),
     }

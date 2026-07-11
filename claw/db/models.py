@@ -5,9 +5,9 @@ JSON columns use the portable JSON type (JSONB on Postgres via dialect).
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -187,6 +187,32 @@ class UsageRecord(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class UsageDaily(Base):
+    """Per-day token rollup (day × user × model), maintained incrementally by
+    UsageStore.record(). The Tokens Usage report queries THIS table, not the raw
+    per-turn usage_records — so Daily/Weekly/Monthly/Yearly views stay cheap as
+    turn volume grows (rows are bounded by days×users×models, not turns).
+    Provider is derived from the live LLM config at query time, not stored here."""
+
+    __tablename__ = "usage_daily"
+    __table_args__ = (
+        # The upsert key: one row per (day, user, model).
+        Index("ix_usage_daily_key", "day", "user_id", "model", unique=True),
+        # Range scans for a granularity window.
+        Index("ix_usage_daily_day", "day"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    day: Mapped[date] = mapped_column(Date)
+    # No FK (mirrors usage_records) so the rollup survives user deletion; the
+    # UserStore.delete cascade prunes a user's rows explicitly.
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    turns: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Feedback(Base):

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from collections.abc import Sequence
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import String, bindparam, cast, func, or_, select
+from sqlalchemy import DateTime, Integer, String, bindparam, cast, func, literal_column, or_, select, update
 from sqlalchemy import text as sa_text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from claw.db.models import (
@@ -26,6 +28,7 @@ from claw.db.models import (
     Schedule,
     Share,
     Skill,
+    UsageDaily,
     UsageRecord,
     User,
     UserGroup,
@@ -574,6 +577,19 @@ class UserStore:
         async with self.factory() as db:
             return await db.scalar(select(User).where(User.email == email))
 
+    async def labels(self, ids: list[str]) -> dict[str, str]:
+        """Map user ids → a display label (name, else email, else id) — for
+        attaching human-readable names to id-keyed aggregates."""
+        if not ids:
+            return {}
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(User.id, User.display_name, User.email).where(User.id.in_(ids))
+                )
+            ).all()
+        return {uid: (name or email or uid) for uid, name, email in rows}
+
     async def count(self) -> int:
         async with self.factory() as db:
             return await db.scalar(select(func.count()).select_from(User))
@@ -655,7 +671,10 @@ class UserStore:
                 await db.execute(
                     LLMProvider.__table__.delete().where(LLMProvider.owner_id == user_id)
                 )
-            for model in (ChatSession, Memory, Skill, McpConnector, Schedule, UsageRecord, Feedback):
+            for model in (
+                ChatSession, Memory, Skill, McpConnector, Schedule,
+                UsageRecord, UsageDaily, Feedback,
+            ):
                 await db.execute(model.__table__.delete().where(model.user_id == user_id))
             await db.delete(user)
             await db.commit()
@@ -806,8 +825,11 @@ class GroupStore:
 
 
 class UsageStore:
-    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+    _GRANULARITIES = {"daily": "day", "weekly": "week", "monthly": "month", "yearly": "year"}
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], is_postgres: bool = True):
         self.factory = factory
+        self.is_postgres = is_postgres
 
     async def record(
         self, user_id: str, session_id: str | None, model: str, usage: dict[str, int]
@@ -816,17 +838,203 @@ class UsageStore:
         completion = int(usage.get("completion_tokens", 0) or 0)
         if prompt == 0 and completion == 0:
             return
+        today = datetime.now(timezone.utc).date()
+        model = model or ""
+        # Write the raw per-turn row AND fold it into today's rollup bucket in
+        # one transaction. Portable upsert: try UPDATE, else INSERT. The only
+        # race is two concurrent FIRST inserts of the same (day,user,model) —
+        # one hits the unique index; catch it and retry (the UPDATE then wins).
+        for attempt in range(2):
+            try:
+                async with self.factory() as db:
+                    db.add(
+                        UsageRecord(
+                            user_id=user_id,
+                            session_id=session_id,
+                            model=model,
+                            prompt_tokens=prompt,
+                            completion_tokens=completion,
+                        )
+                    )
+                    res = await db.execute(
+                        update(UsageDaily)
+                        .where(
+                            UsageDaily.day == today,
+                            UsageDaily.user_id == user_id,
+                            UsageDaily.model == model,
+                        )
+                        .values(
+                            prompt_tokens=UsageDaily.prompt_tokens + prompt,
+                            completion_tokens=UsageDaily.completion_tokens + completion,
+                            turns=UsageDaily.turns + 1,
+                        )
+                    )
+                    if res.rowcount == 0:
+                        db.add(
+                            UsageDaily(
+                                day=today,
+                                user_id=user_id,
+                                model=model,
+                                prompt_tokens=prompt,
+                                completion_tokens=completion,
+                                turns=1,
+                            )
+                        )
+                    await db.commit()
+                return
+            except IntegrityError:
+                if attempt == 1:
+                    raise
+                # Another turn created the bucket first; retry so the UPDATE path hits.
+                continue
+
+    # Label format per granularity — used to normalize a PG bucket (a
+    # datetime, period start) into the same shape SQLite's strftime-based
+    # bucketing already yields directly.
+    _BUCKET_LABEL_FMT = {"day": "%Y-%m-%d", "week": "%Y-%m-%d", "month": "%Y-%m", "year": "%Y"}
+
+    def _bucket_column(self, trunc: str):
+        """SQL bucket expression for `trunc`, portable across dialects.
+
+        Postgres: date_trunc handles every granularity uniformly. SQLite has
+        no native truncation function — day/month/year bucket via strftime's
+        format string alone (grouping identical formatted strings is the
+        truncation); week has no format-string equivalent, so it walks back
+        to the preceding Monday via day-of-week arithmetic (%w: 0=Sun..6=Sat)
+        to match date_trunc('week', ...)'s ISO (Monday-start) semantics."""
+        if self.is_postgres:
+            return func.date_trunc(trunc, cast(UsageDaily.day, DateTime)).label("bucket")
+        if trunc == "week":
+            dow = cast(func.strftime("%w", UsageDaily.day), Integer)
+            offset = (dow + 6) % 7
+            modifier = literal_column("'-'") + cast(offset, String) + literal_column("' days'")
+            return func.date(UsageDaily.day, modifier).label("bucket")
+        fmt = {"day": "%Y-%m-%d", "month": "%Y-%m", "year": "%Y"}[trunc]
+        return func.strftime(fmt, UsageDaily.day).label("bucket")
+
+    def _format_bucket(self, b: Any, trunc: str) -> str:
+        """PG yields a datetime (period start) that needs trimming to the
+        granularity's label shape; SQLite's bucketing already yields the
+        label string directly."""
+        if hasattr(b, "date"):
+            return b.date().strftime(self._BUCKET_LABEL_FMT[trunc])
+        return str(b)
+
+    async def token_series(
+        self,
+        *,
+        granularity: str,
+        start: "date",
+        end: "date",
+        group_col: str,
+        user_id: str | None = None,
+        models: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Rollup token totals bucketed by time period and one dimension.
+
+        `group_col` is "user_id" (User view) or "model" (Model view — the
+        Provider view instead uses `token_series_by_user_model` since a
+        model_id's provider can differ per user). Reads usage_daily only, so
+        cost scales with days×users×models in range, not raw turn volume."""
+        trunc = self._GRANULARITIES.get(granularity, "day")
+        key_col = UsageDaily.user_id if group_col == "user_id" else UsageDaily.model
+        conds = [UsageDaily.day >= start, UsageDaily.day <= end]
+        if user_id:
+            conds.append(UsageDaily.user_id == user_id)
+        if models is not None:
+            if not models:
+                return []
+            conds.append(UsageDaily.model.in_(models))
+
+        bucket = self._bucket_column(trunc)
         async with self.factory() as db:
-            db.add(
-                UsageRecord(
-                    user_id=user_id,
-                    session_id=session_id,
-                    model=model,
-                    prompt_tokens=prompt,
-                    completion_tokens=completion,
+            rows = (
+                await db.execute(
+                    select(
+                        bucket,
+                        key_col.label("key"),
+                        func.coalesce(func.sum(UsageDaily.prompt_tokens), 0),
+                        func.coalesce(func.sum(UsageDaily.completion_tokens), 0),
+                        func.coalesce(func.sum(UsageDaily.turns), 0),
+                    )
+                    .where(*conds)
+                    .group_by(bucket, key_col)
                 )
-            )
-            await db.commit()
+            ).all()
+        return [
+            {
+                "bucket": self._format_bucket(b, trunc),
+                "key": key or "",
+                "prompt_tokens": p,
+                "completion_tokens": c,
+                "turns": t,
+            }
+            for b, key, p, c, t in rows
+        ]
+
+    async def token_series_by_user_model(
+        self,
+        *,
+        granularity: str,
+        start: "date",
+        end: "date",
+        user_id: str | None = None,
+        models: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Like token_series but grouped by (bucket, user_id, model) instead
+        of one dimension — the Provider view needs this because a model_id's
+        provider can differ per user (each BYOK user configures their own),
+        so folding by model_id alone would misattribute one user's usage to
+        a different user's private provider."""
+        trunc = self._GRANULARITIES.get(granularity, "day")
+        conds = [UsageDaily.day >= start, UsageDaily.day <= end]
+        if user_id:
+            conds.append(UsageDaily.user_id == user_id)
+        if models is not None:
+            if not models:
+                return []
+            conds.append(UsageDaily.model.in_(models))
+
+        bucket = self._bucket_column(trunc)
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(
+                        bucket,
+                        UsageDaily.user_id,
+                        UsageDaily.model,
+                        func.coalesce(func.sum(UsageDaily.prompt_tokens), 0),
+                        func.coalesce(func.sum(UsageDaily.completion_tokens), 0),
+                        func.coalesce(func.sum(UsageDaily.turns), 0),
+                    )
+                    .where(*conds)
+                    .group_by(bucket, UsageDaily.user_id, UsageDaily.model)
+                )
+            ).all()
+        return [
+            {
+                "bucket": self._format_bucket(b, trunc),
+                "user_id": uid or "",
+                "model": model or "",
+                "prompt_tokens": p,
+                "completion_tokens": c,
+                "turns": t,
+            }
+            for b, uid, model, p, c, t in rows
+        ]
+
+    async def distinct_user_ids(self, start: "date | None" = None, end: "date | None" = None) -> list[str]:
+        """User ids with rollup activity, optionally date-bounded — scopes
+        cross-tenant BYOK provider/model lookups to users who actually have
+        usage instead of scanning every registered account."""
+        conds = []
+        if start is not None:
+            conds.append(UsageDaily.day >= start)
+        if end is not None:
+            conds.append(UsageDaily.day <= end)
+        async with self.factory() as db:
+            rows = await db.execute(select(UsageDaily.user_id).where(*conds).distinct())
+            return [r[0] for r in rows.all() if r[0]]
 
     async def totals(self) -> dict[str, int]:
         async with self.factory() as db:
@@ -925,8 +1133,9 @@ class FeedbackStore:
 
 
 class AuditStore:
-    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+    def __init__(self, factory: async_sessionmaker[AsyncSession], is_postgres: bool = True):
         self.factory = factory
+        self.is_postgres = is_postgres
 
     async def log(
         self,
@@ -990,21 +1199,84 @@ class AuditStore:
         calendar day for the last `days` days — dense/zero-filled like
         MessageStore.activity_by_day, for the admin overview chart."""
         since = datetime.now(timezone.utc) - timedelta(days=days - 1)
-        bucket = func.date_trunc("day", AuditEvent.created_at)
         async with self.factory() as db:
-            rows = (
-                await db.execute(
-                    select(bucket.label("day"), func.count())
-                    .where(AuditEvent.kind == "policy", AuditEvent.created_at >= since)
-                    .group_by(bucket)
-                )
-            ).all()
-        counts = {r[0].date().isoformat(): r[1] for r in rows if r[0] is not None}
+            if self.is_postgres:
+                bucket = func.date_trunc("day", AuditEvent.created_at)
+                rows = (
+                    await db.execute(
+                        select(bucket.label("day"), func.count())
+                        .where(AuditEvent.kind == "policy", AuditEvent.created_at >= since)
+                        .group_by(bucket)
+                    )
+                ).all()
+                counts = {r[0].date().isoformat(): r[1] for r in rows if r[0] is not None}
+            else:
+                # SQLite fallback (tests/dev): strftime already yields the ISO label.
+                bucket = func.strftime("%Y-%m-%d", AuditEvent.created_at)
+                rows = (
+                    await db.execute(
+                        select(bucket.label("day"), func.count())
+                        .where(AuditEvent.kind == "policy", AuditEvent.created_at >= since)
+                        .group_by(bucket)
+                    )
+                ).all()
+                counts = {r[0]: r[1] for r in rows if r[0] is not None}
         today = datetime.now(timezone.utc).date()
         return [
             {"label": (d := (today - timedelta(days=i)).isoformat()), "count": counts.get(d, 0)}
             for i in range(days - 1, -1, -1)
         ]
+
+    async def policy_hits_by_user(self, days: int = 14, limit: int = 15) -> list[dict[str, Any]]:
+        """Top users by guardrail-match count over the last `days` days, highest
+        first — for the Safety tab's "hits by user" breakdown."""
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(AuditEvent.user_id, func.count())
+                    .where(AuditEvent.kind == "policy", AuditEvent.created_at >= since)
+                    .group_by(AuditEvent.user_id)
+                    .order_by(func.count().desc())
+                    .limit(limit)
+                )
+            ).all()
+        return [{"user_id": uid or "", "count": count} for uid, count in rows]
+
+    async def policy_hits_by_rule(self, days: int = 14, limit: int = 15) -> list[dict[str, Any]]:
+        """Top guardrail rules by match count over the last `days` days, highest
+        first. Each policy hit's payload carries `rules: [name, …]` (a turn can
+        match more than one rule), so this unnests that array before counting."""
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        async with self.factory() as db:
+            if self.is_postgres:
+                rows = (
+                    await db.execute(
+                        sa_text(
+                            "SELECT rule, count(*) AS n FROM audit_events, "
+                            "json_array_elements_text(COALESCE(payload->'rules', '[]')) AS rule "
+                            "WHERE kind = 'policy' AND created_at >= :since "
+                            "GROUP BY rule ORDER BY n DESC LIMIT :limit"
+                        ),
+                        {"since": since, "limit": limit},
+                    )
+                ).all()
+                return [{"rule": rule, "count": count} for rule, count in rows]
+            # SQLite fallback (tests/dev): tally in Python — guardrail hits are a
+            # low-volume security signal, not a per-turn event, so this is cheap.
+            events = (
+                await db.execute(
+                    select(AuditEvent.payload).where(
+                        AuditEvent.kind == "policy", AuditEvent.created_at >= since
+                    )
+                )
+            ).all()
+            tally: dict[str, int] = {}
+            for (payload,) in events:
+                for rule in (payload or {}).get("rules", []):
+                    tally[rule] = tally.get(rule, 0) + 1
+            ranked = sorted(tally.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+            return [{"rule": rule, "count": count} for rule, count in ranked]
 
 
 class LLMConfigStore:
@@ -1038,12 +1310,29 @@ class LLMConfigStore:
     # providers. The same methods serve both — the Control Plane passes None, the
     # per-user "My Models" API passes the caller's id — so there is a single
     # implementation to maintain.
+    @staticmethod
+    def _providers_query():
+        return select(LLMProvider).order_by(LLMProvider.name)
+
     async def list_providers(self, owner_id: str | None = None) -> list[LLMProvider]:
         async with self.factory() as db:
+            rows = await db.scalars(self._providers_query().where(LLMProvider.owner_id == owner_id))
+            return list(rows)
+
+    async def list_all_providers(self, owner_ids: Sequence[str] = ()) -> list[LLMProvider]:
+        """Admin-global providers plus the given owners' BYOK providers — the
+        deliberate, sole cross-tenant exception in this store (every other
+        method here stays scoped to one `owner_id`), used only for read-only
+        analytics (e.g. the admin Tokens Usage report's provider attribution),
+        never for CRUD. Always bounded to owners known to have activity
+        (callers pass `UsageStore.distinct_user_ids()`), never a blanket scan
+        of every registered account — pass no `owner_ids` to get admin-global
+        providers only."""
+        async with self.factory() as db:
             rows = await db.scalars(
-                select(LLMProvider)
-                .where(LLMProvider.owner_id == owner_id)
-                .order_by(LLMProvider.name)
+                self._providers_query().where(
+                    or_(LLMProvider.owner_id.is_(None), LLMProvider.owner_id.in_(owner_ids))
+                )
             )
             return list(rows)
 
@@ -1111,13 +1400,24 @@ class LLMConfigStore:
             return True
 
     # -- models -------------------------------------------------------------
+    @staticmethod
+    def _models_query():
+        return select(LLMModel).join(LLMProvider, LLMModel.provider_id == LLMProvider.id).order_by(LLMModel.label)
+
     async def list_models(self, owner_id: str | None = None) -> list[LLMModel]:
         async with self.factory() as db:
+            rows = await db.scalars(self._models_query().where(LLMProvider.owner_id == owner_id))
+            return list(rows)
+
+    async def list_all_models(self, owner_ids: Sequence[str] = ()) -> list[LLMModel]:
+        """Models under admin-global providers plus the given owners' BYOK
+        providers — paired with list_all_providers(); same bounded,
+        analytics-only, names-only contract."""
+        async with self.factory() as db:
             rows = await db.scalars(
-                select(LLMModel)
-                .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
-                .where(LLMProvider.owner_id == owner_id)
-                .order_by(LLMModel.label)
+                self._models_query().where(
+                    or_(LLMProvider.owner_id.is_(None), LLMProvider.owner_id.in_(owner_ids))
+                )
             )
             return list(rows)
 

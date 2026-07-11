@@ -246,6 +246,59 @@ export interface SessionsByUserPoint {
   sessions: number;
 }
 
+export interface TokenUsagePoint {
+  bucket: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  turns: number;
+}
+export interface TokenUsageSeries {
+  key: string;
+  label: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  turns: number;
+  points: TokenUsagePoint[];
+}
+export interface TokenUsageReport {
+  granularity: string;
+  group_by: string;
+  buckets: string[];
+  series: TokenUsageSeries[];
+  totals: { prompt_tokens: number; completion_tokens: number; turns: number };
+}
+export interface TokenUsageParams {
+  granularity?: "daily" | "weekly" | "monthly" | "yearly";
+  group_by?: "user" | "model" | "provider";
+  user_id?: string;
+  model?: string;
+  provider?: string;
+  start?: string;
+  end?: string;
+}
+
+// Filter options for the Tokens Usage report — every model id and its
+// resolvable provider name across every scope (admin-global + all users'
+// BYOK), so private-provider usage is still selectable/labelled correctly.
+export interface UsageDimensionModel {
+  model_id: string;
+  provider: string;
+}
+export interface UsageDimensions {
+  providers: string[];
+  models: UsageDimensionModel[];
+}
+
+export interface GuardrailHitsByUserPoint {
+  user_id: string;
+  label: string;
+  count: number;
+}
+export interface GuardrailHitsByRulePoint {
+  rule: string;
+  count: number;
+}
+
 export interface AdminOverview {
   stats: Record<string, number | boolean>;
   activity_by_day: ActivityPoint[];
@@ -255,6 +308,8 @@ export interface AdminOverview {
   sessions_by_user_7d: SessionsByUserPoint[];
   sessions_by_day_7d: ActivityPoint[];
   guardrail_hits_by_day: ActivityPoint[];
+  guardrail_hits_by_user: GuardrailHitsByUserPoint[];
+  guardrail_hits_by_rule: GuardrailHitsByRulePoint[];
 }
 
 export type ModelCost = "low" | "medium" | "high" | "very_high";
@@ -605,6 +660,12 @@ export const api = {
 
   // -- admin: overview / LLM providers / guardrails / audit --
   adminOverview: () => request<AdminOverview>("/api/admin/overview"),
+  adminTokenUsage: (params: TokenUsageParams = {}) => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);
+    return request<TokenUsageReport>(`/api/admin/usage/tokens?${q.toString()}`);
+  },
+  adminUsageDimensions: () => request<UsageDimensions>("/api/admin/usage/dimensions"),
 
   adminGuardrails: () =>
     request<{ monitor_only: boolean; tool_args_exempt: string[]; rules: GuardrailRule[] }>(

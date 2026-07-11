@@ -8,7 +8,7 @@ from tests.conftest_app import build_api_app, client
 
 
 async def test_usage_store_records_and_aggregates(db_factory, stores):
-    usage = UsageStore(db_factory)
+    usage = UsageStore(db_factory, is_postgres=False)
     await usage.record("u1", "s1", "gpt", {"prompt_tokens": 100, "completion_tokens": 20})
     await usage.record("u1", "s1", "gpt", {"prompt_tokens": 50, "completion_tokens": 10})
     await usage.record("u2", "s2", "gpt", {"prompt_tokens": 5, "completion_tokens": 1})
@@ -20,13 +20,13 @@ async def test_usage_store_records_and_aggregates(db_factory, stores):
 
 
 async def test_zero_usage_not_recorded(db_factory):
-    usage = UsageStore(db_factory)
+    usage = UsageStore(db_factory, is_postgres=False)
     await usage.record("u1", "s1", "gpt", {"prompt_tokens": 0, "completion_tokens": 0})
     assert (await usage.totals())["turns"] == 0
 
 
 async def test_runtime_records_usage(tmp_path, stores, db_factory):
-    usage = UsageStore(db_factory)
+    usage = UsageStore(db_factory, is_postgres=False)
     provider = FakeProvider([text_turn("hi")])  # text_turn reports 10 prompt / 5 completion
     settings = Settings(_env_file=None, workspaces_root=tmp_path / "ws", sandbox=SandboxSettings(enabled=False))
     memory = MemoryService(stores["memories"], stores["messages"], stores["sessions"], provider)

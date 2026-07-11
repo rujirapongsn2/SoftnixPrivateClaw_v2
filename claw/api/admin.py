@@ -1,6 +1,8 @@
 """System administration API — manage all users. Requires the is_admin flag."""
 
 import re
+from collections.abc import Sequence
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -274,6 +276,17 @@ async def _provider_summaries(state: AppState) -> list[dict]:
     return out
 
 
+async def _guardrail_hits_by_user(state: AppState) -> list[dict]:
+    """Top users by guardrail-match count (last 14 days), with a display label
+    attached — mirrors the token-usage report's id→label pattern."""
+    hits = await state.audit.policy_hits_by_user(14)
+    labels = await state.users.labels([h["user_id"] for h in hits if h["user_id"]])
+    return [
+        {"user_id": h["user_id"], "label": labels.get(h["user_id"], h["user_id"] or "(unknown)"), "count": h["count"]}
+        for h in hits
+    ]
+
+
 @router.get("/overview")
 async def overview(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
     return {
@@ -285,7 +298,246 @@ async def overview(admin: User = Depends(require_admin), state: AppState = Depen
         "sessions_by_user_7d": await state.sessions.by_user_since(7),
         "sessions_by_day_7d": await state.sessions.by_day_since(7),
         "guardrail_hits_by_day": await state.audit.policy_hits_by_day(14),
+        "guardrail_hits_by_user": await _guardrail_hits_by_user(state),
+        "guardrail_hits_by_rule": await state.audit.policy_hits_by_rule(14),
     }
+
+
+# ---------------------------------------------------------------- token usage report
+
+# Default look-back window per granularity, and a hard cap on the span so an
+# explicit start/end can't force an unbounded scan.
+_GRAN_WINDOW_DAYS = {"daily": 30, "weekly": 84, "monthly": 366, "yearly": 1827}
+_TOKENS_TOP_N = 15
+
+
+# _model_provider_map / list_all_providers / list_all_models are the ONE
+# deliberate cross-tenant exception in this admin.py file — every other
+# helper here stays owner_id=None (admin-global) scoped. It exists only to
+# label/filter Tokens Usage report rows, is always bounded to owners with
+# actual usage.record() activity (never a blanket every-account scan), and
+# reads provider/model *names* only, never API keys.
+async def _model_provider_map(
+    state: AppState, owner_ids: Sequence[str]
+) -> dict[str | None, dict[str, str]]:
+    """(owner_id | None) → {model_id: provider name}, admin-global plus the
+    given owners' BYOK config. Kept partitioned by owner rather than folded
+    into one flat model_id→provider dict: two different users can each
+    configure a different BYOK provider for the exact same model_id, and
+    folding them would misattribute one user's usage to another user's
+    private provider name."""
+    if state.llm_config is None:
+        return {}
+    providers = await state.llm_config.list_all_providers(owner_ids)
+    models = await state.llm_config.list_all_models(owner_ids)
+    provider_name = {p.id: p.name for p in providers}
+    provider_owner = {p.id: p.owner_id for p in providers}
+    mapping: dict[str | None, dict[str, str]] = {}
+    for m in models:
+        name = provider_name.get(m.provider_id)
+        if not name:
+            continue
+        owner = provider_owner.get(m.provider_id)
+        mapping.setdefault(owner, {})[m.model_id] = name
+    return mapping
+
+
+def _provider_of(user_id: str | None, model: str, mapping: dict[str | None, dict[str, str]]) -> str:
+    """Resolve model→provider name for a specific user, mirroring
+    LLMConfigStore.resolve()'s precedence: a user's own BYOK provider wins
+    over the admin-global one for that user's own usage."""
+    name = mapping.get(user_id, {}).get(model) or mapping.get(None, {}).get(model)
+    if name:
+        return name
+    prefix = (model or "").split("/", 1)[0]
+    return prefix or "(unknown)"
+
+
+def _fold_by_key(rows: list[dict], key_fn) -> list[dict]:
+    """Sum per-(bucket, key_fn(row)) — used to re-aggregate rows onto a
+    dimension resolved in Python (provider) or narrowed by one (a provider
+    filter applied before re-folding onto user/model)."""
+    folded: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        k = (r["bucket"], key_fn(r))
+        acc = folded.setdefault(
+            k, {"bucket": r["bucket"], "key": k[1], "prompt_tokens": 0, "completion_tokens": 0, "turns": 0}
+        )
+        acc["prompt_tokens"] += r["prompt_tokens"]
+        acc["completion_tokens"] += r["completion_tokens"]
+        acc["turns"] += r["turns"]
+    return list(folded.values())
+
+
+@router.get("/usage/dimensions")
+async def usage_dimensions(
+    admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    """Filter options for the Tokens Usage report: every model id and a
+    representative provider name across every scope (admin-global + every
+    active user's BYOK) — names only, never keys or ownership — so
+    BYOK-served usage can still be selected/filtered. This just lists
+    *available* values (not per-user attribution), so a model_id shared
+    across scopes is flattened here with global preferred, BYOK filling any
+    gap — real per-user attribution happens in usage_tokens()."""
+    owner_ids = await state.usage.distinct_user_ids()
+    mapping = await _model_provider_map(state, owner_ids)
+    # "models" needs one representative provider per model_id (global
+    # preferred, BYOK filling any gap) since it's a flat list of options —
+    # but "providers" must NOT go through that same dedup: two different
+    # owners' distinctly-named providers both remain valid, independently
+    # selectable filter values even when they happen to share a model_id.
+    flat: dict[str, str] = {}
+    all_provider_names: set[str] = set()
+    for owner in sorted(mapping, key=lambda o: (o is not None, o or "")):
+        for model_id, name in mapping[owner].items():
+            flat.setdefault(model_id, name)
+            all_provider_names.add(name)
+    models = [{"model_id": m, "provider": p} for m, p in sorted(flat.items())]
+    return {"providers": sorted(all_provider_names), "models": models}
+
+
+@router.get("/usage/tokens")
+async def usage_tokens(
+    granularity: str = "daily",
+    group_by: str = "user",
+    user_id: str = "",
+    model: str = "",
+    provider: str = "",
+    start: str = "",
+    end: str = "",
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    """Token usage over time, grouped by user, model, or provider, with filters.
+    Reads the usage_daily rollup so any range/granularity stays cheap."""
+    if granularity not in _GRAN_WINDOW_DAYS:
+        granularity = "daily"
+    if group_by not in ("user", "model", "provider"):
+        group_by = "user"
+
+    # Resolve the date range (span-capped).
+    cap = _GRAN_WINDOW_DAYS[granularity]
+    today = datetime.now(timezone.utc).date()
+
+    def _parse(s: str) -> date | None:
+        try:
+            return date.fromisoformat(s) if s else None
+        except ValueError:
+            return None
+
+    end_d = _parse(end) or today
+    start_d = _parse(start) or (end_d - timedelta(days=cap - 1))
+    if start_d > end_d:
+        start_d = end_d
+    if (end_d - start_d).days >= cap:
+        start_d = end_d - timedelta(days=cap - 1)
+
+    models: list[str] | None = [model] if model else None
+
+    if group_by == "provider" or provider:
+        # A provider name doesn't map to a fixed set of model_ids: the same
+        # model_id can belong to a different provider for different BYOK
+        # users. So both grouping by provider AND filtering by provider must
+        # go through per-(user_id, model) rows, resolve each row's provider
+        # individually, and only THEN fold/filter — never via a pre-query
+        # model-id list, which can't distinguish "model X under provider A"
+        # from "model X under provider B" and would leak/misattribute across
+        # users. Bounded to owners with usage in this exact range, not every
+        # registered account.
+        owner_ids = await state.usage.distinct_user_ids(start_d, end_d)
+        mapping = await _model_provider_map(state, owner_ids)
+        raw = await state.usage.token_series_by_user_model(
+            granularity=granularity, start=start_d, end=end_d, user_id=user_id or None, models=models
+        )
+        resolved = [
+            {**r, "provider": _provider_of(r["user_id"] or None, r["model"], mapping)} for r in raw
+        ]
+        if provider:
+            resolved = [r for r in resolved if r["provider"] == provider]
+        key_fn = (
+            (lambda r: r["provider"])
+            if group_by == "provider"
+            else (lambda r: r["user_id"]) if group_by == "user" else (lambda r: r["model"])
+        )
+        rows = _fold_by_key(resolved, key_fn)
+    else:
+        group_col = "user_id" if group_by == "user" else "model"
+        rows = await state.usage.token_series(
+            granularity=granularity,
+            start=start_d,
+            end=end_d,
+            group_col=group_col,
+            user_id=user_id or None,
+            models=models,
+        )
+
+    # Labels: users need id→name; models/providers are self-labelling.
+    labels: dict[str, str] = {}
+    if group_by == "user":
+        labels = await state.users.labels(sorted({r["key"] for r in rows}))
+
+    return _shape_token_series(rows, granularity, group_by, labels)
+
+
+def _shape_token_series(
+    rows: list[dict], granularity: str, group_by: str, labels: dict[str, str]
+) -> dict:
+    """Pivot flat (bucket, key, tokens) rows into a top-N series + totals for the
+    chart, rolling the long tail into a single 'others' entry."""
+    buckets = sorted({r["bucket"] for r in rows})
+    per_key: dict[str, dict] = {}
+    for r in rows:
+        e = per_key.setdefault(
+            r["key"],
+            {"key": r["key"], "prompt_tokens": 0, "completion_tokens": 0, "turns": 0, "points": {}},
+        )
+        e["prompt_tokens"] += r["prompt_tokens"]
+        e["completion_tokens"] += r["completion_tokens"]
+        e["turns"] += r["turns"]
+        e["points"][r["bucket"]] = {
+            "prompt_tokens": r["prompt_tokens"],
+            "completion_tokens": r["completion_tokens"],
+            "turns": r["turns"],
+        }
+
+    ranked = sorted(per_key.values(), key=lambda e: e["prompt_tokens"] + e["completion_tokens"], reverse=True)
+    top = ranked[:_TOKENS_TOP_N]
+    tail = ranked[_TOKENS_TOP_N:]
+
+    def _entry(e: dict, label: str) -> dict:
+        return {
+            "key": e["key"],
+            "label": label,
+            "prompt_tokens": e["prompt_tokens"],
+            "completion_tokens": e["completion_tokens"],
+            "turns": e["turns"],
+            "points": [
+                {"bucket": b, **e["points"].get(b, {"prompt_tokens": 0, "completion_tokens": 0, "turns": 0})}
+                for b in buckets
+            ],
+        }
+
+    series = [_entry(e, labels.get(e["key"], e["key"])) for e in top]
+    if tail:
+        merged = {"key": "__others__", "prompt_tokens": 0, "completion_tokens": 0, "turns": 0, "points": {}}
+        for e in tail:
+            merged["prompt_tokens"] += e["prompt_tokens"]
+            merged["completion_tokens"] += e["completion_tokens"]
+            merged["turns"] += e["turns"]
+            for b, pt in e["points"].items():
+                m = merged["points"].setdefault(b, {"prompt_tokens": 0, "completion_tokens": 0, "turns": 0})
+                m["prompt_tokens"] += pt["prompt_tokens"]
+                m["completion_tokens"] += pt["completion_tokens"]
+                m["turns"] += pt["turns"]
+        series.append(_entry(merged, f"Others ({len(tail)})"))
+
+    totals = {
+        "prompt_tokens": sum(e["prompt_tokens"] for e in per_key.values()),
+        "completion_tokens": sum(e["completion_tokens"] for e in per_key.values()),
+        "turns": sum(e["turns"] for e in per_key.values()),
+    }
+    return {"granularity": granularity, "group_by": group_by, "buckets": buckets, "series": series, "totals": totals}
 
 
 # ---------------------------------------------------------------- LLM providers/models

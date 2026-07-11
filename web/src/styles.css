@@ -714,6 +714,32 @@ html {
 }
 
 /* ---- Admin console (in-panel) ---- */
+/* Tokens Usage tab controls: segmented selectors + filter dropdowns, wrapping. */
+.claw-token-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.claw-token-filter {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-subtle, #e4e2dd);
+  background: var(--color-surface, #fff);
+  color: var(--color-text-primary, #1a1a1a);
+  cursor: pointer;
+  max-width: 240px;
+}
+/* Wraps a filter <select> with an optional search box above it (shown once
+   the option list is long enough to be worth searching). */
+.claw-token-filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 240px;
+}
 /* Stack a card's title above its description — Text renders inline, so an
    adjacent title + paragraph would otherwise collapse onto one line. */
 .claw-card-heading {
@@ -859,6 +885,25 @@ html {
 }
 .claw-legend-dot--completion {
   background: var(--color-info, #2f9e6f);
+}
+/* Legend under a StackedBarChart — one dot+label per series (color set inline
+   per-series via stackColor(), since the palette cycles beyond fixed classes). */
+.claw-stacked-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b7280);
+}
+.claw-stacked-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* Table-like column layout for the model list (LLM Providers / My Models).
    One grid spans the header AND every model row (cells are flat siblings,

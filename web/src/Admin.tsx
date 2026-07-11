@@ -5,6 +5,7 @@ import { Divider } from "@astryxdesign/core/Divider";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon, type IconName, type IconType } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
+import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { Switch } from "@astryxdesign/core/Switch";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Text } from "@astryxdesign/core/Text";
@@ -17,6 +18,7 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
+  Coins,
   Cpu,
   Diamond,
   ExternalLink,
@@ -62,6 +64,10 @@ import {
   OAuthAppsInfo,
   SessionsByUserPoint,
   TelegramAdminConfig,
+  type TokenUsageParams,
+  type TokenUsageReport,
+  type TokenUsageSeries,
+  type UsageDimensions,
   api,
   ADMIN_LLM_API,
   type LlmApi,
@@ -114,6 +120,24 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
   );
 }
 
+// Case-insensitive substring filter shared by every searchable dropdown
+// (User/Model filters in the Tokens tab, etc.) instead of each re-deriving
+// its own `.toLowerCase().includes(...)` inline.
+function filterByQuery<T>(items: T[], query: string, text: (item: T) => string): T[] {
+  if (!query) return items;
+  const q = query.toLowerCase();
+  return items.filter((item) => text(item).toLowerCase().includes(q));
+}
+
+// Keeps the currently-selected option visible in a search-narrowed list even
+// when it no longer matches the query — otherwise the <select> renders as
+// blank/unselected while the (still-applied) filter silently stays active.
+function keepSelected<T>(filtered: T[], all: T[], selected: string, valueOf: (item: T) => string): T[] {
+  if (!selected || filtered.some((item) => valueOf(item) === selected)) return filtered;
+  const found = all.find((item) => valueOf(item) === selected);
+  return found ? [...filtered, found] : filtered;
+}
+
 function useAsyncError() {
   const [error, setError] = useState("");
   const guard = useCallback(async (fn: () => Promise<void>) => {
@@ -161,6 +185,82 @@ function BarChart({ data, accent = "var(--color-primary, #4b6bfb)" }: { data: Ac
   );
 }
 
+// Categorical palette for stacked series (cycles for >8 groups); "Others" always
+// gets a fixed muted color so the long-tail rollup reads consistently.
+const STACK_PALETTE = [
+  "var(--color-primary, #4b6bfb)",
+  "var(--color-info, #2f9e6f)",
+  "var(--color-warning, #d97706)",
+  "var(--color-error, #c0392b)",
+  "var(--color-accent-purple, #7c3aed)",
+  "#0891b2",
+  "#db2777",
+  "#65a30d",
+];
+const STACK_OTHERS_COLOR = "var(--color-text-secondary, #9ca3af)";
+
+function stackColor(index: number, key: string): string {
+  return key === "__others__" ? STACK_OTHERS_COLOR : STACK_PALETTE[index % STACK_PALETTE.length];
+}
+
+// Per-bucket stacked bars, one segment per series — so switching the Tokens
+// tab's group-by (User/Model/Provider) visibly changes each bar's composition,
+// not just a single invariant total-per-day line.
+function StackedBarChart({ buckets, series }: { buckets: string[]; series: TokenUsageSeries[] }) {
+  const totalsByBucket = buckets.map((_, i) =>
+    series.reduce((sum, s) => sum + s.points[i].prompt_tokens + s.points[i].completion_tokens, 0),
+  );
+  const max = Math.max(1, ...totalsByBucket);
+  const W = 100 / Math.max(1, buckets.length);
+  return (
+    <div className="claw-chart">
+      <svg viewBox="0 0 100 40" preserveAspectRatio="none" className="claw-chart-svg">
+        {buckets.map((b, bi) => {
+          let y = 40;
+          return (
+            <g key={b}>
+              {series.map((s, si) => {
+                const v = s.points[bi].prompt_tokens + s.points[bi].completion_tokens;
+                if (v <= 0) return null;
+                const h = (v / max) * 36;
+                y -= h;
+                return (
+                  <rect
+                    key={s.key}
+                    x={bi * W + W * 0.15}
+                    y={y}
+                    width={W * 0.7}
+                    height={Math.max(h, 0.5)}
+                    fill={stackColor(si, s.key)}
+                  >
+                    <title>{`${b} — ${s.label}: ${v.toLocaleString()}`}</title>
+                  </rect>
+                );
+              })}
+            </g>
+          );
+        })}
+      </svg>
+      <div className="claw-chart-axis">
+        {buckets.map((b, i) => (
+          // Buckets are already the right width per granularity ("YYYY" for
+          // yearly, "YYYY-MM" for monthly, "YYYY-MM-DD" for weekly/daily) — only
+          // the full-date form has a redundant year prefix worth trimming.
+          <span key={i}>{b.length > 7 ? b.slice(5) : b}</span>
+        ))}
+      </div>
+      <div className="claw-stacked-legend">
+        {series.map((s, i) => (
+          <span key={s.key}>
+            <i className="claw-legend-dot" style={{ background: stackColor(i, s.key) }} />
+            {s.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- Overview
 
 const STAT_CARDS: { key: string; label: string; icon: IconType }[] = [
@@ -181,6 +281,7 @@ const OVERVIEW_TABS: { key: string; label: string; icon: IconType }[] = [
   { key: "summary", label: "Summary", icon: LayoutDashboard },
   { key: "activity", label: "Activity", icon: MessageSquare },
   { key: "models", label: "Models", icon: Cpu },
+  { key: "tokens", label: "Tokens", icon: Coins },
   { key: "safety", label: "Safety", icon: ShieldCheck },
 ];
 
@@ -206,6 +307,7 @@ function OverviewPanel() {
       {tab === "summary" && <OverviewSummary data={data} />}
       {tab === "activity" && <OverviewActivity data={data} />}
       {tab === "models" && <OverviewModels data={data} />}
+      {tab === "tokens" && <OverviewTokens />}
       {tab === "safety" && <OverviewSafety data={data} />}
     </div>
   );
@@ -334,6 +436,31 @@ function OverviewModels({ data }: { data: AdminOverview }) {
   );
 }
 
+// Generic ranked bar-list — reused for "hits by user" and "hits by rule" (any
+// single-number-per-key breakdown), so the two Safety cards below share one
+// renderer instead of two near-identical copies.
+function RankedBarList({ data, unit }: { data: { key: string; label: string; count: number }[]; unit: string }) {
+  const max = Math.max(1, ...data.map((d) => d.count));
+  return (
+    <div className="claw-model-usage-list">
+      {data.map((d) => (
+        <div key={d.key} className="claw-model-usage-row">
+          <div className="claw-model-usage-head">
+            <span className="claw-model-usage-name claw-model-usage-name--user">{d.label}</span>
+            <span className="claw-model-usage-total">
+              {d.count.toLocaleString()} {unit}
+              {d.count === 1 ? "" : "s"}
+            </span>
+          </div>
+          <div className="claw-model-usage-bar">
+            <div className="claw-model-usage-bar-prompt" style={{ width: `${(d.count / max) * 100}%` }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function OverviewSafety({ data }: { data: AdminOverview }) {
   // The enforcing/monitor-only badge already lives in the Summary tab (a
   // glance-level fact); Safety owns the detailed hit history, not a second
@@ -355,6 +482,214 @@ function OverviewSafety({ data }: { data: AdminOverview }) {
           <BarChart data={data.guardrail_hits_by_day} accent="var(--color-error, #c0392b)" />
         )}
       </Card>
+      <Card padding={3}>
+        <Text weight="semibold">Guardrail hits by user — last 14 days</Text>
+        {data.guardrail_hits_by_user.length === 0 ? (
+          <Text size="sm" color="secondary">
+            No guardrail matches in the last 14 days.
+          </Text>
+        ) : (
+          <RankedBarList
+            data={data.guardrail_hits_by_user.map((u) => ({ key: u.user_id, label: u.label, count: u.count }))}
+            unit="hit"
+          />
+        )}
+      </Card>
+      <Card padding={3}>
+        <Text weight="semibold">Guardrail hits by rule — last 14 days</Text>
+        {data.guardrail_hits_by_rule.length === 0 ? (
+          <Text size="sm" color="secondary">
+            No guardrail matches in the last 14 days.
+          </Text>
+        ) : (
+          <RankedBarList
+            data={data.guardrail_hits_by_rule.map((r) => ({ key: r.rule, label: r.rule, count: r.count }))}
+            unit="hit"
+          />
+        )}
+      </Card>
+    </>
+  );
+}
+
+const GRANULARITIES: { key: TokenUsageParams["granularity"]; label: string }[] = [
+  { key: "daily", label: "Daily" },
+  { key: "weekly", label: "Weekly" },
+  { key: "monthly", label: "Monthly" },
+  { key: "yearly", label: "Yearly" },
+];
+const TOKEN_GROUPS: { key: TokenUsageParams["group_by"]; label: string }[] = [
+  { key: "user", label: "User" },
+  { key: "model", label: "Model" },
+  { key: "provider", label: "Provider" },
+];
+
+// Tokens Usage tab — its own lazy fetch (only runs while this tab is mounted),
+// re-querying when a control changes. Reads the usage_daily rollup via
+// /admin/usage/tokens, so any range/granularity is cheap regardless of history.
+function OverviewTokens() {
+  const [granularity, setGranularity] = useState<NonNullable<TokenUsageParams["granularity"]>>("daily");
+  const [groupBy, setGroupBy] = useState<NonNullable<TokenUsageParams["group_by"]>>("user");
+  const [userId, setUserId] = useState("");
+  const [model, setModel] = useState("");
+  const [provider, setProvider] = useState("");
+  const [userQuery, setUserQuery] = useState("");
+  const [modelQuery, setModelQuery] = useState("");
+  const [report, setReport] = useState<TokenUsageReport | null>(null);
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [dimensions, setDimensions] = useState<UsageDimensions | null>(null);
+  const { error, guard } = useAsyncError();
+
+  // Filter option sources (fetched once). Dimensions cover every scope —
+  // admin-global and every user's BYOK — so private-provider usage is still
+  // selectable/labelled correctly, not just admin-managed models.
+  useEffect(() => {
+    void guard(async () => {
+      const [u, dims] = await Promise.all([api.adminListUsers(), api.adminUsageDimensions()]);
+      setUsers(u);
+      setDimensions(dims);
+    });
+  }, [guard]);
+
+  // Report — refetched on any control change. `cancelled` guards against an
+  // earlier (slower) request resolving after a later one and clobbering the
+  // UI with results for a filter combination that's no longer selected.
+  useEffect(() => {
+    let cancelled = false;
+    void guard(async () => {
+      const r = await api.adminTokenUsage({ granularity, group_by: groupBy, user_id: userId, model, provider });
+      if (!cancelled) setReport(r);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [guard, granularity, groupBy, userId, model, provider]);
+
+  const providerNames = dimensions?.providers ?? [];
+  const allModels = dimensions?.models ?? [];
+  const modelsForProvider = provider ? allModels.filter((m) => m.provider === provider) : allModels;
+
+  // Picking a provider that no longer matches the current model filter clears
+  // it, instead of letting the model filter silently win server-side while
+  // the provider dropdown still shows as selected.
+  const handleProviderChange = (v: string) => {
+    setProvider(v);
+    if (v && model && !allModels.some((m) => m.model_id === model && m.provider === v)) {
+      setModel("");
+    }
+  };
+
+  const filteredUsers = keepSelected(
+    filterByQuery(users, userQuery, (u) => u.display_name || u.email),
+    users,
+    userId,
+    (u) => u.id,
+  );
+  const filteredModels = keepSelected(
+    filterByQuery(modelsForProvider, modelQuery, (m) => m.model_id),
+    modelsForProvider,
+    model,
+    (m) => m.model_id,
+  );
+
+  return (
+    <>
+      <Card padding={2} variant="muted">
+        <div className="claw-token-controls">
+          <SegmentedControl value={granularity} onChange={(v) => setGranularity(v as typeof granularity)} label="Granularity" size="sm">
+            {GRANULARITIES.map((g) => (
+              <SegmentedControlItem key={g.key} value={g.key!} label={g.label} />
+            ))}
+          </SegmentedControl>
+          <SegmentedControl value={groupBy} onChange={(v) => setGroupBy(v as typeof groupBy)} label="Group by" size="sm">
+            {TOKEN_GROUPS.map((g) => (
+              <SegmentedControlItem key={g.key} value={g.key!} label={g.label} />
+            ))}
+          </SegmentedControl>
+          <div className="claw-token-filter-group">
+            {users.length > 10 && (
+              <TextInput
+                label="Search users"
+                isLabelHidden
+                startIcon={<Icon icon={Search} size="sm" color="secondary" />}
+                placeholder="Search users…"
+                value={userQuery}
+                onChange={setUserQuery}
+                hasClear
+              />
+            )}
+            <select className="claw-token-filter" value={userId} onChange={(e) => setUserId(e.target.value)} aria-label="Filter by user">
+              <option value="">All users</option>
+              {filteredUsers.map((u) => (
+                <option key={u.id} value={u.id}>{u.display_name || u.email}</option>
+              ))}
+            </select>
+          </div>
+          <select className="claw-token-filter" value={provider} onChange={(e) => handleProviderChange(e.target.value)} aria-label="Filter by provider">
+            <option value="">All providers</option>
+            {providerNames.map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+          <div className="claw-token-filter-group">
+            {modelsForProvider.length > 10 && (
+              <TextInput
+                label="Search models"
+                isLabelHidden
+                startIcon={<Icon icon={Search} size="sm" color="secondary" />}
+                placeholder="Search models…"
+                value={modelQuery}
+                onChange={setModelQuery}
+                hasClear
+              />
+            )}
+            <select className="claw-token-filter" value={model} onChange={(e) => setModel(e.target.value)} aria-label="Filter by model">
+              <option value="">All models</option>
+              {filteredModels.map((m) => (
+                <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </Card>
+
+      {error && <ErrorText>{error}</ErrorText>}
+      {!report ? (
+        <Text color="secondary">Loading…</Text>
+      ) : report.series.length === 0 ? (
+        <Text size="sm" color="secondary">No token usage recorded for this range.</Text>
+      ) : (
+        <>
+          <div className="claw-row">
+            <Badge variant="neutral" icon={<Icon icon={Cpu} size="xsm" />} label={`${report.totals.turns.toLocaleString()} turns`} />
+            <Badge variant="neutral" label={`prompt ${report.totals.prompt_tokens.toLocaleString()}`} />
+            <Badge variant="neutral" label={`completion ${report.totals.completion_tokens.toLocaleString()}`} />
+            <Badge
+              variant="success"
+              label={`${(report.totals.prompt_tokens + report.totals.completion_tokens).toLocaleString()} total tokens`}
+            />
+          </div>
+          <Card padding={3}>
+            <Text weight="semibold">
+              Tokens over time — by {groupBy}
+            </Text>
+            <StackedBarChart buckets={report.buckets} series={report.series} />
+          </Card>
+          <Card padding={3}>
+            <Text weight="semibold">
+              By {groupBy} · {granularity}
+            </Text>
+            <ModelUsageChart
+              data={report.series.map((s) => ({
+                model: s.label,
+                prompt_tokens: s.prompt_tokens,
+                completion_tokens: s.completion_tokens,
+                turns: s.turns,
+              }))}
+            />
+          </Card>
+        </>
+      )}
     </>
   );
 }
