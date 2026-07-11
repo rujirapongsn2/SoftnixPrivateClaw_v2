@@ -1,9 +1,11 @@
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
+import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Divider } from "@astryxdesign/core/Divider";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon, type IconName, type IconType } from "@astryxdesign/core/Icon";
+import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { MoreMenu } from "@astryxdesign/core/MoreMenu";
 import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
@@ -24,6 +26,7 @@ import {
   Library,
   Link as LinkIcon,
   Lock,
+  Maximize2,
   Pencil,
   Play,
   Plug,
@@ -1324,6 +1327,13 @@ function KnowledgePanel() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Patch one base in place from a mutation response we already have, instead
+  // of re-fetching the whole list (and its per-base doc-count aggregate) for a
+  // single-field change.
+  const patchBase = useCallback((id: string, patch: Partial<KnowledgeBase>) => {
+    setBases((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+  }, []);
+
   useEffect(() => load(), [load]);
 
   const create = async () => {
@@ -1401,7 +1411,7 @@ function KnowledgePanel() {
       ) : (
         <div className="claw-kb-grid">
           {bases.map((kb) => (
-            <KnowledgeCard key={kb.id} kb={kb} onChanged={load} toast={toast} />
+            <KnowledgeCard key={kb.id} kb={kb} onChanged={load} onPatch={patchBase} toast={toast} />
           ))}
         </div>
       )}
@@ -1419,24 +1429,31 @@ function codePointLength(s: string): number {
 function KnowledgeCard({
   kb,
   onChanged,
+  onPatch,
   toast,
 }: {
   kb: KnowledgeBase;
   onChanged: () => void;
+  onPatch: (id: string, patch: Partial<KnowledgeBase>) => void;
   toast: ReturnType<typeof useToast>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [docs, setDocs] = useState<KnowledgeDoc[] | null>(null);
   const [uploading, setUploading] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Separate from `busy` (which gates delete actions) so flipping visibility
+  // never disables unrelated Delete buttons for the duration of the request.
+  const [visibilityBusy, setVisibilityBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   // Extracted-text preview (one open at a time), paged via next_offset.
   const [previewFor, setPreviewFor] = useState<string | null>(null);
+  const [previewTitle, setPreviewTitle] = useState("");
   const [previewText, setPreviewText] = useState("");
   const [previewTotal, setPreviewTotal] = useState(0);
   const [previewNext, setPreviewNext] = useState(0);
   const [previewMore, setPreviewMore] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewExpanded, setPreviewExpanded] = useState(false);
   // Bumped on every preview request; a response only writes state if its token
   // is still current, so a slow reply can't clobber a doc the user switched to.
   const previewReq = useRef(0);
@@ -1445,15 +1462,23 @@ function KnowledgeCard({
   const openPreview = async (docId: string) => {
     if (previewFor === docId) {
       setPreviewFor(null);
+      setPreviewExpanded(false);
       return;
     }
     const token = ++previewReq.current;
     setPreviewFor(docId);
+    setPreviewTitle("");
     setPreviewText("");
+    // Clear the previous doc's pagination stats too — otherwise its stale
+    // total/has-more would render against this doc's empty text while loading.
+    setPreviewTotal(0);
+    setPreviewNext(0);
+    setPreviewMore(false);
     setPreviewLoading(true);
     try {
       const r = await api.previewKnowledgeDoc(kb.id, docId, 0);
       if (token !== previewReq.current) return;
+      setPreviewTitle(r.title ?? "");
       setPreviewText(r.text ?? "");
       setPreviewTotal(r.total_chars ?? 0);
       setPreviewNext(r.next_offset ?? 0);
@@ -1545,6 +1570,20 @@ function KnowledgeCard({
     }
   };
 
+  const toggleVisibility = async (makePublic: boolean) => {
+    setVisibilityBusy(true);
+    try {
+      const r = await api.updateKnowledge(kb.id, { visibility: makePublic ? "public" : "private" });
+      // Use the mutation response directly — no need to re-fetch the whole list
+      // (with its per-base doc-count aggregate) for a single boolean flip.
+      onPatch(kb.id, { visibility: r.visibility });
+    } catch (e) {
+      toast({ body: `Failed to update visibility: ${String(e)}`, type: "error" });
+    } finally {
+      setVisibilityBusy(false);
+    }
+  };
+
   return (
     <Card padding={3}>
       <div className="claw-kb-card">
@@ -1552,11 +1591,32 @@ function KnowledgeCard({
           <Icon icon={Library} size="md" color="secondary" />
           <div className="claw-kb-card-title">
             <Text weight="semibold">{kb.name}</Text>
-            <Badge
-              variant={kb.visibility === "public" ? "success" : "neutral"}
-              icon={<Icon icon={kb.visibility === "public" ? Globe : Lock} size="xsm" />}
-              label={kb.visibility === "public" ? "Public" : "Private"}
-            />
+            {kb.is_owner ? (
+              <button
+                type="button"
+                className="claw-kb-visibility-badge"
+                disabled={busy}
+                aria-label={kb.visibility === "public" ? "Make private" : "Make public"}
+                title={
+                  kb.visibility === "public"
+                    ? "Public — click to make private"
+                    : "Private — click to make public"
+                }
+                onClick={() => toggleVisibility(kb.visibility !== "public")}
+              >
+                <Badge
+                  variant={kb.visibility === "public" ? "success" : "neutral"}
+                  icon={<Icon icon={kb.visibility === "public" ? Globe : Lock} size="xsm" />}
+                  label={kb.visibility === "public" ? "Public" : "Private"}
+                />
+              </button>
+            ) : (
+              <Badge
+                variant={kb.visibility === "public" ? "success" : "neutral"}
+                icon={<Icon icon={kb.visibility === "public" ? Globe : Lock} size="xsm" />}
+                label={kb.visibility === "public" ? "Public" : "Private"}
+              />
+            )}
           </div>
         </div>
         {kb.description && (
@@ -1665,6 +1725,14 @@ function KnowledgeCard({
                           {previewTotal > 0 &&
                             `· ${previewLoadedChars.toLocaleString()} / ${previewTotal.toLocaleString()} chars`}
                         </Text>
+                        <button
+                          type="button"
+                          className="claw-kb-doc-expand"
+                          aria-label="Open in expanded view"
+                          onClick={() => setPreviewExpanded(true)}
+                        >
+                          <Icon icon={Maximize2} size="xsm" color="secondary" />
+                        </button>
                       </div>
                       <pre className="claw-kb-doc-preview-body">{previewText}</pre>
                       {previewMore && (
@@ -1677,6 +1745,52 @@ function KnowledgeCard({
                         />
                       )}
                     </div>
+                  )}
+                  {previewFor === d.id && (
+                    // Kept mounted whenever this doc's preview is active, with only
+                    // `isOpen` toggling — Dialog's own close effect (dialog.close() +
+                    // returning focus to the trigger) runs on an isOpen transition
+                    // while mounted, but never fires if we unmount it instead.
+                    <Dialog
+                      isOpen={previewExpanded}
+                      onOpenChange={setPreviewExpanded}
+                      variant="fullscreen"
+                      purpose="info"
+                    >
+                      <Layout
+                        header={
+                          <DialogHeader
+                            title={previewTitle || d.title}
+                            subtitle={
+                              previewTotal > 0
+                                ? `${previewLoadedChars.toLocaleString()} / ${previewTotal.toLocaleString()} chars extracted`
+                                : undefined
+                            }
+                            onOpenChange={setPreviewExpanded}
+                          />
+                        }
+                        content={
+                          <LayoutContent>
+                            <pre className="claw-kb-doc-preview-body claw-kb-doc-preview-body--expanded">
+                              {previewText}
+                            </pre>
+                          </LayoutContent>
+                        }
+                        footer={
+                          previewMore ? (
+                            <LayoutFooter hasDivider>
+                              <Button
+                                label={previewLoading ? "Loading…" : "Load more"}
+                                size="sm"
+                                variant="secondary"
+                                isDisabled={previewLoading}
+                                onClick={() => loadMorePreview(d.id)}
+                              />
+                            </LayoutFooter>
+                          ) : undefined
+                        }
+                      />
+                    </Dialog>
                   )}
                 </div>
               ))

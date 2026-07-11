@@ -6,6 +6,7 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon, type IconName, type IconType } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { Switch } from "@astryxdesign/core/Switch";
+import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
@@ -90,8 +91,10 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
   // LLM Providers is a data table (model id, cost, status, several action
   // buttons per row) — the shared 720px prose-reading column that suits every
   // other admin page (forms, prose, short lists) squeezes it into ellipsis
-  // soup. Widen just this one section rather than the whole panel.
-  const isWide = section === "providers";
+  // soup. Overview is the same story: a stat grid + charts that read better
+  // with more horizontal room. Widen just these sections rather than the
+  // whole panel.
+  const isWide = section === "providers" || section === "overview";
   return (
     <div className="claw-settings-panel">
       <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
@@ -171,8 +174,19 @@ const STAT_CARDS: { key: string; label: string; icon: IconType }[] = [
   { key: "memory_users", label: "Users with memory", icon: Brain },
 ];
 
+// Overview groups its metrics into tabs (Summary / Activity / Models / Safety)
+// so the page stays scannable as more data is added. Everything comes from one
+// adminOverview() fetch, so switching tabs is an instant client-side view swap.
+const OVERVIEW_TABS: { key: string; label: string; icon: IconType }[] = [
+  { key: "summary", label: "Summary", icon: LayoutDashboard },
+  { key: "activity", label: "Activity", icon: MessageSquare },
+  { key: "models", label: "Models", icon: Cpu },
+  { key: "safety", label: "Safety", icon: ShieldCheck },
+];
+
 function OverviewPanel() {
   const [data, setData] = useState<AdminOverview | null>(null);
+  const [tab, setTab] = useState("summary");
   const { error, guard } = useAsyncError();
 
   useEffect(() => {
@@ -181,10 +195,26 @@ function OverviewPanel() {
 
   if (error) return <ErrorText>{error}</ErrorText>;
   if (!data) return <Text color="secondary">Loading…</Text>;
-  const s = data.stats;
 
   return (
     <div className="claw-panel">
+      <TabList value={tab} onChange={setTab} hasDivider aria-label="Overview sections">
+        {OVERVIEW_TABS.map((t) => (
+          <Tab key={t.key} value={t.key} label={t.label} icon={<Icon icon={t.icon} size="sm" />} />
+        ))}
+      </TabList>
+      {tab === "summary" && <OverviewSummary data={data} />}
+      {tab === "activity" && <OverviewActivity data={data} />}
+      {tab === "models" && <OverviewModels data={data} />}
+      {tab === "safety" && <OverviewSafety data={data} />}
+    </div>
+  );
+}
+
+function OverviewSummary({ data }: { data: AdminOverview }) {
+  const s = data.stats;
+  return (
+    <>
       <div className="claw-stat-grid">
         {STAT_CARDS.map((c) => (
           <Card key={c.key} padding={2} variant="muted">
@@ -218,7 +248,13 @@ function OverviewPanel() {
           label={s.telegram_enabled ? "telegram on" : "telegram off"}
         />
       </div>
+    </>
+  );
+}
 
+function OverviewActivity({ data }: { data: AdminOverview }) {
+  return (
+    <>
       <Card padding={3}>
         <Text weight="semibold">CLAW activity — last 14 days</Text>
         <BarChart data={data.activity_by_day} />
@@ -226,20 +262,6 @@ function OverviewPanel() {
       <Card padding={3}>
         <Text weight="semibold">Activity by hour of day</Text>
         <BarChart data={data.activity_by_hour} accent="var(--color-info, #2f9e6f)" />
-      </Card>
-
-      <Card padding={3}>
-        <Text weight="semibold">Guardrail hits — last 14 days</Text>
-        <Text size="sm" color="secondary" as="p">
-          Turns where a guardrail rule matched the input, output, or a tool call.
-        </Text>
-        {data.guardrail_hits_by_day.every((d) => d.count === 0) ? (
-          <Text size="sm" color="secondary">
-            No guardrail matches in the last 14 days.
-          </Text>
-        ) : (
-          <BarChart data={data.guardrail_hits_by_day} accent="var(--color-error, #c0392b)" />
-        )}
       </Card>
 
       <Card padding={3}>
@@ -262,7 +284,13 @@ function OverviewPanel() {
           <SessionsByUserList data={data.sessions_by_user_7d} />
         )}
       </Card>
+    </>
+  );
+}
 
+function OverviewModels({ data }: { data: AdminOverview }) {
+  return (
+    <>
       <Card padding={3}>
         <Text weight="semibold">LLM providers in use</Text>
         {data.providers.length === 0 ? (
@@ -302,7 +330,32 @@ function OverviewPanel() {
           <ModelUsageChart data={data.usage_by_model} />
         )}
       </Card>
-    </div>
+    </>
+  );
+}
+
+function OverviewSafety({ data }: { data: AdminOverview }) {
+  // The enforcing/monitor-only badge already lives in the Summary tab (a
+  // glance-level fact); Safety owns the detailed hit history, not a second
+  // copy of the same badge.
+  return (
+    <>
+      <Card padding={3}>
+        <div className="claw-card-heading">
+          <Text weight="semibold">Guardrail hits — last 14 days</Text>
+          <Text size="sm" color="secondary" as="p">
+            Turns where a guardrail rule matched the input, output, or a tool call.
+          </Text>
+        </div>
+        {data.guardrail_hits_by_day.every((d) => d.count === 0) ? (
+          <Text size="sm" color="secondary">
+            No guardrail matches in the last 14 days.
+          </Text>
+        ) : (
+          <BarChart data={data.guardrail_hits_by_day} accent="var(--color-error, #c0392b)" />
+        )}
+      </Card>
+    </>
   );
 }
 

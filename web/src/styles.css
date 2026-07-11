@@ -714,9 +714,18 @@ html {
 }
 
 /* ---- Admin console (in-panel) ---- */
+/* Stack a card's title above its description — Text renders inline, so an
+   adjacent title + paragraph would otherwise collapse onto one line. */
+.claw-card-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .claw-stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  /* 170px min so a large token count (e.g. "15,082,950") never overflows its
+     card — the wide Control Plane layout otherwise packs 6+ narrow columns. */
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
   gap: 12px;
 }
 .claw-stat {
@@ -2040,6 +2049,24 @@ html {
   align-items: center;
   gap: 10px;
 }
+/* Public/Private badge doubles as a toggle button on an existing knowledge base
+   card (owner only) — click to flip visibility, no separate switch needed. */
+.claw-kb-visibility-badge {
+  display: inline-flex;
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  border-radius: 999px;
+}
+.claw-kb-visibility-badge:hover {
+  opacity: 0.8;
+}
+.claw-kb-visibility-badge:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
 .claw-kb-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -2126,6 +2153,10 @@ html {
   background: var(--color-surface-secondary, rgba(0, 0, 0, 0.03));
 }
 .claw-kb-doc-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 6px;
 }
 .claw-kb-doc-preview-body {
@@ -2138,6 +2169,24 @@ html {
   line-height: 1.5;
   font-family: var(--font-mono, ui-monospace, monospace);
   color: var(--color-text-primary, #1a1a1a);
+}
+/* Larger, full-height variant used inside the "expanded view" dialog. */
+.claw-kb-doc-preview-body--expanded {
+  max-height: none;
+  height: 100%;
+  font-size: 13px;
+}
+.claw-kb-doc-expand {
+  flex: 0 0 auto;
+  display: inline-flex;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 6px;
+}
+.claw-kb-doc-expand:hover {
+  background: var(--color-surface-2, #f2f3f5);
 }
 /* Brand logo inside a Badge (e.g. signup-method: Google/Microsoft). */
 .claw-signup-logo {
