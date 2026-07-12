@@ -126,6 +126,46 @@ Run tests: `uv run pytest` (backend, SQLite in-memory) and `cd web && npm run bu
 
 ---
 
+## Updating
+
+After you `git commit` + `git push` new code, deploy it to a host-native install
+(Option A) with:
+
+```bash
+./scripts/claw update      # or: claw update, if the /usr/local/bin symlink exists
+```
+
+This runs, in order:
+
+1. `git pull --ff-only` — pulls the new commits (fails rather than merging if local
+   history has diverged).
+2. `uv sync --frozen --no-dev` — updates Python dependencies to match the committed
+   lockfile.
+3. `install.sh --web-only` — rebuilds the web frontend only; does **not** touch
+   Docker, Postgres, or the system service.
+4. `alembic upgrade head` — applies any new database migrations.
+5. Restarts the app via whichever supervisor manages this install (auto-detected:
+   `systemd`, `launchd`, or a plain background process — see `scripts/claw status`).
+
+Don't re-run the full `./install.sh` just to pick up new code — it never runs
+`git pull` on its own, so it won't actually update anything unless you pull first,
+and re-running its Docker/Postgres provisioning can fail (or, on a host where
+Postgres wasn't created exactly the way `install.sh` expects — e.g. started
+separately via `docker compose up -d postgres` — behave unexpectedly). `install.sh`
+is for the *initial* install; `--web-only` (what `claw update` already calls) is the
+safe way to rebuild just the frontend.
+
+Verify after updating:
+
+```bash
+./scripts/claw status      # supervisor + /api/ready health check
+./scripts/claw logs        # tail logs if something looks off
+```
+
+If `git pull --ff-only` fails (local commits diverged from `origin/main`), resolve
+that manually (`git status`, `git log`) before re-running `claw update` — it never
+force-overwrites local changes.
+
 ## Getting started
 
 1. Open the app (`http://localhost:8700` for A/B, `http://localhost:5173` for C) and
