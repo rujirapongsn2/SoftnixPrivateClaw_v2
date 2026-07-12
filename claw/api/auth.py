@@ -1,6 +1,7 @@
 """Authentication: password + OIDC (Google/Microsoft), issuing JWT bearer tokens."""
 
 import asyncio
+import secrets
 from datetime import datetime, timezone
 
 import httpx
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 from claw.api.deps import AppState, current_user, get_state
 from claw.auth import oidc
 from claw.auth.activation import make_activation_token, verify_activation_token
+from claw.auth.password_reset import make_password_reset_token, verify_password_reset_token
 from claw.auth.passwords import hash_password, verify_password
 from claw.auth.tokens import create_access_token
 from claw.db.models import User
@@ -44,6 +46,20 @@ class ActivationInfoBody(BaseModel):
     token: str
 
 
+class ForgotPasswordBody(BaseModel):
+    email: str = Field(pattern=_EMAIL_RE, max_length=255)
+
+
+class ResetPasswordBody(BaseModel):
+    token: str
+    password: str = Field(min_length=8, max_length=128)
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 def _user_json(user: User) -> dict:
     return {
         "id": user.id,
@@ -51,6 +67,10 @@ def _user_json(user: User) -> dict:
         "display_name": user.display_name,
         "is_admin": user.is_admin,
         "role": user.role,
+        # False for an OAuth-only or not-yet-activated account — the
+        # frontend uses this to decide whether to show a "change password"
+        # form at all (there's no password to change otherwise).
+        "has_password": bool(user.password_hash),
     }
 
 
@@ -174,6 +194,88 @@ async def _send_activation_confirmed_email(state: AppState, user_id: str) -> Non
         logger.warning("activation-confirmed email failed for user {}", user_id, exc_info=True)
 
 
+async def _send_password_reset_email(state: AppState, user_id: str) -> str:
+    """Best-effort: send (subject to a cooldown) a "forgot password" reset
+    link. Returns "sent" | "cooldown" | "disabled" | "not_applicable" |
+    "failed" — mirrors _send_activation_email's contract exactly, including
+    doing ALL of its work (the cooldown claim included) after being
+    scheduled: forgot_password() fires this via _spawn_background() and
+    ignores the return value, so an existing account and a nonexistent one
+    produce identical response latency (no enumeration timing oracle)."""
+    try:
+        smtp = await state.smtp_config.get()
+        if not smtp or not smtp.get("enabled"):
+            return "disabled"
+        user = await state.users.get(user_id)
+        if user is None or not user.password_hash or not user.is_active:
+            return "not_applicable"
+        now = datetime.now(timezone.utc)
+        nonce = secrets.token_urlsafe(8)
+        # Atomically claim the cooldown AND record the nonce that will be
+        # embedded in the emailed token, so redeem_password_reset() can
+        # later enforce single-use via compare-and-swap (see that method's
+        # docstring — this closes the TOCTOU gap the activation flow's
+        # equivalent has to accept as low-impact debt, since here we're
+        # building fresh and it costs nothing extra).
+        claimed = await state.users.claim_password_reset_send(
+            user.id, now, state.settings.password_reset_resend_cooldown_seconds, nonce
+        )
+        if not claimed:
+            return "cooldown"
+        token = make_password_reset_token(
+            user.id, nonce, state.settings.secret_key, state.settings.password_reset_token_ttl_seconds
+        )
+        # URL fragment, not a query string — never sent to the server, so
+        # this password-setting token never lands in an access log.
+        link = f"{state.settings.web_base_url.rstrip('/')}/#reset-password={token}"
+        await send_email(
+            smtp,
+            user.email,
+            subject="Reset your PrivateClaw password",
+            text_body=(
+                f"Hi {user.display_name or user.email},\n\n"
+                "We received a request to reset your PrivateClaw password. Click "
+                f"the link below to choose a new one:\n\n{link}\n\n"
+                "This link expires in an hour. If you didn't request this, you can "
+                "safely ignore it — your password won't change."
+            ),
+        )
+        await state.audit.log(
+            "auth", {"event": "password_reset_email_sent", "email": user.email}, user_id=user.id
+        )
+        return "sent"
+    except Exception:
+        logger.warning("password reset email send failed for user {}", user_id, exc_info=True)
+        return "failed"
+
+
+async def _send_password_reset_confirmed_email(state: AppState, user_id: str) -> None:
+    """Best-effort "your password was just changed" notice — lets the real
+    owner notice (and report it) if someone else intercepted and redeemed
+    the reset link first. Detached for the same reason as the activation
+    confirmation email: never let SMTP latency delay the completing user's
+    login response."""
+    try:
+        smtp = await state.smtp_config.get()
+        if not smtp or not smtp.get("enabled"):
+            return
+        user = await state.users.get(user_id)
+        if user is None:
+            return
+        await send_email(
+            smtp,
+            user.email,
+            subject="Your PrivateClaw password was changed",
+            text_body=(
+                f"Hi {user.display_name or user.email},\n\n"
+                "Your PrivateClaw password was just changed. If this wasn't "
+                "you, contact your administrator immediately."
+            ),
+        )
+    except Exception:
+        logger.warning("password-reset-confirmed email failed for user {}", user_id, exc_info=True)
+
+
 @router.post("/register")
 async def register(body: RegisterBody, state: AppState = Depends(get_state)) -> dict:
     existing = await state.users.get_by_email(body.email)
@@ -229,6 +331,93 @@ async def login(body: LoginBody, state: AppState = Depends(get_state)) -> dict:
         raise HTTPException(status_code=403, detail="account suspended")
     await _log_auth(state, "login", user)
     return _issue(state, user)
+
+
+@router.post("/forgot-password")
+async def forgot_password(body: ForgotPasswordBody, state: AppState = Depends(get_state)) -> dict:
+    """Always returns the same generic response whether or not the email
+    matches an account with a password — revealing that distinction would be
+    an account-enumeration oracle (the same class of bug closed on the
+    imported-user activation flow). If it does match a real, active,
+    password-set account, a reset email is sent as a detached side effect
+    (see _send_password_reset_email) so this response's latency never
+    differs either."""
+    user = await state.users.get_by_email(body.email)
+    if user is not None and user.password_hash and user.is_active:
+        _spawn_background(_send_password_reset_email(state, user.id))
+    return {"ok": True}
+
+
+@router.post("/reset-password")
+async def reset_password(body: ResetPasswordBody, state: AppState = Depends(get_state)) -> dict:
+    """Redeems a signed password-reset link (claw/auth/password_reset.py).
+    The token's nonce is the proof of identity, matched against
+    users.password_reset_nonce via an atomic compare-and-swap
+    (UserStore.redeem_password_reset) — so the same token can't be redeemed
+    twice, and requesting a new reset invalidates any prior unredeemed one.
+    That same UPDATE also gates on the account being active, so a suspended
+    account's password is never written — not merely rejected after the
+    fact, which would leave the DB mutated even though the caller sees a
+    403 (this is why _log_auth/the confirmation email below are reachable
+    ONLY when the write itself actually happened)."""
+    parsed = verify_password_reset_token(body.token, state.settings.secret_key)
+    if parsed is None:
+        raise HTTPException(status_code=400, detail="invalid or expired reset link")
+    uid, nonce = parsed
+    redeemed = await state.users.redeem_password_reset(uid, nonce, hash_password(body.password))
+    if not redeemed:
+        # The atomic UPDATE can fail for two different reasons (bad/reused
+        # nonce vs. a genuinely-active token on a suspended account) and the
+        # caller deserves an accurate reason — this follow-up read is safe
+        # precisely because reaching this line already required a
+        # cryptographically valid, correctly-signed token for this uid (not
+        # forgeable without the HMAC secret), so it isn't a new
+        # account-enumeration surface for a third party without the token.
+        user = await state.users.get(uid)
+        if user is not None and not user.is_active:
+            raise HTTPException(status_code=403, detail="account suspended")
+        raise HTTPException(status_code=400, detail="invalid or expired reset link")
+    updated = await state.users.get(uid)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="account no longer exists")
+    await _log_auth(state, "password_reset", updated)
+    _spawn_background(_send_password_reset_confirmed_email(state, updated.id))
+    if not updated.is_active:
+        # Extremely rare race: suspended in the instant between the
+        # password write above (which only succeeds while active) and this
+        # re-fetch. The write was legitimate and is already logged/notified
+        # — just don't hand back a session for a now-suspended account.
+        raise HTTPException(status_code=403, detail="account suspended")
+    return _issue(state, updated)
+
+
+@router.post("/change-password")
+async def change_password(
+    body: ChangePasswordBody, user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> dict:
+    """Self-service password change for an already-authenticated user.
+    Unlike reset-password (which proves identity via an emailed token, for
+    someone who's locked out), this proves identity by requiring the
+    CURRENT password — appropriate since the caller is already holding a
+    valid session."""
+    if not user.password_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="This account doesn't have a password to change (signed in via Google/Microsoft, "
+            "or hasn't finished activation yet).",
+        )
+    if not verify_password(body.current_password, user.password_hash):
+        # 403, not 401: the caller IS authenticated (a valid bearer token got
+        # them past `current_user` above) — this codebase's frontend treats
+        # ANY 401 response as "the session token itself is invalid" and
+        # force-logs-out (clearToken() in web/src/api.ts's request()). Using
+        # 401 here would silently log a user out just for mistyping their
+        # current password.
+        raise HTTPException(status_code=403, detail="current password is incorrect")
+    await state.users.update_profile(user.id, password_hash=hash_password(body.new_password))
+    await _log_auth(state, "password_changed", user)
+    _spawn_background(_send_password_reset_confirmed_email(state, user.id))
+    return {"ok": True}
 
 
 @router.post("/activation")

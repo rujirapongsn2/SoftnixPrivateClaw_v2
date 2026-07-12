@@ -199,6 +199,10 @@ export interface AuthUser {
   display_name: string;
   is_admin: boolean;
   role: string;
+  // False for an OAuth-only or not-yet-activated (imported-pending) account
+  // — the frontend uses this to decide whether to show a "change password"
+  // form on the Profile settings page.
+  has_password: boolean;
 }
 
 export interface AdminUser extends AuthUser {
@@ -207,8 +211,6 @@ export interface AdminUser extends AuthUser {
   // Control Plane's Users list. Accounts predating this field default to
   // "password" (the oldest signup path), which may not be exact for them.
   signup_method: "password" | "google" | "microsoft" | "admin_created" | "dev_token" | "imported";
-  // False only for an imported row that hasn't completed activation yet.
-  has_password: boolean;
   sessions: number;
   group_id: string | null;
   group_name: string | null;
@@ -596,6 +598,29 @@ export const api = {
     request<{ email: string; display_name: string }>("/api/auth/activation", {
       method: "POST",
       body: JSON.stringify({ token }),
+    }),
+  // Always resolves the same way whether or not the email matches an
+  // account with a password — the backend never reveals that distinction
+  // (account enumeration). If it does match, a reset email is sent.
+  forgotPassword: (email: string) =>
+    request<{ ok: boolean }>("/api/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  // Redeems a signed password-reset link (#reset-password=<token>) to set a
+  // new password and log in immediately, same response shape as login/register.
+  resetPassword: (token: string, password: string) =>
+    request<{ access_token: string; user: AuthUser }>("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ token, password }),
+    }),
+  // Self-service change for an already-logged-in user — requires the
+  // current password (proves identity via the credential itself, since the
+  // caller already holds a valid session).
+  changePassword: (current_password: string, new_password: string) =>
+    request<{ ok: boolean }>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ current_password, new_password }),
     }),
   me: () => request<AuthUser>("/api/auth/me"),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),

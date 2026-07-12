@@ -128,6 +128,13 @@ class Settings(BaseSettings):
     # login/register attempt (or the admin "resend" action) can't be used to
     # spam a real user's inbox.
     activation_email_resend_cooldown_seconds: int = 5 * 60
+    # "Forgot password" reset link lifetime — shorter than the activation
+    # link since it's a more time-sensitive, more frequently-used action;
+    # requesting a new one is a one-click "Forgot password?" away.
+    password_reset_token_ttl_seconds: int = 1 * 3600
+    # Minimum gap between reset emails to the same account, so repeated
+    # "forgot password" submissions can't be used to spam a real user's inbox.
+    password_reset_resend_cooldown_seconds: int = 5 * 60
 
     # Public base URL of THIS API (for OIDC redirect_uri) and the web app to return to.
     public_base_url: str = "http://localhost:8700"

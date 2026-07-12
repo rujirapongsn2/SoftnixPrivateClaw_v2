@@ -803,6 +803,50 @@ class UserStore:
             await db.commit()
             return result.rowcount > 0
 
+    async def claim_password_reset_send(
+        self, user_id: str, now: datetime, cooldown_seconds: int, nonce: str
+    ) -> bool:
+        """Atomically claim the right to send a "forgot password" reset email
+        right now (same cooldown-at-the-DB-layer reasoning as
+        claim_activation_send) AND record the nonce that will be embedded in
+        the emailed token, so redeem_password_reset() can later enforce
+        single-use via compare-and-swap. Returns True if this call won the
+        claim (stamps password_reset_sent_at/password_reset_nonce and should
+        proceed to send), False if another call already claimed it within
+        the cooldown window."""
+        cutoff = now - timedelta(seconds=cooldown_seconds)
+        async with self.factory() as db:
+            result = await db.execute(
+                update(User)
+                .where(
+                    User.id == user_id,
+                    or_(User.password_reset_sent_at.is_(None), User.password_reset_sent_at < cutoff),
+                )
+                .values(password_reset_sent_at=now, password_reset_nonce=nonce)
+            )
+            await db.commit()
+            return result.rowcount > 0
+
+    async def redeem_password_reset(self, user_id: str, nonce: str, password_hash: str) -> bool:
+        """Atomically consume a password-reset token: sets the new password
+        hash and clears the nonce in one compare-and-swap UPDATE, matched on
+        the nonce embedded in the emailed token. Returns True if the nonce
+        matched (a real, not-yet-redeemed, not-superseded-by-a-newer-request
+        token) AND the account is currently active, and the password was
+        set; False otherwise — the same single query is the validity check,
+        the single-use enforcement, AND the suspension gate, so there's no
+        window where a suspended account's password gets written before a
+        separate "is it active" check catches up (the write simply never
+        happens for a suspended row, full stop)."""
+        async with self.factory() as db:
+            result = await db.execute(
+                update(User)
+                .where(User.id == user_id, User.password_reset_nonce == nonce, User.is_active.is_(True))
+                .values(password_hash=password_hash, password_reset_nonce=None)
+            )
+            await db.commit()
+            return result.rowcount > 0
+
     async def set_role(self, user_id: str, role: str) -> None:
         async with self.factory() as db:
             user = await db.get(User, user_id)

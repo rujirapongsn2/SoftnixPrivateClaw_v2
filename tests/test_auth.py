@@ -87,3 +87,63 @@ async def test_closed_registration_blocks_second_user(db_factory):
         assert r1.status_code == 200  # first user always allowed (bootstrap)
         r2 = await c.post("/api/auth/register", json={"email": "b@x.io", "password": "password123"})
         assert r2.status_code == 403
+
+
+async def test_me_reports_has_password(db_factory):
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        reg = await c.post("/api/auth/register", json={"email": "a@x.io", "password": "password123"})
+        token = reg.json()["access_token"]
+        assert reg.json()["user"]["has_password"] is True
+        me = await c.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert me.json()["has_password"] is True
+
+
+async def test_change_password_requires_current_password(db_factory):
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        reg = await c.post("/api/auth/register", json={"email": "a@x.io", "password": "oldpassword1"})
+        token = reg.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        wrong = await c.post(
+            "/api/auth/change-password",
+            json={"current_password": "nope", "new_password": "newpassword1"},
+            headers=headers,
+        )
+        # 403, not 401 — a 401 here would make the frontend's global
+        # "401 means the session is invalid" handling force-log-out a user
+        # who simply mistyped their current password.
+        assert wrong.status_code == 403
+
+        ok = await c.post(
+            "/api/auth/change-password",
+            json={"current_password": "oldpassword1", "new_password": "newpassword1"},
+            headers=headers,
+        )
+        assert ok.status_code == 200
+
+        # Old password no longer works; new one does.
+        old_login = await c.post("/api/auth/login", json={"email": "a@x.io", "password": "oldpassword1"})
+        assert old_login.status_code == 401
+        new_login = await c.post("/api/auth/login", json={"email": "a@x.io", "password": "newpassword1"})
+        assert new_login.status_code == 200
+
+
+async def test_change_password_rejected_for_account_without_password(db_factory):
+    """An imported-pending user (no password yet) has nothing to "change" —
+    must use the activation flow instead."""
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        user = await app.state.claw.users.create(
+            email="pending@x.io", password_hash="", signup_method="imported"
+        )
+        # Mint a bearer token directly for this user (bypassing login, which
+        # can't succeed for a passwordless account) to exercise the endpoint.
+        token = create_access_token(user.id, app.state.claw.settings.secret_key)
+        r = await c.post(
+            "/api/auth/change-password",
+            json={"current_password": "anything", "new_password": "newpassword1"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 400

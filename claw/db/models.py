@@ -62,6 +62,17 @@ class User(Base):
     activation_email_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Last time a "forgot password" reset email was sent — rate-limits resends
+    # the same way activation_email_sent_at does.
+    password_reset_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The nonce embedded in the currently-outstanding password-reset token (or
+    # null if none is outstanding). Redeeming a reset token clears this via an
+    # atomic compare-and-swap (UserStore.redeem_password_reset), so a token
+    # can be redeemed at most once and a newly-requested reset invalidates
+    # any prior unredeemed one.
+    password_reset_nonce: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         # Enforces (and indexes) case-insensitive email uniqueness — the

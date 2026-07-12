@@ -103,3 +103,23 @@ async def test_claim_activation_send_lets_only_one_concurrent_caller_win(stores)
     # And a claim well past the cooldown window succeeds again.
     later = now + timedelta(seconds=301)
     assert await users.claim_activation_send(user.id, later, 300) is True
+
+
+async def test_redeem_password_reset_lets_only_one_concurrent_caller_win(stores):
+    """Two concurrent redemptions of the same password-reset nonce must not
+    both succeed — the compare-and-swap UPDATE (matched on the nonce, cleared
+    to NULL on success) means only the first caller's WHERE clause matches."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    users = stores["users"]
+    user = await users.create(email="race-reset@x.io", signup_method="password", password_hash="old")
+    await users.claim_password_reset_send(user.id, datetime.now(timezone.utc), 300, "shared-nonce")
+
+    results = await asyncio.gather(
+        *[users.redeem_password_reset(user.id, "shared-nonce", f"new-hash-{i}") for i in range(8)]
+    )
+    assert sum(results) == 1
+
+    # A stale/never-issued nonce never redeems.
+    assert await users.redeem_password_reset(user.id, "shared-nonce", "another-hash") is False

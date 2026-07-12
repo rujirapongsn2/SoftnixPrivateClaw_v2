@@ -35,11 +35,14 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  User as UserIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ProvidersPanel } from "./Admin";
 import { ErrorText } from "./ErrorText";
+import { PasswordField } from "./PasswordField";
 import {
+  AuthUser,
   ConnectorInfo,
   ConnectorPreset,
   KnowledgeBase,
@@ -53,6 +56,7 @@ import {
 import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 export type SettingsSection =
+  | "profile"
   | "skills"
   | "knowledge"
   | "memory"
@@ -64,6 +68,7 @@ export type SettingsSection =
   | "browser-extension";
 
 export const SETTINGS_SECTIONS: { key: SettingsSection; label: string; icon: IconType | IconName }[] = [
+  { key: "profile", label: "Profile", icon: UserIcon },
   { key: "skills", label: "Skills", icon: Sparkles },
   { key: "knowledge", label: "Knowledge", icon: Library },
   { key: "memory", label: "Memory", icon: Brain },
@@ -88,6 +93,7 @@ export function SettingsPanel({ section }: { section: SettingsSection }) {
         <Text type="display-3">{meta?.label}</Text>
       </div>
       <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
+        {section === "profile" && <ProfilePanel />}
         {section === "skills" && <SkillsPanel />}
         {section === "knowledge" && <KnowledgePanel />}
         {section === "memory" && <MemoryPanel />}
@@ -113,6 +119,87 @@ function useAsyncError() {
     }
   }, []);
   return { error, guard };
+}
+
+// ---------------------------------------------------------------- Profile
+
+function ProfilePanel() {
+  const [me, setMe] = useState<AuthUser | null>(null);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState("");
+  const { error, guard } = useAsyncError();
+  const toast = useToast();
+
+  const reload = useCallback(() => api.me().then(setMe), []);
+  useEffect(() => {
+    void guard(async () => await reload());
+  }, [guard, reload]);
+
+  const submit = async () => {
+    setBusy(true);
+    setFormError("");
+    try {
+      await api.changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      toast({ body: "Password updated", type: "info", autoHideDuration: 2500 });
+    } catch (e) {
+      // Inline, not an early-return replacing the whole panel — a wrong
+      // current password shouldn't wipe out the form the user is mid-typing.
+      setFormError(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (error) return <ErrorText>{error}</ErrorText>;
+  if (!me) return <Text color="secondary">Loading…</Text>;
+
+  return (
+    <div className="claw-panel">
+      <Card padding={2}>
+        <div className="claw-panel">
+          <Text weight="semibold">{me.display_name || me.email}</Text>
+          <Text size="sm" color="secondary">
+            {me.email}
+          </Text>
+        </div>
+      </Card>
+      <Card padding={2}>
+        <div className="claw-panel">
+          <Text weight="semibold">Change password</Text>
+          {!me.has_password ? (
+            <Text size="sm" color="secondary">
+              This account doesn't use a password (signed in via Google/Microsoft, or hasn't finished
+              activation yet).
+            </Text>
+          ) : (
+            <>
+              <PasswordField label="Current password" value={currentPassword} onChange={setCurrentPassword} />
+              <PasswordField
+                label="New password"
+                description="At least 8 characters."
+                value={newPassword}
+                onChange={setNewPassword}
+              />
+              {formError && <ErrorText>{formError}</ErrorText>}
+              <div className="claw-row">
+                <Button
+                  label={busy ? "…" : "Update password"}
+                  variant="primary"
+                  icon={<Icon icon="check" size="sm" />}
+                  isDisabled={busy || !currentPassword || newPassword.length < 8}
+                  clickAction={submit}
+                />
+              </div>
+            </>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------- Skills

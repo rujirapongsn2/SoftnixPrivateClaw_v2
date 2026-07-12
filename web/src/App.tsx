@@ -20,7 +20,7 @@ import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
 import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
-import { AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
+import { ApiError, AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 import { MOBILE_QUERY, PHONE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 const PROVIDER_LABELS: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
@@ -328,13 +328,15 @@ function Auth({
   onDone,
   initialError,
   activationToken,
+  resetToken,
 }: {
   onDone: (user: AuthUser) => void;
   initialError?: string;
   activationToken?: string;
+  resetToken?: string;
 }) {
-  const [mode, setMode] = useState<"login" | "register" | "complete-setup">(
-    activationToken ? "complete-setup" : "login",
+  const [mode, setMode] = useState<"login" | "register" | "complete-setup" | "forgot-password" | "reset-password">(
+    activationToken ? "complete-setup" : resetToken ? "reset-password" : "login",
   );
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
@@ -345,6 +347,9 @@ function Auth({
   // Only used to display which account an activation link belongs to — the
   // request itself is authenticated by the token, not this email.
   const [activationEmail, setActivationEmail] = useState("");
+  // Whether the "forgot password" form has been submitted — flips the view
+  // to a static confirmation instead of the email form.
+  const [forgotSent, setForgotSent] = useState(false);
 
   useEffect(() => {
     api.providers().then((r) => setProviders(r.providers)).catch(() => setProviders([]));
@@ -369,26 +374,73 @@ function Auth({
     setBusy(true);
     setError("");
     try {
+      if (mode === "forgot-password") {
+        // api.forgotPassword always resolves the same way whether or not the
+        // email matches an account with a password — the backend never
+        // reveals that distinction, so neither does this branch.
+        await api.forgotPassword(email);
+        setForgotSent(true);
+        return;
+      }
       const res =
         mode === "complete-setup"
           ? await api.completeRegistration(activationToken ?? "", password, displayName.trim())
-          : mode === "login"
-            ? await api.login(email, password)
-            : await api.register(email, password, displayName.trim());
+          : mode === "reset-password"
+            ? await api.resetPassword(resetToken ?? "", password)
+            : mode === "login"
+              ? await api.login(email, password)
+              : await api.register(email, password, displayName.trim());
       setToken(res.access_token);
       onDone(res.user);
     } catch (e) {
       setError(
         mode === "login"
-          ? "Invalid email or password."
+          ? // Shown identically for every login failure — wrong password, no
+            // such account, or a pending-imported account — so the message
+            // itself never reveals which case applies (that distinction is
+            // exactly the account-enumeration oracle closed on the backend).
+            "Invalid email or password. New here or recently added by an administrator? Check your email for an activation link."
           : mode === "complete-setup"
             ? "Couldn't activate this account. The link may have expired — ask an administrator to resend it."
-            : String(e).replace(/^Error:\s*/, ""),
+            : mode === "reset-password"
+              ? // A 403 here means the token WAS valid (the password may
+                // already have changed) but the account is suspended — a
+                // distinct, accurate message, not the generic expired-link
+                // one that would otherwise tell the user to just retry.
+                e instanceof ApiError && e.status === 403
+                ? "This account has been suspended. Contact your administrator."
+                : "This reset link is invalid or has expired. Request a new one from the login page."
+              : mode === "forgot-password"
+                ? "Something went wrong. Please try again."
+                : String(e).replace(/^Error:\s*/, ""),
       );
     } finally {
       setBusy(false);
     }
   };
+
+  if (mode === "forgot-password" && forgotSent) {
+    return (
+      <div className="claw-login">
+        <SoftnixLogo height={44} />
+        <Text type="display-3">PrivateClaw</Text>
+        <Text color="secondary">Your personal AI agent</Text>
+        <Text size="sm" color="secondary">
+          If an account with a password exists for {email || "that email"}, we've sent a link to reset it. Check
+          your inbox (and spam folder).
+        </Text>
+        <Button
+          label="Back to login"
+          variant="ghost"
+          clickAction={() => {
+            setMode("login");
+            setForgotSent(false);
+            setError("");
+          }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="claw-login">
@@ -402,31 +454,73 @@ function Auth({
             : "Checking your activation link…"}
         </Text>
       )}
+      {mode === "reset-password" && (
+        <Text size="sm" color="secondary">
+          Choose a new password for your account.
+        </Text>
+      )}
       {(mode === "register" || mode === "complete-setup") && (
         <TextInput label="Full name" placeholder="Jane Doe" value={displayName} onChange={setDisplayName} />
       )}
-      {mode !== "complete-setup" && (
+      {(mode === "login" || mode === "register" || mode === "forgot-password") && (
         <TextInput label="Email" type="email" placeholder="jane@company.com" value={email} onChange={setEmail} />
       )}
-      {mode === "register" || mode === "complete-setup" ? (
-        <PasswordField
-          label="Password"
-          description="At least 8 characters."
-          value={password}
-          onChange={setPassword}
-        />
-      ) : (
-        <TextInput label="Password" type="password" value={password} onChange={setPassword} />
-      )}
+      {mode !== "forgot-password" &&
+        (mode === "register" || mode === "complete-setup" || mode === "reset-password" ? (
+          <PasswordField
+            label="Password"
+            description="At least 8 characters."
+            value={password}
+            onChange={setPassword}
+          />
+        ) : (
+          <TextInput label="Password" type="password" value={password} onChange={setPassword} />
+        ))}
       {error && <ErrorText>{error}</ErrorText>}
       <Button
-        label={busy ? "…" : mode === "login" ? "Log in" : mode === "register" ? "Create account" : "Activate account"}
+        label={
+          busy
+            ? "…"
+            : mode === "login"
+              ? "Log in"
+              : mode === "register"
+                ? "Create account"
+                : mode === "complete-setup"
+                  ? "Activate account"
+                  : mode === "forgot-password"
+                    ? "Send reset link"
+                    : "Reset password"
+        }
         isDisabled={
-          busy || password.length < 8 || (mode === "complete-setup" ? !activationEmail : !email)
+          busy ||
+          (mode === "forgot-password"
+            ? !email
+            : password.length < 8 || (mode === "complete-setup" ? !activationEmail : mode === "reset-password" ? false : !email))
         }
         clickAction={submit}
       />
-      {mode === "complete-setup" ? (
+      {mode === "login" && (
+        <Button
+          label="Forgot password?"
+          variant="ghost"
+          size="sm"
+          clickAction={() => {
+            setMode("forgot-password");
+            setPassword("");
+            setError("");
+          }}
+        />
+      )}
+      {mode === "login" || mode === "register" ? (
+        <Button
+          label={mode === "login" ? "Need an account? Register" : "Have an account? Log in"}
+          variant="ghost"
+          clickAction={() => {
+            setMode(mode === "login" ? "register" : "login");
+            setError("");
+          }}
+        />
+      ) : (
         <Button
           label="Back to login"
           variant="ghost"
@@ -436,17 +530,8 @@ function Auth({
             setError("");
           }}
         />
-      ) : (
-        <Button
-          label={mode === "login" ? "Need an account? Register" : "Have an account? Log in"}
-          variant="ghost"
-          clickAction={() => {
-            setMode(mode === "login" ? "register" : "login");
-            setError("");
-          }}
-        />
       )}
-      {mode !== "complete-setup" && providers.length > 0 && (
+      {(mode === "login" || mode === "register") && providers.length > 0 && (
         <>
           <Text size="sm" color="secondary">or continue with</Text>
           {providers.map((p) => (
@@ -479,6 +564,7 @@ export default function App() {
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
   const [activationToken, setActivationToken] = useState("");
+  const [resetToken, setResetToken] = useState("");
   // Responsive shell. Below the tablet width the sidebar becomes an off-canvas
   // drawer (navOpen); on desktop `collapsed` drives the rail. Control Plane is
   // hidden on phones (see the trade-off note in the render).
@@ -511,9 +597,17 @@ export default function App() {
     // Uses a URL FRAGMENT (#activate=...), not a query string — fragments
     // are never sent to the server, so this login-granting token never
     // appears in any reverse-proxy/CDN/server access log.
-    const activate = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("activate");
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const activate = hashParams.get("activate");
     if (activate) {
       setActivationToken(activate);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    // "Forgot password" reset link — same fragment-not-query-string
+    // reasoning as the activation link above.
+    const resetPassword = hashParams.get("reset-password");
+    if (resetPassword) {
+      setResetToken(resetPassword);
       window.history.replaceState({}, "", window.location.pathname);
     }
     // Connector OAuth callback lands here with ?connector=<key>&connector_status=…
@@ -651,7 +745,15 @@ export default function App() {
   };
 
   if (checking) return <div className="claw-login"><Text color="secondary">Loading…</Text></div>;
-  if (!user) return <Auth onDone={setUser} initialError={authError} activationToken={activationToken || undefined} />;
+  if (!user)
+    return (
+      <Auth
+        onDone={setUser}
+        initialError={authError}
+        activationToken={activationToken || undefined}
+        resetToken={resetToken || undefined}
+      />
+    );
 
   // Selecting anything in the drawer should close it on mobile.
   const closeDrawer = () => setNavOpen(false);
