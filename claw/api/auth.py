@@ -336,15 +336,22 @@ async def login(body: LoginBody, state: AppState = Depends(get_state)) -> dict:
 @router.post("/forgot-password")
 async def forgot_password(body: ForgotPasswordBody, state: AppState = Depends(get_state)) -> dict:
     """Always returns the same generic response whether or not the email
-    matches an account with a password — revealing that distinction would be
-    an account-enumeration oracle (the same class of bug closed on the
-    imported-user activation flow). If it does match a real, active,
-    password-set account, a reset email is sent as a detached side effect
-    (see _send_password_reset_email) so this response's latency never
-    differs either."""
+    matches an account — revealing that distinction would be an account-
+    enumeration oracle (the same class of bug closed on the imported-user
+    activation flow). This is the single recovery entry point for both
+    "I forgot my password" (an account with a password already set) and
+    "I was imported but never activated" (no password yet) — those two
+    cases need different emails (a reset link vs an activation link), but
+    from the caller's perspective it's the same "I can't get into my
+    account" action, so there's no separate form to pick the right one.
+    Whichever applies is sent as a detached side effect so this response's
+    latency never differs either."""
     user = await state.users.get_by_email(body.email)
-    if user is not None and user.password_hash and user.is_active:
-        _spawn_background(_send_password_reset_email(state, user.id))
+    if user is not None and user.is_active:
+        if user.password_hash:
+            _spawn_background(_send_password_reset_email(state, user.id))
+        elif user.signup_method == "imported":
+            _spawn_background(_send_activation_email(state, user.id))
     return {"ok": True}
 
 

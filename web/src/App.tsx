@@ -399,7 +399,12 @@ function Auth({
             // such account, or a pending-imported account — so the message
             // itself never reveals which case applies (that distinction is
             // exactly the account-enumeration oracle closed on the backend).
-            "Invalid email or password. New here or recently added by an administrator? Check your email for an activation link."
+            // Deliberately does NOT mention "activation link": that reads as
+            // confusing/wrong to the much more common case of an already-
+            // activated user who simply forgot their password. The "Forgot
+            // password?" link below covers BOTH cases (see forgot_password()
+            // in claw/api/auth.py) without needing a hint in this message.
+            "Invalid email or password."
           : mode === "complete-setup"
             ? "Couldn't activate this account. The link may have expired — ask an administrator to resend it."
             : mode === "reset-password"
@@ -426,8 +431,8 @@ function Auth({
         <Text type="display-3">PrivateClaw</Text>
         <Text color="secondary">Your personal AI agent</Text>
         <Text size="sm" color="secondary">
-          If an account with a password exists for {email || "that email"}, we've sent a link to reset it. Check
-          your inbox (and spam folder).
+          If an account exists for {email || "that email"}, we've sent instructions to access it. Check your
+          inbox (and spam folder).
         </Text>
         <Button
           label="Back to login"

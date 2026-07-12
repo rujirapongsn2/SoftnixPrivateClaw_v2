@@ -37,20 +37,49 @@ async def test_forgot_password_returns_generic_ok_regardless_of_email(db_factory
         assert real.json() == fake.json() == {"ok": True}
 
 
-async def test_forgot_password_does_not_apply_to_imported_pending_account(db_factory):
-    """An imported user with no password yet has nothing to "forget" — must
-    use the activation flow instead, not password reset."""
+async def test_forgot_password_sends_activation_not_reset_for_imported_pending_account(db_factory, monkeypatch):
+    """An imported user with no password yet has nothing to "reset" — but
+    "Forgot password?" is the one recovery entry point for any "I can't get
+    into my account" case, so it should trigger the activation email
+    instead of the password-reset email for this account."""
+    import asyncio
+
+    import claw.api.auth as auth_module
+
     app = build_api_app(db_factory)
     async with client(app) as c:
+        await app.state.claw.smtp_config.set(
+            provider="",
+            host="smtp.example.com",
+            port=587,
+            username="",
+            password="",
+            from_address="noreply@example.com",
+            use_tls=True,
+            use_ssl=False,
+            enabled=True,
+        )
+
+        async def fake_send_email(cfg, to_address, subject, text_body, html_body=None):
+            return None
+
+        monkeypatch.setattr(auth_module, "send_email", fake_send_email)
+
         user = await app.state.claw.users.create(
             email="pending@x.io", password_hash="", signup_method="imported"
         )
         r = await c.post("/api/auth/forgot-password", json={"email": "pending@x.io"})
         assert r.status_code == 200  # still generic — doesn't reveal anything
-        # No reset was actually claimed/sent for this account.
+
+        await asyncio.sleep(0.05)  # let the detached background send complete
+
+        # No password-reset nonce/cooldown was claimed for this account...
         refreshed = await app.state.claw.users.get(user.id)
         assert refreshed.password_reset_nonce is None
         assert refreshed.password_reset_sent_at is None
+        # ...but the activation-email cooldown WAS claimed, proving the
+        # activation path (not the reset path) fired.
+        assert refreshed.activation_email_sent_at is not None
 
 
 async def test_reset_password_roundtrip_and_single_use(db_factory):
