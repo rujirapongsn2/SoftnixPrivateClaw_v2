@@ -182,13 +182,21 @@ class Settings(BaseSettings):
     def _default_web_base_url_to_public(self) -> "Settings":
         # An operator who sets CLAW_PUBLIC_BASE_URL (this API's own address)
         # but forgets CLAW_WEB_BASE_URL (where emailed links — e.g. the
-        # imported-user activation link — should point) would otherwise
-        # silently mail every real user a broken http://localhost:5173 link.
-        # If web_base_url was left at its dev default while public_base_url
-        # was explicitly changed, fall back to it; still overridable by
-        # setting CLAW_WEB_BASE_URL explicitly (e.g. when the frontend is
-        # served from a different host than the API).
-        if self.web_base_url == "http://localhost:5173" and self.public_base_url != "http://localhost:8700":
+        # imported-user activation link, the password-reset link — should
+        # point) would otherwise silently mail every real user a broken
+        # localhost link. web_base_url's dev default is the Vite dev
+        # server's :5173 (Option C, manual dev setup); but install.sh and
+        # docker-compose.prod.yml both default it to the API's own :8700
+        # too (Option A/B, before an operator points it at a real domain) —
+        # so both localhost defaults must fall back, not just :5173, or a
+        # host-native/Docker install that only ever set CLAW_PUBLIC_BASE_URL
+        # keeps mailing http://localhost:8700 links forever. Still
+        # overridable by setting CLAW_WEB_BASE_URL explicitly (e.g. when the
+        # frontend is served from a different host than the API).
+        if (
+            self.web_base_url in ("http://localhost:5173", "http://localhost:8700")
+            and self.public_base_url != "http://localhost:8700"
+        ):
             self.web_base_url = self.public_base_url
         return self
 

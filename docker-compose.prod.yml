@@ -30,9 +30,13 @@ services:
       CLAW_LLM__MODEL: ${CLAW_LLM__MODEL:-openrouter/anthropic/claude-sonnet-5}
       CLAW_LLM__API_KEY: ${CLAW_LLM__API_KEY:?set the LLM API key}
       # Public https URL the reverse proxy/tunnel serves — drives OIDC + connector
-      # OAuth redirect URIs. Set both to your real domain in production.
+      # OAuth redirect URIs. Set both to your real domain in production. If only
+      # CLAW_PUBLIC_BASE_URL is set, CLAW_WEB_BASE_URL falls back to it (rather
+      # than to localhost) so emailed activation/reset links aren't broken by a
+      # forgotten second variable — see Settings._default_web_base_url_to_public
+      # for the same fallback applied again inside the app as a second guard.
       CLAW_PUBLIC_BASE_URL: ${CLAW_PUBLIC_BASE_URL:-http://localhost:8700}
-      CLAW_WEB_BASE_URL: ${CLAW_WEB_BASE_URL:-http://localhost:8700}
+      CLAW_WEB_BASE_URL: ${CLAW_WEB_BASE_URL:-${CLAW_PUBLIC_BASE_URL:-http://localhost:8700}}
       # Persistent data roots. MUST be an absolute host path mounted at the SAME
       # path inside the container (see the volumes below) — the tool-ephemeral
       # sandbox bind-mounts workspace.resolve() into a sibling container via the
