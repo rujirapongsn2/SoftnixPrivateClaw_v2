@@ -650,25 +650,27 @@ class UserStore:
             rows = await db.execute(select(User.email).where(func.lower(User.email).in_(lowered)))
             return {email.lower() for (email,) in rows.all()}
 
-    async def bulk_create_imported(self, rows: list[dict[str, Any]]) -> set[str]:
+    async def bulk_create_imported(self, rows: list[dict[str, Any]]) -> dict[str, str]:
         """Create many bulk-imported users in as few round trips as possible
-        — one transaction for the whole batch in the common case. Returns
-        the subset of emails (lowercased) that failed because they lost a
-        race against a concurrent insert between the caller's own dedup
-        check and this call; everything else in `rows` was created."""
+        — one transaction for the whole batch in the common case. Returns a
+        map of lowercased email -> status for every row that did NOT get
+        created: "already_exists" for a genuine race against a concurrent
+        insert (confirmed via a fresh lookup, not just assumed), or "error"
+        for any other constraint violation (e.g. a bad group_id) — these
+        must not be silently mislabeled as a duplicate."""
         if not rows:
-            return set()
+            return {}
         async with self.factory() as db:
             for r in rows:
                 db.add(User(**r))
             try:
                 await db.commit()
-                return set()
+                return {}
             except IntegrityError:
                 await db.rollback()
-        # Something in this batch raced a concurrent insert — retry one at a
-        # time to isolate exactly which email(s) conflicted, keeping the rest.
-        failed: set[str] = set()
+        # Something in this batch failed — retry one at a time to isolate
+        # exactly which row(s) failed and why, keeping the rest.
+        failed: dict[str, str] = {}
         for r in rows:
             async with self.factory() as db:
                 db.add(User(**r))
@@ -676,7 +678,8 @@ class UserStore:
                     await db.commit()
                 except IntegrityError:
                     await db.rollback()
-                    failed.add(r["email"].lower())
+                    email = r["email"].lower()
+                    failed[email] = "already_exists" if await self.get_by_email(email) is not None else "error"
         return failed
 
     async def assign_group(self, user_id: str, group_id: str | None) -> User | None:
@@ -775,6 +778,30 @@ class UserStore:
                 user.password_hash = password_hash
             await db.commit()
             return user
+
+    async def claim_activation_send(self, user_id: str, now: datetime, cooldown_seconds: int) -> bool:
+        """Atomically claim the right to send an imported-user activation
+        email right now, enforcing the resend cooldown at the DB layer
+        instead of a read-then-write race. A plain "read timestamp, decide,
+        send, then write timestamp" sequence lets N concurrent callers (e.g.
+        an attacker firing repeated /login attempts for a known imported
+        email) all observe the same stale timestamp and all send — this
+        conditional UPDATE means only one caller's WHERE clause matches at a
+        time. Returns True if this call won the claim (stamps
+        activation_email_sent_at and should proceed to send), False if
+        another call already claimed it within the cooldown window."""
+        cutoff = now - timedelta(seconds=cooldown_seconds)
+        async with self.factory() as db:
+            result = await db.execute(
+                update(User)
+                .where(
+                    User.id == user_id,
+                    or_(User.activation_email_sent_at.is_(None), User.activation_email_sent_at < cutoff),
+                )
+                .values(activation_email_sent_at=now)
+            )
+            await db.commit()
+            return result.rowcount > 0
 
     async def set_role(self, user_id: str, role: str) -> None:
         async with self.factory() as db:
@@ -1822,6 +1849,94 @@ class TelegramConfigStore:
         token = bot_token or (existing["bot_token"] if existing else "")
         stored_token = self.secret_box.encrypt(token) if (self.secret_box and token) else token
         value = {"bot_token": stored_token, "enabled": enabled}
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+            if row is None:
+                db.add(AppSetting(key=self._KEY, value=value))
+            else:
+                row.value = value
+            await db.commit()
+
+
+class SmtpConfigStore:
+    """Admin-configured SMTP settings for transactional email (currently:
+    the imported-user activation link, see claw/api/auth.py) — self-service
+    from the Control Plane, same shape as TelegramConfigStore. The password
+    is encrypted at rest (same scheme as OAuthAppStore/TelegramConfigStore).
+
+    ``get()`` returns None when nobody has ever saved a config — callers must
+    treat that as "email sending disabled". Unlike Telegram, there is no env
+    var fallback: this is a brand-new capability with no legacy deployment
+    to stay compatible with.
+    """
+
+    _KEY = "smtp_config"
+    _DEFAULTS: dict[str, Any] = {
+        "provider": "",
+        "host": "",
+        "port": 587,
+        "username": "",
+        "password": "",
+        "from_address": "",
+        "use_tls": True,
+        "use_ssl": False,
+        "enabled": False,
+    }
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], secret_box: Any | None = None):
+        self.factory = factory
+        self.secret_box = secret_box
+
+    async def get(self) -> dict[str, Any] | None:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+        if row is None:
+            return None
+        data = {**self._DEFAULTS, **(row.value or {})}
+        password = data.get("password", "")
+        if self.secret_box and password:
+            password = self.secret_box.decrypt(password)
+        data["password"] = password
+        return data
+
+    async def public(self) -> dict[str, Any]:
+        """Safe view for the admin UI — never returns the password itself."""
+        data = await self.get()
+        if data is None:
+            return {**self._DEFAULTS, "password": None, "has_password": False}
+        pub = {k: v for k, v in data.items() if k != "password"}
+        pub["has_password"] = bool(data["password"])
+        return pub
+
+    async def set(
+        self,
+        *,
+        provider: str,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        from_address: str,
+        use_tls: bool,
+        use_ssl: bool,
+        enabled: bool,
+    ) -> None:
+        # Preserve the existing password when the caller submits a blank one
+        # (the admin UI does this whenever it isn't changing the password).
+        existing = await self.get()
+        pwd = password or (existing["password"] if existing else "")
+        stored_password = self.secret_box.encrypt(pwd) if (self.secret_box and pwd) else pwd
+        value = {
+            "provider": provider,
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": stored_password,
+            "from_address": from_address,
+            "use_tls": use_tls,
+            "use_ssl": use_ssl,
+            "enabled": enabled,
+        }
         async with self.factory() as db:
             row = await db.get(AppSetting, self._KEY)
             if row is None:

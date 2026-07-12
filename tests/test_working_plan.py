@@ -46,7 +46,7 @@ def test_render_plan_formats_goal_and_steps():
 
 @pytest.mark.asyncio
 async def test_set_plan_roundtrip(db_factory):
-    sessions = SessionStore(db_factory)
+    sessions = SessionStore(db_factory, is_postgres=False)
     session = await sessions.create("user-1")
     steps = [{"step": "a", "status": "done"}, {"step": "b", "status": "pending"}]
     await sessions.set_plan(session.id, "My goal", steps)
@@ -57,7 +57,7 @@ async def test_set_plan_roundtrip(db_factory):
 
 @pytest.mark.asyncio
 async def test_set_plan_replaces_previous(db_factory):
-    sessions = SessionStore(db_factory)
+    sessions = SessionStore(db_factory, is_postgres=False)
     session = await sessions.create("user-1")
     await sessions.set_plan(session.id, "v1", [{"step": "old", "status": "pending"}])
     await sessions.set_plan(session.id, "v2", [{"step": "new", "status": "done"}])
@@ -71,7 +71,7 @@ async def test_set_plan_replaces_previous(db_factory):
 
 @pytest.mark.asyncio
 async def test_plan_tool_persists_to_active_session(db_factory):
-    sessions = SessionStore(db_factory)
+    sessions = SessionStore(db_factory, is_postgres=False)
     session = await sessions.create("user-1")
     tool = PlanTool(sessions)
 
@@ -102,7 +102,7 @@ async def test_plan_tool_persists_to_active_session(db_factory):
 
 @pytest.mark.asyncio
 async def test_plan_tool_without_active_session_errors(db_factory):
-    tool = PlanTool(SessionStore(db_factory))
+    tool = PlanTool(SessionStore(db_factory, is_postgres=False))
     # No current_session_id set → tool must refuse, not raise.
     result = await tool.execute(goal="x", steps=[])
     assert result.startswith("Error")

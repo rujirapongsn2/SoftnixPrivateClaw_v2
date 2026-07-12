@@ -207,6 +207,8 @@ export interface AdminUser extends AuthUser {
   // Control Plane's Users list. Accounts predating this field default to
   // "password" (the oldest signup path), which may not be exact for them.
   signup_method: "password" | "google" | "microsoft" | "admin_created" | "dev_token" | "imported";
+  // False only for an imported row that hasn't completed activation yet.
+  has_password: boolean;
   sessions: number;
   group_id: string | null;
   group_name: string | null;
@@ -239,7 +241,8 @@ export type UserImportRowStatus =
   | "duplicate_in_file"
   | "already_exists"
   | "invalid_email"
-  | "missing_email";
+  | "missing_email"
+  | "error";
 export interface UserImportRowResult {
   row_index: number;
   email: string;
@@ -399,6 +402,29 @@ export interface TelegramAdminConfig {
   bot_username: string;
 }
 
+export interface SmtpAdminConfig {
+  provider: string;
+  host: string;
+  port: number;
+  username: string;
+  from_address: string;
+  use_tls: boolean;
+  use_ssl: boolean;
+  enabled: boolean;
+  has_password: boolean;
+}
+export interface SmtpAdminConfigBody {
+  provider: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string; // empty keeps the existing password
+  from_address: string;
+  use_tls: boolean;
+  use_ssl: boolean;
+  enabled: boolean;
+}
+
 export interface OAuthAppPublic {
   client_id: string;
   tenant: string;
@@ -554,13 +580,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ email, password }),
     }),
-  // For a bulk-imported user (no password yet): login() 403s with a
-  // registration_incomplete signal instead — this sets their password and
-  // logs them in immediately, same response shape as login/register.
-  completeRegistration: (email: string, password: string, display_name?: string) =>
+  // For a bulk-imported user (no password yet): redeems the signed token
+  // from an emailed activation link (#activate=<token>) to set their
+  // password and log in immediately, same response shape as login/register.
+  completeRegistration: (token: string, password: string, display_name?: string) =>
     request<{ access_token: string; user: AuthUser }>("/api/auth/complete-registration", {
       method: "POST",
-      body: JSON.stringify({ email, password, display_name }),
+      body: JSON.stringify({ token, password, display_name }),
+    }),
+  // Decodes an activation link token so the set-password form can be
+  // prefilled with the real account's email/display name. POST (token in
+  // the body, not a GET path param) so the token never appears in a URL a
+  // reverse proxy/CDN would log.
+  activationInfo: (token: string) =>
+    request<{ email: string; display_name: string }>("/api/auth/activation", {
+      method: "POST",
+      body: JSON.stringify({ token }),
     }),
   me: () => request<AuthUser>("/api/auth/me"),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
@@ -702,6 +737,8 @@ export const api = {
     },
   ) => request<AdminUser>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   adminDeleteUser: (id: string) => request(`/api/admin/users/${id}`, { method: "DELETE" }),
+  adminResendActivation: (id: string) =>
+    request<{ ok: boolean }>(`/api/admin/users/${id}/resend-activation`, { method: "POST" }),
 
   // Bulk user import — parse returns the full grid (no server-side state);
   // commit takes the same rows back along with the column mapping.
@@ -801,6 +838,12 @@ export const api = {
   adminGetTelegramConfig: () => request<TelegramAdminConfig>("/api/admin/telegram"),
   adminSetTelegramConfig: (body: { bot_token: string; enabled: boolean }) =>
     request<TelegramAdminConfig>("/api/admin/telegram", { method: "PUT", body: JSON.stringify(body) }),
+
+  adminGetEmailConfig: () => request<SmtpAdminConfig>("/api/admin/email/config"),
+  adminSetEmailConfig: (body: SmtpAdminConfigBody) =>
+    request<SmtpAdminConfig>("/api/admin/email/config", { method: "PUT", body: JSON.stringify(body) }),
+  adminTestEmailConfig: (body: SmtpAdminConfigBody & { recipient: string }) =>
+    request<{ ok: boolean }>("/api/admin/email/test", { method: "POST", body: JSON.stringify(body) }),
 
   adminAudit: (
     filters: { kind?: string; user_id?: string; search?: string; before?: string; limit?: number } = {},

@@ -1,5 +1,6 @@
 """System administration API — manage all users. Requires the is_admin flag."""
 
+import asyncio
 import csv
 import io
 import re
@@ -11,11 +12,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from claw.api import llm_shared as llm
+from claw.api.auth import _send_activation_email
 from claw.api.deps import AppState, get_state, require_admin
 from claw.auth import oidc
 from claw.auth.passwords import hash_password
 from claw.channels.telegram import validate_bot_token
 from claw.db.models import User
+from claw.notifications.mailer import SmtpSendError, send_email
 from claw.security.policy import DEFAULT_TOOL_ARGS_EXEMPT, rule_from_row
 
 router = APIRouter(prefix="/api/admin")
@@ -66,6 +69,7 @@ def _user_row(user: User, sessions: int, group_names: dict[str, str]) -> dict:
         "is_active": user.is_active,
         "role": user.role,
         "signup_method": user.signup_method,
+        "has_password": bool(user.password_hash),
         "sessions": sessions,
         "group_id": user.group_id,
         "group_name": group_names.get(user.group_id) if user.group_id else None,
@@ -163,6 +167,41 @@ async def delete_user(
     return {"deleted": True}
 
 
+@router.post("/users/{user_id}/resend-activation")
+async def resend_activation_email(
+    user_id: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    """Admin-triggered resend of the imported-user activation email — for
+    when the original was spam-filtered or missed, so the person isn't stuck
+    waiting on another login attempt to re-trigger it. Respects the same
+    cooldown as the automatic login()/register() trigger, and — unlike that
+    fire-and-forget path — awaits the send directly and reports the true
+    outcome: this is an authenticated admin action, not the unauthenticated
+    login()/register() path the detached/silent design exists to protect."""
+    target = await state.users.get(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    if target.signup_method != "imported" or target.password_hash:
+        raise HTTPException(status_code=400, detail="this user has already completed registration")
+    smtp = await state.smtp_config.get()
+    if not smtp or not smtp.get("enabled"):
+        raise HTTPException(status_code=422, detail="Email Notification is not configured/enabled.")
+    result = await _send_activation_email(state, target.id)
+    if result == "cooldown":
+        raise HTTPException(
+            status_code=429,
+            detail="An activation email was already sent to this user recently; please wait before resending.",
+        )
+    if result != "sent":
+        raise HTTPException(status_code=422, detail="Could not send the activation email.")
+    await state.audit.log(
+        "auth",
+        {"event": "activation_email_resend_requested", "email": target.email, "by": admin.id},
+        user_id=target.id,
+    )
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- bulk user import
 # CSV/XLSX -> preview/map -> commit. Stateless: the parse step returns the full
 # parsed grid to the browser (bounded by the caps below) and the commit step
@@ -253,9 +292,16 @@ async def import_users_parse(
     name = (file.filename or "").lower()
     raw = await _read_capped(file, _MAX_IMPORT_BYTES)
     if name.endswith(".csv"):
-        rows = list(csv.reader(_decode_csv_bytes(raw).splitlines()))
+        # StringIO (not .splitlines()) so csv.reader can see embedded
+        # newlines inside quoted multi-line cells instead of them being
+        # split apart before csv.reader ever gets a chance to parse them.
+        rows = list(csv.reader(io.StringIO(_decode_csv_bytes(raw))))
     elif name.endswith(".xlsx"):
-        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        # openpyxl parsing is synchronous/blocking — keep it off the event
+        # loop, same as the knowledge-doc ingest pipeline does for parsing.
+        wb = await asyncio.to_thread(
+            openpyxl.load_workbook, io.BytesIO(raw), read_only=True, data_only=True
+        )
         sheet = wb.worksheets[0]
         rows = [["" if c is None else str(c) for c in r] for r in sheet.iter_rows(values_only=True)]
     else:
@@ -320,13 +366,16 @@ async def import_users_commit(
     ]
 
     # Pass 3: one transaction for the whole batch — falls back to per-row
-    # only for whatever (rare) row loses a race against a concurrent insert.
-    raced = await state.users.bulk_create_imported(to_create)
+    # only for whatever (rare) row fails, distinguishing a genuine race
+    # against a concurrent insert from any other constraint violation.
+    failed = await state.users.bulk_create_imported(to_create)
 
     created = 0
     for i, email, _ in candidates:
-        if email in existing or email in raced:
+        if email in existing:
             results[i] = {"row_index": i, "email": email, "status": "already_exists"}
+        elif email in failed:
+            results[i] = {"row_index": i, "email": email, "status": failed[email]}
         else:
             results[i] = {"row_index": i, "email": email, "status": "created"}
             created += 1
@@ -1047,6 +1096,107 @@ async def set_telegram_config(
     effective_token = (cfg["bot_token"] if cfg["enabled"] else "") if cfg else ""
     state.telegram = await state.telegram_mgr.ensure_running(effective_token)
     return await _telegram_config_json(state)
+
+
+# ---------------------------------------------------------------- Email (SMTP)
+# Used to send the imported-user activation link (see claw/api/auth.py) —
+# not a general notification channel.
+
+_HEADER_UNSAFE_RE = re.compile(r"[\r\n]")
+
+
+def _reject_header_unsafe(*values: str) -> None:
+    for v in values:
+        if _HEADER_UNSAFE_RE.search(v):
+            raise HTTPException(status_code=422, detail="Fields may not contain line breaks.")
+
+
+class SmtpConfigBody(BaseModel):
+    provider: str = ""
+    host: str = Field("", max_length=255)
+    port: int = Field(587, ge=1, le=65535)
+    username: str = Field("", max_length=255)
+    password: str = ""  # empty keeps the existing password
+    from_address: str = Field("", max_length=255)
+    use_tls: bool = True
+    use_ssl: bool = False
+    enabled: bool = False
+
+
+class SmtpTestBody(SmtpConfigBody):
+    recipient: str = Field(pattern=_EMAIL_RE, max_length=255)
+
+
+@router.get("/email/config")
+async def get_email_config(
+    admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    return await state.smtp_config.public()
+
+
+@router.put("/email/config")
+async def set_email_config(
+    body: SmtpConfigBody,
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    _reject_header_unsafe(body.host, body.from_address, body.username, body.provider)
+    if body.enabled and not (body.host and body.from_address):
+        raise HTTPException(
+            status_code=422, detail="Host and from address are required to enable email sending."
+        )
+    await state.smtp_config.set(
+        provider=body.provider.strip(),
+        host=body.host.strip(),
+        port=body.port,
+        username=body.username.strip(),
+        password=body.password,
+        from_address=body.from_address.strip(),
+        use_tls=body.use_tls,
+        use_ssl=body.use_ssl,
+        enabled=body.enabled,
+    )
+    return await state.smtp_config.public()
+
+
+@router.post("/email/test")
+async def test_email_config(
+    body: SmtpTestBody,
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    """Send a real test email using the submitted form values — falls back to
+    the already-saved password when the caller leaves it blank (mirrors the
+    "leave blank to keep existing" semantics of PUT /email/config), so an
+    admin can test without re-typing a password they already saved."""
+    _reject_header_unsafe(body.host, body.from_address, body.username)
+    password = body.password
+    if not password:
+        existing = await state.smtp_config.get()
+        password = existing["password"] if existing else ""
+    cfg = {
+        "host": body.host.strip(),
+        "port": body.port,
+        "username": body.username.strip(),
+        "password": password,
+        "from_address": body.from_address.strip(),
+        "use_tls": body.use_tls,
+        "use_ssl": body.use_ssl,
+    }
+    try:
+        await send_email(
+            cfg,
+            body.recipient,
+            subject="PrivateClaw test email",
+            text_body=(
+                "This is a test email from your PrivateClaw Control Plane's "
+                "Email Notification settings. If you received this, your SMTP "
+                "configuration is working."
+            ),
+        )
+    except SmtpSendError as exc:
+        raise HTTPException(status_code=422, detail=f"Could not send test email: {exc}") from exc
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- audit logs

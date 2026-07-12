@@ -7,7 +7,7 @@ JSON columns use the portable JSON type (JSONB on Postgres via dialect).
 import uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -56,6 +56,20 @@ class User(Base):
         ForeignKey("user_groups.id", ondelete="SET NULL"), nullable=True, index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Last time an imported-pending-activation email was sent — used to rate
+    # limit resends (see claw/api/auth.py's activation email helper). Null
+    # until the first send.
+    activation_email_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        # Enforces (and indexes) case-insensitive email uniqueness — the
+        # plain `unique=True` above is case-sensitive only, while lookups
+        # throughout this codebase (UserStore.get_by_email()) are
+        # case-insensitive, so this closes that gap at the DB layer too.
+        Index("ix_users_email_lower", func.lower(email), unique=True),
+    )
 
 
 class UserGroup(Base):

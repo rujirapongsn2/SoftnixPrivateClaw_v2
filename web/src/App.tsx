@@ -20,7 +20,7 @@ import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
 import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
-import { ApiError, AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
+import { AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 import { MOBILE_QUERY, PHONE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 const PROVIDER_LABELS: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
@@ -324,18 +324,46 @@ function RecentsNav({
   );
 }
 
-function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; initialError?: string }) {
-  const [mode, setMode] = useState<"login" | "register" | "complete-setup">("login");
+function Auth({
+  onDone,
+  initialError,
+  activationToken,
+}: {
+  onDone: (user: AuthUser) => void;
+  initialError?: string;
+  activationToken?: string;
+}) {
+  const [mode, setMode] = useState<"login" | "register" | "complete-setup">(
+    activationToken ? "complete-setup" : "login",
+  );
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState(initialError ?? "");
   const [busy, setBusy] = useState(false);
   const [providers, setProviders] = useState<string[]>([]);
+  // Only used to display which account an activation link belongs to — the
+  // request itself is authenticated by the token, not this email.
+  const [activationEmail, setActivationEmail] = useState("");
 
   useEffect(() => {
     api.providers().then((r) => setProviders(r.providers)).catch(() => setProviders([]));
   }, []);
+
+  // Decode the emailed activation link so the form can show which account
+  // it's for and prefill the display name — same info the old (removed)
+  // registration_incomplete signal used to carry, now sourced from a token
+  // that proves the visitor actually received this link by email.
+  useEffect(() => {
+    if (!activationToken) return;
+    api
+      .activationInfo(activationToken)
+      .then((info) => {
+        setActivationEmail(info.email);
+        setDisplayName(info.display_name);
+      })
+      .catch(() => setError("This activation link is invalid or has expired."));
+  }, [activationToken]);
 
   const submit = async () => {
     setBusy(true);
@@ -343,28 +371,20 @@ function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; init
     try {
       const res =
         mode === "complete-setup"
-          ? await api.completeRegistration(email, password, displayName.trim())
+          ? await api.completeRegistration(activationToken ?? "", password, displayName.trim())
           : mode === "login"
             ? await api.login(email, password)
             : await api.register(email, password, displayName.trim());
       setToken(res.access_token);
       onDone(res.user);
     } catch (e) {
-      // A bulk-imported user has no password yet — login() signals this with
-      // a 403 (register() with a 409, if they land on the wrong tab first)
-      // instead of the usual error, so redirect to a "finish setting up your
-      // account" screen (fields pre-filled) instead of a bare error.
-      const detail =
-        (mode === "login" || mode === "register") && e instanceof ApiError && (e.status === 403 || e.status === 409)
-          ? (e.body as { detail?: { reason?: string; display_name?: string } } | undefined)?.detail
-          : undefined;
-      if (detail?.reason === "registration_incomplete") {
-        setDisplayName(detail.display_name ?? "");
-        setPassword("");
-        setMode("complete-setup");
-        return;
-      }
-      setError(mode === "login" ? "Invalid email or password." : String(e).replace(/^Error:\s*/, ""));
+      setError(
+        mode === "login"
+          ? "Invalid email or password."
+          : mode === "complete-setup"
+            ? "Couldn't activate this account. The link may have expired — ask an administrator to resend it."
+            : String(e).replace(/^Error:\s*/, ""),
+      );
     } finally {
       setBusy(false);
     }
@@ -377,20 +397,17 @@ function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; init
       <Text color="secondary">Your personal AI agent</Text>
       {mode === "complete-setup" && (
         <Text size="sm" color="secondary">
-          An account for {email} is waiting for you — set a password to finish activating it.
+          {activationEmail
+            ? `An account for ${activationEmail} is waiting for you — set a password to finish activating it.`
+            : "Checking your activation link…"}
         </Text>
       )}
       {(mode === "register" || mode === "complete-setup") && (
         <TextInput label="Full name" placeholder="Jane Doe" value={displayName} onChange={setDisplayName} />
       )}
-      <TextInput
-        label="Email"
-        type="email"
-        placeholder="jane@company.com"
-        value={email}
-        onChange={setEmail}
-        isDisabled={mode === "complete-setup"}
-      />
+      {mode !== "complete-setup" && (
+        <TextInput label="Email" type="email" placeholder="jane@company.com" value={email} onChange={setEmail} />
+      )}
       {mode === "register" || mode === "complete-setup" ? (
         <PasswordField
           label="Password"
@@ -404,7 +421,9 @@ function Auth({ onDone, initialError }: { onDone: (user: AuthUser) => void; init
       {error && <ErrorText>{error}</ErrorText>}
       <Button
         label={busy ? "…" : mode === "login" ? "Log in" : mode === "register" ? "Create account" : "Activate account"}
-        isDisabled={busy || !email || password.length < 8}
+        isDisabled={
+          busy || password.length < 8 || (mode === "complete-setup" ? !activationEmail : !email)
+        }
         clickAction={submit}
       />
       {mode === "complete-setup" ? (
@@ -459,6 +478,7 @@ export default function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
+  const [activationToken, setActivationToken] = useState("");
   // Responsive shell. Below the tablet width the sidebar becomes an off-canvas
   // drawer (navOpen); on desktop `collapsed` drives the rail. Control Plane is
   // hidden on phones (see the trade-off note in the render).
@@ -487,6 +507,15 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const urlToken = params.get("token");
     const urlError = params.get("auth_error");
+    // Imported-user activation link from an emailed "set your password" link.
+    // Uses a URL FRAGMENT (#activate=...), not a query string — fragments
+    // are never sent to the server, so this login-granting token never
+    // appears in any reverse-proxy/CDN/server access log.
+    const activate = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("activate");
+    if (activate) {
+      setActivationToken(activate);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
     // Connector OAuth callback lands here with ?connector=<key>&connector_status=…
     const connector = params.get("connector");
     const connectorStatus = params.get("connector_status");
@@ -622,7 +651,7 @@ export default function App() {
   };
 
   if (checking) return <div className="claw-login"><Text color="secondary">Loading…</Text></div>;
-  if (!user) return <Auth onDone={setUser} initialError={authError} />;
+  if (!user) return <Auth onDone={setUser} initialError={authError} activationToken={activationToken || undefined} />;
 
   // Selecting anything in the drawer should close it on mobile.
   const closeDrawer = () => setNavOpen(false);

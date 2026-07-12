@@ -66,6 +66,7 @@ import {
   ModelUsagePoint,
   OAuthAppsInfo,
   SessionsByUserPoint,
+  SmtpAdminConfig,
   TelegramAdminConfig,
   type TokenUsageParams,
   type TokenUsageReport,
@@ -79,7 +80,15 @@ import {
   type LlmApi,
 } from "./api";
 
-export type AdminSection = "overview" | "providers" | "guardrails" | "oauth" | "telegram" | "audit" | "users";
+export type AdminSection =
+  | "overview"
+  | "providers"
+  | "guardrails"
+  | "oauth"
+  | "telegram"
+  | "email"
+  | "audit"
+  | "users";
 
 export const COST_LABEL: Record<ModelCost, string> = {
   low: "Low cost",
@@ -94,6 +103,7 @@ export const ADMIN_SECTIONS: { key: AdminSection; label: string; icon: IconType 
   { key: "guardrails", label: "Guardrails", icon: ShieldCheck },
   { key: "oauth", label: "OAuth apps", icon: KeyRound },
   { key: "telegram", label: "Telegram", icon: Send },
+  { key: "email", label: "Email Notification", icon: Mail },
   { key: "audit", label: "Audit Logs", icon: ScrollText },
   { key: "users", label: "Users", icon: Users },
 ];
@@ -119,6 +129,7 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
         {section === "guardrails" && <GuardrailsPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
+        {section === "email" && <EmailConfigPanel />}
         {section === "audit" && <AuditPanel />}
         {section === "users" && <UsersPanel selfId={selfId} />}
       </div>
@@ -2330,6 +2341,187 @@ function TelegramConfigPanel() {
   );
 }
 
+// ---------------------------------------------------------------- Email Notification (SMTP)
+// Only used for auth-related transactional email today (the imported-user
+// activation link, claw/api/auth.py) — not a general notification channel.
+
+const SMTP_PRESETS: Record<string, { host: string; port: number; security: "tls" | "ssl" }> = {
+  "Microsoft Outlook 365": { host: "smtp.office365.com", port: 587, security: "tls" },
+  "Gmail": { host: "smtp.gmail.com", port: 587, security: "tls" },
+};
+
+function EmailConfigPanel() {
+  const [cfg, setCfg] = useState<SmtpAdminConfig | null>(null);
+  const [provider, setProvider] = useState("");
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState("587");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [fromAddress, setFromAddress] = useState("");
+  const [security, setSecurity] = useState<"tls" | "ssl">("tls");
+  const [enabled, setEnabled] = useState(false);
+  const [testRecipient, setTestRecipient] = useState("");
+  const [testBusy, setTestBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const { error, guard } = useAsyncError();
+  const toast = useToast();
+
+  const reload = useCallback(
+    () =>
+      api.adminGetEmailConfig().then((c) => {
+        setCfg(c);
+        setProvider(c.provider);
+        setHost(c.host);
+        setPort(String(c.port));
+        setUsername(c.username);
+        setFromAddress(c.from_address);
+        setSecurity(c.use_ssl ? "ssl" : "tls");
+        setEnabled(c.enabled);
+      }),
+    [],
+  );
+  useEffect(() => {
+    void guard(async () => await reload());
+  }, [guard, reload]);
+
+  if (error) return <ErrorText>{error}</ErrorText>;
+  if (!cfg) return <Text color="secondary">Loading…</Text>;
+
+  const currentBody = () => ({
+    provider,
+    host: host.trim(),
+    port: Number(port) || 587,
+    username: username.trim(),
+    password,
+    from_address: fromAddress.trim(),
+    use_tls: security === "tls",
+    use_ssl: security === "ssl",
+    enabled,
+  });
+
+  return (
+    <div className="claw-panel">
+      <Text color="secondary">
+        Configure SMTP so PrivateClaw can send transactional email — currently used only for the
+        imported-user activation link (registration invite / account-ready emails), separate from
+        any chat channel configuration.
+      </Text>
+      <Card padding={2}>
+        <div className="claw-panel">
+          <Text weight="semibold">Provider</Text>
+          <select
+            className="claw-token-filter"
+            value={provider}
+            onChange={(e) => {
+              const value = e.target.value;
+              setProvider(value);
+              const preset = SMTP_PRESETS[value];
+              if (preset) {
+                setHost(preset.host);
+                setPort(String(preset.port));
+                setSecurity(preset.security);
+              }
+            }}
+          >
+            <option value="">Custom</option>
+            {Object.keys(SMTP_PRESETS).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+
+          <Text weight="semibold" size="sm">
+            Connection
+          </Text>
+          <TextInput label="SMTP host" value={host} onChange={setHost} placeholder="smtp.office365.com" />
+          <TextInput label="Port" value={port} onChange={setPort} placeholder="587" />
+          <TextInput label="Username" value={username} onChange={setUsername} placeholder="notification@company.com" />
+          <TextInput
+            label="From address"
+            value={fromAddress}
+            onChange={setFromAddress}
+            placeholder="notification@company.com"
+          />
+          <PasswordField
+            label={cfg.has_password ? "Password (leave blank to keep existing)" : "Password"}
+            value={password}
+            onChange={setPassword}
+          />
+
+          <SegmentedControl
+            value={security}
+            onChange={(v) => setSecurity(v as "tls" | "ssl")}
+            label="Security"
+            size="sm"
+          >
+            <SegmentedControlItem value="tls" label="Use STARTTLS" />
+            <SegmentedControlItem value="ssl" label="Use SSL (SMTPS)" />
+          </SegmentedControl>
+
+          <label className="claw-kb-visibility">
+            <Switch value={enabled} changeAction={setEnabled} label="Enabled" />
+            <Text size="sm" color="secondary">
+              {enabled ? "Email sending is active" : "Email sending is paused"}
+            </Text>
+          </label>
+
+          <div className="claw-row">
+            <Button
+              label="Save"
+              variant="primary"
+              icon={<Icon icon="check" size="sm" />}
+              clickAction={() =>
+                guard(async () => {
+                  const res = await api.adminSetEmailConfig(currentBody());
+                  setCfg(res);
+                  setPassword("");
+                  toast({ body: "Email Notification settings saved", type: "info", autoHideDuration: 2500 });
+                })
+              }
+            />
+          </div>
+        </div>
+      </Card>
+
+      <Card padding={2} variant="muted">
+        <Text weight="semibold">Test Send Mail</Text>
+        <Text size="sm" color="secondary">
+          Sends using the form values above (unsaved changes included) — save first if you want the
+          test to reflect what's actually stored.
+        </Text>
+        <TextInput
+          label="Recipient email"
+          type="email"
+          value={testRecipient}
+          onChange={setTestRecipient}
+          placeholder="you@company.com"
+        />
+        {testResult && (testResult.ok ? <Text size="sm">{testResult.message}</Text> : <ErrorText>{testResult.message}</ErrorText>)}
+        <div className="claw-row">
+          <Button
+            label={testBusy ? "Sending…" : "Test Send Mail"}
+            variant="secondary"
+            isDisabled={testBusy || !testRecipient}
+            clickAction={async () => {
+              setTestBusy(true);
+              setTestResult(null);
+              try {
+                await api.adminTestEmailConfig({ ...currentBody(), recipient: testRecipient });
+                setTestResult({ ok: true, message: "Test email sent." });
+              } catch (e) {
+                setTestResult({ ok: false, message: String(e).replace(/^Error:\s*/, "") });
+              } finally {
+                setTestBusy(false);
+              }
+            }}
+          />
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- Audit Logs
 
 const AUDIT_PAGE = 50;
@@ -2669,10 +2861,12 @@ const IMPORT_FIELD_OPTIONS: { value: string; label: string }[] = [
 ];
 
 const IMPORT_STATUS_LABEL: Record<string, string> = {
+  created: "imported",
   duplicate_in_file: "duplicate in file",
   already_exists: "already exists",
   invalid_email: "invalid email",
   missing_email: "missing email",
+  error: "error",
 };
 
 // Bulk user import — upload -> map columns -> confirm -> results. Stateless:
@@ -2752,16 +2946,22 @@ function UserImportDialog({
   const lastNameCol = fieldByCol.indexOf("last_name");
   const nameMode: UserImportMapping["name_mode"] =
     firstNameCol >= 0 || lastNameCol >= 0 ? "split" : fullNameCol >= 0 ? "full" : "none";
-  const mapping: UserImportMapping | null =
-    emailCol >= 0
-      ? {
-          email_col: emailCol,
-          name_mode: nameMode,
-          full_name_col: fullNameCol >= 0 ? fullNameCol : undefined,
-          first_name_col: firstNameCol >= 0 ? firstNameCol : undefined,
-          last_name_col: lastNameCol >= 0 ? lastNameCol : undefined,
-        }
-      : null;
+  // Memoized so its identity is stable across renders when the underlying
+  // selection hasn't changed — otherwise a fresh object literal every
+  // render would defeat `summary`'s useMemo below (it depends on `mapping`).
+  const mapping: UserImportMapping | null = useMemo(
+    () =>
+      emailCol >= 0
+        ? {
+            email_col: emailCol,
+            name_mode: nameMode,
+            full_name_col: fullNameCol >= 0 ? fullNameCol : undefined,
+            first_name_col: firstNameCol >= 0 ? firstNameCol : undefined,
+            last_name_col: lastNameCol >= 0 ? lastNameCol : undefined,
+          }
+        : null,
+    [emailCol, nameMode, fullNameCol, firstNameCol, lastNameCol],
+  );
 
   const computeDisplayName = (row: string[]): string => {
     if (nameMode === "full" && fullNameCol >= 0) return (row[fullNameCol] || "").trim();
@@ -2936,39 +3136,58 @@ function UserImportDialog({
                 <>
                   <Text weight="semibold">Import complete</Text>
                   <div className="claw-row">
-                    <Badge variant="success" label={`${result.created} created`} />
+                    <Badge variant="success" label={`${result.created} ${IMPORT_STATUS_LABEL.created}`} />
                     {Object.entries(IMPORT_STATUS_LABEL).map(([status, label]) => {
+                      if (status === "created") return null; // already shown above, success-colored
                       const n = result.results.filter((r) => r.status === status).length;
                       return n > 0 ? <Badge key={status} variant="neutral" label={`${n} ${label}`} /> : null;
                     })}
                   </div>
-                  {result.results.some((r) => r.status !== "created") && (
-                    <div className="claw-import-preview-table">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>File row</th>
-                            <th>Email</th>
-                            <th>Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {result.results
-                            .filter((r) => r.status !== "created")
-                            .map((r) => (
-                              // +2, not +1: row_index is 0-based over data rows with the header
-                              // already stripped server-side, and the header itself occupies
-                              // line 1 of the admin's actual source file.
-                              <tr key={r.row_index}>
-                                <td>{r.row_index + 2}</td>
-                                <td>{r.email || "—"}</td>
-                                <td>{IMPORT_STATUS_LABEL[r.status] ?? r.status}</td>
+                  {(() => {
+                    // Only the actionable rows (skipped/errored) are worth listing —
+                    // "created" rows are already summarized by the badge above. Cap
+                    // the rendered list too: with up to 5,000 rows per import, an
+                    // unbounded table would degrade badly as an import grows (see
+                    // CLAUDE.md's "avoid layouts that degrade as data grows" rule).
+                    const problems = result.results.filter((r) => r.status !== "created");
+                    const shown = problems.slice(0, 200);
+                    if (problems.length === 0) return null;
+                    return (
+                      <>
+                        <Text weight="semibold" size="sm">
+                          Skipped / errored rows
+                        </Text>
+                        {problems.length > shown.length && (
+                          <Text size="sm" color="secondary">
+                            Showing first {shown.length} of {problems.length}.
+                          </Text>
+                        )}
+                        <div className="claw-import-preview-table">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>File row</th>
+                                <th>Email</th>
+                                <th>Status</th>
                               </tr>
-                            ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
+                            </thead>
+                            <tbody>
+                              {shown.map((r) => (
+                                // +2, not +1: row_index is 0-based over data rows with the header
+                                // already stripped server-side, and the header itself occupies
+                                // line 1 of the admin's actual source file.
+                                <tr key={r.row_index}>
+                                  <td>{r.row_index + 2}</td>
+                                  <td>{r.email || "—"}</td>
+                                  <td>{IMPORT_STATUS_LABEL[r.status] ?? r.status}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    );
+                  })()}
                 </>
               )}
             </div>
@@ -3365,6 +3584,20 @@ function UserRow({
               }
             />
           </label>
+          {u.signup_method === "imported" && !u.has_password && (
+            <IconButton
+              label="Resend activation email"
+              icon={<Icon icon={Mail} size="sm" />}
+              size="sm"
+              variant="ghost"
+              clickAction={() =>
+                guard(async () => {
+                  await api.adminResendActivation(u.id);
+                  toast({ body: `Activation email sent to ${u.email}`, type: "info", autoHideDuration: 2500 });
+                })
+              }
+            />
+          )}
           <IconButton
             label={editing ? "Close editor" : "Edit user"}
             icon={<Icon icon={Pencil} size="sm" />}

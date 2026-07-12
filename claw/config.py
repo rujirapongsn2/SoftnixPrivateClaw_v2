@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -119,6 +119,15 @@ class Settings(BaseSettings):
     # Allow public self-registration. When false, only admins create users.
     open_registration: bool = True
     token_ttl_seconds: int = 7 * 24 * 3600
+    # Imported-user activation link lifetime — short enough to bound the
+    # window an intercepted email link stays exploitable, long enough that
+    # most people click it same-day (the admin "resend" action covers anyone
+    # who doesn't).
+    activation_token_ttl_seconds: int = 6 * 3600
+    # Minimum gap between activation-email sends to the same account, so a
+    # login/register attempt (or the admin "resend" action) can't be used to
+    # spam a real user's inbox.
+    activation_email_resend_cooldown_seconds: int = 5 * 60
 
     # Public base URL of THIS API (for OIDC redirect_uri) and the web app to return to.
     public_base_url: str = "http://localhost:8700"
@@ -161,6 +170,20 @@ class Settings(BaseSettings):
     memory: MemorySettings = MemorySettings()
     scheduler: SchedulerSettings = SchedulerSettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()
+
+    @model_validator(mode="after")
+    def _default_web_base_url_to_public(self) -> "Settings":
+        # An operator who sets CLAW_PUBLIC_BASE_URL (this API's own address)
+        # but forgets CLAW_WEB_BASE_URL (where emailed links — e.g. the
+        # imported-user activation link — should point) would otherwise
+        # silently mail every real user a broken http://localhost:5173 link.
+        # If web_base_url was left at its dev default while public_base_url
+        # was explicitly changed, fall back to it; still overridable by
+        # setting CLAW_WEB_BASE_URL explicitly (e.g. when the frontend is
+        # served from a different host than the API).
+        if self.web_base_url == "http://localhost:5173" and self.public_base_url != "http://localhost:8700":
+            self.web_base_url = self.public_base_url
+        return self
 
 
 def load_settings() -> Settings:

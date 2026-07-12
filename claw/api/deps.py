@@ -27,6 +27,7 @@ from claw.db.stores import (
     SessionStore,
     ShareStore,
     SkillStore,
+    SmtpConfigStore,
     TelegramConfigStore,
     UsageStore,
     UserStore,
@@ -62,6 +63,7 @@ class AppState:
     shares: ShareStore
     telegram_config: TelegramConfigStore
     telegram_mgr: "TelegramManager"
+    smtp_config: SmtpConfigStore
     telegram: "TelegramChannel | None" = None
 
 

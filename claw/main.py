@@ -47,6 +47,7 @@ from claw.db.stores import (
     SessionStore,
     ShareStore,
     SkillStore,
+    SmtpConfigStore,
     TelegramConfigStore,
     UsageStore,
     UserStore,
@@ -83,6 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     guardrails = GuardrailStore(factory)
     llm_config = LLMConfigStore(factory, secret_box=secret_box)
     oauth_apps = OAuthAppStore(factory, secret_box=secret_box)
+    smtp_config = SmtpConfigStore(factory, secret_box=secret_box)
     browser_broker = BrowserBrokerStore(settings.workspaces_root / "_browser_broker")
     knowledge = KnowledgeStore(factory, is_postgres=is_postgres)
     knowledge_service = KnowledgeService(knowledge, settings.knowledge_root, settings.knowledge)
@@ -234,6 +236,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         telegram=None,
         telegram_config=telegram_config,
         telegram_mgr=telegram_mgr,
+        smtp_config=smtp_config,
         guardrails=guardrails,
         llm_config=llm_config,
         audit=audit,
