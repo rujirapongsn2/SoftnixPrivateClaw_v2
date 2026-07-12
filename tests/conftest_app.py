@@ -95,3 +95,29 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
 
 def client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+async def enable_test_smtp(app, monkeypatch, sent: list[str] | None = None) -> None:
+    """Configure a dummy-but-enabled SMTP config and monkeypatch send_email to
+    a no-op, so a test can exercise a code path gated on
+    smtp_config.get()["enabled"] without hitting a real mail server. Pass a
+    list via `sent` to record each call's recipient address."""
+    import claw.api.auth as auth_module
+
+    await app.state.claw.smtp_config.set(
+        provider="",
+        host="smtp.example.com",
+        port=587,
+        username="",
+        password="",
+        from_address="noreply@example.com",
+        use_tls=True,
+        use_ssl=False,
+        enabled=True,
+    )
+
+    async def fake_send_email(cfg, to_address, subject, text_body, html_body=None):
+        if sent is not None:
+            sent.append(to_address)
+
+    monkeypatch.setattr(auth_module, "send_email", fake_send_email)

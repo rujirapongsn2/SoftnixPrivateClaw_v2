@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from claw.api import llm_shared as llm
-from claw.api.auth import _send_activation_email
+from claw.api.auth import _is_pending_imported_account, _send_activation_email
 from claw.api.deps import AppState, get_state, require_admin
 from claw.auth import oidc
 from claw.auth.passwords import hash_password
@@ -181,7 +181,7 @@ async def resend_activation_email(
     target = await state.users.get(user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="user not found")
-    if target.signup_method != "imported" or target.password_hash:
+    if not _is_pending_imported_account(target):
         raise HTTPException(status_code=400, detail="this user has already completed registration")
     smtp = await state.smtp_config.get()
     if not smtp or not smtp.get("enabled"):
@@ -190,7 +190,11 @@ async def resend_activation_email(
     if result == "cooldown":
         raise HTTPException(
             status_code=429,
-            detail="An activation email was already sent to this user recently; please wait before resending.",
+            detail=(
+                "An activation email was already sent to this user recently — either from this "
+                "action or from the user clicking \"Forgot password?\" themselves; please wait "
+                "before resending."
+            ),
         )
     if result != "sent":
         raise HTTPException(status_code=422, detail="Could not send the activation email.")

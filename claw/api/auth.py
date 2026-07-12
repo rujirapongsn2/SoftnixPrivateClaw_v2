@@ -91,6 +91,17 @@ async def _log_auth(state: AppState, event: str, user: User, method: str = "pass
 
 # --------------------------------------------------- imported-user activation email
 
+
+def _is_pending_imported_account(user: User) -> bool:
+    """True only for a bulk-imported user who has never set a password —
+    the one account state the activation-link flow applies to. An OIDC-only
+    account can also have an empty password_hash, so signup_method must be
+    checked too; every call site that used to hand-roll this check (login,
+    register, forgot_password, and the activation-token endpoints) shares
+    this one definition so the two conditions can't drift out of sync."""
+    return user.signup_method == "imported" and not user.password_hash
+
+
 _bg_tasks: set[asyncio.Task] = set()
 
 
@@ -111,19 +122,19 @@ async def _send_activation_email(state: AppState, user_id: str) -> str:
     endpoint) can report the true outcome instead of always claiming success.
 
     Must never raise, and must do ALL of its work — including the cooldown
-    claim — after being scheduled, not before: login()/register() call this
-    via _spawn_background() and ignore the return value, specifically so its
-    latency (a DB read/write plus an SMTP round trip) is never observed by
-    the caller. Checking the cooldown synchronously before scheduling would
-    reopen, as a timing side-channel, the exact account-enumeration oracle
-    this flow exists to close.
+    claim — after being scheduled, not before: login(), register(), and
+    forgot_password() all call this via _spawn_background() and ignore the
+    return value, specifically so its latency (a DB read/write plus an SMTP
+    round trip) is never observed by the caller. Checking the cooldown
+    synchronously before scheduling would reopen, as a timing side-channel,
+    the exact account-enumeration oracle this flow exists to close.
     """
     try:
         smtp = await state.smtp_config.get()
         if not smtp or not smtp.get("enabled"):
             return "disabled"
         user = await state.users.get(user_id)
-        if user is None or user.signup_method != "imported" or user.password_hash or not user.is_active:
+        if user is None or not user.is_active or not _is_pending_imported_account(user):
             return "not_applicable"
         now = datetime.now(timezone.utc)
         # Atomically claim the send slot (a conditional UPDATE) BEFORE
@@ -285,7 +296,7 @@ async def register(body: RegisterBody, state: AppState = Depends(get_state)) -> 
         # this used to be) — same generic 409 as any other duplicate email.
         # The only difference is a side effect: (re)send the activation link
         # to the real address, detached so it can't be timed either.
-        if existing.signup_method == "imported" and not existing.password_hash:
+        if _is_pending_imported_account(existing):
             _spawn_background(_send_activation_email(state, existing.id))
         raise HTTPException(status_code=409, detail="email already registered")
 
@@ -323,7 +334,7 @@ async def login(body: LoginBody, state: AppState = Depends(get_state)) -> dict:
     # a wrong password or no-such-user does. The only effect is a detached
     # side effect (an activation email), which must never change this
     # endpoint's response status, body, or observable latency.
-    if user is not None and user.signup_method == "imported" and not user.password_hash:
+    if user is not None and _is_pending_imported_account(user):
         _spawn_background(_send_activation_email(state, user.id))
     if user is None or not user.password_hash or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid email or password")
@@ -350,7 +361,7 @@ async def forgot_password(body: ForgotPasswordBody, state: AppState = Depends(ge
     if user is not None and user.is_active:
         if user.password_hash:
             _spawn_background(_send_password_reset_email(state, user.id))
-        elif user.signup_method == "imported":
+        elif _is_pending_imported_account(user):
             _spawn_background(_send_activation_email(state, user.id))
     return {"ok": True}
 
@@ -438,7 +449,7 @@ async def activation_info(body: ActivationInfoBody, state: AppState = Depends(ge
     same generic 400 as any other, never a distinguishing reason."""
     uid = verify_activation_token(body.token, state.settings.secret_key)
     user = await state.users.get(uid) if uid else None
-    if user is None or user.signup_method != "imported" or user.password_hash:
+    if user is None or not _is_pending_imported_account(user):
         raise HTTPException(status_code=400, detail="invalid or expired activation link")
     return {"email": user.email, "display_name": user.display_name}
 
@@ -453,7 +464,7 @@ async def complete_registration(body: CompleteRegistrationBody, state: AppState 
     instead of merely knowing/guessing the address."""
     uid = verify_activation_token(body.token, state.settings.secret_key)
     user = await state.users.get(uid) if uid else None
-    if user is None or user.signup_method != "imported" or user.password_hash:
+    if user is None or not _is_pending_imported_account(user):
         raise HTTPException(status_code=400, detail="invalid or expired activation link")
     if not user.is_active:
         # Suspended between import and first login — must not be able to

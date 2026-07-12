@@ -599,9 +599,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ token }),
     }),
-  // Always resolves the same way whether or not the email matches an
-  // account with a password — the backend never reveals that distinction
-  // (account enumeration). If it does match, a reset email is sent.
+  // Always resolves the same way regardless of account state — the backend
+  // never reveals that distinction (account enumeration). If it matches an
+  // account with a password, a reset link is emailed; if it matches an
+  // imported account that never activated, an activation link is emailed
+  // instead (see forgot_password() in claw/api/auth.py).
   forgotPassword: (email: string) =>
     request<{ ok: boolean }>("/api/auth/forgot-password", {
       method: "POST",

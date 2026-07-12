@@ -3,7 +3,7 @@ pre-emptive-takeover gap where complete-registration used to trust a bare
 email match (see claw/api/auth.py)."""
 
 from claw.auth.activation import make_activation_token, verify_activation_token
-from tests.conftest_app import build_api_app, client
+from tests.conftest_app import build_api_app, client, enable_test_smtp
 
 SECRET = "test-secret"
 
@@ -141,32 +141,14 @@ async def test_resend_activation_reports_true_outcome(db_factory, monkeypatch):
     cooldown window returns 429 rather than a false {"ok": true} (the admin
     resend path awaits the send directly instead of firing-and-forgetting,
     so it can report what really happened)."""
-    import claw.api.auth as auth_module
-
     app = build_api_app(db_factory)
     async with client(app) as c:
         admin_reg = await c.post("/api/auth/register", json={"email": "admin2@x.io", "password": "password123"})
         admin_token = admin_reg.json()["access_token"]
         user = await _make_imported_user(app, email="pending@x.io")
 
-        await app.state.claw.smtp_config.set(
-            provider="",
-            host="smtp.example.com",
-            port=587,
-            username="",
-            password="",
-            from_address="noreply@example.com",
-            use_tls=True,
-            use_ssl=False,
-            enabled=True,
-        )
-
         sent: list[str] = []
-
-        async def fake_send_email(cfg, to_address, subject, text_body, html_body=None):
-            sent.append(to_address)
-
-        monkeypatch.setattr(auth_module, "send_email", fake_send_email)
+        await enable_test_smtp(app, monkeypatch, sent)
 
         r1 = await c.post(
             f"/api/admin/users/{user.id}/resend-activation",

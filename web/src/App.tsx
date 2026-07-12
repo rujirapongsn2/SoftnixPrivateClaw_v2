@@ -493,7 +493,7 @@ function Auth({
                 : mode === "complete-setup"
                   ? "Activate account"
                   : mode === "forgot-password"
-                    ? "Send reset link"
+                    ? "Send recovery email"
                     : "Reset password"
         }
         isDisabled={

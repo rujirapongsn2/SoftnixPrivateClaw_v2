@@ -1,10 +1,11 @@
 """Forgot-password flow: generic response (no account-enumeration oracle),
 detached send, and atomic single-use token redemption via compare-and-swap."""
 
+import asyncio
 from datetime import datetime, timezone
 
 from claw.auth.password_reset import make_password_reset_token, verify_password_reset_token
-from tests.conftest_app import build_api_app, client
+from tests.conftest_app import build_api_app, client, enable_test_smtp
 
 SECRET = "test-secret"
 
@@ -25,16 +26,22 @@ def test_password_reset_token_rejects_wrong_purpose_and_secret():
 
 async def test_forgot_password_returns_generic_ok_regardless_of_email(db_factory):
     """Same {"ok": true} response whether the email belongs to a real
-    password account or doesn't exist at all — revealing that distinction
-    would be an account-enumeration oracle."""
+    password account, an imported-but-never-activated account, or doesn't
+    exist at all — revealing any of these distinctions would be an
+    account-enumeration oracle. All three are compared in one assertion so a
+    future change to any one branch that breaks response-uniformity fails
+    this test directly, rather than only being covered indirectly by
+    separate per-branch tests."""
     app = build_api_app(db_factory)
     async with client(app) as c:
         await c.post("/api/auth/register", json={"email": "real@x.io", "password": "password123"})
+        await app.state.claw.users.create(email="pending@x.io", password_hash="", signup_method="imported")
 
         real = await c.post("/api/auth/forgot-password", json={"email": "real@x.io"})
+        pending = await c.post("/api/auth/forgot-password", json={"email": "pending@x.io"})
         fake = await c.post("/api/auth/forgot-password", json={"email": "nobody-here@x.io"})
-        assert real.status_code == fake.status_code == 200
-        assert real.json() == fake.json() == {"ok": True}
+        assert real.status_code == pending.status_code == fake.status_code == 200
+        assert real.json() == pending.json() == fake.json() == {"ok": True}
 
 
 async def test_forgot_password_sends_activation_not_reset_for_imported_pending_account(db_factory, monkeypatch):
@@ -42,34 +49,15 @@ async def test_forgot_password_sends_activation_not_reset_for_imported_pending_a
     "Forgot password?" is the one recovery entry point for any "I can't get
     into my account" case, so it should trigger the activation email
     instead of the password-reset email for this account."""
-    import asyncio
-
-    import claw.api.auth as auth_module
-
     app = build_api_app(db_factory)
     async with client(app) as c:
-        await app.state.claw.smtp_config.set(
-            provider="",
-            host="smtp.example.com",
-            port=587,
-            username="",
-            password="",
-            from_address="noreply@example.com",
-            use_tls=True,
-            use_ssl=False,
-            enabled=True,
-        )
-
-        async def fake_send_email(cfg, to_address, subject, text_body, html_body=None):
-            return None
-
-        monkeypatch.setattr(auth_module, "send_email", fake_send_email)
+        await enable_test_smtp(app, monkeypatch)
 
         user = await app.state.claw.users.create(
             email="pending@x.io", password_hash="", signup_method="imported"
         )
         r = await c.post("/api/auth/forgot-password", json={"email": "pending@x.io"})
-        assert r.status_code == 200  # still generic — doesn't reveal anything
+        assert r.status_code == 200 and r.json() == {"ok": True}  # still generic — doesn't reveal anything
 
         await asyncio.sleep(0.05)  # let the detached background send complete
 
