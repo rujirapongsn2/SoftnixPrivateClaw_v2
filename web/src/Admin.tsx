@@ -1,6 +1,7 @@
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
+import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Divider } from "@astryxdesign/core/Divider";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -3879,6 +3880,13 @@ function UsersPanel({ selfId }: { selfId: string }) {
   const [groupFilter, setGroupFilter] = useState<string>("all");
   const [managingGroups, setManagingGroups] = useState(false);
   const [importing, setImporting] = useState(false);
+  // Bulk group reassignment: a set of selected user ids plus the chosen
+  // target group (undefined = none picked yet, distinct from null = "No
+  // group" explicitly chosen, so the Apply button can't fire on an
+  // unconsidered default).
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkTarget, setBulkTarget] = useState<string | null | undefined>(undefined);
+  const [bulkApplying, setBulkApplying] = useState(false);
   const { error, guard } = useAsyncError();
   const toast = useToast();
 
@@ -3896,8 +3904,14 @@ function UsersPanel({ selfId }: { selfId: string }) {
     void guard(async () => await reloadAll());
   }, [guard, reloadAll]);
 
-  // Reset the "load more" window whenever the search or group filter changes.
-  useEffect(() => setVisible(USERS_PAGE), [query, groupFilter]);
+  // Reset the "load more" window and any bulk selection whenever the search
+  // or group filter changes — a selection made under one filter shouldn't
+  // silently carry over and get bulk-applied under a different one.
+  useEffect(() => {
+    setVisible(USERS_PAGE);
+    setSelectedIds(new Set());
+    setBulkTarget(undefined);
+  }, [query, groupFilter]);
   // A default group is a fine starting selection for a new user; leave the plan
   // on "Default plan" (null) so new users inherit the deployment default.
   useEffect(() => {
@@ -3935,6 +3949,63 @@ function UsersPanel({ selfId }: { selfId: string }) {
   });
   const shown = filtered.slice(0, visible);
   const ungrouped = users.filter((u) => !u.group_id).length;
+
+  const toggleSelect = (id: string) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const shownSelectedCount = shown.filter((u) => selectedIds.has(u.id)).length;
+  const toggleSelectAllShown = () =>
+    setSelectedIds((prev) => {
+      if (shownSelectedCount === shown.length) {
+        // All loaded rows are selected — deselect just those (keep any
+        // selection from a previous filter/page out of scope entirely, since
+        // selection is cleared on filter change anyway).
+        const next = new Set(prev);
+        shown.forEach((u) => next.delete(u.id));
+        return next;
+      }
+      const next = new Set(prev);
+      shown.forEach((u) => next.add(u.id));
+      return next;
+    });
+
+  // Client-side loop, one request per user (sequential, not parallel, so a
+  // large selection doesn't fire dozens of concurrent PATCHes at once) — a
+  // per-user failure doesn't abort the rest; the toast reports how many of
+  // each.
+  const applyBulkGroup = () => {
+    if (bulkTarget === undefined || selectedIds.size === 0) return;
+    const targetName = bulkTarget === null ? "No group" : groups.find((g) => g.id === bulkTarget)?.name || "group";
+    if (!window.confirm(`Move ${selectedIds.size} user(s) to "${targetName}"?`)) return;
+    void guard(async () => {
+      setBulkApplying(true);
+      const ids = Array.from(selectedIds);
+      let failed = 0;
+      for (const id of ids) {
+        try {
+          await api.adminUpdateUser(id, { group_id: bulkTarget });
+        } catch {
+          failed += 1;
+        }
+      }
+      setBulkApplying(false);
+      setSelectedIds(new Set());
+      setBulkTarget(undefined);
+      toast({
+        body:
+          failed === 0
+            ? `${ids.length} user(s) moved to "${targetName}"`
+            : `${ids.length - failed} moved, ${failed} failed`,
+        type: failed === 0 ? "info" : "error",
+        autoHideDuration: failed === 0 ? 2500 : 4000,
+      });
+      await reloadAll();
+    });
+  };
 
   return (
     <div className="claw-panel">
@@ -4093,6 +4164,63 @@ function UsersPanel({ selfId }: { selfId: string }) {
         />
       ) : (
         <>
+          {groups.length > 0 && (
+            <div className="claw-row claw-row-between">
+              <label className="claw-toggle-inline">
+                <CheckboxInput
+                  value={
+                    shownSelectedCount === 0 ? false : shownSelectedCount === shown.length ? true : "indeterminate"
+                  }
+                  label="Select all loaded users"
+                  isLabelHidden
+                  onChange={toggleSelectAllShown}
+                />
+                <Text size="sm" color="secondary">
+                  {selectedIds.size > 0 ? `${selectedIds.size} selected` : "Select all"}
+                </Text>
+              </label>
+              {selectedIds.size > 0 && (
+                <div className="claw-row">
+                  <Text size="sm" color="secondary">
+                    Move to
+                  </Text>
+                  <Button
+                    label="No group"
+                    size="sm"
+                    variant={bulkTarget === null ? "primary" : "secondary"}
+                    clickAction={() => setBulkTarget(null)}
+                  />
+                  {groups.map((g) => (
+                    <Button
+                      key={g.id}
+                      label={g.name}
+                      size="sm"
+                      variant={bulkTarget === g.id ? "primary" : "secondary"}
+                      clickAction={() => setBulkTarget(g.id)}
+                    />
+                  ))}
+                  <Button
+                    label={`Apply (${selectedIds.size})`}
+                    size="sm"
+                    variant="primary"
+                    isLoading={bulkApplying}
+                    isDisabled={bulkApplying || bulkTarget === undefined}
+                    clickAction={applyBulkGroup}
+                  />
+                  <Button
+                    label="Clear"
+                    size="sm"
+                    variant="ghost"
+                    isDisabled={bulkApplying}
+                    clickAction={() => {
+                      setSelectedIds(new Set());
+                      setBulkTarget(undefined);
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
           <div className="claw-user-list">
             {shown.map((u) => (
               <UserRow
@@ -4104,6 +4232,9 @@ function UsersPanel({ selfId }: { selfId: string }) {
                 reload={reloadAll}
                 createGroup={createGroup}
                 guard={guard}
+                selectable={groups.length > 0}
+                selected={selectedIds.has(u.id)}
+                onToggleSelect={() => toggleSelect(u.id)}
               />
             ))}
           </div>
@@ -4169,6 +4300,9 @@ function UserRow({
   reload,
   createGroup,
   guard,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
 }: {
   user: AdminUser;
   selfId: string;
@@ -4177,6 +4311,9 @@ function UserRow({
   reload: () => Promise<void>;
   createGroup: (name: string) => Promise<GroupInfo>;
   guard: (fn: () => Promise<void>) => Promise<void>;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [displayName, setDisplayName] = useState(u.display_name);
@@ -4190,6 +4327,14 @@ function UserRow({
   return (
     <div className={`claw-user-row${!u.is_active ? " is-suspended" : ""}`}>
       <div className="claw-user-head">
+        {selectable && (
+          <CheckboxInput
+            value={selected}
+            label={`Select ${label}`}
+            isLabelHidden
+            onChange={() => onToggleSelect?.()}
+          />
+        )}
         <div className="claw-user-avatar" aria-hidden="true">
           {userInitials(u.display_name, u.email)}
         </div>
