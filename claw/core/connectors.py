@@ -10,9 +10,12 @@ import shlex
 import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
+import httpx
 from loguru import logger
+from mcp.shared.exceptions import McpError
 
 from claw.db.stores import ConnectorStore
 from claw.tools.base import Tool
@@ -23,6 +26,10 @@ from claw.tools.registry import ToolRegistry
 # endpoints (Composio, Softnix ONE, …) carry their bearer/api-key auth.
 _HEADER_ENV_PREFIX = "HEADER_"
 
+# Defaults, overridable per-instance via ConnectorSettings (claw/config.py) —
+# module constants only so direct construction (tests, scratch scripts)
+# doesn't need a full Settings object.
+#
 # Per-connector connect+list_tools budget. sync_tools() holds a per-user lock
 # for its whole duration, so without a timeout a single misbehaving MCP server
 # (e.g. one that hangs mid-handshake instead of raising) can block that lock
@@ -40,25 +47,49 @@ _CONNECT_TIMEOUT_SECONDS = 20
 # process. ToolRegistry.execute() already wraps every tool call in a generic
 # try/except and turns any exception into a normal "Error executing ..."
 # result the model sees, so a timeout here surfaces exactly like any other
-# tool failure — no special-casing needed upstream.
+# tool failure — no special-casing needed upstream. Uses the mcp SDK's own
+# per-request timeout (ClientSession.call_tool's read_timeout_seconds) rather
+# than an external asyncio.wait_for: it's scoped with anyio.fail_after inside
+# the same request/task, so cleanup of the SDK's own response-stream
+# bookkeeping is guaranteed via its `finally` regardless of the timeout,
+# instead of abandoning a separately-spawned wait_for task. Note this still
+# only stops the CLIENT from waiting — it does not send the MCP protocol's
+# notifications/cancelled to the remote server, so a slow-but-eventually-
+# completing call can still finish (and act on) its side effect server-side
+# after the client has already reported the call as failed.
 _TOOL_CALL_TIMEOUT_SECONDS = 60
 
 
 class McpToolProxy(Tool):
-    def __init__(self, session: Any, connector: str, tool_name: str, description: str, schema: dict):
+    def __init__(
+        self,
+        session: Any,
+        connector: str,
+        tool_name: str,
+        description: str,
+        schema: dict,
+        *,
+        tool_call_timeout_seconds: float = _TOOL_CALL_TIMEOUT_SECONDS,
+    ):
         self._session = session
         self._remote_name = tool_name
+        self._tool_call_timeout_seconds = tool_call_timeout_seconds
         self.name = f"mcp_{connector}_{tool_name}"
         self.description = f"[{connector}] {description or tool_name}"
         self.parameters = schema or {"type": "object", "properties": {}}
 
     async def execute(self, **kwargs: Any) -> str:
         try:
-            result = await asyncio.wait_for(
-                self._session.call_tool(self._remote_name, kwargs), timeout=_TOOL_CALL_TIMEOUT_SECONDS
+            result = await self._session.call_tool(
+                self._remote_name, kwargs, read_timeout_seconds=timedelta(seconds=self._tool_call_timeout_seconds)
             )
-        except TimeoutError:
-            return f"Error: {self.name} timed out after {_TOOL_CALL_TIMEOUT_SECONDS}s waiting for a response"
+        except McpError as exc:
+            if exc.error.code == httpx.codes.REQUEST_TIMEOUT:
+                return (
+                    f"Error: {self.name} timed out after {self._tool_call_timeout_seconds}s "
+                    "waiting for a response"
+                )
+            raise
         parts: list[str] = []
         for item in getattr(result, "content", None) or []:
             text = getattr(item, "text", None)
@@ -78,8 +109,15 @@ class _UserConnections:
 
 
 class ConnectorManager:
-    def __init__(self, store: ConnectorStore):
+    def __init__(
+        self,
+        store: ConnectorStore,
+        connect_timeout_seconds: float = _CONNECT_TIMEOUT_SECONDS,
+        tool_call_timeout_seconds: float = _TOOL_CALL_TIMEOUT_SECONDS,
+    ):
         self.store = store
+        self.connect_timeout_seconds = connect_timeout_seconds
+        self.tool_call_timeout_seconds = tool_call_timeout_seconds
         self._users: dict[str, _UserConnections] = {}
         # Serialize sync_tools per user: it is now driven both by chat turns and
         # by the connectors listing endpoint (composer menu), which can overlap.
@@ -96,12 +134,18 @@ class ConnectorManager:
         return dict(self._users.get(user_id, _UserConnections()).statuses)
 
     async def sync_tools(self, user_id: str, registry: ToolRegistry) -> None:
-        """Ensure the registry reflects the user's enabled connectors. Cheap when unchanged."""
+        """Ensure the registry reflects the user's enabled connectors. Cheap
+        when unchanged. A connector that ended in "error" last time
+        (including a connect timeout) is always retried here even though its
+        config didn't change — otherwise a transient failure would cache as
+        permanently broken until an admin edits the connector, which defeats
+        the point of timing failures out instead of hanging."""
         async with self._lock(user_id):
             connectors = await self.store.enabled_for_user(user_id)
             signature = tuple(sorted((c.id, c.updated_at.isoformat()) for c in connectors))
             state = self._users.get(user_id)
-            if state is not None and state.signature == signature:
+            had_error = state is not None and any(s.get("status") == "error" for s in state.statuses.values())
+            if state is not None and state.signature == signature and not had_error:
                 return
 
             await self._close_user(user_id, registry)
@@ -111,33 +155,48 @@ class ConnectorManager:
                 return
 
             await state.stack.__aenter__()
-            for connector in connectors:
-                try:
-                    session, listed = await asyncio.wait_for(
-                        self._connect_and_list(state.stack, connector),
-                        timeout=_CONNECT_TIMEOUT_SECONDS,
+            # Connect all of a user's connectors concurrently, not one at a
+            # time — otherwise N broken/hanging connectors cost N times the
+            # per-connector timeout instead of one timeout period total,
+            # while this method holds the per-user lock throughout.
+            results = await asyncio.gather(*(self._connect_one(state.stack, c) for c in connectors))
+            for connector, session, listed, error in results:
+                if error is not None:
+                    state.statuses[connector.name] = error
+                    logger.warning("MCP connector {} {}", connector.name, error["error"])
+                    continue
+                count = 0
+                for tool in listed.tools:
+                    proxy = McpToolProxy(
+                        session,
+                        connector.name,
+                        tool.name,
+                        tool.description or "",
+                        tool.inputSchema or {},
+                        tool_call_timeout_seconds=self.tool_call_timeout_seconds,
                     )
-                    count = 0
-                    for tool in listed.tools:
-                        proxy = McpToolProxy(
-                            session,
-                            connector.name,
-                            tool.name,
-                            tool.description or "",
-                            tool.inputSchema or {},
-                        )
-                        registry.register(proxy)
-                        state.tool_names.append(proxy.name)
-                        count += 1
-                    state.statuses[connector.name] = {"status": "connected", "tools": count}
-                    logger.info("MCP connector {} connected with {} tools", connector.name, count)
-                except TimeoutError:
-                    message = f"timed out after {_CONNECT_TIMEOUT_SECONDS}s connecting/listing tools"
-                    state.statuses[connector.name] = {"status": "error", "error": message}
-                    logger.warning("MCP connector {} {}", connector.name, message)
-                except Exception as exc:
-                    state.statuses[connector.name] = {"status": "error", "error": str(exc)[:300]}
-                    logger.warning("MCP connector {} failed: {}", connector.name, exc)
+                    registry.register(proxy)
+                    state.tool_names.append(proxy.name)
+                    count += 1
+                state.statuses[connector.name] = {"status": "connected", "tools": count}
+                logger.info("MCP connector {} connected with {} tools", connector.name, count)
+
+    async def _connect_one(self, stack: AsyncExitStack, connector) -> tuple[Any, Any, Any, dict | None]:
+        """Connect+list one connector under its own timeout. Never raises —
+        returns (connector, session, listed, error_status), so callers can
+        run several of these concurrently (via asyncio.gather) and still
+        tell which ones failed."""
+        try:
+            session, listed = await asyncio.wait_for(
+                self._connect_and_list(stack, connector),
+                timeout=self.connect_timeout_seconds,
+            )
+            return connector, session, listed, None
+        except TimeoutError:
+            message = f"timed out after {self.connect_timeout_seconds}s connecting/listing tools"
+            return connector, None, None, {"status": "error", "error": message}
+        except Exception as exc:
+            return connector, None, None, {"status": "error", "error": str(exc)[:300]}
 
     async def _connect_and_list(self, stack: AsyncExitStack, connector) -> tuple[Any, Any]:
         session = await self._connect(stack, connector)

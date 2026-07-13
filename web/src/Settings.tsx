@@ -629,13 +629,29 @@ function parseEnvText(text: string): Record<string, string> {
     const line = raw.trim();
     if (!line) continue;
     const eq = line.indexOf("=");
-    const colon = line.indexOf(": ");
+    // Colon WITHOUT requiring a following space, so "Name:value" (no space,
+    // e.g. copied from a curl one-liner) is recognized too, not just
+    // "Name: value".
+    const colon = line.indexOf(":");
     if (eq !== -1 && (colon === -1 || eq < colon)) {
+      // KEY=value — everything after the first "=" is the value verbatim,
+      // so a value that itself contains "=" or ":" (e.g. a JWT/base64
+      // token, a URL) round-trips correctly.
       const key = line.slice(0, eq).trim();
       if (key) env[key] = line.slice(eq + 1).trim();
     } else if (colon !== -1) {
+      // "Header-Name: value" (or "Header-Name:value") shorthand for an HTTP
+      // header — becomes HEADER_<Header-Name> internally (see
+      // _HEADER_ENV_PREFIX in claw/core/connectors.py).
       const key = line.slice(0, colon).trim();
-      if (key) env[`${HEADER_ENV_PREFIX}${key}`] = line.slice(colon + 2).trim();
+      const rest = line.slice(colon + 1);
+      const value = (rest.startsWith(" ") ? rest.slice(1) : rest).trim();
+      if (key) env[`${HEADER_ENV_PREFIX}${key}`] = value;
+    } else {
+      // No "=" or ":" at all (e.g. a bare flag like "DEBUG") — keep the
+      // whole line as a key with an empty value rather than silently
+      // discarding user input.
+      env[line] = "";
     }
   }
   return env;
@@ -643,9 +659,23 @@ function parseEnvText(text: string): Record<string, string> {
 
 function formatEnvText(env: Record<string, string> | undefined): string {
   return Object.entries(env ?? {})
-    .map(([k, v]) =>
-      k.startsWith(HEADER_ENV_PREFIX) ? `${k.slice(HEADER_ENV_PREFIX.length)}: ${v}` : `${k}=${v}`,
-    )
+    .map(([k, v]) => {
+      if (k.startsWith(HEADER_ENV_PREFIX)) {
+        // Always keep the colon, even for an empty value — dropping it for
+        // "v is falsy" would render a bare name indistinguishable from a
+        // plain env var, losing the HEADER_ prefix on the next parse.
+        const name = k.slice(HEADER_ENV_PREFIX.length);
+        return v ? `${name}: ${v}` : `${name}:`;
+      }
+      // Omit the trailing "=" for an empty value: re-parsing a bare key
+      // (the "else" branch above) round-trips to the same {key: ""} entry,
+      // and — critically — it also means a pre-existing malformed key that
+      // itself contains ": " (e.g. the historical "Authorization: Bearer
+      // <token>" -> "" shape a missing "=" used to produce) is rendered
+      // as-is instead of gaining a spurious trailing "=" that would then
+      // get misread as part of the token value on the next save.
+      return v ? `${k}=${v}` : k;
+    })
     .join("\n");
 }
 

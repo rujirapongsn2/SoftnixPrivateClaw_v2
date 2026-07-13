@@ -94,6 +94,18 @@ class KnowledgeSettings(BaseModel):
     ocr_timeout_seconds: int = 600
 
 
+class ConnectorSettings(BaseModel):
+    """MCP connector connect/tool-call timeouts. A single misbehaving remote
+    MCP server (e.g. one that hangs instead of raising, after sending a
+    malformed response the client can't parse) must not be able to hang a
+    user's connector sync or chat turn forever — see claw/core/connectors.py."""
+
+    # Budget for one connector's connect + list_tools handshake.
+    connect_timeout_seconds: int = 20
+    # Budget for one already-connected MCP tool call.
+    tool_call_timeout_seconds: int = 60
+
+
 class SchedulerSettings(BaseModel):
     """Recurring/one-shot scheduled tasks."""
 
@@ -177,6 +189,7 @@ class Settings(BaseSettings):
     memory: MemorySettings = MemorySettings()
     scheduler: SchedulerSettings = SchedulerSettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()
+    connectors: ConnectorSettings = ConnectorSettings()
 
     @model_validator(mode="after")
     def _default_web_base_url_to_public(self) -> "Settings":

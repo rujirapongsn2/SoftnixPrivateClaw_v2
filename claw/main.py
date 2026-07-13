@@ -80,7 +80,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     secret_box = SecretBox(settings.secret_key)
     connectors = ConnectorStore(factory, secret_box=secret_box)
     schedules = ScheduleStore(factory)
-    connectors_mgr = ConnectorManager(connectors)
+    connectors_mgr = ConnectorManager(
+        connectors,
+        connect_timeout_seconds=settings.connectors.connect_timeout_seconds,
+        tool_call_timeout_seconds=settings.connectors.tool_call_timeout_seconds,
+    )
     guardrails = GuardrailStore(factory)
     llm_config = LLMConfigStore(factory, secret_box=secret_box)
     oauth_apps = OAuthAppStore(factory, secret_box=secret_box)
