@@ -70,11 +70,51 @@ cmd_stop() {
   esac
 }
 
+# Polls /api/ready for up to ~15s. The restart commands below (systemctl,
+# launchctl, nohup) all return/detach before the new uvicorn process has
+# necessarily finished booting and bound the port — this is the only way to
+# confirm the NEW process is actually the one answering requests, rather than
+# assuming success just because the restart command didn't error.
+wait_ready() {
+  local tries=15
+  while (( tries > 0 )); do
+    curl -fsS "http://127.0.0.1:$(port)/api/ready" >/dev/null 2>&1 && return 0
+    sleep 1
+    tries=$((tries - 1))
+  done
+  return 1
+}
+
+# The exact command an operator should run by hand if the automatic restart
+# didn't take effect (e.g. sudo needs an interactive password over SSH).
+manual_restart_hint() {
+  case "$(mode)" in
+    systemd) echo "sudo systemctl restart ${SYSTEMD_UNIT}" ;;
+    launchd-daemon) echo "sudo launchctl unload -w ${LAUNCHD_DAEMON_PLIST} && sudo launchctl load -w ${LAUNCHD_DAEMON_PLIST}" ;;
+    launchd) echo "launchctl unload -w ${LAUNCHD_PLIST} && launchctl load -w ${LAUNCHD_PLIST}" ;;
+    nohup) echo "$SCRIPT_DIR/claw restart" ;;
+  esac
+}
+
 cmd_restart() {
   case "$(mode)" in
-    systemd) sc restart "$SYSTEMD_UNIT" ;;
+    # `|| true`: a failed restart command (e.g. sudo prompting for a password
+    # with no TTY) must not abort this function before the health check below
+    # runs — the check is what actually determines success or failure here.
+    systemd) sc restart "$SYSTEMD_UNIT" || true ;;
     *) cmd_stop; sleep 1; cmd_start ;;
   esac
+  if wait_ready; then
+    echo "  /api/ready: OK — the new build is live"
+  else
+    echo "  WARNING: backend did not become healthy after restart — it may"
+    echo "  still be running the OLD build. This commonly happens when the"
+    echo "  restart needs sudo/an interactive password (e.g. run over SSH"
+    echo "  without a TTY or passwordless sudo configured)."
+    echo "  Finish it by running this yourself, then re-check with 'claw status':"
+    echo "    $(manual_restart_hint)"
+    return 1
+  fi
 }
 
 cmd_status() {
@@ -109,7 +149,15 @@ cmd_update() {
   echo "==> uv sync"; uv sync --frozen --no-dev
   echo "==> rebuild web"; "$PROJECT_DIR/install.sh" --web-only
   echo "==> migrate"; uv run alembic upgrade head
-  echo "==> restart"; cmd_restart
+  echo "==> restart"
+  if cmd_restart; then
+    echo "==> update complete — backend is running the new build"
+  else
+    echo "==> update INCOMPLETE — code/web/migrations are updated, but the"
+    echo "    backend restart above did not succeed. The old build is still"
+    echo "    serving requests until you run the manual command shown above."
+    exit 1
+  fi
 }
 
 case "${1:-}" in
