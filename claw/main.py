@@ -23,6 +23,7 @@ from claw.core.bus import EventBus
 from claw.core.connectors import ConnectorManager
 from claw.core.heartbeat import HeartbeatService
 from claw.core.memory import MemoryService
+from claw.core.limits import RateLimiter
 from claw.core.runtime import AgentRuntime
 from claw.core.scheduler import SchedulerService
 from claw.security.policy import (
@@ -241,6 +242,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         telegram_config=telegram_config,
         telegram_mgr=telegram_mgr,
         smtp_config=smtp_config,
+        image_rate_limiter=RateLimiter(settings.image.per_minute),
         guardrails=guardrails,
         llm_config=llm_config,
         audit=audit,

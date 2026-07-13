@@ -15,6 +15,7 @@ from claw.api.deps import AppState
 
 _PREFIX_RE = r"^[a-z0-9_]*$"
 _COST_RE = r"^(low|medium|high|very_high)$"
+_KIND_RE = r"^(chat|image)$"
 
 
 class ProviderBody(BaseModel):
@@ -41,6 +42,9 @@ class ModelBody(BaseModel):
     enabled: bool = True
     cost: str = Field(default="medium", pattern=_COST_RE)
     description: str = ""
+    # "chat" = agent chat picker; "image" = text-to-image only (kept out of
+    # the chat picker, offered via the separate image-generation path).
+    kind: str = Field(default="chat", pattern=_KIND_RE)
 
 
 class ModelPatch(BaseModel):
@@ -50,6 +54,7 @@ class ModelPatch(BaseModel):
     is_default: bool | None = None  # admin-global only; ignored on user scope
     cost: str | None = Field(default=None, pattern=_COST_RE)
     description: str | None = None
+    kind: str | None = Field(default=None, pattern=_KIND_RE)
 
 
 def provider_row(p, models: list) -> dict:
@@ -73,6 +78,7 @@ def model_row(m) -> dict:
         "is_default": m.is_default,
         "cost": m.cost or "medium",
         "description": m.description or "",
+        "kind": m.kind or "chat",
     }
 
 
@@ -121,7 +127,7 @@ async def create_model(
 ) -> dict:
     m = await state.llm_config.create_model(
         provider_id, body.model_id, body.label, body.enabled, body.cost, body.description,
-        owner_id=owner_id,
+        kind=body.kind, owner_id=owner_id,
     )
     if m is None:
         raise HTTPException(status_code=404, detail="provider not found")

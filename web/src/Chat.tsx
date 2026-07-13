@@ -13,6 +13,7 @@ import { Markdown } from "@astryxdesign/core/Markdown";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { Icon } from "@astryxdesign/core/Icon";
+import { Lightbox } from "@astryxdesign/core/Lightbox";
 import { Popover } from "@astryxdesign/core/Popover";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { Text } from "@astryxdesign/core/Text";
@@ -54,6 +55,7 @@ import { ErrorText } from "./ErrorText";
 import { ExecutionPanel } from "./ExecutionPanel";
 import {
   AgentEvent,
+  ApiError,
   AttachmentRef,
   ConnectorInfo,
   KnowledgeBase,
@@ -290,6 +292,17 @@ export function Chat({
   const [knowledge, setKnowledge] = useState<KnowledgeBase[]>([]);
   const [plusOpen, setPlusOpen] = useState(false);
   const [plusView, setPlusView] = useState<"root" | "skills" | "connectors" | "knowledge">("root");
+  // Text-to-image (composer "Create image" mode): separate from chat, a
+  // one-shot REST call. imageMode swaps the SAME composer shell into an
+  // image-prompt input rather than opening a separate floating panel.
+  const [imageModels, setImageModels] = useState<ModelOption[]>([]);
+  const [imageModel, setImageModel] = useState<string>("");
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageMode, setImageMode] = useState(false);
+  const [imageModelOpen, setImageModelOpen] = useState(false);
+  // Click-to-enlarge for artifact images (generated or agent-produced).
+  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
   const [modelOpen, setModelOpen] = useState(false);
   // Which starter-suggestion category panel is expanded (null = show the chip
   // row). Reset whenever the session changes so a stale panel doesn't linger.
@@ -311,6 +324,14 @@ export function Chat({
   // the Execution panel. Null until the agent sets one this session.
   const [plan, setPlan] = useState<WorkingPlan | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  // Mirrors the `sessionId` prop for use inside async callbacks (e.g.
+  // runGeneratedImage) — lets them tell, after an await, whether the user has
+  // since switched to a different session so they don't apply a stale
+  // result/error/busy-state to the wrong session's transcript.
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
   const fileRef = useRef<HTMLInputElement | null>(null);
   // Imperative handle for the composer's contentEditable — lets us insert a
   // styled mention chip (skill/connector/knowledge) instead of raw "@name " text.
@@ -327,6 +348,11 @@ export function Chat({
   const rawSendRef = useRef<(content: string, atts: AttachmentRef[], modelOverride?: string) => void>(
     () => {},
   );
+  // Same idea as pendingRef, for a "Create image" prompt submitted from the
+  // draft landing: held until the freshly-created session's id lands, then
+  // run by the effect below (ordered after the per-session reset effect so
+  // it never gets its optimistic bubble wiped by that reset).
+  const pendingImageRef = useRef<string | null>(null);
   // Did this mount's socket deliver turn_completed? If the parent's poll sees
   // the session finish and we DIDN'T (event missed while navigated away), we
   // refetch the persisted answer instead of losing it.
@@ -354,6 +380,12 @@ export function Chat({
     setFeedback({});
     setPlan(null); // plan is per-session; don't leak one chat's plan into another
     setSuggestionCategory(null);
+    // "Create image" mode is per-session UI state too — without this, opening
+    // it in one chat and switching to another leaves the composer stuck in
+    // image-prompt mode (and any leftover prompt text) in the new session.
+    setImageMode(false);
+    setImagePrompt("");
+    setImageBusy(false);
     sentCountRef.current = 0;
     sawCompletionRef.current = false;
     prevRunningRef.current = !!running;
@@ -368,6 +400,12 @@ export function Chat({
     // greeting doesn't flash back in during the handoff. Also keep the spinner
     // up when reopening a session the backend says is still processing.
     const handoff = pendingRef.current !== null;
+    // A pending image prompt is the same "fresh, empty session" situation,
+    // but it's a REST call with no socket turn to eventually clear `busy` —
+    // only skip the fetch (so it can't clobber the optimistic user bubble
+    // pushed by the pendingImageRef effect below), don't fold it into the
+    // handoff spinner.
+    const skipMessageFetch = handoff || pendingImageRef.current !== null;
     setBusy(handoff || running === true);
     let cancelled = false;
     let socket: WebSocket | null = null;
@@ -562,7 +600,7 @@ export function Chat({
       socket.onclose = onClose;
     };
 
-    if (handoff) {
+    if (skipMessageFetch) {
       // Fresh draft session — connect immediately to flush the pending message.
       openSocket();
     } else {
@@ -684,6 +722,14 @@ export function Chat({
       .listKnowledge()
       .then((k) => setKnowledge(k.filter((x) => x.docs > 0)))
       .catch(() => setKnowledge([]));
+    // Text-to-image models for the "+ Image" picker.
+    api
+      .listImageModels()
+      .then((r) => {
+        setImageModels(r.models);
+        setImageModel((cur) => cur || r.models[0]?.model_id || "");
+      })
+      .catch(() => setImageModels([]));
   }, [sessionId, running]);
 
   // Insert an "@mention" for a skill/connector at the caret, then refocus so the
@@ -939,6 +985,99 @@ export function Chat({
     [sessionId, onRequireSession],
   );
 
+  // Text-to-image generation: a one-shot REST call (no socket, no agent loop).
+  // Shows the prompt right away (like a normal sent message), then the
+  // "Generating image…" bubble covers the wait until the artifact lands.
+  const runGeneratedImage = useCallback(
+    async (sid: string, prompt: string) => {
+      let userIndex = -1;
+      setItems((prev) => {
+        userIndex = prev.length;
+        return [...prev, { kind: "message", role: "user", content: prompt }];
+      });
+      // The REST call has no socket/turn to tie it to a session — if the user
+      // switches to a different chat before it resolves, `sid` no longer
+      // matches what's on screen. Check before touching `items`/`error`/
+      // `imageBusy` so a stale result/failure never lands in the wrong
+      // session's transcript (those setters aren't otherwise session-scoped).
+      const stillOnThisSession = () => sessionIdRef.current === sid;
+      try {
+        const res = await api.generateImage(sid, imageModel, prompt);
+        if (!stillOnThisSession()) return;
+        // The backend may have masked the prompt (guardrail/PII policy) —
+        // `res.prompt` is what's actually persisted, so reconcile the
+        // optimistic bubble (and the session auto-title) to match instead of
+        // showing/storing the raw text the policy was meant to strip. Titling
+        // only on success also avoids naming a session after a prompt that
+        // never produced anything.
+        if (sentCountRef.current === 0) onFirstMessage?.(res.prompt);
+        setItems((prev) => {
+          const next = [...prev];
+          const userItem = next[userIndex];
+          if (userItem?.kind === "message" && userItem.role === "user") {
+            next[userIndex] = { ...userItem, content: res.prompt };
+          }
+          next.push({ kind: "message", role: "assistant", content: "", artifacts: [res.path] });
+          return next;
+        });
+        sentCountRef.current += 1;
+      } catch (e) {
+        if (!stillOnThisSession()) return;
+        // Nothing was persisted server-side on failure — drop the optimistic
+        // bubble instead of leaving a prompt with no response in the
+        // transcript (it would vanish on reload anyway).
+        setItems((prev) => {
+          const userItem = prev[userIndex];
+          if (userItem?.kind === "message" && userItem.role === "user" && userItem.content === prompt) {
+            return [...prev.slice(0, userIndex), ...prev.slice(userIndex + 1)];
+          }
+          return prev;
+        });
+        setError(`Image generation failed: ${e instanceof ApiError ? e.message : String(e)}`);
+      } finally {
+        if (stillOnThisSession()) setImageBusy(false);
+      }
+    },
+    [imageModel, onFirstMessage],
+  );
+
+  const generateImage = useCallback(
+    async (value: string) => {
+      const prompt = value.trim();
+      if (!prompt || !imageModel || imageBusy) return;
+      setImageBusy(true);
+      setError("");
+      if (sessionId) {
+        void runGeneratedImage(sessionId, prompt);
+        return;
+      }
+      // Draft landing: materialize a session first (like attachments). The
+      // per-session reset effect (keyed on sessionId) clears `items` the
+      // moment the id swaps in from null — pushing the prompt bubble here
+      // would race that reset. Instead queue it and let the effect below
+      // (ordered after the reset effect) run it once sessionId settles,
+      // mirroring how the chat-text path defers via pendingRef + socket onopen.
+      pendingImageRef.current = prompt;
+      onRequireSession?.().catch((e) => {
+        pendingImageRef.current = null;
+        setImageBusy(false);
+        setError(`Image generation failed: ${e instanceof ApiError ? e.message : String(e)}`);
+      });
+    },
+    [imageModel, imageBusy, sessionId, onRequireSession, runGeneratedImage],
+  );
+
+  // Runs after the per-session reset effect (defined earlier, so it commits
+  // first within the same pass) — picks up a prompt queued by generateImage
+  // while materializing a draft session.
+  useEffect(() => {
+    if (sessionId && pendingImageRef.current) {
+      const prompt = pendingImageRef.current;
+      pendingImageRef.current = null;
+      void runGeneratedImage(sessionId, prompt);
+    }
+  }, [sessionId, runGeneratedImage]);
+
   const rate = useCallback(
     (index: number, content: string, signal: "up" | "down") => {
       setFeedback((prev) => ({ ...prev, [index]: signal }));
@@ -1030,7 +1169,7 @@ export function Chat({
     [sessionId, items, sharing, toast],
   );
 
-  const isEmpty = items.length === 0 && !streaming && !busy;
+  const isEmpty = items.length === 0 && !streaming && !busy && !imageBusy;
 
   // Flatten every tool-call group (in order) into the execution timeline.
   const execSteps = items.flatMap((it) => (it.kind === "tools" ? it.calls : []));
@@ -1094,11 +1233,34 @@ export function Chat({
               onChange={(e) => void onPickFiles(e.target.files)}
             />
             <ChatComposer
-              onSubmit={send}
-              placeholder={isEmpty ? "How can Claw help you today?" : "Message Claw…"}
-              isDisabled={false}
+              onSubmit={imageMode ? (value) => void generateImage(value) : send}
+              value={imageMode ? imagePrompt : undefined}
+              onChange={imageMode ? setImagePrompt : undefined}
+              placeholder={
+                imageMode
+                  ? "Describe the image to generate…"
+                  : isEmpty
+                    ? "How can Claw help you today?"
+                    : "Message Claw…"
+              }
+              isDisabled={imageMode && imageBusy}
               input={<ChatComposerInput handleRef={composerHandleRef} />}
               footerActions={
+                imageMode ? (
+                  <div className="claw-composer-actions">
+                    <button
+                      type="button"
+                      className="claw-image-mode-back"
+                      onClick={() => {
+                        setImageMode(false);
+                        setImagePrompt("");
+                      }}
+                    >
+                      <Icon icon={ArrowLeft} size="sm" color="secondary" />
+                      <span className="claw-image-mode-back-label">Back to chat</span>
+                    </button>
+                  </div>
+                ) : (
                 <div className="claw-composer-actions">
                   <Popover
                     label="Add"
@@ -1153,6 +1315,24 @@ export function Chat({
                               <Icon icon={Library} size="sm" color="secondary" />
                               <span>Knowledge</span>
                               <Icon icon={ChevronRight} size="sm" color="secondary" />
+                            </button>
+                            <button
+                              type="button"
+                              className="claw-plus-item"
+                              onClick={() => {
+                                if (imageModels.length === 0) {
+                                  toast({
+                                    body: "No image models available. Ask an admin to add one in the Control Plane.",
+                                    type: "info",
+                                  });
+                                  return;
+                                }
+                                setImageMode(true);
+                                setPlusOpen(false);
+                              }}
+                            >
+                              <Icon icon={ImageIcon} size="sm" color="secondary" />
+                              <span>Create image</span>
                             </button>
                           </>
                         )}
@@ -1360,9 +1540,67 @@ export function Chat({
                     </button>
                   )}
                 </div>
+                )
               }
               sendActions={
-                models.length > 0 ? (
+                imageMode ? (
+                  imageModels.length > 1 ? (
+                    <Popover
+                      label="Select image model"
+                      placement="above"
+                      alignment="end"
+                      isOpen={imageModelOpen}
+                      onOpenChange={setImageModelOpen}
+                      width={360}
+                      hasAutoFocus={false}
+                      content={
+                        <div className="claw-model-menu">
+                          <div className="claw-model-menu-title">
+                            <Text size="sm" weight="semibold" color="secondary">
+                              Select image model
+                            </Text>
+                          </div>
+                          <div className="claw-plus-divider" />
+                          {imageModels.map((m) => (
+                            <button
+                              key={m.model_id}
+                              type="button"
+                              className="claw-model-option"
+                              onClick={() => {
+                                setImageModel(m.model_id);
+                                setImageModelOpen(false);
+                              }}
+                            >
+                              <div className="claw-model-option-main">
+                                <div className="claw-model-option-head">
+                                  <span className="claw-model-option-name">{m.label}</span>
+                                  {m.scope === "private" && (
+                                    <span className="claw-model-option-private">Private</span>
+                                  )}
+                                  <span className={`claw-cost claw-cost-${m.cost}`}>{COST_LABEL[m.cost]}</span>
+                                </div>
+                                {m.description && (
+                                  <span className="claw-model-option-desc">{m.description}</span>
+                                )}
+                              </div>
+                              {m.model_id === imageModel && (
+                                <Icon icon={Check} size="sm" color="secondary" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      }
+                    >
+                      <button type="button" className="claw-model-trigger">
+                        <Icon icon={ImageIcon} size="sm" color="secondary" />
+                        <span className="claw-model-trigger-label">
+                          {imageModels.find((m) => m.model_id === imageModel)?.label ?? "Model"}
+                        </span>
+                        <Icon icon={ChevronDown} size="xsm" color="secondary" />
+                      </button>
+                    </Popover>
+                  ) : undefined
+                ) : models.length > 0 ? (
                   <Popover
                     label="Select model"
                     placement="above"
@@ -1560,6 +1798,7 @@ export function Chat({
                             // Show images (e.g. a generated chart) inline; keep
                             // everything else as an openable chip.
                             if (/\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(p)) {
+                              const name = p.split("/").pop() ?? p;
                               return (
                                 <a
                                   key={p}
@@ -1567,9 +1806,20 @@ export function Chat({
                                   href={href}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  title={`Open ${p}`}
+                                  title={`View ${p}`}
+                                  onClick={(e) => {
+                                    // Plain left-click opens the in-app lightbox instead of
+                                    // navigating; cmd/ctrl/shift/middle-click fall through to
+                                    // the native anchor behavior (new tab), restoring the
+                                    // open-in-new-tab / save-as affordance a <button> lost.
+                                    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+                                      return;
+                                    }
+                                    e.preventDefault();
+                                    setLightbox({ src: href, alt: name });
+                                  }}
                                 >
-                                  <img src={href} alt={p.split("/").pop()} loading="lazy" />
+                                  <img src={href} alt={name} loading="lazy" />
                                 </a>
                               );
                             }
@@ -1670,6 +1920,15 @@ export function Chat({
                 </ChatMessageBubble>
               </ChatMessage>
             )}
+            {imageBusy && (
+              <ChatMessage sender="assistant">
+                <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
+                  <span className="claw-thinking">
+                    <Spinner size="sm" shade="subtle" /> Generating image…
+                  </span>
+                </ChatMessageBubble>
+              </ChatMessage>
+            )}
           </ChatMessageList>
         </div>
         )}
@@ -1678,6 +1937,14 @@ export function Chat({
       {!isEmpty && execOpen && (
         <ExecutionPanel steps={execSteps} plan={plan} running={busy} onClose={() => toggleExec(false)} />
       )}
+      <Lightbox
+        isOpen={lightbox !== null}
+        onOpenChange={(open) => {
+          if (!open) setLightbox(null);
+        }}
+        media={lightbox ?? { src: "", alt: "" }}
+        hasZoom
+      />
     </div>
   );
 }

@@ -323,6 +323,11 @@ class LLMModel(Base):
     provider_id: Mapped[str] = mapped_column(ForeignKey("llm_providers.id"), index=True)
     model_id: Mapped[str] = mapped_column(String(128))  # litellm id, e.g. anthropic/claude-sonnet-5
     label: Mapped[str] = mapped_column(String(128), default="")
+    # "chat" = usable in the agent chat picker (sent tool definitions);
+    # "image" = text-to-image only, used by the separate /images generation
+    # path, never offered as a chat model (an image model can't do tool
+    # calling, so picking it as a chat model would always fail).
+    kind: Mapped[str] = mapped_column(String(16), default="chat")  # chat|image
     # Shown in the chat model picker: cost tier + a one-line description.
     cost: Mapped[str] = mapped_column(String(16), default="medium")  # low|medium|high|very_high
     description: Mapped[str] = mapped_column(Text, default="")

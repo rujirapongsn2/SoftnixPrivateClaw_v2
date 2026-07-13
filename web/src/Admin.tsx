@@ -63,6 +63,7 @@ import {
   LLMModelCfg,
   LLMProviderCfg,
   ModelCost,
+  ModelKind,
   ModelUsagePoint,
   OAuthAppsInfo,
   SessionsByUserPoint,
@@ -903,6 +904,27 @@ function CostSegmented({ value, onChange }: { value: ModelCost; onChange: (c: Mo
   );
 }
 
+// Chat vs image classification — image models are text-to-image only, kept out
+// of the chat picker (they can't do tool calling) and offered in the composer's
+// separate "+ Image" picker instead.
+function KindSegmented({ value, onChange }: { value: ModelKind; onChange: (k: ModelKind) => void }) {
+  return (
+    <div className="claw-segmented" role="group" aria-label="Model type">
+      {(["chat", "image"] as ModelKind[]).map((k) => (
+        <button
+          key={k}
+          type="button"
+          className={value === k ? "is-active" : ""}
+          aria-pressed={value === k}
+          onClick={() => onChange(k)}
+        >
+          {k === "chat" ? "Chat" : "Image"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // Ownership scope: "admin" drives the global Control Plane (all users see the
 // models); "user" drives a person's own private "bring your own key" providers,
 // visible only to them. Both mount this same component with a different `llmApi`
@@ -1256,17 +1278,21 @@ function ProviderCard({
           )}
           <span className="claw-models-grid-head" />
           <span className="claw-models-grid-head" />
-          {provider.models.map((m) => (
-            <ModelRow
-              key={m.id}
-              model={m}
-              modelPrefix={provider.model_prefix}
-              reload={reload}
-              guard={guard}
-              llmApi={llmApi}
-              scope={scope}
-            />
-          ))}
+          {/* Chat models first, then image models — keeps the two kinds
+              visually grouped within the provider. */}
+          {[...provider.models]
+            .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "image" ? 1 : -1))
+            .map((m) => (
+              <ModelRow
+                key={m.id}
+                model={m}
+                modelPrefix={provider.model_prefix}
+                reload={reload}
+                guard={guard}
+                llmApi={llmApi}
+                scope={scope}
+              />
+            ))}
         </div>
       )}
 
@@ -1321,6 +1347,7 @@ function ModelRow({
   const [label, setLabel] = useState(model.label);
   const [cost, setCost] = useState<ModelCost>(model.cost);
   const [description, setDescription] = useState(model.description);
+  const [kind, setKind] = useState<ModelKind>(model.kind);
   const toast = useToast();
 
   if (editing) {
@@ -1354,16 +1381,24 @@ function ModelRow({
           )}
           <TextInput
             label="Description"
-            description="Shown in the chat model picker"
+            description="Shown in the model picker"
             value={description}
             onChange={setDescription}
           />
           <div className="claw-row">
             <Text size="sm" color="secondary">
-              Cost tier
+              Type
             </Text>
-            <CostSegmented value={cost} onChange={setCost} />
+            <KindSegmented value={kind} onChange={setKind} />
           </div>
+          {kind === "chat" && (
+            <div className="claw-row">
+              <Text size="sm" color="secondary">
+                Cost tier
+              </Text>
+              <CostSegmented value={cost} onChange={setCost} />
+            </div>
+          )}
           <div className="claw-row">
             <Button
               label="Save changes"
@@ -1378,6 +1413,7 @@ function ModelRow({
                     label: label.trim(),
                     cost,
                     description: description.trim(),
+                    kind,
                   });
                   setEditing(false);
                   toast({ body: "Model saved", type: "info", autoHideDuration: 2500 });
@@ -1394,6 +1430,7 @@ function ModelRow({
                 setLabel(model.label);
                 setCost(model.cost);
                 setDescription(model.description);
+                setKind(model.kind);
                 setEditing(false);
               }}
             />
@@ -1411,7 +1448,11 @@ function ModelRow({
           <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default" />
         )}
       </div>
-      <span className={`claw-cost claw-cost-${model.cost}`}>{COST_LABEL[model.cost]}</span>
+      {model.kind === "image" ? (
+        <Badge variant="neutral" label="Image" />
+      ) : (
+        <span className={`claw-cost claw-cost-${model.cost}`}>{COST_LABEL[model.cost]}</span>
+      )}
       <Text size="sm" color="secondary" className="claw-model-id">
         {stripKnownPrefix(modelPrefix, model.model_id)}
       </Text>
@@ -1438,7 +1479,8 @@ function ModelRow({
           label={model.is_default ? "Default" : "Set default"}
           size="sm"
           variant={model.is_default ? "secondary" : "ghost"}
-          isDisabled={model.is_default || !model.enabled}
+          // An image model can never be the chat default.
+          isDisabled={model.is_default || !model.enabled || model.kind === "image"}
           clickAction={() =>
             guard(async () => {
               await llmApi.updateModel(model.id, { is_default: true });
@@ -1489,6 +1531,7 @@ function AddModelForm({
   const [label, setLabel] = useState("");
   const [cost, setCost] = useState<ModelCost>("medium");
   const [description, setDescription] = useState("");
+  const [kind, setKind] = useState<ModelKind>("chat");
   const toast = useToast();
 
   const hasPrefix = Boolean(modelPrefix);
@@ -1521,16 +1564,24 @@ function AddModelForm({
         )}
         <TextInput
           label="Description"
-          description="Shown in the chat model picker"
+          description="Shown in the model picker"
           value={description}
           onChange={setDescription}
         />
         <div className="claw-row">
           <Text size="sm" color="secondary">
-            Cost tier
+            Type
           </Text>
-          <CostSegmented value={cost} onChange={setCost} />
+          <KindSegmented value={kind} onChange={setKind} />
         </div>
+        {kind === "chat" && (
+          <div className="claw-row">
+            <Text size="sm" color="secondary">
+              Cost tier
+            </Text>
+            <CostSegmented value={cost} onChange={setCost} />
+          </div>
+        )}
         <div className="claw-row">
           <Button
             label="Add model"
@@ -1545,6 +1596,7 @@ function AddModelForm({
                   label: label.trim(),
                   cost,
                   description: description.trim(),
+                  kind,
                 });
                 toast({ body: "Model added", type: "info", autoHideDuration: 2500 });
                 onClose();

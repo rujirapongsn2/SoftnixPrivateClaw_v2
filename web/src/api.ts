@@ -349,6 +349,8 @@ export interface AdminOverview {
 
 export type ModelCost = "low" | "medium" | "high" | "very_high";
 
+export type ModelKind = "chat" | "image";
+
 export interface LLMModelCfg {
   id: string;
   model_id: string;
@@ -357,6 +359,8 @@ export interface LLMModelCfg {
   is_default: boolean;
   cost: ModelCost;
   description: string;
+  // "chat" = agent chat picker; "image" = text-to-image only.
+  kind: ModelKind;
 }
 
 export interface LLMProviderCfg {
@@ -484,6 +488,7 @@ export interface LlmModelCreate {
   enabled?: boolean;
   cost?: ModelCost;
   description?: string;
+  kind?: ModelKind;
 }
 export interface LlmModelPatch {
   model_id?: string;
@@ -492,6 +497,7 @@ export interface LlmModelPatch {
   is_default?: boolean;
   cost?: ModelCost;
   description?: string;
+  kind?: ModelKind;
 }
 export interface LlmApi {
   list: () => Promise<{ providers: LLMProviderCfg[] }>;
@@ -887,6 +893,15 @@ export const api = {
   },
 
   listModels: () => request<{ models: ModelOption[]; default: string }>("/api/models"),
+
+  // Text-to-image: the composer's "+ Image" picker + one-shot generation
+  // (separate from the chat WebSocket / agent loop).
+  listImageModels: () => request<{ models: ModelOption[] }>("/api/image-models"),
+  generateImage: (sessionId: string, model: string, prompt: string, size?: string) =>
+    request<{ path: string; prompt: string }>(`/api/sessions/${sessionId}/images`, {
+      method: "POST",
+      body: JSON.stringify({ model, prompt, size }),
+    }),
 
   getHeartbeat: () =>
     request<{ interval_minutes: number; enabled: boolean; next_run_at: string | null }>("/api/heartbeat"),

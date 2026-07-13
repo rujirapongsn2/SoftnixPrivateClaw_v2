@@ -1564,6 +1564,7 @@ class LLMConfigStore:
         enabled: bool = True,
         cost: str = "medium",
         description: str = "",
+        kind: str = "chat",
         owner_id: str | None = None,
     ) -> LLMModel | None:
         async with self.factory() as db:
@@ -1578,6 +1579,7 @@ class LLMConfigStore:
                 enabled=enabled,
                 cost=cost or "medium",
                 description=description or "",
+                kind=kind or "chat",
             )
             db.add(row)
             await db.commit()
@@ -1590,12 +1592,18 @@ class LLMConfigStore:
             row = await db.get(LLMModel, model_id_pk)
             if row is None or not await self._owns_provider(db, row.provider_id, owner_id):
                 return None
-            for key in ("model_id", "label", "enabled", "cost", "description"):
+            for key in ("model_id", "label", "enabled", "cost", "description", "kind"):
                 if key in fields and fields[key] is not None:
                     setattr(row, key, fields[key])
+            # Only a chat model can be the global default. Reclassifying the
+            # current default to "image" (or any non-chat kind) must clear its
+            # is_default — otherwise default_model() (which filters kind=="chat")
+            # would find no default and the deployment loses its chat default.
+            if row.kind != "chat":
+                row.is_default = False
             # The auto-selected default is an admin-global concept only; private
             # models are never the global default (owner_id=None gates it).
-            if owner_id is None and fields.get("is_default"):
+            elif owner_id is None and fields.get("is_default"):
                 # Exactly one default across all global models.
                 await db.execute(
                     LLMModel.__table__.update()
@@ -1622,10 +1630,15 @@ class LLMConfigStore:
             return True
 
     # -- resolution (used by chat/runtime) ----------------------------------
-    async def enabled_models(self, user_id: str | None = None) -> list[dict[str, Any]]:
-        """Enabled models for the chat picker: admin-global models merged with the
-        caller's own private (BYOK) models. Each carries a ``scope`` marker
-        ("global" | "private") so the UI can badge the user's own."""
+    async def enabled_models(
+        self, user_id: str | None = None, kind: str = "chat"
+    ) -> list[dict[str, Any]]:
+        """Enabled models of the given kind ("chat" for the agent picker,
+        "image" for the text-to-image picker): admin-global models merged with
+        the caller's own private (BYOK) models. Each carries a ``scope`` marker
+        ("global" | "private") so the UI can badge the user's own. Chat and
+        image models are intentionally separate lists — an image model can't
+        do tool calling, so it must never appear as a chat option."""
         async with self.factory() as db:
             rows = (
                 await db.execute(
@@ -1634,6 +1647,7 @@ class LLMConfigStore:
                     .where(
                         LLMModel.enabled.is_(True),
                         LLMProvider.enabled.is_(True),
+                        LLMModel.kind == kind,
                         or_(
                             LLMProvider.owner_id.is_(None),
                             LLMProvider.owner_id == user_id,
@@ -1665,6 +1679,7 @@ class LLMConfigStore:
                         LLMModel.enabled.is_(True),
                         LLMProvider.enabled.is_(True),
                         LLMModel.is_default.is_(True),
+                        LLMModel.kind == "chat",
                     )
                     .limit(1)
                 )
@@ -1677,7 +1692,9 @@ class LLMConfigStore:
         Scope: admin-global providers plus the caller's own private ones. If the
         same model id exists in both scopes, the user's own wins (ordered first) —
         so a user's key is used for their model and one user can never resolve
-        another user's credentials."""
+        another user's credentials. Only matches kind="chat" — an image-only
+        model must never be selectable as a chat turn's model (it can't do tool
+        calling), mirroring resolve_image()'s reverse guard."""
         async with self.factory() as db:
             row = (
                 await db.execute(
@@ -1685,6 +1702,7 @@ class LLMConfigStore:
                     .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
                     .where(
                         LLMModel.model_id == model_id,
+                        LLMModel.kind == "chat",
                         LLMModel.enabled.is_(True),
                         LLMProvider.enabled.is_(True),
                         or_(
@@ -1707,6 +1725,42 @@ class LLMConfigStore:
             "model_id": m.model_id,
             "api_key": self._clean_key(self._dec(p.api_key)),
             "api_base": p.api_base,
+        }
+
+    async def resolve_image(self, model_id: str, user_id: str | None = None) -> dict[str, str] | None:
+        """Like resolve(), but ONLY matches models classified kind="image", and
+        also returns the provider's model_prefix so the image path can pick its
+        generation strategy (openai/azure -> /images endpoint; else -> chat
+        multimodal). Same owner-scoping and own-provider-wins tiebreak as
+        resolve(), so this can never reach another user's credentials, and a
+        chat model id can never be driven through the image path."""
+        async with self.factory() as db:
+            row = (
+                await db.execute(
+                    select(LLMModel, LLMProvider)
+                    .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+                    .where(
+                        LLMModel.model_id == model_id,
+                        LLMModel.kind == "image",
+                        LLMModel.enabled.is_(True),
+                        LLMProvider.enabled.is_(True),
+                        or_(
+                            LLMProvider.owner_id.is_(None),
+                            LLMProvider.owner_id == user_id,
+                        ),
+                    )
+                    .order_by(LLMProvider.owner_id.is_(None))
+                    .limit(1)
+                )
+            ).first()
+        if row is None:
+            return None
+        m, p = row
+        return {
+            "model_id": m.model_id,
+            "api_key": self._clean_key(self._dec(p.api_key)),
+            "api_base": p.api_base or "",
+            "model_prefix": p.model_prefix or "",
         }
 
 

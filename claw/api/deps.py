@@ -8,6 +8,7 @@ from claw.browser.broker import BrowserBrokerStore
 from claw.config import Settings
 from claw.core.bus import EventBus
 from claw.core.connectors import ConnectorManager
+from claw.core.limits import RateLimiter
 from claw.core.runtime import AgentRuntime
 from claw.core.scheduler import SchedulerService
 from claw.db.models import User
@@ -64,6 +65,9 @@ class AppState:
     telegram_config: TelegramConfigStore
     telegram_mgr: "TelegramManager"
     smtp_config: SmtpConfigStore
+    # Per-user throttle for the /images endpoint (its own limiter, separate
+    # from the chat turn limiter which lives on the runtime).
+    image_rate_limiter: RateLimiter = None  # type: ignore[assignment]
     telegram: "TelegramChannel | None" = None
 
 

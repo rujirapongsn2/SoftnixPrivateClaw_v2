@@ -94,6 +94,33 @@ class KnowledgeSettings(BaseModel):
     ocr_timeout_seconds: int = 600
 
 
+class ImageSettings(BaseModel):
+    """Text-to-image generation (the composer's "+ Image" action). A separate
+    request/response path from the agent loop — see claw/api/routes.py's
+    /images endpoint and LiteLLMProvider.generate_image."""
+
+    # Hard cap on one image-generation call (some models are slow).
+    timeout_seconds: int = 120
+    # Passed to the /images endpoint (DALL·E-style) providers; ignored by
+    # chat-multimodal image models that don't accept a size param.
+    default_size: str = "1024x1024"
+    # Reject absurdly long prompts before spending a call.
+    max_prompt_chars: int = 4000
+    # Per-user generations per minute (0 = unlimited). Mirrors the chat path's
+    # turns_per_minute — each call hits a paid provider, so it needs a throttle.
+    per_minute: int = 10
+    # Reject a generated image larger than this before writing it to disk
+    # (a misbehaving/compromised provider or BYOK api_base could return a huge
+    # payload). Matches the attachment upload cap.
+    max_bytes: int = 20_000_000
+    # Cap on how many generated images a single user's workspace keeps —
+    # unlike attachments (user-initiated, self-limiting), every successful
+    # /images call writes a new file with nothing to ever delete it. Oldest
+    # files beyond this count are pruned after each generation so the
+    # directory can't grow unbounded.
+    max_stored_per_user: int = 200
+
+
 class ConnectorSettings(BaseModel):
     """MCP connector connect/tool-call timeouts. A single misbehaving remote
     MCP server (e.g. one that hangs instead of raising, after sending a
@@ -190,6 +217,7 @@ class Settings(BaseSettings):
     scheduler: SchedulerSettings = SchedulerSettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()
     connectors: ConnectorSettings = ConnectorSettings()
+    image: ImageSettings = ImageSettings()
 
     @model_validator(mode="after")
     def _default_web_base_url_to_public(self) -> "Settings":

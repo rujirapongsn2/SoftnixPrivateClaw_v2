@@ -1,5 +1,6 @@
 """Shared fixtures: fake streaming provider and sqlite-backed stores."""
 
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -8,6 +9,20 @@ import pytest
 from claw.db.engine import create_engine_and_factory, init_db
 from claw.db.stores import AuditStore, MemoryStore, MessageStore, SessionStore, UserStore
 from claw.providers.base import ChatResult, LLMProvider, ProviderEvent, TextDelta
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch):
+    """Strip ambient CLAW_*/QROQ_* before every test so the developer's real
+    .env can never leak into a test's Settings(). Tests always pass their
+    config explicitly (build_api_app / _settings(_env_file=None)); without
+    this, importing litellm anywhere in the run calls load_dotenv() and
+    injects .env into os.environ — which BaseSettings reads regardless of
+    _env_file, making later tests (e.g. OIDC provider-enablement) depend on
+    test ordering. monkeypatch restores the real environment afterwards."""
+    for key in list(os.environ):
+        if key.startswith("CLAW_") or key.startswith("QROQ_"):
+            monkeypatch.delenv(key, raising=False)
 
 
 class FakeProvider(LLMProvider):

@@ -51,6 +51,39 @@ def _short_id() -> str:
     return "".join(secrets.choice(_ALNUM) for _ in range(9))
 
 
+_MIME_EXT = {"jpeg": "jpg", "jpg": "jpg", "png": "png", "webp": "webp", "gif": "gif"}
+
+
+def _ext_from_mime(header: str) -> str:
+    """'data:image/jpeg;base64' -> 'jpg'. Defaults to png."""
+    m = re.search(r"image/([a-z0-9.+-]+)", header.lower())
+    return _MIME_EXT.get(m.group(1), "png") if m else "png"
+
+
+def _ext_from_url(url: str) -> str:
+    """Guess an extension from a URL path. Clamped to the same known-image
+    allowlist as _ext_from_mime — the URL is provider-controlled (including a
+    user's own BYOK api_base), so an unrecognized extension (.svg, .htm) must
+    never pass through unchanged: the workspace file-serving route renders
+    files inline with no Content-Disposition, so echoing an arbitrary
+    extension would let a malicious/compromised provider land a stored-XSS
+    payload. Defaults to png like _ext_from_mime."""
+    m = re.search(r"\.([a-z0-9]{3,4})(?:[?#]|$)", url.lower())
+    return _MIME_EXT.get(m.group(1), "png") if m else "png"
+
+
+def _image_part_url(img: Any) -> str:
+    """Pull the url out of an MCP-style image content part, tolerating both
+    dict and pydantic-object shapes (litellm's message.images entries)."""
+    if isinstance(img, dict):
+        iu = img.get("image_url") or {}
+    else:
+        iu = getattr(img, "image_url", None) or {}
+    if isinstance(iu, dict):
+        return iu.get("url") or ""
+    return getattr(iu, "url", "") or ""
+
+
 def _tool_names(tools: list[dict[str, Any]] | None) -> set[str]:
     names: set[str] = set()
     for t in tools or []:
@@ -343,6 +376,124 @@ class LiteLLMProvider(LLMProvider):
             finish_reason=finish_reason,
             usage=usage,
         )
+
+    # -- image generation (separate path, never touches the agent loop) -----
+
+    async def generate_image(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        api_key: str | None = None,
+        api_base: str | None = None,
+        size: str | None = None,
+        mode: str = "chat",
+        timeout: float = 120.0,
+    ) -> list[tuple[bytes, str]]:
+        """Generate image(s) from a text prompt. Returns [(bytes, ext), ...].
+
+        Two paths, chosen by the caller via ``mode`` (derived from the
+        provider's model_prefix):
+          - "images_endpoint": OpenAI/Azure DALL·E-style /images endpoint
+            (litellm.aimage_generation), returning b64_json (or a URL we fetch).
+          - "chat": OpenRouter/Gemini image models return the image as an image
+            content part on the chat message
+            (``message.images[*].image_url.url`` data URL) — confirmed by the
+            verification spike. NEVER sends tool definitions (sending tools is
+            exactly what makes these models 404 as chat models).
+
+        Runs entirely outside the agent loop: no tools, no streaming, no
+        EventBus. Raises ProviderError on any failure or if no image comes back.
+        """
+        import base64
+
+        effective_key = api_key or self.api_key
+        effective_base = api_base or self.api_base
+        try:
+            if mode == "images_endpoint":
+                results = await self._image_via_images_endpoint(
+                    prompt, model, effective_key, effective_base, size, timeout
+                )
+            else:
+                results = await self._image_via_chat(
+                    prompt, model, effective_key, effective_base, timeout, base64
+                )
+        except ProviderError:
+            raise
+        except Exception as exc:
+            logger.warning("Image generation failed for {}: {}", model, exc)
+            raise ProviderError(str(exc)) from exc
+        if not results:
+            raise ProviderError("the model returned no image")
+        return results
+
+    async def _image_via_images_endpoint(
+        self, prompt, model, key, base, size, timeout
+    ) -> list[tuple[bytes, str]]:
+        import base64
+
+        from litellm import aimage_generation
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "response_format": "b64_json",
+            "timeout": timeout,
+        }
+        if size:
+            kwargs["size"] = size
+        if key:
+            kwargs["api_key"] = key
+        if base:
+            kwargs["api_base"] = base
+        resp = await aimage_generation(**kwargs)
+        out: list[tuple[bytes, str]] = []
+        for item in getattr(resp, "data", None) or []:
+            b64 = getattr(item, "b64_json", None) or (item.get("b64_json") if isinstance(item, dict) else None)
+            url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+            if b64:
+                out.append((base64.b64decode(b64), "png"))
+            elif url:
+                out.append((await self._fetch_bytes(url, timeout), _ext_from_url(url)))
+        return out
+
+    async def _image_via_chat(self, prompt, model, key, base, timeout, base64) -> list[tuple[bytes, str]]:
+        from litellm import acompletion
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "timeout": timeout,
+        }
+        if key:
+            kwargs["api_key"] = key
+        if base:
+            kwargs["api_base"] = base
+        resp = await acompletion(**kwargs)  # deliberately NO tools / NO stream
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            return []
+        msg = choices[0].message
+        images = getattr(msg, "images", None) or []
+        out: list[tuple[bytes, str]] = []
+        for img in images:
+            url = _image_part_url(img)
+            if url.startswith("data:image"):
+                header, _, b64 = url.partition(",")
+                out.append((base64.b64decode(b64), _ext_from_mime(header)))
+            elif url.startswith("http"):
+                out.append((await self._fetch_bytes(url, timeout), _ext_from_url(url)))
+        return out
+
+    @staticmethod
+    async def _fetch_bytes(url: str, timeout: float) -> bytes:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            return resp.content
 
     def count_tokens(self, messages: list[dict[str, Any]], model: str | None = None) -> int:
         try:

@@ -364,6 +364,15 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
     return {"models": models, "default": default}
 
 
+@router.get("/image-models")
+async def list_image_models(
+    user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> dict:
+    """Enabled text-to-image models for the composer's "+ Image" picker —
+    kept separate from the chat picker (these can't do tool calling)."""
+    return {"models": await state.llm_config.enabled_models(user.id, kind="image")}
+
+
 # ---------------------------------------------------------------- my LLM providers (BYOK)
 # Users manage their own private providers/models here. These call the SAME shared
 # handlers as the admin Control Plane routes (claw/api/admin.py), scoped to the

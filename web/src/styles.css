@@ -1647,6 +1647,27 @@ html {
 .claw-plus-empty {
   padding: 8px 10px;
 }
+/* "Create image" composer mode: swaps the main input into an image-prompt
+   field (see Chat.tsx's `imageMode`) instead of opening a separate floating
+   panel. This is the footer's "exit mode" pill — styled like the model/
+   permission triggers so it reads as part of the same composer, not a
+   disconnected control. */
+.claw-image-mode-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: var(--color-surface-2, #f2f3f5);
+  color: var(--color-text-primary, #1a1a1a);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.claw-image-mode-back:hover {
+  background: var(--color-border-subtle, #e9ebee);
+}
 .claw-plus-count {
   flex: 0 0 auto;
   font-size: 12px;
@@ -2062,6 +2083,10 @@ html {
   .claw-perm-trigger-label {
     display: none;
   }
+  /* Same treatment for the "Create image" mode's exit button. */
+  .claw-image-mode-back-label {
+    display: none;
+  }
 }
 
 /* "This feature needs a bigger screen" placeholder (e.g. Admin on phone). */
@@ -2113,6 +2138,8 @@ html {
   overflow: hidden;
   background: var(--color-surface-1, #fff);
   transition: box-shadow 0.15s, border-color 0.15s;
+  padding: 0;
+  cursor: pointer;
 }
 .claw-artifact-image:hover {
   border-color: var(--color-primary, #4b6bfb);

@@ -44,6 +44,16 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._") or "file"
 
 
+def _prune_generated_images(uploads: Path, keep: int) -> None:
+    """Delete the oldest generated-*.* files beyond `keep` — every successful
+    /images call writes a new one and nothing else ever removes them, so
+    without this the directory grows without bound. Runs synchronously; call
+    via asyncio.to_thread."""
+    files = sorted(uploads.glob("generated-*.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for stale in files[keep:]:
+        stale.unlink(missing_ok=True)
+
+
 def _resolve_attachment(workspace: Path, rel: str) -> str | None:
     """Resolve a workspace-relative attachment path, rejecting escapes."""
     try:
@@ -172,7 +182,15 @@ async def list_messages(
 ) -> list:
     await _owned_session(state, user, session_id)
     messages = await state.messages.recent(session_id, limit=500)
-    return [m for m in messages if m["role"] in ("user", "assistant") and m.get("content")]
+    # Keep user/assistant messages that have text OR an artifact (e.g. a
+    # generated image with no caption) — an artifact-only assistant message
+    # would otherwise vanish on reload.
+    return [
+        m
+        for m in messages
+        if m["role"] in ("user", "assistant")
+        and (m.get("content") or (m.get("meta") or {}).get("artifacts"))
+    ]
 
 
 @router.get("/api/sessions/{session_id}/files/{path:path}")
@@ -356,6 +374,110 @@ async def upload_attachments(
             }
         )
     return result
+
+
+# DALL·E-style /images-endpoint providers; everything else (openrouter,
+# gemini, …) returns images through the chat-multimodal path instead.
+_IMAGES_ENDPOINT_PREFIXES = {"openai", "azure"}
+
+
+class GenerateImageRequest(BaseModel):
+    prompt: str
+    model: str
+    size: str | None = None
+
+
+@router.post("/api/sessions/{session_id}/images")
+async def generate_image(
+    session_id: str,
+    body: GenerateImageRequest,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    """Text-to-image generation — a one-shot request/response path entirely
+    separate from the agent loop (no tools, no streaming, no EventBus). Writes
+    the image into the user's workspace and persists it as an artifact message
+    so it renders (and reloads) like any other agent-produced image."""
+    from claw.providers.base import ProviderError
+
+    await _owned_session(state, user, session_id)
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="prompt is required")
+    if len(prompt) > state.settings.image.max_prompt_chars:
+        raise HTTPException(status_code=413, detail="prompt is too long")
+
+    # Per-user throttle before doing any (paid) work — mirrors the chat path's
+    # turn rate limit so this endpoint can't be looped to run up provider cost.
+    if state.image_rate_limiter is not None and not state.image_rate_limiter.allow(user.id):
+        raise HTTPException(status_code=429, detail="Too many image requests; please wait a moment.")
+
+    # Run the prompt through the same control policy as chat input — a blocked
+    # prompt never reaches the provider; a masked prompt is what we send AND
+    # store (raw PII is not persisted), exactly like the chat path.
+    if state.policy is not None:
+        decision = state.policy.enforce(prompt, scope="input")
+        if decision.matched_rules:
+            await state.audit.log(
+                "policy",
+                {"scope": "input", "action": decision.action, "rules": decision.matched_rules},
+                user_id=user.id,
+                session_id=session_id,
+            )
+        if decision.blocked:
+            raise HTTPException(
+                status_code=400, detail=decision.message or "Request blocked by the control policy."
+            )
+        prompt = decision.text
+
+    # resolve_image only matches kind="image" models the caller may use, and
+    # returns the provider prefix so we pick the right generation strategy.
+    resolved = await state.llm_config.resolve_image(body.model, user.id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="image model not found")
+    mode = "images_endpoint" if resolved["model_prefix"] in _IMAGES_ENDPOINT_PREFIXES else "chat"
+
+    try:
+        images = await state.runtime.provider.generate_image(
+            prompt,
+            resolved["model_id"],
+            api_key=resolved["api_key"] or None,
+            api_base=resolved["api_base"] or None,
+            size=body.size or state.settings.image.default_size,
+            mode=mode,
+            timeout=state.settings.image.timeout_seconds,
+        )
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=f"image generation failed: {exc}") from exc
+
+    data, ext = images[0]
+    # Guard against an oversized payload (a misbehaving provider or a
+    # user-controlled BYOK api_base) before writing it to disk.
+    if len(data) > state.settings.image.max_bytes:
+        raise HTTPException(status_code=502, detail="generated image exceeds the size limit")
+
+    workspace = _user_workspace(state, user.id)
+    uploads = workspace / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    name = f"generated-{uuid.uuid4().hex[:8]}.{ext}"
+    # Up to max_bytes (20MB default) — off the event loop, matching the
+    # to_thread pattern used elsewhere for large writes (knowledge ingestion,
+    # filesystem tool).
+    await asyncio.to_thread((uploads / name).write_bytes, data)
+    await asyncio.to_thread(_prune_generated_images, uploads, state.settings.image.max_stored_per_user)
+    rel = f"uploads/{name}"
+
+    # Persist as a user prompt + an artifact-only assistant message so it shows
+    # in the transcript and survives reload (see list_messages' filter). Store
+    # the possibly-masked prompt, never the raw input.
+    await state.messages.append(
+        session_id,
+        [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": "", "meta": {"artifacts": [rel], "image_model": body.model}},
+        ],
+    )
+    return {"path": rel, "prompt": prompt}
 
 
 _MAX_AUDIO_BYTES = 25_000_000  # 25 MB — Groq's per-request audio limit
