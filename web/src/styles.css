@@ -2087,6 +2087,21 @@ html {
   .claw-image-mode-back-label {
     display: none;
   }
+  /* The desktop shrink-wrap (width: fit-content, see .claw-artifact-image)
+     relies on the img's max-width being a fixed 480px; on a phone the
+     available width is already narrower than that, so just fill it like a
+     normal responsive image instead of hugging a fixed pixel size.
+     !important: this media query block sits earlier in the file than the
+     base .claw-artifact-image rules below, so at equal specificity the
+     later base rule would otherwise win even when this narrower media
+     condition matches (same class of ordering issue as .claw-msg-bubble
+     above). */
+  .claw-artifact-image {
+    width: 100% !important;
+  }
+  .claw-artifact-image img {
+    max-width: 100% !important;
+  }
 }
 
 /* "This feature needs a bigger screen" placeholder (e.g. Admin on phone). */
@@ -2106,6 +2121,10 @@ html {
   flex-wrap: wrap;
   gap: 8px;
   margin: 8px 0 2px;
+  /* Without this, a fit-content child (.claw-artifact-image) can pull this
+     row wider than ITS OWN parent's available width — the same intrinsic-
+     sizing-vs-percentage issue as that child's img, one level up. */
+  max-width: 100%;
 }
 .claw-artifact-chip {
   display: inline-flex;
@@ -2132,7 +2151,20 @@ html {
   font-weight: 500;
 }
 .claw-artifact-image {
+  /* As a flex item (parent: .claw-artifacts), a block box with no explicit
+     width stretches to the row's full available width instead of hugging
+     its image — width: fit-content makes the bordered card shrink to the
+     actual rendered image size, so no blank card background shows past the
+     image's right edge. This only works because the img's max-width below
+     is a plain pixel value: a percentage there (e.g. min(480px, 100%)) makes
+     the browser resolve this flex item's fit-content basis against the full
+     available row width instead of the image's real size, undoing the
+     shrink-wrap (the % and the fit-content basis are circular — each needs
+     the other resolved first). The phone media query below relaxes back to
+     100% width, where shrink-wrapping doesn't matter. */
   display: block;
+  width: fit-content;
+  max-width: 100%;
   border: 1px solid var(--color-border-subtle, #e4e6ea);
   border-radius: 10px;
   overflow: hidden;
@@ -2147,7 +2179,7 @@ html {
 }
 .claw-artifact-image img {
   display: block;
-  max-width: min(480px, 100%);
+  max-width: 480px;
   max-height: 360px;
   height: auto;
   object-fit: contain;
