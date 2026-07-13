@@ -47,7 +47,7 @@ from claw.db.stores import (
     UsageStore,
     UserStore,
 )
-from claw.i18n import classify_error_reason, t
+from claw.i18n import classify_error_reason, is_no_tool_support_error, t
 from claw.providers.base import LLMProvider, ProviderError
 from claw.sandbox.ephemeral import EphemeralSandbox
 from claw.security.policy import Action, PolicyEngine
@@ -634,8 +634,16 @@ class AgentRuntime:
                     permission_mode=permission_mode, confirm=_confirm,
                 )
             except ProviderError as exc:
-                reason = t(classify_error_reason(str(exc)), locale)
-                message = t("error.llm", locale, reason=reason)
+                detail = str(exc)
+                if is_no_tool_support_error(detail):
+                    # Retrying gets the identical rejection every time (the
+                    # selected model can never handle a tool-calling
+                    # request) — tell the user to switch models instead of
+                    # error.llm's generic "please try again".
+                    message = t("error.llm_no_tool_support", locale)
+                else:
+                    reason = t(classify_error_reason(detail), locale)
+                    message = t("error.llm", locale, reason=reason)
                 self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
                 # The user message is already persisted (above); never persist the
                 # error text, so a bad provider response can't poison future

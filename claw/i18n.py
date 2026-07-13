@@ -7,6 +7,16 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "en": "The AI model could not be reached ({reason}). Please try again.",
         "th": "ไม่สามารถติดต่อโมเดล AI ได้ ({reason}) กรุณาลองใหม่อีกครั้ง",
     },
+    # Distinct from error.llm: retrying is futile here (the model itself
+    # can never handle a tool-calling request), so the message tells the
+    # user to switch models instead of "please try again".
+    "error.llm_no_tool_support": {
+        "en": (
+            "This model doesn't support tool/function calling, so it can't be used as a "
+            "chat model here. Please pick a different model."
+        ),
+        "th": "โมเดลนี้ไม่รองรับการเรียกใช้เครื่องมือ (tool calling) จึงใช้เป็นโมเดลแชทในระบบนี้ไม่ได้ กรุณาเลือกโมเดลอื่น",
+    },
     "error.tool": {
         "en": "A tool failed while working on your request ({reason}).",
         "th": "เครื่องมือทำงานไม่สำเร็จระหว่างประมวลผลคำขอ ({reason})",
@@ -38,6 +48,23 @@ def t(key: str, locale: str | None = None, **params: Any) -> str:
         return text.format(**params)
     except (KeyError, IndexError):
         return text
+
+
+def is_no_tool_support_error(detail: str) -> bool:
+    """True when the provider rejected the request specifically because the
+    selected model doesn't support tool/function calling at all (e.g. a
+    pure image-generation model picked as the chat model) — retrying gets
+    the identical error every time, so this needs its own message telling
+    the user to switch models rather than error.llm's generic "try again"."""
+    lowered = detail.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "no endpoints found that support tool use",
+            "does not support tool",
+            "does not support function calling",
+        )
+    )
 
 
 def classify_error_reason(detail: str) -> str:
