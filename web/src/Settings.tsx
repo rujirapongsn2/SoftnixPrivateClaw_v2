@@ -615,6 +615,40 @@ function GuidedSetup({
   );
 }
 
+// Env keys with this prefix become HTTP headers server-side (see
+// _HEADER_ENV_PREFIX in claw/core/connectors.py) — accepting the raw
+// "Header-Name: value" shorthand here (in addition to "KEY=value") means a
+// header line pasted straight from docs/curl no longer silently becomes a
+// single malformed env key with an empty value (no "=" to split on) that
+// then fails to match the HEADER_ prefix and so is never actually sent.
+const HEADER_ENV_PREFIX = "HEADER_";
+
+function parseEnvText(text: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const eq = line.indexOf("=");
+    const colon = line.indexOf(": ");
+    if (eq !== -1 && (colon === -1 || eq < colon)) {
+      const key = line.slice(0, eq).trim();
+      if (key) env[key] = line.slice(eq + 1).trim();
+    } else if (colon !== -1) {
+      const key = line.slice(0, colon).trim();
+      if (key) env[`${HEADER_ENV_PREFIX}${key}`] = line.slice(colon + 2).trim();
+    }
+  }
+  return env;
+}
+
+function formatEnvText(env: Record<string, string> | undefined): string {
+  return Object.entries(env ?? {})
+    .map(([k, v]) =>
+      k.startsWith(HEADER_ENV_PREFIX) ? `${k.slice(HEADER_ENV_PREFIX.length)}: ${v}` : `${k}=${v}`,
+    )
+    .join("\n");
+}
+
 function ConnectorsPanel() {
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
@@ -679,22 +713,9 @@ function ConnectorsPanel() {
           />
         )}
         <TextArea
-          label="Environment variables (KEY=value, one per line)"
-          value={Object.entries(editing.env ?? {})
-            .map(([k, v]) => `${k}=${v}`)
-            .join("\n")}
-          onChange={(v) =>
-            setEditing({
-              ...editing,
-              env: Object.fromEntries(
-                v
-                  .split("\n")
-                  .map((line) => line.split(/=(.*)/s))
-                  .filter((kv) => kv[0]?.trim())
-                  .map((kv) => [kv[0].trim(), (kv[1] ?? "").trim()]),
-              ),
-            })
-          }
+          label="Environment variables (KEY=value, or Header-Name: value for an HTTP header — one per line)"
+          value={formatEnvText(editing.env)}
+          onChange={(v) => setEditing({ ...editing, env: parseEnvText(v) })}
           rows={3}
         />
         {error && <ErrorText>{error}</ErrorText>}
