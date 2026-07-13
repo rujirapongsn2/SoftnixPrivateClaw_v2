@@ -24,6 +24,7 @@ from claw.core.connectors import ConnectorManager
 from claw.core.heartbeat import HeartbeatService
 from claw.core.memory import MemoryService
 from claw.core.limits import RateLimiter
+from claw.core.plans import builtin_plan_seeds
 from claw.core.runtime import AgentRuntime
 from claw.core.scheduler import SchedulerService
 from claw.security.policy import (
@@ -44,6 +45,7 @@ from claw.db.stores import (
     MemoryStore,
     MessageStore,
     OAuthAppStore,
+    PolicyPlanStore,
     ScheduleStore,
     SessionStore,
     ShareStore,
@@ -94,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     knowledge = KnowledgeStore(factory, is_postgres=is_postgres)
     knowledge_service = KnowledgeService(knowledge, settings.knowledge_root, settings.knowledge)
     shares = ShareStore(factory)
+    plans = PolicyPlanStore(factory)
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
 
     browser_mgr = None
@@ -130,6 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         usage=usage,
         schedules=schedules,
         llm_config=llm_config,
+        plans=plans,
         browser_broker=browser_broker,
         knowledge=knowledge,
     )
@@ -183,6 +187,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except Exception:
             logger.exception("Guardrail load failed; using built-in defaults")
+        # Seed built-in usage-tier plans once (empty table only), so a fresh
+        # install ships with a Free→Unlimited ladder the admin can retune.
+        try:
+            if await plans.count() == 0:
+                await plans.seed(builtin_plan_seeds())
+        except Exception:
+            logger.exception("Policy-plan seed failed; continuing without default plans")
         scheduler.start()
         heartbeat.start()
         await knowledge_service.start()
@@ -242,6 +253,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         telegram_config=telegram_config,
         telegram_mgr=telegram_mgr,
         smtp_config=smtp_config,
+        plans=plans,
         image_rate_limiter=RateLimiter(settings.image.per_minute),
         guardrails=guardrails,
         llm_config=llm_config,

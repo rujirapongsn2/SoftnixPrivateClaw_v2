@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 import openpyxl
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 
 from claw.api import llm_shared as llm
 from claw.api.auth import _is_pending_imported_account, _send_activation_email
@@ -18,6 +19,7 @@ from claw.auth import oidc
 from claw.auth.passwords import hash_password
 from claw.channels.telegram import validate_bot_token
 from claw.db.models import User
+from claw.db.stores import plan_to_dict
 from claw.notifications.mailer import SmtpSendError, send_email
 from claw.security.policy import DEFAULT_TOOL_ARGS_EXEMPT, rule_from_row
 
@@ -47,6 +49,8 @@ class CreateUserBody(BaseModel):
     is_admin: bool = False
     # Organizational group (optional). Empty/None = ungrouped.
     group_id: str | None = None
+    # Usage-tier plan (optional). Empty/None = fall back to group/default plan.
+    plan_id: str | None = None
 
 
 class UpdateUserBody(BaseModel):
@@ -58,9 +62,13 @@ class UpdateUserBody(BaseModel):
     # Group assignment. Sentinel "__unset__" (the default) means "leave as-is";
     # None/"" means "move to ungrouped"; a real id moves to that group.
     group_id: str | None = "__unset__"
+    # Plan assignment, same "__unset__" sentinel semantics as group_id.
+    plan_id: str | None = "__unset__"
 
 
-def _user_row(user: User, sessions: int, group_names: dict[str, str]) -> dict:
+def _user_row(
+    user: User, sessions: int, group_names: dict[str, str], plan_names: dict[str, str]
+) -> dict:
     return {
         "id": user.id,
         "email": user.email,
@@ -73,12 +81,27 @@ def _user_row(user: User, sessions: int, group_names: dict[str, str]) -> dict:
         "sessions": sessions,
         "group_id": user.group_id,
         "group_name": group_names.get(user.group_id) if user.group_id else None,
+        "plan_id": user.plan_id,
+        "plan_name": plan_names.get(user.plan_id) if user.plan_id else None,
         "created_at": user.created_at.isoformat(),
     }
 
 
 async def _group_names(state: AppState) -> dict[str, str]:
     return {g.id: g.name for g in await state.groups.list()}
+
+
+async def _plan_names(state: AppState) -> dict[str, str]:
+    return {p["id"]: p["name"] for p in await state.plans.list()}
+
+
+async def _valid_plan_id(state: AppState, plan_id: str | None) -> str | None:
+    """Normalize an incoming plan id: blank → None; otherwise 404 if unknown."""
+    if not plan_id:
+        return None
+    if plan_id not in await _plan_names(state):
+        raise HTTPException(status_code=404, detail="plan not found")
+    return plan_id
 
 
 async def _valid_group_id(state: AppState, group_id: str | None) -> str | None:
@@ -96,7 +119,8 @@ async def list_users(admin: User = Depends(require_admin), state: AppState = Dep
     users = await state.users.list_all()
     counts = await state.sessions.count_by_user()
     names = await _group_names(state)
-    return [_user_row(u, counts.get(u.id, 0), names) for u in users]
+    plan_names = await _plan_names(state)
+    return [_user_row(u, counts.get(u.id, 0), names, plan_names) for u in users]
 
 
 @router.post("/users")
@@ -106,6 +130,7 @@ async def create_user(
     if await state.users.get_by_email(body.email) is not None:
         raise HTTPException(status_code=409, detail="email already registered")
     group_id = await _valid_group_id(state, body.group_id)
+    plan_id = await _valid_plan_id(state, body.plan_id)
     user = await state.users.create(
         email=body.email,
         password_hash=hash_password(body.password),
@@ -115,7 +140,9 @@ async def create_user(
         group_id=group_id,
         signup_method="admin_created",
     )
-    return _user_row(user, 0, await _group_names(state))
+    if plan_id is not None:
+        user = await state.users.assign_plan(user.id, plan_id)
+    return _user_row(user, 0, await _group_names(state), await _plan_names(state))
 
 
 @router.patch("/users/{user_id}")
@@ -147,8 +174,14 @@ async def update_user(
         updated = await state.users.assign_group(
             user_id, await _valid_group_id(state, body.group_id)
         )
+    if body.plan_id != "__unset__":
+        updated = await state.users.assign_plan(
+            user_id, await _valid_plan_id(state, body.plan_id)
+        )
     counts = await state.sessions.count_by_user()
-    return _user_row(updated, counts.get(updated.id, 0), await _group_names(state))
+    return _user_row(
+        updated, counts.get(updated.id, 0), await _group_names(state), await _plan_names(state)
+    )
 
 
 @router.delete("/users/{user_id}")
@@ -394,17 +427,25 @@ class GroupBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
 
+class GroupPatchBody(BaseModel):
+    # Default usage-tier plan for the group's members. Sentinel "__unset__"
+    # leaves it as-is; None/"" clears it; a real id assigns.
+    plan_id: str | None = "__unset__"
+
+
 class DefaultGroupBody(BaseModel):
     # The group new self-registered users join. None clears the default.
     group_id: str | None = None
 
 
-def _group_row(g, counts: dict[str, int]) -> dict:
+def _group_row(g, counts: dict[str, int], plan_names: dict[str, str]) -> dict:
     return {
         "id": g.id,
         "name": g.name,
         "is_default": g.is_default,
         "user_count": counts.get(g.id, 0),
+        "plan_id": g.plan_id,
+        "plan_name": plan_names.get(g.plan_id) if g.plan_id else None,
     }
 
 
@@ -412,7 +453,8 @@ def _group_row(g, counts: dict[str, int]) -> dict:
 async def list_groups(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> list:
     groups = await state.groups.list()
     counts = await state.groups.counts_by_group()
-    return [_group_row(g, counts) for g in groups]
+    plan_names = await _plan_names(state)
+    return [_group_row(g, counts, plan_names) for g in groups]
 
 
 @router.post("/groups")
@@ -422,7 +464,26 @@ async def create_group(
     if await state.groups.get_by_name(body.name.strip()) is not None:
         raise HTTPException(status_code=409, detail="a group with this name already exists")
     g = await state.groups.create(body.name.strip())
-    return _group_row(g, {})
+    return _group_row(g, {}, await _plan_names(state))
+
+
+@router.patch("/groups/{group_id}")
+async def update_group(
+    group_id: str,
+    body: GroupPatchBody,
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    if body.plan_id != "__unset__":
+        updated = await state.groups.set_plan(group_id, await _valid_plan_id(state, body.plan_id))
+    else:
+        # No plan change requested — treat as a no-op fetch, not a mutation, so
+        # an unset plan_id returns the current row instead of a spurious 404.
+        updated = next((g for g in await state.groups.list() if g.id == group_id), None)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="group not found")
+    counts = await state.groups.counts_by_group()
+    return _group_row(updated, counts, await _plan_names(state))
 
 
 @router.delete("/groups/{group_id}")
@@ -445,6 +506,110 @@ async def set_default_group(
             raise HTTPException(status_code=404, detail="group not found")
     await state.groups.set_default(body.group_id)
     return {"default_group_id": body.group_id}
+
+
+# ---------------------------------------------------------------- policy plans
+# Usage tiers: model cost ceilings + daily/per-minute quotas. Assigned per-user
+# or per-group; enforced in the runtime (chat) and /images (image) paths.
+
+_PLAN_COSTS = {"low", "medium", "high", "very_high"}
+
+
+def _check_costs(*values: str | None) -> None:
+    for v in values:
+        if v is not None and v not in _PLAN_COSTS:
+            raise HTTPException(status_code=422, detail=f"invalid cost tier: {v}")
+
+
+class PlanBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    rank: int = 0
+    max_chat_cost: str = "very_high"
+    allow_image: bool = True
+    max_image_cost: str = "very_high"
+    messages_per_day: int = Field(default=0, ge=0)
+    images_per_day: int = Field(default=0, ge=0)
+    turns_per_minute: int = Field(default=0, ge=0)
+    is_default: bool = False
+
+
+class PlanPatchBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    rank: int | None = None
+    max_chat_cost: str | None = None
+    allow_image: bool | None = None
+    max_image_cost: str | None = None
+    messages_per_day: int | None = Field(default=None, ge=0)
+    images_per_day: int | None = Field(default=None, ge=0)
+    turns_per_minute: int | None = Field(default=None, ge=0)
+    is_default: bool | None = None
+
+
+class DefaultPlanBody(BaseModel):
+    plan_id: str | None = None
+
+
+def _plan_row(plan: dict, counts: dict[str, int]) -> dict:
+    return {**plan, "user_count": counts.get(plan["id"], 0)}
+
+
+@router.get("/plans")
+async def list_plans(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> list:
+    plans = await state.plans.list()
+    counts = await state.plans.counts_by_plan()
+    return [_plan_row(p, counts) for p in plans]
+
+
+@router.post("/plans")
+async def create_plan(
+    body: PlanBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    _check_costs(body.max_chat_cost, body.max_image_cost)
+    try:
+        row = await state.plans.create(**body.model_dump())
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="a plan with this name already exists") from None
+    return _plan_row(plan_to_dict(row), {})
+
+
+@router.patch("/plans/{plan_id}")
+async def update_plan(
+    plan_id: str,
+    body: PlanPatchBody,
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    _check_costs(body.max_chat_cost, body.max_image_cost)
+    try:
+        row = await state.plans.update(plan_id, **body.model_dump(exclude_none=True))
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="a plan with this name already exists") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    if row is None:
+        raise HTTPException(status_code=404, detail="plan not found")
+    counts = await state.plans.counts_by_plan()
+    return _plan_row(plan_to_dict(row), counts)
+
+
+@router.delete("/plans/{plan_id}")
+async def delete_plan(
+    plan_id: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    ok = await state.plans.delete(plan_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="plan not found")
+    return {"deleted": True}
+
+
+@router.put("/plans/default")
+async def set_default_plan(
+    body: DefaultPlanBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    if body.plan_id and body.plan_id not in await _plan_names(state):
+        raise HTTPException(status_code=404, detail="plan not found")
+    await state.plans.set_default(body.plan_id)
+    return {"default_plan_id": body.plan_id}
 
 
 async def _build_stats(state: AppState) -> dict:
@@ -514,6 +679,36 @@ async def _guardrail_hits_by_user(state: AppState) -> list[dict]:
     ]
 
 
+async def _plans_overview(state: AppState) -> dict:
+    """Per-plan admin report: the tier ladder + direct-assignment user counts,
+    plus today's highest-volume users with their effective plan and quota, so
+    an admin sees who's near a cap. All bounded (plan set is tiny; the user
+    list is top-N), following the overview's no-unbounded-scan pattern."""
+    plans = await state.plans.list()
+    counts = await state.plans.counts_by_plan()
+    plan_rows = [_plan_row(p, counts) for p in plans]
+
+    top = await state.usage.top_users_today(_TOKENS_TOP_N)
+    user_ids = [r["user_id"] for r in top]
+    labels = await state.users.labels(user_ids) if top else {}
+    plans_by_user = await state.plans.resolve_for_users(user_ids)
+    usage_rows = []
+    for r in top:
+        plan = plans_by_user.get(r["user_id"])
+        usage_rows.append(
+            {
+                "user_id": r["user_id"],
+                "label": labels.get(r["user_id"], r["user_id"]),
+                "plan_name": plan["name"] if plan else None,
+                "turns": r["turns"],
+                "messages_limit": plan["messages_per_day"] if plan else 0,
+                "images": r["images"],
+                "images_limit": plan["images_per_day"] if plan else 0,
+            }
+        )
+    return {"plans": plan_rows, "usage_today": usage_rows}
+
+
 @router.get("/overview")
 async def overview(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
     return {
@@ -527,6 +722,7 @@ async def overview(admin: User = Depends(require_admin), state: AppState = Depen
         "guardrail_hits_by_day": await state.audit.policy_hits_by_day(14),
         "guardrail_hits_by_user": await _guardrail_hits_by_user(state),
         "guardrail_hits_by_rule": await state.audit.policy_hits_by_rule(14),
+        "plans_report": await _plans_overview(state),
     }
 
 

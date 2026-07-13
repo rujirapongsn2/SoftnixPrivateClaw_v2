@@ -412,9 +412,12 @@ async def generate_image(
     if state.image_rate_limiter is not None and not state.image_rate_limiter.allow(user.id):
         raise HTTPException(status_code=429, detail="Too many image requests; please wait a moment.")
 
-    # Run the prompt through the same control policy as chat input — a blocked
-    # prompt never reaches the provider; a masked prompt is what we send AND
-    # store (raw PII is not persisted), exactly like the chat path.
+    # Run the prompt through the same control policy as chat input — BEFORE
+    # any model resolution/plan gate — so a policy-violating prompt is always
+    # scanned and audited even when it's paired with an invalid or plan-gated
+    # model id; a blocked prompt never reaches the provider, and a masked
+    # prompt is what we send AND store (raw PII is not persisted), exactly
+    # like the chat path.
     if state.policy is not None:
         decision = state.policy.enforce(prompt, scope="input")
         if decision.matched_rules:
@@ -432,10 +435,63 @@ async def generate_image(
 
     # resolve_image only matches kind="image" models the caller may use, and
     # returns the provider prefix so we pick the right generation strategy.
-    resolved = await state.llm_config.resolve_image(body.model, user.id)
+    # max_cost enforces the plan's image cost ceiling (BYOK models exempt).
+    plan = await state.plans.resolve_for_user(user.id) if state.plans is not None else None
+    resolved = await state.llm_config.resolve_image(
+        body.model, user.id, max_cost=plan["max_image_cost"] if plan else None
+    )
     if resolved is None:
         raise HTTPException(status_code=404, detail="image model not found")
+
+    # Usage-plan gate: the caller's plan must permit image generation at all —
+    # but only for admin-global models; the caller's own BYOK model is exempt
+    # (same reasoning as the cost ceiling: they pay for their own key, so the
+    # plan tier that meters the operator's shared models doesn't apply). The
+    # images/day quota is enforced atomically after resolve, below — a
+    # reserve-then-verify to avoid a check-then-act race on this paid resource.
+    if resolved["scope"] == "global" and plan is not None and not plan["allow_image"]:
+        await state.audit.log(
+            "quota",
+            {"event": "image_disallowed", "plan": plan["name"]},
+            user_id=user.id,
+            session_id=session_id,
+        )
+        raise HTTPException(status_code=403, detail="Your plan does not include image generation.")
+
     mode = "images_endpoint" if resolved["model_prefix"] in _IMAGES_ENDPOINT_PREFIXES else "chat"
+
+    # Reserve the images/day slot atomically BEFORE the paid provider call:
+    # increment the counter, then verify the user is still within their cap.
+    # Two concurrent requests both increment and both see the post-increment
+    # total, so at most `limit` can pass — no check-then-act overshoot on a
+    # paid resource. The reservation is released on any failure below (and on
+    # over-quota here). Counting also happens for unlimited plans (limit 0) so
+    # the usage report stays accurate. `reserved` tracks whether to release.
+    # The cap itself only applies to admin-global models — the caller's own
+    # BYOK model is exempt, same reasoning as the allow_image gate above.
+    img_limit = plan["images_per_day"] if plan else 0
+    reserved = False
+    if state.usage is not None:
+        await state.usage.record_image(user.id, resolved["model_id"])
+        reserved = True
+        if img_limit > 0 and resolved["scope"] == "global":
+            used = (await state.usage.usage_today(user.id))["images"]
+            if used > img_limit:
+                await state.usage.release_image(user.id, resolved["model_id"])
+                await state.audit.log(
+                    "quota",
+                    {"event": "images_per_day", "plan": plan["name"], "limit": img_limit},
+                    user_id=user.id,
+                    session_id=session_id,
+                )
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Daily image limit reached ({img_limit}/day). Try again tomorrow.",
+                )
+
+    async def _release() -> None:
+        if reserved and state.usage is not None:
+            await state.usage.release_image(user.id, resolved["model_id"])
 
     try:
         images = await state.runtime.provider.generate_image(
@@ -448,12 +504,14 @@ async def generate_image(
             timeout=state.settings.image.timeout_seconds,
         )
     except ProviderError as exc:
+        await _release()
         raise HTTPException(status_code=502, detail=f"image generation failed: {exc}") from exc
 
     data, ext = images[0]
     # Guard against an oversized payload (a misbehaving provider or a
     # user-controlled BYOK api_base) before writing it to disk.
     if len(data) > state.settings.image.max_bytes:
+        await _release()
         raise HTTPException(status_code=502, detail="generated image exceeds the size limit")
 
     workspace = _user_workspace(state, user.id)
@@ -469,7 +527,8 @@ async def generate_image(
 
     # Persist as a user prompt + an artifact-only assistant message so it shows
     # in the transcript and survives reload (see list_messages' filter). Store
-    # the possibly-masked prompt, never the raw input.
+    # the possibly-masked prompt, never the raw input. The images/day counter
+    # was already incremented by the reservation above.
     await state.messages.append(
         session_id,
         [

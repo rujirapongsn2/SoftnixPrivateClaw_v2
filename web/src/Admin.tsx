@@ -24,6 +24,7 @@ import {
   Cpu,
   Diamond,
   ExternalLink,
+  Gauge,
   Globe,
   Info,
   KeyRound,
@@ -49,7 +50,7 @@ import {
   UserPlus,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
 import {
@@ -66,6 +67,8 @@ import {
   ModelKind,
   ModelUsagePoint,
   OAuthAppsInfo,
+  type PlanCreate,
+  type PlanInfo,
   SessionsByUserPoint,
   SmtpAdminConfig,
   TelegramAdminConfig,
@@ -84,6 +87,7 @@ import {
 export type AdminSection =
   | "overview"
   | "providers"
+  | "plans"
   | "guardrails"
   | "oauth"
   | "telegram"
@@ -101,6 +105,7 @@ export const COST_LABEL: Record<ModelCost, string> = {
 export const ADMIN_SECTIONS: { key: AdminSection; label: string; icon: IconType | IconName }[] = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
   { key: "providers", label: "LLM Providers", icon: Cpu },
+  { key: "plans", label: "Plans", icon: Gauge },
   { key: "guardrails", label: "Guardrails", icon: ShieldCheck },
   { key: "oauth", label: "OAuth apps", icon: KeyRound },
   { key: "telegram", label: "Telegram", icon: Send },
@@ -117,7 +122,7 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
   // soup. Overview is the same story: a stat grid + charts that read better
   // with more horizontal room. Widen just these sections rather than the
   // whole panel.
-  const isWide = section === "providers" || section === "overview";
+  const isWide = section === "providers" || section === "overview" || section === "plans";
   return (
     <div className="claw-settings-panel">
       <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
@@ -127,6 +132,7 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
       <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
         {section === "overview" && <OverviewPanel />}
         {section === "providers" && <ProvidersPanel llmApi={ADMIN_LLM_API} scope="admin" />}
+        {section === "plans" && <PlansPanel />}
         {section === "guardrails" && <GuardrailsPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
@@ -300,6 +306,7 @@ const OVERVIEW_TABS: { key: string; label: string; icon: IconType }[] = [
   { key: "activity", label: "Activity", icon: MessageSquare },
   { key: "models", label: "Models", icon: Cpu },
   { key: "tokens", label: "Tokens", icon: Coins },
+  { key: "plans", label: "Plans", icon: Gauge },
   { key: "safety", label: "Safety", icon: ShieldCheck },
 ];
 
@@ -326,6 +333,7 @@ function OverviewPanel() {
       {tab === "activity" && <OverviewActivity data={data} />}
       {tab === "models" && <OverviewModels data={data} />}
       {tab === "tokens" && <OverviewTokens />}
+      {tab === "plans" && <OverviewPlans data={data} />}
       {tab === "safety" && <OverviewSafety data={data} />}
     </div>
   );
@@ -524,6 +532,135 @@ function OverviewSafety({ data }: { data: AdminOverview }) {
             data={data.guardrail_hits_by_rule.map((r) => ({ key: r.rule, label: r.rule, count: r.count }))}
             unit="hit"
           />
+        )}
+      </Card>
+    </>
+  );
+}
+
+// Plans overview — reads entirely from the already-fetched adminOverview()
+// payload (data.plans_report), so switching to this tab is an instant
+// client-side view swap with no extra fetch (per CLAUDE.md rule 1).
+const PLAN_LADDER_COLUMNS = [
+  "Plan",
+  "Chat ceiling",
+  "Image",
+  "Messages/day",
+  "Images/day",
+  "Turns/min",
+];
+
+// 0 encodes "unlimited" (daily quotas) — render it as ∞ rather than a literal 0.
+function planLimitText(n: number): string {
+  return n > 0 ? n.toLocaleString() : "∞";
+}
+
+function OverviewPlans({ data }: { data: AdminOverview }) {
+  const report = data.plans_report;
+  // Ranked low→high so the ladder reads as a progression, matching the Plans
+  // management section's ordering.
+  const plans = [...report.plans].sort((a, b) => a.rank - b.rank);
+  const perPlan = plans.map((p) => ({ key: p.id, label: p.name, count: p.user_count ?? 0 }));
+
+  return (
+    <>
+      <Card padding={3}>
+        <Text weight="semibold">Users per plan</Text>
+        {perPlan.length === 0 ? (
+          <Text size="sm" color="secondary">
+            No plans configured yet — add one in the Plans section.
+          </Text>
+        ) : (
+          <RankedBarList data={perPlan} unit="user" />
+        )}
+      </Card>
+
+      <Card padding={3}>
+        <Text weight="semibold">Plan ladder</Text>
+        {plans.length === 0 ? (
+          <Text size="sm" color="secondary">
+            No plans configured yet.
+          </Text>
+        ) : (
+          // One grid spanning the header + every plan row — same table-without-a-
+          // table approach as the models grid, so columns align across all rows.
+          <div className="claw-plan-ladder">
+            {PLAN_LADDER_COLUMNS.map((h) => (
+              <Text key={h} size="2xs" color="secondary" className="claw-models-grid-head">
+                {h}
+              </Text>
+            ))}
+            {plans.map((p) => (
+              <Fragment key={p.id}>
+                <div className="claw-model-name-cell">
+                  <Text className="claw-model-label">{p.name}</Text>
+                  {p.is_default && (
+                    <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default" />
+                  )}
+                </div>
+                <span className={`claw-cost claw-cost-${p.max_chat_cost}`}>
+                  {COST_LABEL[p.max_chat_cost]}
+                </span>
+                {p.allow_image ? (
+                  <span className={`claw-cost claw-cost-${p.max_image_cost}`}>
+                    {COST_LABEL[p.max_image_cost]}
+                  </span>
+                ) : (
+                  <Text size="sm" color="secondary">
+                    Off
+                  </Text>
+                )}
+                <Text size="sm" color="secondary">
+                  {planLimitText(p.messages_per_day)}
+                </Text>
+                <Text size="sm" color="secondary">
+                  {planLimitText(p.images_per_day)}
+                </Text>
+                <Text size="sm" color="secondary">
+                  {p.turns_per_minute > 0 ? p.turns_per_minute.toLocaleString() : "global"}
+                </Text>
+              </Fragment>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card padding={3}>
+        <div className="claw-card-heading">
+          <Text weight="semibold">Today's top users</Text>
+          <Text size="sm" color="secondary" as="p">
+            Consumption against each user's plan quota so far today. Highlighted rows are at or over
+            a quota.
+          </Text>
+        </div>
+        {report.usage_today.length === 0 ? (
+          <Text size="sm" color="secondary">
+            No usage recorded today.
+          </Text>
+        ) : (
+          <div className="claw-plan-usage-list">
+            {/* "Top users" is already a bounded server-side ranking; the slice is
+                a defensive cap so the list can never degrade the page. */}
+            {report.usage_today.slice(0, 50).map((r) => {
+              const msgOver = r.messages_limit > 0 && r.turns >= r.messages_limit;
+              const imgOver = r.images_limit > 0 && r.images >= r.images_limit;
+              return (
+                <div
+                  key={r.user_id}
+                  className={`claw-plan-usage-row${msgOver || imgOver ? " is-over" : ""}`}
+                >
+                  <span className="claw-plan-usage-name">{r.label}</span>
+                  <Badge variant="neutral" label={r.plan_name ?? "Default"} />
+                  <span className="claw-plan-usage-metric">
+                    {r.turns.toLocaleString()} / {planLimitText(r.messages_limit)} msgs
+                  </span>
+                  <span className="claw-plan-usage-metric">
+                    {r.images.toLocaleString()} / {planLimitText(r.images_limit)} imgs
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         )}
       </Card>
     </>
@@ -1391,14 +1528,12 @@ function ModelRow({
             </Text>
             <KindSegmented value={kind} onChange={setKind} />
           </div>
-          {kind === "chat" && (
-            <div className="claw-row">
-              <Text size="sm" color="secondary">
-                Cost tier
-              </Text>
-              <CostSegmented value={cost} onChange={setCost} />
-            </div>
-          )}
+          <div className="claw-row">
+            <Text size="sm" color="secondary">
+              Cost tier
+            </Text>
+            <CostSegmented value={cost} onChange={setCost} />
+          </div>
           <div className="claw-row">
             <Button
               label="Save changes"
@@ -1448,11 +1583,10 @@ function ModelRow({
           <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default" />
         )}
       </div>
-      {model.kind === "image" ? (
-        <Badge variant="neutral" label="Image" />
-      ) : (
+      <div className="claw-model-cost-cell">
+        {model.kind === "image" && <Badge variant="neutral" label="Image" />}
         <span className={`claw-cost claw-cost-${model.cost}`}>{COST_LABEL[model.cost]}</span>
-      )}
+      </div>
       <Text size="sm" color="secondary" className="claw-model-id">
         {stripKnownPrefix(modelPrefix, model.model_id)}
       </Text>
@@ -1574,14 +1708,12 @@ function AddModelForm({
           </Text>
           <KindSegmented value={kind} onChange={setKind} />
         </div>
-        {kind === "chat" && (
-          <div className="claw-row">
-            <Text size="sm" color="secondary">
-              Cost tier
-            </Text>
-            <CostSegmented value={cost} onChange={setCost} />
-          </div>
-        )}
+        <div className="claw-row">
+          <Text size="sm" color="secondary">
+            Cost tier
+          </Text>
+          <CostSegmented value={cost} onChange={setCost} />
+        </div>
         <div className="claw-row">
           <Button
             label="Add model"
@@ -1608,6 +1740,443 @@ function AddModelForm({
         </div>
       </div>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------- Plans
+
+// Usage-tier plans (Free/Plus/Pro/…): each sets model cost ceilings plus
+// daily / per-minute quotas, and can be assigned to groups or individual
+// users. Structurally mirrors the LLM Providers panel — a list of Cards, each
+// with an inline Edit form, plus an Add form toggled from the header.
+function PlansPanel() {
+  const [plans, setPlans] = useState<PlanInfo[]>([]);
+  const [adding, setAdding] = useState(false);
+  const { error, guard } = useAsyncError();
+
+  const reload = useCallback(() => api.adminListPlans().then(setPlans), []);
+  useEffect(() => {
+    void guard(async () => await reload());
+  }, [guard, reload]);
+
+  // Ranked low→high so the list reads as a ladder (Free → Plus → Pro → …).
+  const sorted = [...plans].sort((a, b) => a.rank - b.rank);
+
+  return (
+    <div className="claw-panel">
+      <div className="claw-row claw-row-between">
+        <Text color="secondary">
+          Usage-tier plans set the highest-cost chat and image models a user can pick, plus daily
+          message / image quotas and a per-minute turn rate. Assign a plan to a group or an
+          individual user; anyone without one falls back to the default plan.
+        </Text>
+        {!adding && (
+          <Button
+            label="Add plan"
+            icon={<Icon icon={Plus} size="sm" />}
+            size="sm"
+            clickAction={() => setAdding(true)}
+          />
+        )}
+      </div>
+      {error && <ErrorText>{error}</ErrorText>}
+
+      {adding && <AddPlanForm guard={guard} reload={reload} onClose={() => setAdding(false)} />}
+
+      {plans.length === 0 && !adding ? (
+        <EmptyState
+          title="No plans"
+          description="Add a usage-tier plan to gate model cost and set per-user quotas."
+        />
+      ) : (
+        sorted.map((p) => <PlanCard key={p.id} plan={p} reload={reload} guard={guard} />)
+      )}
+    </div>
+  );
+}
+
+// Parse a number-input string, guarding NaN/negatives to 0 (which every quota
+// field treats as "unlimited"/"inherit", so a blank/garbage entry is safe).
+function planNum(s: string): number {
+  const n = Number(s);
+  return Number.isNaN(n) ? 0 : Math.max(0, Math.trunc(n));
+}
+
+function PlanCard({
+  plan,
+  reload,
+  guard,
+}: {
+  plan: PlanInfo;
+  reload: () => Promise<void>;
+  guard: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(plan.name);
+  const [rank, setRank] = useState(String(plan.rank));
+  const [maxChatCost, setMaxChatCost] = useState<ModelCost>(plan.max_chat_cost);
+  const [maxImageCost, setMaxImageCost] = useState<ModelCost>(plan.max_image_cost);
+  const [allowImage, setAllowImage] = useState(plan.allow_image);
+  const [messagesPerDay, setMessagesPerDay] = useState(String(plan.messages_per_day));
+  const [imagesPerDay, setImagesPerDay] = useState(String(plan.images_per_day));
+  const [turnsPerMinute, setTurnsPerMinute] = useState(String(plan.turns_per_minute));
+  const [isDefault, setIsDefault] = useState(plan.is_default);
+  const toast = useToast();
+
+  const resetForm = () => {
+    setName(plan.name);
+    setRank(String(plan.rank));
+    setMaxChatCost(plan.max_chat_cost);
+    setMaxImageCost(plan.max_image_cost);
+    setAllowImage(plan.allow_image);
+    setMessagesPerDay(String(plan.messages_per_day));
+    setImagesPerDay(String(plan.images_per_day));
+    setTurnsPerMinute(String(plan.turns_per_minute));
+    setIsDefault(plan.is_default);
+  };
+
+  return (
+    <Card padding={2} variant="default">
+      <div className="claw-row claw-row-between">
+        <div>
+          <div className="claw-row">
+            <Text weight="semibold">{plan.name}</Text>
+            {plan.is_default && (
+              <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="Default" />
+            )}
+            <Badge variant="neutral" label={`rank ${plan.rank}`} />
+            <Badge
+              variant="neutral"
+              icon={<Icon icon={Users} size="xsm" />}
+              label={`${plan.user_count ?? 0} ${(plan.user_count ?? 0) === 1 ? "user" : "users"}`}
+            />
+          </div>
+          <div className="claw-plan-specs">
+            <span>Chat ≤ {COST_LABEL[plan.max_chat_cost]}</span>
+            <span>
+              Image: {plan.allow_image ? `≤ ${COST_LABEL[plan.max_image_cost]}` : "off"}
+            </span>
+            <span>
+              {plan.messages_per_day > 0
+                ? `${plan.messages_per_day.toLocaleString()} messages/day`
+                : "unlimited messages"}
+            </span>
+            <span>
+              {plan.images_per_day > 0
+                ? `${plan.images_per_day.toLocaleString()} images/day`
+                : "unlimited images"}
+            </span>
+            <span>
+              {plan.turns_per_minute > 0
+                ? `${plan.turns_per_minute.toLocaleString()} turns/min`
+                : "global turn rate"}
+            </span>
+          </div>
+        </div>
+        <div className="claw-row">
+          {!plan.is_default && (
+            <Button
+              label="Make default"
+              size="sm"
+              variant="ghost"
+              clickAction={() =>
+                guard(async () => {
+                  await api.adminSetDefaultPlan(plan.id);
+                  toast({ body: `${plan.name} is now the default plan`, type: "info", autoHideDuration: 2500 });
+                  await reload();
+                })
+              }
+            />
+          )}
+          <Button
+            label="Edit"
+            icon={<Icon icon={Pencil} size="sm" />}
+            size="sm"
+            variant="ghost"
+            clickAction={() => {
+              resetForm();
+              setEditing((e) => !e);
+            }}
+          />
+          <Button
+            label="Delete"
+            icon={<Icon icon={Trash2} size="sm" />}
+            size="sm"
+            variant="destructive"
+            clickAction={() =>
+              guard(async () => {
+                if (
+                  !window.confirm(
+                    `Delete plan “${plan.name}”? Users and groups on this plan fall back to the default plan.`,
+                  )
+                ) {
+                  return;
+                }
+                await api.adminDeletePlan(plan.id);
+                toast({ body: `Plan “${plan.name}” deleted`, type: "info", autoHideDuration: 2500 });
+                await reload();
+              })
+            }
+          />
+        </div>
+      </div>
+
+      {editing && (
+        <Card padding={2} variant="muted">
+          <div className="claw-panel">
+            <div className="claw-row claw-row-2col">
+              <TextInput label="Name" value={name} onChange={setName} />
+              <TextInput
+                label="Rank"
+                description="Higher = more premium; orders the ladder."
+                value={rank}
+                onChange={setRank}
+              />
+            </div>
+            <div className="claw-row">
+              <Text size="sm" color="secondary">
+                Max chat cost
+              </Text>
+              <CostSegmented value={maxChatCost} onChange={setMaxChatCost} />
+            </div>
+            <label className="claw-toggle-inline">
+              <Switch value={allowImage} label="Allow image generation" isLabelHidden changeAction={setAllowImage} />
+              <Text size="sm" color="secondary">
+                Allow image generation
+              </Text>
+            </label>
+            {allowImage && (
+              <div className="claw-row">
+                <Text size="sm" color="secondary">
+                  Max image cost
+                </Text>
+                <CostSegmented value={maxImageCost} onChange={setMaxImageCost} />
+              </div>
+            )}
+            <div className="claw-row claw-row-2col">
+              <TextInput
+                label="Messages per day"
+                description="0 = unlimited"
+                value={messagesPerDay}
+                onChange={setMessagesPerDay}
+              />
+              <TextInput
+                label="Images per day"
+                description="0 = unlimited"
+                value={imagesPerDay}
+                onChange={setImagesPerDay}
+              />
+            </div>
+            <TextInput
+              label="Turns per minute"
+              description="0 = inherit the global rate limit"
+              value={turnsPerMinute}
+              onChange={setTurnsPerMinute}
+            />
+            <label className="claw-toggle-inline">
+              <Switch value={isDefault} label="Default plan" isLabelHidden changeAction={setIsDefault} />
+              <Text size="sm" color="secondary">
+                Default plan (used by anyone without an assigned plan)
+              </Text>
+            </label>
+            <div className="claw-row">
+              <Button
+                label="Save changes"
+                variant="primary"
+                icon={<Icon icon="check" size="sm" />}
+                size="sm"
+                isDisabled={!name.trim()}
+                clickAction={() =>
+                  guard(async () => {
+                    await api.adminUpdatePlan(plan.id, {
+                      name: name.trim(),
+                      rank: planNum(rank),
+                      max_chat_cost: maxChatCost,
+                      allow_image: allowImage,
+                      max_image_cost: maxImageCost,
+                      messages_per_day: planNum(messagesPerDay),
+                      images_per_day: planNum(imagesPerDay),
+                      turns_per_minute: planNum(turnsPerMinute),
+                      is_default: isDefault,
+                    });
+                    setEditing(false);
+                    toast({ body: "Plan saved", type: "info", autoHideDuration: 2500 });
+                    await reload();
+                  })
+                }
+              />
+              <Button
+                label="Cancel"
+                variant="ghost"
+                size="sm"
+                clickAction={() => {
+                  resetForm();
+                  setEditing(false);
+                }}
+              />
+            </div>
+          </div>
+        </Card>
+      )}
+    </Card>
+  );
+}
+
+function AddPlanForm({
+  guard,
+  reload,
+  onClose,
+}: {
+  guard: (fn: () => Promise<void>) => Promise<void>;
+  reload: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [rank, setRank] = useState("0");
+  const [maxChatCost, setMaxChatCost] = useState<ModelCost>("medium");
+  const [maxImageCost, setMaxImageCost] = useState<ModelCost>("medium");
+  const [allowImage, setAllowImage] = useState(false);
+  const [messagesPerDay, setMessagesPerDay] = useState("0");
+  const [imagesPerDay, setImagesPerDay] = useState("0");
+  const [turnsPerMinute, setTurnsPerMinute] = useState("0");
+  const [isDefault, setIsDefault] = useState(false);
+  const toast = useToast();
+
+  return (
+    <Card padding={2}>
+      <div className="claw-panel">
+        <div className="claw-info-box">
+          <Icon icon={Plus} size="sm" color="secondary" />
+          <Text size="sm" color="secondary">
+            Adding a new usage-tier plan
+          </Text>
+        </div>
+        <div className="claw-row claw-row-2col">
+          <TextInput label="Name" placeholder="e.g. Pro" value={name} onChange={setName} />
+          <TextInput
+            label="Rank"
+            description="Higher = more premium; orders the ladder."
+            value={rank}
+            onChange={setRank}
+          />
+        </div>
+        <div className="claw-row">
+          <Text size="sm" color="secondary">
+            Max chat cost
+          </Text>
+          <CostSegmented value={maxChatCost} onChange={setMaxChatCost} />
+        </div>
+        <label className="claw-toggle-inline">
+          <Switch value={allowImage} label="Allow image generation" isLabelHidden changeAction={setAllowImage} />
+          <Text size="sm" color="secondary">
+            Allow image generation
+          </Text>
+        </label>
+        {allowImage && (
+          <div className="claw-row">
+            <Text size="sm" color="secondary">
+              Max image cost
+            </Text>
+            <CostSegmented value={maxImageCost} onChange={setMaxImageCost} />
+          </div>
+        )}
+        <div className="claw-row claw-row-2col">
+          <TextInput
+            label="Messages per day"
+            description="0 = unlimited"
+            value={messagesPerDay}
+            onChange={setMessagesPerDay}
+          />
+          <TextInput
+            label="Images per day"
+            description="0 = unlimited"
+            value={imagesPerDay}
+            onChange={setImagesPerDay}
+          />
+        </div>
+        <TextInput
+          label="Turns per minute"
+          description="0 = inherit the global rate limit"
+          value={turnsPerMinute}
+          onChange={setTurnsPerMinute}
+        />
+        <label className="claw-toggle-inline">
+          <Switch value={isDefault} label="Default plan" isLabelHidden changeAction={setIsDefault} />
+          <Text size="sm" color="secondary">
+            Default plan (used by anyone without an assigned plan)
+          </Text>
+        </label>
+        <div className="claw-row">
+          <Button
+            label="Create plan"
+            variant="primary"
+            icon={<Icon icon={Plus} size="sm" />}
+            size="sm"
+            isDisabled={!name.trim()}
+            clickAction={() =>
+              guard(async () => {
+                const body: PlanCreate = {
+                  name: name.trim(),
+                  rank: planNum(rank),
+                  max_chat_cost: maxChatCost,
+                  allow_image: allowImage,
+                  max_image_cost: maxImageCost,
+                  messages_per_day: planNum(messagesPerDay),
+                  images_per_day: planNum(imagesPerDay),
+                  turns_per_minute: planNum(turnsPerMinute),
+                  is_default: isDefault,
+                };
+                await api.adminCreatePlan(body);
+                toast({ body: `${name.trim()} added`, type: "info", autoHideDuration: 2500 });
+                onClose();
+                await reload();
+              })
+            }
+          />
+          <Button label="Cancel" variant="ghost" size="sm" clickAction={onClose} />
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// Single-select plan picker (chips) for the Add/Edit user forms and the group
+// manager — mirrors GroupPicker, minus the inline "create" (plans are made in
+// the Plans section). A "Default plan" chip clears any explicit assignment.
+function PlanPicker({
+  plans,
+  value,
+  onChange,
+  label = "Plan",
+}: {
+  plans: PlanInfo[];
+  value: string | null;
+  onChange: (id: string | null) => void;
+  label?: string;
+}) {
+  return (
+    <div className="claw-field-group">
+      <Text size="sm" color="secondary">
+        {label}
+      </Text>
+      <div className="claw-row">
+        <Button
+          label="Default plan"
+          size="sm"
+          variant={value === null ? "primary" : "secondary"}
+          clickAction={() => onChange(null)}
+        />
+        {plans.map((p) => (
+          <Button
+            key={p.id}
+            label={p.name}
+            size="sm"
+            variant={value === p.id ? "primary" : "secondary"}
+            clickAction={() => onChange(p.id)}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -2788,10 +3357,12 @@ function GroupPicker({
 // land in. Groups are organizational only — no permission effect.
 function GroupsManager({
   groups,
+  plans,
   reload,
   guard,
 }: {
   groups: GroupInfo[];
+  plans: PlanInfo[];
   reload: () => Promise<void>;
   guard: (fn: () => Promise<void>) => Promise<void>;
 }) {
@@ -2823,50 +3394,70 @@ function GroupsManager({
           </Text>
         )}
         {groups.map((g) => (
-          <div key={g.id} className="claw-row claw-row-between claw-model-row">
-            <div className="claw-row">
-              <Icon icon={Users} size="sm" color="secondary" />
-              <Text>{g.name}</Text>
-              <Text size="sm" color="secondary">
-                {g.user_count} {g.user_count === 1 ? "user" : "users"}
-              </Text>
-              {g.is_default && (
-                <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default sign-up" />
-              )}
+          <div key={g.id} className="claw-plan-group-item">
+            <div className="claw-row claw-row-between claw-model-row">
+              <div className="claw-row">
+                <Icon icon={Users} size="sm" color="secondary" />
+                <Text>{g.name}</Text>
+                <Text size="sm" color="secondary">
+                  {g.user_count} {g.user_count === 1 ? "user" : "users"}
+                </Text>
+                {g.is_default && (
+                  <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default sign-up" />
+                )}
+                {g.plan_name && (
+                  <Badge variant="neutral" icon={<Icon icon={Gauge} size="xsm" />} label={g.plan_name} />
+                )}
+              </div>
+              <div className="claw-row">
+                <Button
+                  label={g.is_default ? "Default sign-up group" : "Set as default"}
+                  size="sm"
+                  variant={g.is_default ? "secondary" : "ghost"}
+                  clickAction={() =>
+                    guard(async () => {
+                      await api.adminSetDefaultGroup(g.is_default ? null : g.id);
+                      await reload();
+                    })
+                  }
+                />
+                <IconButton
+                  label="Delete group"
+                  icon={<Icon icon={Trash2} size="sm" />}
+                  size="sm"
+                  variant="ghost"
+                  clickAction={() =>
+                    guard(async () => {
+                      if (
+                        !window.confirm(
+                          `Delete group “${g.name}”? Its ${g.user_count} member(s) become ungrouped. The users themselves are not deleted.`,
+                        )
+                      ) {
+                        return;
+                      }
+                      await api.adminDeleteGroup(g.id);
+                      toast({ body: `Group “${g.name}” deleted`, type: "info", autoHideDuration: 2500 });
+                      await reload();
+                    })
+                  }
+                />
+              </div>
             </div>
-            <div className="claw-row">
-              <Button
-                label={g.is_default ? "Default sign-up group" : "Set as default"}
-                size="sm"
-                variant={g.is_default ? "secondary" : "ghost"}
-                clickAction={() =>
-                  guard(async () => {
-                    await api.adminSetDefaultGroup(g.is_default ? null : g.id);
+            {/* Default plan for everyone in this group (members without their own
+                assigned plan inherit it). */}
+            {plans.length > 0 && (
+              <PlanPicker
+                plans={plans}
+                value={g.plan_id}
+                label="Default plan for group"
+                onChange={(planId) =>
+                  void guard(async () => {
+                    await api.adminUpdateGroup(g.id, { plan_id: planId });
                     await reload();
                   })
                 }
               />
-              <IconButton
-                label="Delete group"
-                icon={<Icon icon={Trash2} size="sm" />}
-                size="sm"
-                variant="ghost"
-                clickAction={() =>
-                  guard(async () => {
-                    if (
-                      !window.confirm(
-                        `Delete group “${g.name}”? Its ${g.user_count} member(s) become ungrouped. The users themselves are not deleted.`,
-                      )
-                    ) {
-                      return;
-                    }
-                    await api.adminDeleteGroup(g.id);
-                    toast({ body: `Group “${g.name}” deleted`, type: "info", autoHideDuration: 2500 });
-                    await reload();
-                  })
-                }
-              />
-            </div>
+            )}
           </div>
         ))}
         {adding ? (
@@ -3274,12 +3865,14 @@ function UserImportDialog({
 function UsersPanel({ selfId }: { selfId: string }) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [groups, setGroups] = useState<GroupInfo[]>([]);
+  const [plans, setPlans] = useState<PlanInfo[]>([]);
   const [creating, setCreating] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
   const [newGroupId, setNewGroupId] = useState<string | null>(null);
+  const [newPlanId, setNewPlanId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [visible, setVisible] = useState(USERS_PAGE);
   // Group filter: "all" | "none" (ungrouped) | a group id.
@@ -3291,11 +3884,13 @@ function UsersPanel({ selfId }: { selfId: string }) {
 
   const reloadUsers = useCallback(() => api.adminListUsers().then(setUsers), []);
   const reloadGroups = useCallback(() => api.adminListGroups().then(setGroups), []);
-  // Group changes (create/delete/default, or assigning a user) affect both
-  // lists — a deleted group ungroups its members, counts shift, etc.
+  const reloadPlans = useCallback(() => api.adminListPlans().then(setPlans), []);
+  // Group/plan changes (create/delete/default, or assigning a user) affect
+  // several lists — a deleted group ungroups its members, plan user_counts
+  // shift, etc. — so refresh them together.
   const reloadAll = useCallback(async () => {
-    await Promise.all([reloadUsers(), reloadGroups()]);
-  }, [reloadUsers, reloadGroups]);
+    await Promise.all([reloadUsers(), reloadGroups(), reloadPlans()]);
+  }, [reloadUsers, reloadGroups, reloadPlans]);
 
   useEffect(() => {
     void guard(async () => await reloadAll());
@@ -3303,9 +3898,11 @@ function UsersPanel({ selfId }: { selfId: string }) {
 
   // Reset the "load more" window whenever the search or group filter changes.
   useEffect(() => setVisible(USERS_PAGE), [query, groupFilter]);
-  // A default group is a fine starting selection for a new user.
+  // A default group is a fine starting selection for a new user; leave the plan
+  // on "Default plan" (null) so new users inherit the deployment default.
   useEffect(() => {
     setNewGroupId(groups.find((g) => g.is_default)?.id ?? null);
+    setNewPlanId(null);
   }, [groups, creating]);
 
   const resetForm = () => {
@@ -3392,7 +3989,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
         }}
       />
 
-      {managingGroups && <GroupsManager groups={groups} reload={reloadAll} guard={guard} />}
+      {managingGroups && <GroupsManager groups={groups} plans={plans} reload={reloadAll} guard={guard} />}
 
       {users.length > USERS_PAGE / 2 && (
         <TextInput
@@ -3450,6 +4047,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
               onChange={setPassword}
             />
             <GroupPicker groups={groups} value={newGroupId} onChange={setNewGroupId} onCreate={createGroup} />
+            {plans.length > 0 && <PlanPicker plans={plans} value={newPlanId} onChange={setNewPlanId} />}
             <label className="claw-toggle-inline">
               <Switch value={isAdmin} label="Make administrator" isLabelHidden changeAction={setIsAdmin} />
               <Text size="sm" color="secondary">
@@ -3464,7 +4062,16 @@ function UsersPanel({ selfId }: { selfId: string }) {
                 isDisabled={!email.trim() || password.length < 8}
                 clickAction={() =>
                   guard(async () => {
-                    await api.adminCreateUser(email.trim(), password, isAdmin, displayName.trim(), newGroupId);
+                    // adminCreateUser has no plan_id param, so assign the chosen
+                    // plan in a follow-up PATCH once we have the new user's id.
+                    const created = await api.adminCreateUser(
+                      email.trim(),
+                      password,
+                      isAdmin,
+                      displayName.trim(),
+                      newGroupId,
+                    );
+                    if (newPlanId) await api.adminUpdateUser(created.id, { plan_id: newPlanId });
                     toast({ body: `${displayName.trim() || email.trim()} added`, type: "info", autoHideDuration: 2500 });
                     resetForm();
                     await reloadAll();
@@ -3493,6 +4100,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
                 user={u}
                 selfId={selfId}
                 groups={groups}
+                plans={plans}
                 reload={reloadAll}
                 createGroup={createGroup}
                 guard={guard}
@@ -3557,6 +4165,7 @@ function UserRow({
   user: u,
   selfId,
   groups,
+  plans,
   reload,
   createGroup,
   guard,
@@ -3564,6 +4173,7 @@ function UserRow({
   user: AdminUser;
   selfId: string;
   groups: GroupInfo[];
+  plans: PlanInfo[];
   reload: () => Promise<void>;
   createGroup: (name: string) => Promise<GroupInfo>;
   guard: (fn: () => Promise<void>) => Promise<void>;
@@ -3572,6 +4182,7 @@ function UserRow({
   const [displayName, setDisplayName] = useState(u.display_name);
   const [newPassword, setNewPassword] = useState("");
   const [groupId, setGroupId] = useState<string | null>(u.group_id);
+  const [planId, setPlanId] = useState<string | null>(u.plan_id);
   const toast = useToast();
   const isSelf = u.id === selfId;
   const label = u.display_name || u.email;
@@ -3592,6 +4203,9 @@ function UserRow({
             <SignupMethodBadge method={u.signup_method} />
             {u.group_name && (
               <Badge variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={u.group_name} />
+            )}
+            {u.plan_name && (
+              <Badge variant="neutral" icon={<Icon icon={Gauge} size="xsm" />} label={u.plan_name} />
             )}
             {!u.is_active && (
               <Badge variant="error" icon={<Icon icon={ShieldOff} size="xsm" />} label="suspended" />
@@ -3659,6 +4273,7 @@ function UserRow({
               setDisplayName(u.display_name);
               setNewPassword("");
               setGroupId(u.group_id);
+              setPlanId(u.plan_id);
               setEditing((e) => !e);
             }}
           />
@@ -3698,6 +4313,7 @@ function UserRow({
             onChange={setNewPassword}
           />
           <GroupPicker groups={groups} value={groupId} onChange={setGroupId} onCreate={createGroup} />
+          {plans.length > 0 && <PlanPicker plans={plans} value={planId} onChange={setPlanId} />}
           <div className="claw-row">
             <Button
               label="Save changes"
@@ -3710,6 +4326,7 @@ function UserRow({
                   await api.adminUpdateUser(u.id, {
                     display_name: displayName.trim(),
                     group_id: groupId,
+                    plan_id: planId,
                     ...(newPassword ? { password: newPassword } : {}),
                   });
                   setEditing(false);

@@ -1322,7 +1322,7 @@ export function Chat({
                               onClick={() => {
                                 if (imageModels.length === 0) {
                                   toast({
-                                    body: "No image models available. Ask an admin to add one in the Control Plane.",
+                                    body: "Image generation isn't included in your current plan. Ask an admin to upgrade your plan or enable an image model in the Control Plane.",
                                     type: "info",
                                   });
                                   return;

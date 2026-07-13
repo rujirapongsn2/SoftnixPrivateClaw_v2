@@ -214,6 +214,8 @@ export interface AdminUser extends AuthUser {
   sessions: number;
   group_id: string | null;
   group_name: string | null;
+  plan_id: string | null;
+  plan_name: string | null;
   created_at: string;
 }
 
@@ -222,6 +224,35 @@ export interface GroupInfo {
   name: string;
   is_default: boolean;
   user_count: number;
+  plan_id: string | null;
+  plan_name: string | null;
+}
+
+// A usage-tier plan (Free/Plus/Pro/Max/Unlimited-style): model cost ceilings +
+// daily/per-minute quotas. Mirrors claw/db/models.py::PolicyPlan.
+export interface PlanInfo {
+  id: string;
+  name: string;
+  rank: number;
+  max_chat_cost: ModelCost;
+  allow_image: boolean;
+  max_image_cost: ModelCost;
+  messages_per_day: number; // 0 = unlimited
+  images_per_day: number; // 0 = unlimited
+  turns_per_minute: number; // 0 = inherit global
+  is_default: boolean;
+  user_count?: number; // attached by the admin list endpoint
+}
+
+export type PlanCreate = Omit<PlanInfo, "id" | "user_count">;
+export type PlanPatch = Partial<PlanCreate>;
+
+// GET /api/my/plan — the caller's effective plan + today's consumption.
+export interface MyPlan {
+  plan: PlanInfo | null;
+  used: { turns: number; images: number };
+  messages_remaining?: number | null;
+  images_remaining?: number | null;
 }
 
 // Bulk user import (CSV/XLSX) — parse is stateless: the browser holds the
@@ -345,6 +376,22 @@ export interface AdminOverview {
   guardrail_hits_by_day: ActivityPoint[];
   guardrail_hits_by_user: GuardrailHitsByUserPoint[];
   guardrail_hits_by_rule: GuardrailHitsByRulePoint[];
+  plans_report: PlansReport;
+}
+
+export interface PlansReport {
+  plans: PlanInfo[];
+  usage_today: PlanUsageRow[];
+}
+
+export interface PlanUsageRow {
+  user_id: string;
+  label: string;
+  plan_name: string | null;
+  turns: number;
+  messages_limit: number;
+  images: number;
+  images_limit: number;
 }
 
 export type ModelCost = "low" | "medium" | "high" | "very_high";
@@ -760,13 +807,14 @@ export const api = {
     }),
   adminUpdateUser: (
     id: string,
-    // Omit group_id to leave the group unchanged; pass null to move to ungrouped.
+    // Omit group_id/plan_id to leave unchanged; pass null to clear.
     patch: {
       is_admin?: boolean;
       is_active?: boolean;
       display_name?: string;
       password?: string;
       group_id?: string | null;
+      plan_id?: string | null;
     },
   ) => request<AdminUser>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   adminDeleteUser: (id: string) => request(`/api/admin/users/${id}`, { method: "DELETE" }),
@@ -807,6 +855,24 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ group_id }),
     }),
+  adminUpdateGroup: (id: string, patch: { plan_id?: string | null }) =>
+    request<GroupInfo>(`/api/admin/groups/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+
+  // -- admin: usage-tier plans --
+  adminListPlans: () => request<PlanInfo[]>("/api/admin/plans"),
+  adminCreatePlan: (plan: PlanCreate) =>
+    request<PlanInfo>("/api/admin/plans", { method: "POST", body: JSON.stringify(plan) }),
+  adminUpdatePlan: (id: string, patch: PlanPatch) =>
+    request<PlanInfo>(`/api/admin/plans/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  adminDeletePlan: (id: string) => request(`/api/admin/plans/${id}`, { method: "DELETE" }),
+  adminSetDefaultPlan: (plan_id: string | null) =>
+    request<{ default_plan_id: string | null }>("/api/admin/plans/default", {
+      method: "PUT",
+      body: JSON.stringify({ plan_id }),
+    }),
+
+  // -- user: my effective plan + today's usage (composer quota hint) --
+  myPlan: () => request<MyPlan>("/api/my/plan"),
 
   // -- admin: overview / LLM providers / guardrails / audit --
   adminOverview: () => request<AdminOverview>("/api/admin/overview"),

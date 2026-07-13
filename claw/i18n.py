@@ -29,6 +29,14 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "en": "You're sending messages too fast. Please wait a moment and try again.",
         "th": "คุณส่งข้อความถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง",
     },
+    "error.daily_limit": {
+        "en": "You've reached your plan's daily message limit. It resets tomorrow.",
+        "th": "คุณใช้ข้อความครบตามโควตารายวันของแพ็กเกจแล้ว ระบบจะรีเซ็ตในวันพรุ่งนี้",
+    },
+    "error.no_model_for_plan": {
+        "en": "Your plan doesn't allow any of the currently available chat models. Ask an admin to adjust your plan or the model lineup.",
+        "th": "แพ็กเกจของคุณไม่อนุญาตให้ใช้โมเดลแชทที่มีอยู่ในระบบตอนนี้เลย กรุณาติดต่อผู้ดูแลระบบเพื่อปรับแพ็กเกจหรือรายการโมเดล",
+    },
     "reason.timeout": {"en": "connection timed out", "th": "การเชื่อมต่อหมดเวลา"},
     "reason.auth": {"en": "authentication failed", "th": "การยืนยันตัวตนล้มเหลว"},
     "reason.rate_limit": {"en": "rate limit exceeded", "th": "เกินขีดจำกัดการเรียกใช้งาน"},

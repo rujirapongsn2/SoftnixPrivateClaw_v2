@@ -339,11 +339,14 @@ async def get_usage(user: User = Depends(current_user), state: AppState = Depend
 async def list_models(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
     """Enabled models for the chat model picker, plus the effective default.
 
-    Falls back to the env-configured model when no providers are set up, so chat
+    Filtered by the user's usage-plan cost ceiling (BYOK models exempt). Falls
+    back to the env-configured model when no providers are set up, so chat
     keeps working out of the box.
     """
-    models = await state.llm_config.enabled_models(user.id)
-    default = await state.llm_config.default_model()
+    plan = await state.plans.resolve_for_user(user.id) if state.plans is not None else None
+    chat_cost = plan["max_chat_cost"] if plan else None
+    models = await state.llm_config.enabled_models(user.id, max_cost=chat_cost)
+    default = await state.llm_config.default_model_for(chat_cost)
     if not models:
         env_model = state.settings.llm.model
         return {
@@ -369,8 +372,36 @@ async def list_image_models(
     user: User = Depends(current_user), state: AppState = Depends(get_state)
 ) -> dict:
     """Enabled text-to-image models for the composer's "+ Image" picker —
-    kept separate from the chat picker (these can't do tool calling)."""
-    return {"models": await state.llm_config.enabled_models(user.id, kind="image")}
+    kept separate from the chat picker (these can't do tool calling). When the
+    plan disallows image generation, admin-global models are hidden but the
+    caller's own BYOK image models still show (same exemption as the cost
+    ceiling below — it's their own key, not the operator's)."""
+    plan = await state.plans.resolve_for_user(user.id) if state.plans is not None else None
+    image_cost = plan["max_image_cost"] if plan else None
+    models = await state.llm_config.enabled_models(user.id, kind="image", max_cost=image_cost)
+    if plan is not None and not plan["allow_image"]:
+        models = [m for m in models if m["scope"] == "private"]
+    return {"models": models}
+
+
+@router.get("/my/plan")
+async def my_plan(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    """The caller's effective usage plan + today's consumption/remaining, for
+    the composer's quota hint. Null plan = no restriction."""
+    plan = await state.plans.resolve_for_user(user.id) if state.plans is not None else None
+    today = await state.usage.usage_today(user.id) if state.usage is not None else {"turns": 0, "images": 0}
+    if plan is None:
+        return {"plan": None, "used": today}
+    return {
+        "plan": plan,
+        "used": today,
+        "messages_remaining": (
+            max(0, plan["messages_per_day"] - today["turns"]) if plan["messages_per_day"] else None
+        ),
+        "images_remaining": (
+            max(0, plan["images_per_day"] - today["images"]) if plan["images_per_day"] else None
+        ),
+    }
 
 
 # ---------------------------------------------------------------- my LLM providers (BYOK)

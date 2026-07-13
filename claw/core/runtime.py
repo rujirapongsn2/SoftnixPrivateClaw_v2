@@ -41,6 +41,7 @@ from claw.db.stores import (
     AuditStore,
     KnowledgeStore,
     MessageStore,
+    PolicyPlanStore,
     ScheduleStore,
     SessionStore,
     SkillStore,
@@ -289,12 +290,14 @@ class AgentRuntime:
         schedules: ScheduleStore | None = None,
         scheduler: SchedulerService | None = None,
         llm_config: "LLMConfigStore | None" = None,
+        plans: "PolicyPlanStore | None" = None,
         browser_broker: BrowserBrokerStore | None = None,
         knowledge: "KnowledgeStore | None" = None,
     ):
         self.settings = settings
         self.provider = provider
         self.llm_config = llm_config
+        self.plans = plans
         self.knowledge = knowledge
         self.bus = bus
         self.users = users
@@ -503,8 +506,50 @@ class AgentRuntime:
         """
         turn_id = uuid.uuid4().hex[:12]
 
-        # Per-user rate limit — reject before doing any work or calling the model.
-        if not self._rate_limiter.allow(user_id):
+        # Resolve the caller's usage-tier plan once (None = no plan / unlimited).
+        # It governs the per-minute cap, the daily message quota, and the chat
+        # model cost ceiling used further down.
+        plan = await self.plans.resolve_for_user(user_id) if self.plans is not None else None
+
+        # Daily message quota (plan.messages_per_day; 0 = unlimited). Soft cap:
+        # UsageDaily is written in a background task after the turn, so a burst
+        # can overshoot slightly — acceptable for tiering. Checked BEFORE the
+        # rate limiter below so a user who's already over their daily cap
+        # doesn't also burn a per-minute slot on every rejected retry.
+        if plan and plan["messages_per_day"] > 0 and self.usage is not None:
+            used_today = (await self.usage.usage_today(user_id))["turns"]
+            if used_today >= plan["messages_per_day"]:
+                await self.audit.log(
+                    "quota",
+                    {
+                        "event": "messages_per_day",
+                        "plan": plan["name"],
+                        "limit": plan["messages_per_day"],
+                    },
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+                msg = t("error.daily_limit", locale)
+                self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
+                self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
+                return msg
+
+        # Per-user rate limit — reject before doing any work or calling the
+        # model. A plan can only TIGHTEN the global per-minute cap, never exceed
+        # it: Settings.turns_per_minute is the operator's hard safety backstop
+        # against overloading shared infrastructure, and applies even to a plan
+        # whose own turns_per_minute is 0. Plan 0 = "no plan-specific throttle,
+        # inherit the global backstop" (NOT "ignore the global backstop") —
+        # global 0 = the backstop itself is off. So the effective cap is the
+        # stricter of the two, treating 0 as "no limit on that side."
+        global_rpm = self._rate_limiter.per_minute
+        plan_rpm = plan["turns_per_minute"] if plan else 0
+        if plan_rpm and global_rpm:
+            effective_rpm = min(plan_rpm, global_rpm)
+        else:
+            # One side unlimited: plan_rpm (if set) applies, else fall to global.
+            effective_rpm = plan_rpm or global_rpm
+        if not self._rate_limiter.allow(user_id, per_minute=effective_rpm):
             msg = t("error.rate_limited", locale)
             self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
             self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
@@ -542,19 +587,43 @@ class AgentRuntime:
             # Resolve the effective model for this turn: explicit request → sticky
             # per-chat choice → admin default → env default. Persist an explicit
             # choice onto the session so it sticks for the whole conversation.
+            # The plan's chat cost ceiling gates which admin-global model this
+            # turn may use; resolve() returns None for a disallowed one, so a
+            # user can't reach a pricier model than their tier by passing its
+            # id. The fallback picks the best model the plan DOES allow.
+            plan_chat_cost = plan["max_chat_cost"] if plan else None
             effective_model: str | None = None
             model_key: str | None = None
             model_base: str | None = None
             if self.llm_config is not None:
                 requested = model or (session.model if session else None)
                 if requested:
-                    resolved = await self.llm_config.resolve(requested, user_id)
+                    resolved = await self.llm_config.resolve(
+                        requested, user_id, max_cost=plan_chat_cost
+                    )
                     if resolved is not None:
                         effective_model = resolved["model_id"]
                         model_key = resolved["api_key"] or None
                         model_base = resolved["api_base"] or None
                 if effective_model is None:
-                    effective_model = await self.llm_config.default_model()
+                    effective_model = await self.llm_config.default_model_for(plan_chat_cost)
+                # A plan cost ceiling is in effect but no admin-global model
+                # satisfies it: reject the turn instead of falling through with
+                # model=None, which claw/core/loop.py would silently resolve to
+                # the operator's raw env-configured default — bypassing the
+                # ceiling entirely. (No ceiling in effect, i.e. plan_chat_cost
+                # is None, keeps the existing out-of-box env-default fallback.)
+                if effective_model is None and plan_chat_cost is not None:
+                    await self.audit.log(
+                        "quota",
+                        {"event": "no_model_for_plan", "plan": plan["name"] if plan else None,
+                         "max_chat_cost": plan_chat_cost},
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    msg = t("error.no_model_for_plan", locale)
+                    self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
+                    return msg
                 if model and session is not None and session.model != model:
                     self._spawn_background(self.sessions.set_model(session_id, model))
             history = await self.messages.recent(session_id, after_seq=after_seq)

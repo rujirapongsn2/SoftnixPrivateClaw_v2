@@ -24,6 +24,7 @@ from claw.db.stores import (
     MemoryStore,
     MessageStore,
     OAuthAppStore,
+    PolicyPlanStore,
     ScheduleStore,
     SessionStore,
     ShareStore,
@@ -65,6 +66,8 @@ class AppState:
     telegram_config: TelegramConfigStore
     telegram_mgr: "TelegramManager"
     smtp_config: SmtpConfigStore
+    # Usage-tier plans (model cost ceilings + daily/per-minute quotas).
+    plans: PolicyPlanStore = None  # type: ignore[assignment]
     # Per-user throttle for the /images endpoint (its own limiter, separate
     # from the chat turn limiter which lives on the runtime).
     image_rate_limiter: RateLimiter = None  # type: ignore[assignment]

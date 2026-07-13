@@ -11,6 +11,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from claw.core.plans import cost_allowed, cost_rank
 from claw.db.models import (
     AppSetting,
     AuditEvent,
@@ -25,6 +26,7 @@ from claw.db.models import (
     McpConnector,
     Memory,
     Message,
+    PolicyPlan,
     Schedule,
     Share,
     Skill,
@@ -692,6 +694,18 @@ class UserStore:
             await db.commit()
             return user
 
+    async def assign_plan(self, user_id: str, plan_id: str | None) -> User | None:
+        """Set (or clear, with None) a user's usage-tier plan. None falls back
+        to the user's group plan, then the system default (PolicyPlanStore.
+        resolve_for_user)."""
+        async with self.factory() as db:
+            user = await db.get(User, user_id)
+            if user is None:
+                return None
+            user.plan_id = plan_id
+            await db.commit()
+            return user
+
     async def get(self, user_id: str) -> User | None:
         async with self.factory() as db:
             return await db.get(User, user_id)
@@ -940,6 +954,16 @@ class GroupStore:
                     row.is_default = True
             await db.commit()
 
+    async def set_plan(self, group_id: str, plan_id: str | None) -> UserGroup | None:
+        """Set (or clear, with None) the group's default usage-tier plan."""
+        async with self.factory() as db:
+            row = await db.get(UserGroup, group_id)
+            if row is None:
+                return None
+            row.plan_id = plan_id
+            await db.commit()
+            return row
+
     async def default_group(self) -> UserGroup | None:
         async with self.factory() as db:
             return await db.scalar(select(UserGroup).where(UserGroup.is_default.is_(True)).limit(1))
@@ -953,6 +977,230 @@ class GroupStore:
                 .group_by(User.group_id)
             )
             return {gid: n for gid, n in rows.all()}
+
+
+_PLAN_FIELDS = (
+    "name",
+    "rank",
+    "max_chat_cost",
+    "allow_image",
+    "max_image_cost",
+    "messages_per_day",
+    "images_per_day",
+    "turns_per_minute",
+)
+
+
+def plan_to_dict(p: PolicyPlan) -> dict[str, Any]:
+    """Serialize a PolicyPlan to the plain dict used everywhere off the ORM
+    (API responses, the resolve cache, enforcement)."""
+    return {
+        "id": p.id,
+        "name": p.name,
+        "rank": p.rank,
+        "max_chat_cost": p.max_chat_cost,
+        "allow_image": p.allow_image,
+        "max_image_cost": p.max_image_cost,
+        "messages_per_day": p.messages_per_day,
+        "images_per_day": p.images_per_day,
+        "turns_per_minute": p.turns_per_minute,
+        "is_default": p.is_default,
+    }
+
+
+class PolicyPlanStore:
+    """Usage-tier plans: model cost ceilings + daily/per-minute quotas, assigned
+    per-user or per-group. Plans change rarely but are read on every turn, so
+    the effective-plan lookup is served from a small in-process cache that is
+    invalidated on any write (mirrors PolicyEngine's reload model)."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+        self.factory = factory
+        # {"by_id": {id: dict}, "default": dict | None}; None = not yet loaded.
+        self._cache: dict[str, Any] | None = None
+
+    def _invalidate(self) -> None:
+        self._cache = None
+
+    async def _cached(self) -> dict[str, Any]:
+        if self._cache is None:
+            async with self.factory() as db:
+                rows = list(await db.scalars(select(PolicyPlan)))
+            by_id = {p.id: plan_to_dict(p) for p in rows}
+            default = next((plan_to_dict(p) for p in rows if p.is_default), None)
+            self._cache = {"by_id": by_id, "default": default}
+        return self._cache
+
+    async def list(self) -> list[dict[str, Any]]:
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(PolicyPlan).order_by(PolicyPlan.rank, PolicyPlan.name)
+            )
+            return [plan_to_dict(p) for p in rows]
+
+    async def get(self, plan_id: str) -> dict[str, Any] | None:
+        async with self.factory() as db:
+            row = await db.get(PolicyPlan, plan_id)
+            return plan_to_dict(row) if row else None
+
+    async def count(self) -> int:
+        async with self.factory() as db:
+            return await db.scalar(select(func.count()).select_from(PolicyPlan))
+
+    async def create(self, **fields: Any) -> PolicyPlan:
+        want_default = bool(fields.pop("is_default", False))
+        async with self.factory() as db:
+            if want_default:
+                await db.execute(PolicyPlan.__table__.update().values(is_default=False))
+            row = PolicyPlan(**{k: v for k, v in fields.items() if k in _PLAN_FIELDS})
+            row.is_default = want_default
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+        self._invalidate()
+        return row
+
+    async def update(self, plan_id: str, **fields: Any) -> PolicyPlan | None:
+        async with self.factory() as db:
+            row = await db.get(PolicyPlan, plan_id)
+            if row is None:
+                return None
+            for key in _PLAN_FIELDS:
+                if key in fields and fields[key] is not None:
+                    setattr(row, key, fields[key])
+            if fields.get("is_default") is True:
+                await db.execute(
+                    PolicyPlan.__table__.update()
+                    .where(PolicyPlan.id != plan_id)
+                    .values(is_default=False)
+                )
+                row.is_default = True
+            elif fields.get("is_default") is False:
+                if row.is_default:
+                    # Clearing the sole default would leave every user/group
+                    # without an explicit plan_id silently unrestricted (their
+                    # resolve_for_user() falls through to no plan at all).
+                    # Require picking a replacement default first via
+                    # set_default() instead of allowing a bare unset.
+                    other_default = (
+                        await db.execute(
+                            select(PolicyPlan.id)
+                            .where(PolicyPlan.id != plan_id, PolicyPlan.is_default.is_(True))
+                            .limit(1)
+                        )
+                    ).first()
+                    if other_default is None:
+                        raise ValueError(
+                            "cannot unset the only default plan — set another plan as default first"
+                        )
+                row.is_default = False
+            await db.commit()
+            await db.refresh(row)
+        self._invalidate()
+        return row
+
+    async def delete(self, plan_id: str) -> bool:
+        """Delete a plan; users/groups referencing it become plan-less (plan_id
+        → NULL). Done explicitly so it works where the FK's ON DELETE isn't
+        enforced (SQLite in tests), matching GroupStore.delete."""
+        async with self.factory() as db:
+            row = await db.get(PolicyPlan, plan_id)
+            if row is None:
+                return False
+            await db.execute(
+                User.__table__.update().where(User.plan_id == plan_id).values(plan_id=None)
+            )
+            await db.execute(
+                UserGroup.__table__.update()
+                .where(UserGroup.plan_id == plan_id)
+                .values(plan_id=None)
+            )
+            await db.delete(row)
+            await db.commit()
+        self._invalidate()
+        return True
+
+    async def set_default(self, plan_id: str | None) -> None:
+        """Make `plan_id` the sole default plan, or clear the default when None."""
+        async with self.factory() as db:
+            await db.execute(PolicyPlan.__table__.update().values(is_default=False))
+            if plan_id is not None:
+                row = await db.get(PolicyPlan, plan_id)
+                if row is not None:
+                    row.is_default = True
+            await db.commit()
+        self._invalidate()
+
+    async def default_plan(self) -> dict[str, Any] | None:
+        return (await self._cached())["default"]
+
+    async def resolve_for_user(self, user_id: str) -> dict[str, Any] | None:
+        """Effective plan for a user: their own plan → their group's default
+        plan → the system default plan. None means no plan applies (no
+        restriction / unlimited) — keeps the feature non-breaking."""
+        cache = await self._cached()
+        by_id = cache["by_id"]
+        if not by_id:
+            return None
+        async with self.factory() as db:
+            row = (
+                await db.execute(
+                    select(User.plan_id, UserGroup.plan_id)
+                    .select_from(User)
+                    .join(UserGroup, User.group_id == UserGroup.id, isouter=True)
+                    .where(User.id == user_id)
+                )
+            ).first()
+        if row is not None:
+            plan_id = row[0] or row[1]
+            if plan_id and plan_id in by_id:
+                return by_id[plan_id]
+        return cache["default"]
+
+    async def resolve_for_users(self, user_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Batched resolve_for_user() for a known set of ids — one query
+        instead of one round-trip per user (e.g. the admin overview's top-N
+        usage list), same resolution order (user plan → group plan → default)."""
+        if not user_ids:
+            return {}
+        cache = await self._cached()
+        by_id = cache["by_id"]
+        if not by_id:
+            return {uid: None for uid in user_ids}
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(User.id, User.plan_id, UserGroup.plan_id)
+                    .select_from(User)
+                    .join(UserGroup, User.group_id == UserGroup.id, isouter=True)
+                    .where(User.id.in_(user_ids))
+                )
+            ).all()
+        found = {row[0]: (row[1] or row[2]) for row in rows}
+        return {
+            uid: by_id.get(found.get(uid) or "", cache["default"]) if uid in found else cache["default"]
+            for uid in user_ids
+        }
+
+    async def counts_by_plan(self) -> dict[str, int]:
+        """Direct-assignment user count per plan_id (excludes users covered only
+        via their group's plan — those are attributed to the group, not counted
+        here)."""
+        async with self.factory() as db:
+            rows = await db.execute(
+                select(User.plan_id, func.count())
+                .where(User.plan_id.is_not(None))
+                .group_by(User.plan_id)
+            )
+            return {pid: n for pid, n in rows.all()}
+
+    async def seed(self, plans: list[dict[str, Any]]) -> None:
+        """Insert built-in plans once, when the table is empty."""
+        async with self.factory() as db:
+            for p in plans:
+                db.add(PolicyPlan(**p))
+            await db.commit()
+        self._invalidate()
 
 
 class UsageStore:
@@ -1018,6 +1266,93 @@ class UsageStore:
                     raise
                 # Another turn created the bucket first; retry so the UPDATE path hits.
                 continue
+
+    async def record_image(self, user_id: str, model: str) -> None:
+        """Increment today's image-generation count for a user. The /images
+        path emits no tokens, so record() never sees it — this keeps the
+        images/day plan quota fed. Same portable UPDATE-else-INSERT upsert +
+        retry as record()."""
+        today = datetime.now(timezone.utc).date()
+        model = model or ""
+        for attempt in range(2):
+            try:
+                async with self.factory() as db:
+                    res = await db.execute(
+                        update(UsageDaily)
+                        .where(
+                            UsageDaily.day == today,
+                            UsageDaily.user_id == user_id,
+                            UsageDaily.model == model,
+                        )
+                        .values(images=UsageDaily.images + 1)
+                    )
+                    if res.rowcount == 0:
+                        db.add(UsageDaily(day=today, user_id=user_id, model=model, images=1))
+                    await db.commit()
+                return
+            except IntegrityError:
+                if attempt == 1:
+                    raise
+                continue
+
+    async def top_users_today(self, limit: int = 15) -> list[dict[str, int]]:
+        """Today's highest-volume users (by chat turns), bounded to `limit`
+        rows — feeds the admin Plans overview's "who's near their quota" list
+        without an unbounded per-user scan."""
+        today = datetime.now(timezone.utc).date()
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(
+                        UsageDaily.user_id,
+                        func.coalesce(func.sum(UsageDaily.turns), 0).label("turns"),
+                        func.coalesce(func.sum(UsageDaily.images), 0).label("images"),
+                    )
+                    .where(UsageDaily.day == today)
+                    .group_by(UsageDaily.user_id)
+                    .order_by(func.sum(UsageDaily.turns).desc())
+                    .limit(limit)
+                )
+            ).all()
+        return [
+            {"user_id": uid, "turns": int(turns or 0), "images": int(images or 0)}
+            for uid, turns, images in rows
+        ]
+
+    async def release_image(self, user_id: str, model: str) -> None:
+        """Undo a record_image() reservation (decrement, floored at 0). Used
+        when an image slot was reserved up front but generation was then
+        rejected (over quota) or failed."""
+        today = datetime.now(timezone.utc).date()
+        model = model or ""
+        async with self.factory() as db:
+            await db.execute(
+                update(UsageDaily)
+                .where(
+                    UsageDaily.day == today,
+                    UsageDaily.user_id == user_id,
+                    UsageDaily.model == model,
+                    UsageDaily.images > 0,
+                )
+                .values(images=UsageDaily.images - 1)
+            )
+            await db.commit()
+
+    async def usage_today(self, user_id: str) -> dict[str, int]:
+        """Today's summed chat turns + image generations for a user — the
+        counters the daily plan quotas (messages_per_day / images_per_day) are
+        checked against."""
+        today = datetime.now(timezone.utc).date()
+        async with self.factory() as db:
+            row = (
+                await db.execute(
+                    select(
+                        func.coalesce(func.sum(UsageDaily.turns), 0),
+                        func.coalesce(func.sum(UsageDaily.images), 0),
+                    ).where(UsageDaily.day == today, UsageDaily.user_id == user_id)
+                )
+            ).one()
+        return {"turns": int(row[0] or 0), "images": int(row[1] or 0)}
 
     # Label format per granularity — used to normalize a PG bucket (a
     # datetime, period start) into the same shape SQLite's strftime-based
@@ -1631,14 +1966,19 @@ class LLMConfigStore:
 
     # -- resolution (used by chat/runtime) ----------------------------------
     async def enabled_models(
-        self, user_id: str | None = None, kind: str = "chat"
+        self, user_id: str | None = None, kind: str = "chat", max_cost: str | None = None
     ) -> list[dict[str, Any]]:
         """Enabled models of the given kind ("chat" for the agent picker,
         "image" for the text-to-image picker): admin-global models merged with
         the caller's own private (BYOK) models. Each carries a ``scope`` marker
         ("global" | "private") so the UI can badge the user's own. Chat and
         image models are intentionally separate lists — an image model can't
-        do tool calling, so it must never appear as a chat option."""
+        do tool calling, so it must never appear as a chat option.
+
+        ``max_cost`` is the caller's usage-plan cost ceiling (None = no limit):
+        admin-global models above it are dropped, but the caller's own BYOK
+        models are always kept — they pay for their own key, so the plan tier
+        (which meters the operator's shared models) doesn't restrict them."""
         async with self.factory() as db:
             rows = (
                 await db.execute(
@@ -1667,6 +2007,8 @@ class LLMConfigStore:
                 "scope": "private" if p.owner_id else "global",
             }
             for m, p in rows
+            # BYOK (owner's own) rows bypass the plan ceiling; global rows are gated.
+            if p.owner_id is not None or cost_allowed(max_cost, m.cost)
         ]
 
     async def default_model(self) -> str | None:
@@ -1686,7 +2028,37 @@ class LLMConfigStore:
             ).scalar_one_or_none()
             return row.model_id if row else None
 
-    async def resolve(self, model_id: str, user_id: str | None = None) -> dict[str, str] | None:
+    async def default_model_for(self, max_cost: str | None = None) -> str | None:
+        """The chat model to fall back to for a user on a plan with ceiling
+        ``max_cost``. Prefers the admin default when the plan allows it, else
+        the most capable (highest-cost) allowed enabled global chat model, so a
+        restricted user never lands on a model their plan forbids. None when the
+        plan allows nothing (or nothing is configured)."""
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(LLMModel)
+                    .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+                    .where(
+                        LLMModel.enabled.is_(True),
+                        LLMProvider.enabled.is_(True),
+                        LLMModel.kind == "chat",
+                        LLMProvider.owner_id.is_(None),  # global models only
+                    )
+                )
+            ).scalars().all()
+        allowed = [m for m in rows if cost_allowed(max_cost, m.cost)]
+        if not allowed:
+            return None
+        default = next((m for m in allowed if m.is_default), None)
+        if default is not None:
+            return default.model_id
+        # No allowed default → most capable allowed tier wins.
+        return max(allowed, key=lambda m: cost_rank(m.cost)).model_id
+
+    async def resolve(
+        self, model_id: str, user_id: str | None = None, max_cost: str | None = None
+    ) -> dict[str, str] | None:
         """Given an enabled model id, return its provider credentials (decrypted).
 
         Scope: admin-global providers plus the caller's own private ones. If the
@@ -1694,7 +2066,12 @@ class LLMConfigStore:
         so a user's key is used for their model and one user can never resolve
         another user's credentials. Only matches kind="chat" — an image-only
         model must never be selectable as a chat turn's model (it can't do tool
-        calling), mirroring resolve_image()'s reverse guard."""
+        calling), mirroring resolve_image()'s reverse guard.
+
+        ``max_cost`` (usage-plan ceiling) hard-denies a global model above the
+        tier by returning None — defense in depth so a client can't bypass the
+        cost-filtered picker by passing a disallowed model_id directly. The
+        caller's own BYOK model is never gated (they pay for it)."""
         async with self.factory() as db:
             row = (
                 await db.execute(
@@ -1719,6 +2096,9 @@ class LLMConfigStore:
         if row is None:
             return None
         m, p = row
+        # Plan ceiling gates admin-global models only; the caller's own BYOK is exempt.
+        if p.owner_id is None and not cost_allowed(max_cost, m.cost):
+            return None
         # Sanitize on read too, so keys stored before sanitization existed (or
         # any stray whitespace) can't crash the outbound HTTP header encoding.
         return {
@@ -1727,13 +2107,17 @@ class LLMConfigStore:
             "api_base": p.api_base,
         }
 
-    async def resolve_image(self, model_id: str, user_id: str | None = None) -> dict[str, str] | None:
+    async def resolve_image(
+        self, model_id: str, user_id: str | None = None, max_cost: str | None = None
+    ) -> dict[str, str] | None:
         """Like resolve(), but ONLY matches models classified kind="image", and
         also returns the provider's model_prefix so the image path can pick its
         generation strategy (openai/azure -> /images endpoint; else -> chat
         multimodal). Same owner-scoping and own-provider-wins tiebreak as
         resolve(), so this can never reach another user's credentials, and a
-        chat model id can never be driven through the image path."""
+        chat model id can never be driven through the image path. ``max_cost``
+        hard-denies a global image model above the plan's image ceiling (BYOK
+        exempt), mirroring resolve()."""
         async with self.factory() as db:
             row = (
                 await db.execute(
@@ -1756,11 +2140,14 @@ class LLMConfigStore:
         if row is None:
             return None
         m, p = row
+        if p.owner_id is None and not cost_allowed(max_cost, m.cost):
+            return None
         return {
             "model_id": m.model_id,
             "api_key": self._clean_key(self._dec(p.api_key)),
             "api_base": p.api_base or "",
             "model_prefix": p.model_prefix or "",
+            "scope": "private" if p.owner_id else "global",
         }
 
 

@@ -55,6 +55,12 @@ class User(Base):
     group_id: Mapped[str | None] = mapped_column(
         ForeignKey("user_groups.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # Usage-tier plan assigned directly to this user. Null = fall back to the
+    # user's group plan, then the system default plan (see PolicyPlanStore.
+    # resolve_for_user). Cleared to null when the plan is deleted.
+    plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("policy_plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     # Last time an imported-pending-activation email was sent — used to rate
     # limit resends (see claw/api/auth.py's activation email helper). Null
@@ -84,8 +90,9 @@ class User(Base):
 
 
 class UserGroup(Base):
-    """A named group of users, for organization/filtering only. Carries no
-    policy or permission meaning."""
+    """A named group of users, for organization/filtering. A group may carry a
+    default usage-tier plan (plan_id) that its members inherit when they have
+    no plan of their own — otherwise it's purely organizational."""
 
     __tablename__ = "user_groups"
 
@@ -93,6 +100,40 @@ class UserGroup(Base):
     name: Mapped[str] = mapped_column(String(64), unique=True)
     # When true, self-registered users are placed in this group. At most one
     # group is the default at a time (enforced by the store).
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Default usage-tier plan for members who have no per-user plan. Null =
+    # fall through to the system default plan. Cleared when the plan is deleted.
+    plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("policy_plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class PolicyPlan(Base):
+    """A usage tier (Free/Plus/Pro/Max/Unlimited-style) governing which models a
+    user may use (by cost ceiling) and their daily/per-minute quotas. Assigned
+    per-user (User.plan_id) or per-group (UserGroup.plan_id); see
+    PolicyPlanStore.resolve_for_user for the resolution order."""
+
+    __tablename__ = "policy_plans"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    # Display / privilege order (higher = more privileged); drives sort in the UI.
+    rank: Mapped[int] = mapped_column(Integer, default=0)
+    # Highest chat-model cost tier this plan may use (low|medium|high|very_high).
+    # Global models above this are hidden from the picker and denied at resolve.
+    max_chat_cost: Mapped[str] = mapped_column(String(16), default="very_high")
+    # Whether the plan may generate images at all, and the image cost ceiling.
+    allow_image: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_image_cost: Mapped[str] = mapped_column(String(16), default="very_high")
+    # Daily quotas (0 = unlimited). messages = chat turns; images = generations.
+    messages_per_day: Mapped[int] = mapped_column(Integer, default=0)
+    images_per_day: Mapped[int] = mapped_column(Integer, default=0)
+    # Per-minute chat-turn cap (0 = inherit global Settings.turns_per_minute).
+    turns_per_minute: Mapped[int] = mapped_column(Integer, default=0)
+    # Exactly one plan is the default (enforced by the store); it applies to
+    # users/groups with no explicit plan.
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
@@ -238,6 +279,9 @@ class UsageDaily(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     turns: Mapped[int] = mapped_column(Integer, default=0)
+    # Text-to-image generations for this bucket (the /images path doesn't emit
+    # tokens, so it's counted separately here for the images/day plan quota).
+    images: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
 
 
 class Feedback(Base):
