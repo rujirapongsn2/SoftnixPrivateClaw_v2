@@ -123,8 +123,14 @@ class ManageSkillTool(Tool):
         return f"Error: unknown action '{action}'."
 
 
-def build_skills_summary(skills: list) -> str:
-    """System-prompt section listing enabled skills (names + descriptions only)."""
+def build_skills_summary(skills: list, tool_names_by_skill: dict[str, list[str]] | None = None) -> str:
+    """System-prompt section listing enabled skills (names + descriptions only).
+
+    ``tool_names_by_skill`` (skill name -> its linked connector's CURRENT
+    registered tool names, resolved live per-turn) lets a skill's own text
+    stay generic about "the connected knowledge base" instead of hardcoding a
+    connector name that can be renamed later — the exact names to call are
+    appended here instead, always up to date."""
     if not skills:
         return ""
     lines = [
@@ -134,5 +140,10 @@ def build_skills_summary(skills: list) -> str:
         "with the read_skill tool first.",
         "",
     ]
-    lines += [f"- {s.name}: {s.description or '(no description)'}" for s in skills]
+    for s in skills:
+        line = f"- {s.name}: {s.description or '(no description)'}"
+        names = (tool_names_by_skill or {}).get(s.name)
+        if names:
+            line += f" (call these exact tools: {', '.join(names)})"
+        lines.append(line)
     return "\n".join(lines)

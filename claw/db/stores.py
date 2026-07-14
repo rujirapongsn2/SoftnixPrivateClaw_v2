@@ -436,6 +436,12 @@ class SkillStore:
             for key in ("description", "content", "enabled"):
                 if key in fields and fields[key] is not None:
                     setattr(skill, key, fields[key])
+            # Unlike the fields above, connector_id's presence itself is the
+            # signal (None is a valid, meaningful value — "no connector
+            # linked" — not "leave unchanged"), so callers must omit the key
+            # entirely to leave it alone.
+            if "connector_id" in fields:
+                skill.connector_id = fields["connector_id"]
             await db.commit()
             return skill
 

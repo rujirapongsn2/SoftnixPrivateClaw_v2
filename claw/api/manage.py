@@ -24,6 +24,11 @@ class SkillBody(BaseModel):
     description: str = Field(default="", max_length=500)
     content: str = ""
     enabled: bool = True
+    # The MCP connector this skill's instructions rely on, if any — lets the
+    # runtime resolve that connector's CURRENT tool names live every turn
+    # instead of the skill text hardcoding a connector name that can later be
+    # renamed. null = no linked connector.
+    connector_id: str | None = None
 
 
 def _skill_json(s, builtin: bool = False) -> dict:
@@ -33,6 +38,7 @@ def _skill_json(s, builtin: bool = False) -> dict:
         "description": s.description,
         "content": s.content,
         "enabled": s.enabled,
+        "connector_id": getattr(s, "connector_id", None),
         "updated_at": s.updated_at.isoformat(),
         "builtin": builtin,
     }
@@ -60,8 +66,17 @@ async def upsert_skill(
 
     if get_builtin_skill(name.strip()) is not None:
         raise HTTPException(status_code=400, detail="that name is reserved by a built-in skill")
+    if body.connector_id is not None:
+        owned = await state.connectors.list_for_user(user.id)
+        if not any(c.id == body.connector_id for c in owned):
+            raise HTTPException(status_code=404, detail="connector not found")
     skill = await state.skills.upsert(
-        user.id, name.strip(), description=body.description, content=body.content, enabled=body.enabled
+        user.id,
+        name.strip(),
+        description=body.description,
+        content=body.content,
+        enabled=body.enabled,
+        connector_id=body.connector_id,
     )
     return _skill_json(skill)
 

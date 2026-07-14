@@ -206,12 +206,14 @@ function ProfilePanel() {
 
 function SkillsPanel() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [editing, setEditing] = useState<Partial<SkillInfo> | null>(null);
   const { error, guard } = useAsyncError();
 
   const reload = useCallback(() => api.listSkills().then(setSkills), []);
   useEffect(() => {
     void reload();
+    void api.listConnectors().then(setConnectors);
   }, [reload]);
 
   if (editing) {
@@ -242,6 +244,35 @@ function SkillsPanel() {
           rows={10}
           isDisabled={readOnly}
         />
+        {!readOnly && connectors.length > 0 && (
+          <div className="claw-field-group">
+            <Text size="sm" color="secondary">
+              Linked connector (optional)
+            </Text>
+            <Text size="sm" color="secondary" as="p">
+              If this skill calls a connector's tools, link it here instead of writing the tool's
+              exact name in the instructions above — Claw resolves the current tool names for you,
+              so it keeps working even if the connector is later renamed.
+            </Text>
+            <div className="claw-row">
+              <Button
+                label="None"
+                size="sm"
+                variant={!editing.connector_id ? "primary" : "secondary"}
+                clickAction={() => setEditing({ ...editing, connector_id: null })}
+              />
+              {connectors.map((c) => (
+                <Button
+                  key={c.id}
+                  label={c.name}
+                  size="sm"
+                  variant={editing.connector_id === c.id ? "primary" : "secondary"}
+                  clickAction={() => setEditing({ ...editing, connector_id: c.id })}
+                />
+              ))}
+            </div>
+          </div>
+        )}
         {error && <ErrorText>{error}</ErrorText>}
         <div className="claw-row">
           {!readOnly && (
@@ -255,6 +286,7 @@ function SkillsPanel() {
                     description: editing.description ?? "",
                     content: editing.content ?? "",
                     enabled: editing.enabled ?? true,
+                    connector_id: editing.connector_id ?? null,
                   });
                   setEditing(null);
                   await reload();
@@ -908,6 +940,11 @@ function ConnectorsPanel() {
                   <Text size="sm" color="secondary" as="p">
                     {c.transport === "stdio" ? c.command : c.url}
                   </Text>
+                  {(c.runtime.tool_names?.length ?? 0) > 0 && (
+                    <Text size="sm" color="secondary" as="p" className="claw-connector-tool-names">
+                      Reference these exact names in a skill: {c.runtime.tool_names!.join(", ")}
+                    </Text>
+                  )}
                   {c.runtime.error && (
                     <Text size="sm" color="secondary" as="p">
                       {c.runtime.error}

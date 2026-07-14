@@ -8,6 +8,16 @@ import pytest
 from claw.core.scheduler import SchedulerService, compute_next_run
 from claw.db.stores import ConnectorStore, ScheduleStore, SkillStore
 from claw.tools.skills import ReadSkillTool, build_skills_summary
+from tests.conftest_app import build_api_app, client
+
+
+async def _register(c, email):
+    r = await c.post("/api/auth/register", json={"email": email, "password": "password123"})
+    return r.json()["access_token"], r.json()["user"]
+
+
+def _bearer(token):
+    return {"Authorization": f"Bearer {token}"}
 
 
 def as_utc(dt: datetime) -> datetime:
@@ -50,6 +60,41 @@ async def test_skill_isolation_between_users(db_factory, stores):
 
     tool = ReadSkillTool(skills, bob.id)
     assert (await tool.execute(name="private")).startswith("Error")
+
+
+async def test_skill_connector_id_persists(db_factory, stores):
+    skills = SkillStore(db_factory)
+    connectors = ConnectorStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("linked@x.y")
+    connector = await connectors.upsert(user.id, "softnixkb", transport="http", url="https://example.invalid/mcp")
+
+    await skills.upsert(user.id, "kb-skill", content="use the connected kb", connector_id=connector.id)
+    saved = await skills.get_by_name(user.id, "kb-skill")
+    assert saved.connector_id == connector.id
+
+    # Explicitly unlinking (passing None) must clear it, unlike other fields
+    # where None means "leave unchanged".
+    await skills.upsert(user.id, "kb-skill", connector_id=None)
+    assert (await skills.get_by_name(user.id, "kb-skill")).connector_id is None
+
+    # Omitting the key entirely must leave a previously-set link untouched.
+    await skills.upsert(user.id, "kb-skill", connector_id=connector.id)
+    await skills.upsert(user.id, "kb-skill", description="updated desc")
+    assert (await skills.get_by_name(user.id, "kb-skill")).connector_id == connector.id
+
+
+def test_build_skills_summary_appends_resolved_tool_names():
+    from types import SimpleNamespace
+
+    skills = [SimpleNamespace(name="kb-skill", description="answer from the kb")]
+    summary = build_skills_summary(
+        skills, tool_names_by_skill={"kb-skill": ["mcp_softnixkb_search_knowledge"]}
+    )
+    assert "mcp_softnixkb_search_knowledge" in summary
+
+    # A skill absent from the mapping (no connector linked, or unresolved) gets no suffix.
+    summary_unlinked = build_skills_summary(skills, tool_names_by_skill={})
+    assert "call these exact tools" not in summary_unlinked
 
 
 # ---------------------------------------------------------------- schedule computation
@@ -213,3 +258,39 @@ async def test_connector_store_crud(db_factory, stores):
 
     assert await connectors.delete(user.id, row.id) is True
     assert await connectors.list_for_user(user.id) == []
+
+
+async def test_skill_put_endpoint_rejects_another_users_connector(db_factory):
+    # Connectors are admin-managed (PUT /connectors requires require_admin);
+    # skills are per-user (require_operator). The first registered user is
+    # the implicit admin.
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        admin_token, _ = await _register(c, "admin@x.io")
+        other_token, _ = await _register(c, "other@x.io")
+
+        admin_conn = (
+            await c.put(
+                "/api/connectors/softnixkb",
+                json={"name": "softnixkb", "transport": "http", "url": "https://example.invalid/mcp"},
+                headers=_bearer(admin_token),
+            )
+        ).json()
+
+        # The admin can link their own skill to their own connector.
+        r = await c.put(
+            "/api/skills/kb-skill",
+            json={"name": "kb-skill", "content": "use the kb", "connector_id": admin_conn["id"]},
+            headers=_bearer(admin_token),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["connector_id"] == admin_conn["id"]
+
+        # A different user (who owns no connectors at all) cannot link their
+        # skill to someone else's connector id.
+        r2 = await c.put(
+            "/api/skills/other-skill",
+            json={"name": "other-skill", "content": "x", "connector_id": admin_conn["id"]},
+            headers=_bearer(other_token),
+        )
+        assert r2.status_code == 404

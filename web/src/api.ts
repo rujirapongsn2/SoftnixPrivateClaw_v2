@@ -96,6 +96,11 @@ export interface SkillInfo {
   enabled: boolean;
   // Built-in skills ship with the platform: read-only, always enabled.
   builtin?: boolean;
+  // MCP connector this skill's instructions rely on, if any. The runtime
+  // resolves that connector's current tool names live every turn, so the
+  // skill's own text can stay generic instead of hardcoding a connector name
+  // that could later be renamed — null = no linked connector.
+  connector_id?: string | null;
 }
 
 export interface MemoryInfo {
@@ -111,7 +116,10 @@ export interface ConnectorInfo {
   url: string;
   env: Record<string, string>;
   enabled: boolean;
-  runtime: { status: string; tools?: number; error?: string };
+  // tool_names are the exact `mcp_{connector}_{tool}` names a skill must
+  // reference to call one of this connector's tools — not the server's own
+  // (unprefixed) tool name.
+  runtime: { status: string; tools?: number; tool_names?: string[]; error?: string };
 }
 
 export interface FieldSpec {

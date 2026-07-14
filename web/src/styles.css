@@ -685,6 +685,11 @@ html {
 .claw-connector-name {
   line-height: 1.3;
 }
+.claw-connector-tool-names {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  word-break: break-word;
+}
 .claw-connector-desc {
   display: -webkit-box;
   -webkit-line-clamp: 1;

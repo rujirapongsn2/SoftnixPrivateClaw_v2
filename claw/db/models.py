@@ -199,6 +199,16 @@ class Skill(Base):
     description: Mapped[str] = mapped_column(String(500), default="")
     content: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Optional link to the MCP connector this skill's instructions rely on.
+    # Lets the skill's content reference tools generically (e.g. "the
+    # connected knowledge base") instead of hardcoding the connector's current
+    # display name into `mcp_{name}_{tool}` strings — the runtime resolves the
+    # connector's live, current tool names by this id every turn, so renaming
+    # or recreating the connector never leaves the skill's text stale.
+    # Cleared to null when the connector is deleted.
+    connector_id: Mapped[str | None] = mapped_column(
+        ForeignKey("mcp_connectors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

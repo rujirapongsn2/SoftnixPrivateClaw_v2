@@ -133,6 +133,26 @@ class ConnectorManager:
     async def status(self, user_id: str) -> dict[str, dict]:
         return dict(self._users.get(user_id, _UserConnections()).statuses)
 
+    async def resolve_tool_names(self, user_id: str, connector_id: str) -> list[str] | None:
+        """The tool names a connector is CURRENTLY registered under
+        (`mcp_{connector.name}_{tool}`), looked up by the connector's stable
+        id rather than its (renameable) name — so a skill linked to this id
+        stays correct across a rename or delete+recreate. Requires
+        sync_tools() to have already run for this user in this process
+        (i.e. call this after sync_tools, not before). None if the connector
+        doesn't belong to this user, or isn't currently connected."""
+        connectors = await self.store.list_for_user(user_id)
+        connector = next((c for c in connectors if c.id == connector_id), None)
+        if connector is None:
+            return None
+        state = self._users.get(user_id)
+        if state is None:
+            return None
+        status = state.statuses.get(connector.name)
+        if status is None or status.get("status") != "connected":
+            return None
+        return status.get("tool_names")
+
     async def sync_tools(self, user_id: str, registry: ToolRegistry) -> None:
         """Ensure the registry reflects the user's enabled connectors. Cheap
         when unchanged. A connector that ended in "error" last time
@@ -165,7 +185,7 @@ class ConnectorManager:
                     state.statuses[connector.name] = error
                     logger.warning("MCP connector {} {}", connector.name, error["error"])
                     continue
-                count = 0
+                registered_names: list[str] = []
                 for tool in listed.tools:
                     proxy = McpToolProxy(
                         session,
@@ -177,9 +197,18 @@ class ConnectorManager:
                     )
                     registry.register(proxy)
                     state.tool_names.append(proxy.name)
-                    count += 1
-                state.statuses[connector.name] = {"status": "connected", "tools": count}
-                logger.info("MCP connector {} connected with {} tools", connector.name, count)
+                    registered_names.append(proxy.name)
+                # `tool_names` here are the exact names a skill's instructions
+                # must reference to call this connector's tools (the
+                # `mcp_{connector}_{tool}` prefix, not the server's raw tool
+                # name) — surfaced in the Connectors UI so skill authors don't
+                # have to guess it.
+                state.statuses[connector.name] = {
+                    "status": "connected",
+                    "tools": len(registered_names),
+                    "tool_names": registered_names,
+                }
+                logger.info("MCP connector {} connected with {} tools", connector.name, len(registered_names))
 
     async def _connect_one(self, stack: AsyncExitStack, connector) -> tuple[Any, Any, Any, dict | None]:
         """Connect+list one connector under its own timeout. Never raises —

@@ -628,11 +628,32 @@ class AgentRuntime:
                     self._spawn_background(self.sessions.set_model(session_id, model))
             history = await self.messages.recent(session_id, after_seq=after_seq)
             memory_context = await self.memory.build_context(user_id)
+            # Sync connectors BEFORE building the skills summary below — a
+            # skill linked to a connector needs that connector's live tool
+            # names, which only exist after this call has run.
+            if self.connectors is not None:
+                try:
+                    await self.connectors.sync_tools(user_id, agent.tools)
+                except Exception:
+                    logger.exception("Connector sync failed for {}", user_id)
             # Built-in skills are always offered; user skills are merged in.
             enabled_skills = list(builtin_skills())
             if self.skills is not None:
                 enabled_skills += await self.skills.enabled_for_user(user_id)
-            skills_summary = build_skills_summary(enabled_skills)
+            # For any user skill linked to a connector, resolve that
+            # connector's CURRENT registered tool names (mcp_{name}_{tool})
+            # live — never hardcoded in the skill's own text, so renaming or
+            # recreating the connector never leaves the skill's instructions
+            # pointing at a stale/nonexistent tool name.
+            tool_names_by_skill: dict[str, list[str]] = {}
+            if self.connectors is not None:
+                for s in enabled_skills:
+                    connector_id = getattr(s, "connector_id", None)
+                    if connector_id:
+                        names = await self.connectors.resolve_tool_names(user_id, connector_id)
+                        if names:
+                            tool_names_by_skill[s.name] = names
+            skills_summary = build_skills_summary(enabled_skills, tool_names_by_skill)
             # Tell the agent which knowledge bases exist so it knows to reach for
             # the search_knowledge tool when a question may be answered by them.
             knowledge_summary = ""
@@ -654,11 +675,6 @@ class AgentRuntime:
                         "(optionally with `knowledge_base` to target one) and answer from the "
                         "returned passages, citing the source.\n\n" + lines
                     )
-            if self.connectors is not None:
-                try:
-                    await self.connectors.sync_tools(user_id, agent.tools)
-                except Exception:
-                    logger.exception("Connector sync failed for {}", user_id)
             runtime_ctx = build_runtime_context(channel, locale)
             model_content, storage_text = build_user_content(content, media, agent.workspace)
             if isinstance(model_content, str):

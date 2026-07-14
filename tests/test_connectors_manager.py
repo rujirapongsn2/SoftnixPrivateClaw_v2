@@ -13,7 +13,10 @@ import pytest
 from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 
+from sqlalchemy import update
+
 from claw.core.connectors import ConnectorManager, McpToolProxy
+from claw.db.models import McpConnector
 from claw.db.stores import ConnectorStore, UserStore
 from claw.tools.registry import ToolRegistry
 
@@ -188,6 +191,65 @@ async def test_tool_call_non_timeout_mcp_error_is_not_swallowed():
     proxy = McpToolProxy(RejectingSession(), "softnixkb", "search_knowledge", "desc", {})
     with pytest.raises(McpError):
         await proxy.execute(query="x")
+
+
+async def test_resolve_tool_names_survives_connector_rename(db_factory, monkeypatch):
+    """A skill links to a connector by its stable id. Renaming the connector
+    must not break that link — resolve_tool_names looks up the CURRENT name
+    live, so the returned tool names always reflect the connector's present
+    display name, not whatever it was called when the skill was written."""
+    users = UserStore(db_factory)
+    user = await users.create(email="rename@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    connector = await store.upsert(user.id, "softnixkb", transport="http", url="https://example.invalid/mcp", enabled=True)
+
+    class FakeSession:
+        async def list_tools(self):
+            class Tool:
+                name = "search_knowledge"
+                description = "search"
+                inputSchema = {}
+
+            class Listed:
+                tools = [Tool()]
+
+            return Listed()
+
+    async def fake_connect_and_list(self, stack, c):
+        session = FakeSession()
+        return session, await session.list_tools()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    names = await mgr.resolve_tool_names(user.id, connector.id)
+    assert names == ["mcp_softnixkb_search_knowledge"]
+
+    # Rename the connector — same id, different name (the store's own upsert()
+    # can't rename in place since `name` is its lookup key, not an update
+    # field, so mutate the row directly to simulate it) — then force a re-sync.
+    async with db_factory() as db:
+        await db.execute(
+            update(McpConnector).where(McpConnector.id == connector.id).values(name="softnix-kb-v2")
+        )
+        await db.commit()
+    await mgr.invalidate(user.id)
+    await mgr.sync_tools(user.id, registry)
+
+    names = await mgr.resolve_tool_names(user.id, connector.id)
+    assert names == ["mcp_softnix-kb-v2_search_knowledge"]
+
+
+async def test_resolve_tool_names_none_for_unknown_or_disconnected(db_factory):
+    users = UserStore(db_factory)
+    user = await users.create(email="noconn@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    mgr = ConnectorManager(store)
+
+    assert await mgr.resolve_tool_names(user.id, "nonexistent-id") is None
 
 
 async def test_tool_call_returns_normally_when_within_the_timeout():
