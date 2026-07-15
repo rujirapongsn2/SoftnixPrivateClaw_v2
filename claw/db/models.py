@@ -424,7 +424,9 @@ class AppSetting(Base):
 class KnowledgeBase(Base):
     """A user-created knowledge collection (an OKF "bundle"). Documents uploaded
     into it are parsed, chunked, and made searchable by the agent. `private`
-    bundles are visible only to their owner; `public` ones to all users."""
+    bundles are visible only to their owner; `group` ones to the owner's
+    current organizational group (User.group_id, resolved live) plus any
+    groups listed in KnowledgeBaseSharedGroup; `public` ones to all users."""
 
     __tablename__ = "knowledge_bases"
 
@@ -432,9 +434,26 @@ class KnowledgeBase(Base):
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str] = mapped_column(Text, default="")
-    visibility: Mapped[str] = mapped_column(String(16), default="private")  # private | public
+    visibility: Mapped[str] = mapped_column(String(16), default="private")  # private | group | public
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class KnowledgeBaseSharedGroup(Base):
+    """Additional groups a `group`-visibility knowledge base is explicitly
+    shared with, beyond the owner's own group (which is always included by
+    default and is never a row here — see KnowledgeBase.visibility). Both FKs
+    cascade so deleting either side cleans this up automatically."""
+
+    __tablename__ = "knowledge_base_shared_groups"
+    __table_args__ = (Index("ix_kb_shared_groups_group", "group_id"),)
+
+    kb_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), primary_key=True
+    )
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("user_groups.id", ondelete="CASCADE"), primary_key=True
+    )
 
 
 class KnowledgeDoc(Base):

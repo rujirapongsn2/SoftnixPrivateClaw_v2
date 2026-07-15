@@ -6,10 +6,23 @@ from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, Integer, String, bindparam, cast, func, literal_column, or_, select, update
+from sqlalchemy import (
+    DateTime,
+    Integer,
+    String,
+    bindparam,
+    cast,
+    false as sa_false,
+    func,
+    literal_column,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from claw.core.plans import cost_allowed, cost_rank
 from claw.db.models import (
@@ -19,6 +32,7 @@ from claw.db.models import (
     Feedback,
     GuardrailRule,
     KnowledgeBase,
+    KnowledgeBaseSharedGroup,
     KnowledgeChunk,
     KnowledgeDoc,
     LLMModel,
@@ -944,6 +958,13 @@ class GroupStore:
                 return False
             await db.execute(
                 User.__table__.update().where(User.group_id == group_id).values(group_id=None)
+            )
+            # Drop any explicit knowledge-base shares into this group too —
+            # same "don't rely on ON DELETE CASCADE" reasoning as above.
+            await db.execute(
+                KnowledgeBaseSharedGroup.__table__.delete().where(
+                    KnowledgeBaseSharedGroup.group_id == group_id
+                )
             )
             await db.delete(row)
             await db.commit()
@@ -2450,6 +2471,8 @@ class KnowledgeStore:
         self.is_postgres = is_postgres
 
     # -- bases --------------------------------------------------------------
+    _VISIBILITIES = ("private", "group", "public")
+
     async def create_base(
         self, owner_id: str, name: str, description: str = "", visibility: str = "private"
     ) -> KnowledgeBase:
@@ -2458,7 +2481,7 @@ class KnowledgeStore:
                 owner_id=owner_id,
                 name=name[:120],
                 description=description,
-                visibility="public" if visibility == "public" else "private",
+                visibility=visibility if visibility in self._VISIBILITIES else "private",
             )
             db.add(kb)
             await db.commit()
@@ -2478,25 +2501,75 @@ class KnowledgeStore:
                 kb.name = str(fields["name"])[:120]
             if fields.get("description") is not None:
                 kb.description = str(fields["description"])
-            if fields.get("visibility") in ("private", "public"):
+            if fields.get("visibility") in self._VISIBILITIES:
                 kb.visibility = fields["visibility"]
+                if kb.visibility != "group":
+                    # Explicit shares are only meaningful under "group" visibility.
+                    await db.execute(
+                        KnowledgeBaseSharedGroup.__table__.delete().where(
+                            KnowledgeBaseSharedGroup.kb_id == kb_id
+                        )
+                    )
             await db.commit()
             await db.refresh(kb)
             return kb
 
-    async def list_accessible(self, user_id: str) -> list[dict[str, Any]]:
-        """Bases the user can see (their own + all public), each with a doc count."""
+    async def set_shared_groups(self, kb_id: str, group_ids: list[str]) -> None:
+        """Replace the set of additional groups a `group`-visibility base is
+        shared with (the owner's own group is always included and never
+        stored here — see KnowledgeBase.visibility)."""
+        async with self.factory() as db:
+            await db.execute(
+                KnowledgeBaseSharedGroup.__table__.delete().where(
+                    KnowledgeBaseSharedGroup.kb_id == kb_id
+                )
+            )
+            for group_id in dict.fromkeys(group_ids):  # dedupe, preserve order
+                db.add(KnowledgeBaseSharedGroup(kb_id=kb_id, group_id=group_id))
+            await db.commit()
+
+    async def owner_group_id(self, owner_id: str) -> str | None:
+        async with self.factory() as db:
+            owner = await db.get(User, owner_id)
+            return owner.group_id if owner is not None else None
+
+    async def shared_group_ids(self, kb_id: str) -> list[str]:
         async with self.factory() as db:
             rows = (
                 await db.execute(
-                    select(KnowledgeBase)
-                    .where(
-                        (KnowledgeBase.owner_id == user_id)
-                        | (KnowledgeBase.visibility == "public")
+                    select(KnowledgeBaseSharedGroup.group_id).where(
+                        KnowledgeBaseSharedGroup.kb_id == kb_id
                     )
-                    .order_by(KnowledgeBase.updated_at.desc())
                 )
             ).scalars().all()
+        return list(rows)
+
+    async def list_accessible(self, user_id: str) -> list[dict[str, Any]]:
+        """Bases the user can see — their own, all public, and any `group`
+        base whose owner shares the viewer's *current* group (default or
+        explicitly shared) — each with a doc count."""
+        owner = aliased(User)
+        async with self.factory() as db:
+            viewer = await db.get(User, user_id)
+            viewer_group_id = viewer.group_id if viewer is not None else None
+            group_clause = self._group_visible_clause(owner, viewer_group_id)
+            stmt = (
+                select(KnowledgeBase, owner.group_id)
+                .join(owner, owner.id == KnowledgeBase.owner_id)
+                .outerjoin(
+                    KnowledgeBaseSharedGroup,
+                    (KnowledgeBaseSharedGroup.kb_id == KnowledgeBase.id)
+                    & (KnowledgeBaseSharedGroup.group_id == viewer_group_id),
+                )
+                .where(
+                    (KnowledgeBase.owner_id == user_id)
+                    | (KnowledgeBase.visibility == "public")
+                    | group_clause
+                )
+                .distinct()
+                .order_by(KnowledgeBase.updated_at.desc())
+            )
+            rows = (await db.execute(stmt)).all()
             counts = dict(
                 (
                     await db.execute(
@@ -2504,6 +2577,24 @@ class KnowledgeStore:
                     )
                 ).all()
             )
+            group_names = {
+                g.id: g.name
+                for g in (await db.execute(select(UserGroup))).scalars().all()
+            }
+            # Explicit shares are only the caller's own business to see —
+            # one bounded bulk query over just their own group-visibility
+            # bases, not per-row.
+            own_group_kb_ids = [
+                kb.id for kb, _ in rows if kb.owner_id == user_id and kb.visibility == "group"
+            ]
+            shared_by_kb: dict[str, list[str]] = {}
+            if own_group_kb_ids:
+                for row in await db.execute(
+                    select(KnowledgeBaseSharedGroup.kb_id, KnowledgeBaseSharedGroup.group_id).where(
+                        KnowledgeBaseSharedGroup.kb_id.in_(own_group_kb_ids)
+                    )
+                ):
+                    shared_by_kb.setdefault(row.kb_id, []).append(row.group_id)
         return [
             {
                 "id": kb.id,
@@ -2512,28 +2603,63 @@ class KnowledgeStore:
                 "visibility": kb.visibility,
                 "owner_id": kb.owner_id,
                 "is_owner": kb.owner_id == user_id,
+                "owner_group_name": group_names.get(owner_group_id),
+                "shared_group_ids": shared_by_kb.get(kb.id, []) if kb.owner_id == user_id else [],
                 "docs": int(counts.get(kb.id, 0)),
                 "updated_at": kb.updated_at.isoformat(),
             }
-            for kb in rows
+            for kb, owner_group_id in rows
         ]
 
     async def accessible_ids(self, user_id: str) -> list[str]:
+        owner = aliased(User)
         async with self.factory() as db:
-            rows = (
-                await db.execute(
-                    select(KnowledgeBase.id).where(
-                        (KnowledgeBase.owner_id == user_id)
-                        | (KnowledgeBase.visibility == "public")
-                    )
+            viewer = await db.get(User, user_id)
+            viewer_group_id = viewer.group_id if viewer is not None else None
+            group_clause = self._group_visible_clause(owner, viewer_group_id)
+            stmt = (
+                select(KnowledgeBase.id)
+                .join(owner, owner.id == KnowledgeBase.owner_id)
+                .outerjoin(
+                    KnowledgeBaseSharedGroup,
+                    (KnowledgeBaseSharedGroup.kb_id == KnowledgeBase.id)
+                    & (KnowledgeBaseSharedGroup.group_id == viewer_group_id),
                 )
-            ).scalars().all()
+                .where(
+                    (KnowledgeBase.owner_id == user_id)
+                    | (KnowledgeBase.visibility == "public")
+                    | group_clause
+                )
+                .distinct()
+            )
+            rows = (await db.execute(stmt)).scalars().all()
         return list(rows)
+
+    @staticmethod
+    def _group_visible_clause(owner: Any, viewer_group_id: str | None):
+        """`group`-visibility match: the viewer has a group, and either the
+        owner's *current* group is the viewer's group (default share) or an
+        explicit KnowledgeBaseSharedGroup row exists for the viewer's group
+        (joined in by the caller, filtered to viewer_group_id already)."""
+        if viewer_group_id is None:
+            return sa_false()
+        return (KnowledgeBase.visibility == "group") & (
+            (owner.group_id == viewer_group_id)
+            | (KnowledgeBaseSharedGroup.group_id == viewer_group_id)
+        )
 
     async def delete_base(self, kb_id: str) -> None:
         async with self.factory() as db:
             await db.execute(KnowledgeChunk.__table__.delete().where(KnowledgeChunk.kb_id == kb_id))
             await db.execute(KnowledgeDoc.__table__.delete().where(KnowledgeDoc.kb_id == kb_id))
+            # Explicit cleanup rather than relying on the FK's ON DELETE CASCADE
+            # — SQLite (tests) doesn't enforce it without a pragma, same reason
+            # GroupStore.delete() clears User.group_id explicitly.
+            await db.execute(
+                KnowledgeBaseSharedGroup.__table__.delete().where(
+                    KnowledgeBaseSharedGroup.kb_id == kb_id
+                )
+            )
             kb = await db.get(KnowledgeBase, kb_id)
             if kb is not None:
                 await db.delete(kb)

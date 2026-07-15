@@ -155,6 +155,14 @@ async def connector_presets(user: User = Depends(current_user)) -> list:
     return list_presets()
 
 
+@router.get("/groups")
+async def list_groups(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
+    """Org-wide group names — lets a regular user pick "share with additional
+    groups" for a knowledge base. Deliberately thinner than the admin
+    `/admin/groups` payload (no user_count/plan_id — not this endpoint's business)."""
+    return [{"id": g.id, "name": g.name} for g in await state.groups.list()]
+
+
 @router.put("/connectors/{name}")
 async def upsert_connector(
     name: str,

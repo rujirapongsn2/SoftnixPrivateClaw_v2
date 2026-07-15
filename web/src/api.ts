@@ -169,10 +169,23 @@ export interface KnowledgeBase {
   id: string;
   name: string;
   description: string;
-  visibility: "private" | "public";
+  visibility: "private" | "group" | "public";
+  // Only meaningful when visibility === "group": the owner's own group is
+  // always included by default (not listed here); these are additional
+  // groups the owner explicitly shared it with. Only populated for bases the
+  // caller owns.
+  shared_group_ids?: string[];
+  owner_group_name?: string | null;
   is_owner: boolean;
   docs: number;
   owner_id?: string;
+}
+
+// Minimal org-wide group info — just enough to populate a "share with
+// additional groups" picker. See GroupInfo for the fuller admin-only shape.
+export interface SimpleGroup {
+  id: string;
+  name: string;
 }
 
 export interface KnowledgeDoc {
@@ -211,6 +224,7 @@ export interface AuthUser {
   // — the frontend uses this to decide whether to show a "change password"
   // form on the Profile settings page.
   has_password: boolean;
+  group_id: string | null;
 }
 
 export interface AdminUser extends AuthUser {
@@ -220,7 +234,6 @@ export interface AdminUser extends AuthUser {
   // "password" (the oldest signup path), which may not be exact for them.
   signup_method: "password" | "google" | "microsoft" | "admin_created" | "dev_token" | "imported";
   sessions: number;
-  group_id: string | null;
   group_name: string | null;
   plan_id: string | null;
   plan_name: string | null;
@@ -747,13 +760,26 @@ export const api = {
 
   // Knowledge bases (OKF): uploaded documents the agent can search to answer from.
   listKnowledge: () => request<KnowledgeBase[]>("/api/knowledge"),
-  createKnowledge: (name: string, description: string, visibility: "private" | "public") =>
+  createKnowledge: (
+    name: string,
+    description: string,
+    visibility: "private" | "group" | "public",
+    sharedGroupIds?: string[],
+  ) =>
     request<KnowledgeBase>("/api/knowledge", {
       method: "POST",
-      body: JSON.stringify({ name, description, visibility }),
+      body: JSON.stringify({ name, description, visibility, shared_group_ids: sharedGroupIds ?? null }),
     }),
-  updateKnowledge: (id: string, patch: Partial<Pick<KnowledgeBase, "name" | "description" | "visibility">>) =>
-    request<KnowledgeBase>(`/api/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  updateKnowledge: (
+    id: string,
+    patch: Partial<Pick<KnowledgeBase, "name" | "description" | "visibility" | "shared_group_ids">>,
+  ) =>
+    request<KnowledgeBase>(`/api/knowledge/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...patch, shared_group_ids: patch.shared_group_ids ?? null }),
+    }),
+  // Org-wide group names, for the "share with additional groups" picker.
+  listGroups: () => request<SimpleGroup[]>("/api/groups"),
   deleteKnowledge: (id: string) => request(`/api/knowledge/${id}`, { method: "DELETE" }),
   listKnowledgeDocs: (id: string) => request<KnowledgeDoc[]>(`/api/knowledge/${id}/documents`),
   uploadKnowledgeDocs: async (

@@ -2,11 +2,14 @@
 
 A knowledge base is an OKF bundle. Uploads are parsed + chunked automatically —
 the user never deals with formats. Private bases are visible only to their
-owner; public ones to everyone. Only the owner may modify or delete a base.
+owner; group bases to the owner's current organizational group (plus any
+groups explicitly shared into via `shared_group_ids`); public ones to
+everyone. Only the owner may modify or delete a base.
 """
 
 import os
 import tempfile
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -19,17 +22,24 @@ router = APIRouter(prefix="/api/knowledge")
 
 _UPLOAD_CHUNK = 1024 * 1024  # 1 MB stream chunks
 
+Visibility = Literal["private", "group", "public"]
+
 
 class CreateKBBody(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
-    visibility: str = "private"  # private | public
+    visibility: Visibility = "private"
+    # Only meaningful when visibility == "group" — additional groups beyond
+    # the owner's own (which is always included by default, see
+    # KnowledgeBase.visibility).
+    shared_group_ids: list[str] | None = None
 
 
 class UpdateKBBody(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     description: str | None = None
-    visibility: str | None = None
+    visibility: Visibility | None = None
+    shared_group_ids: list[str] | None = None
 
 
 def _doc_row(d) -> dict:
@@ -60,9 +70,15 @@ async def _readable_base(state: AppState, user: User, kb_id: str):
     kb = await state.knowledge.get_base(kb_id)
     if kb is None:
         raise HTTPException(status_code=404, detail="knowledge base not found")
-    if kb.owner_id != user.id and kb.visibility != "public":
-        raise HTTPException(status_code=403, detail="you don't have access to this knowledge base")
-    return kb
+    if kb.owner_id == user.id or kb.visibility == "public":
+        return kb
+    if kb.visibility == "group" and user.group_id is not None:
+        owner_group_id = await state.knowledge.owner_group_id(kb.owner_id)
+        if owner_group_id == user.group_id:
+            return kb
+        if user.group_id in await state.knowledge.shared_group_ids(kb_id):
+            return kb
+    raise HTTPException(status_code=403, detail="you don't have access to this knowledge base")
 
 
 @router.get("")
@@ -77,11 +93,16 @@ async def create_base(
     kb = await state.knowledge.create_base(
         owner_id=user.id, name=body.name, description=body.description, visibility=body.visibility
     )
+    shared_group_ids: list[str] = []
+    if kb.visibility == "group" and body.shared_group_ids:
+        await state.knowledge.set_shared_groups(kb.id, body.shared_group_ids)
+        shared_group_ids = await state.knowledge.shared_group_ids(kb.id)
     return {
         "id": kb.id,
         "name": kb.name,
         "description": kb.description,
         "visibility": kb.visibility,
+        "shared_group_ids": shared_group_ids,
         "is_owner": True,
         "docs": 0,
     }
@@ -95,7 +116,18 @@ async def update_base(
     kb = await state.knowledge.update_base(
         kb_id, name=body.name, description=body.description, visibility=body.visibility
     )
-    return {"id": kb.id, "name": kb.name, "description": kb.description, "visibility": kb.visibility}
+    shared_group_ids: list[str] = []
+    if kb.visibility == "group" and body.shared_group_ids is not None:
+        await state.knowledge.set_shared_groups(kb_id, body.shared_group_ids)
+    if kb.visibility == "group":
+        shared_group_ids = await state.knowledge.shared_group_ids(kb_id)
+    return {
+        "id": kb.id,
+        "name": kb.name,
+        "description": kb.description,
+        "visibility": kb.visibility,
+        "shared_group_ids": shared_group_ids,
+    }
 
 
 @router.delete("/{kb_id}")

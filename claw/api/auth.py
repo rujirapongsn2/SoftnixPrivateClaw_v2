@@ -71,6 +71,11 @@ def _user_json(user: User) -> dict:
         # frontend uses this to decide whether to show a "change password"
         # form at all (there's no password to change otherwise).
         "has_password": bool(user.password_hash),
+        # The viewer's own group (already on the row, no extra query) — lets
+        # Settings > Knowledge show "shared with your group" without a
+        # separate admin-only lookup. The frontend resolves the display name
+        # via the org-wide GET /api/groups list.
+        "group_id": user.group_id,
     }
 
 

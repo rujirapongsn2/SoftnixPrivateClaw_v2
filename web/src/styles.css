@@ -686,9 +686,24 @@ html {
   line-height: 1.3;
 }
 .claw-connector-tool-names {
+  margin-top: 4px;
+}
+.claw-connector-tool-names-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+.claw-connector-tool-names-list {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
   word-break: break-word;
+  margin-top: 4px;
+  padding-left: 18px;
 }
 .claw-connector-desc {
   display: -webkit-box;

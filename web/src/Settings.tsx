@@ -15,6 +15,8 @@ import { useToast } from "@astryxdesign/core/Toast";
 import {
   Brain,
   Puzzle,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Cpu,
   Download,
@@ -36,6 +38,7 @@ import {
   Trash2,
   Upload,
   User as UserIcon,
+  Users,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ProvidersPanel } from "./Admin";
@@ -49,6 +52,7 @@ import {
   KnowledgeDoc,
   MemoryInfo,
   ScheduleInfo,
+  SimpleGroup,
   SkillInfo,
   USER_LLM_API,
   api,
@@ -711,6 +715,33 @@ function formatEnvText(env: Record<string, string> | undefined): string {
     .join("\n");
 }
 
+// The exact mcp_{connector}_{tool} names a skill must reference — collapsed
+// by default since a connector like an all-in-one CRM can expose 80+ tools,
+// which would otherwise dwarf the rest of the connector card.
+function ConnectorToolNames({ names }: { names: string[] }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="claw-connector-tool-names">
+      <button
+        type="button"
+        className="claw-connector-tool-names-toggle"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+      >
+        <Icon icon={expanded ? ChevronDown : ChevronRight} size="xsm" color="secondary" />
+        <Text size="sm" color="secondary">
+          {names.length} tool name{names.length === 1 ? "" : "s"} to reference in a skill
+        </Text>
+      </button>
+      {expanded && (
+        <Text size="sm" color="secondary" as="p" className="claw-connector-tool-names-list">
+          {names.join(", ")}
+        </Text>
+      )}
+    </div>
+  );
+}
+
 function ConnectorsPanel() {
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
@@ -941,9 +972,7 @@ function ConnectorsPanel() {
                     {c.transport === "stdio" ? c.command : c.url}
                   </Text>
                   {(c.runtime.tool_names?.length ?? 0) > 0 && (
-                    <Text size="sm" color="secondary" as="p" className="claw-connector-tool-names">
-                      Reference these exact names in a skill: {c.runtime.tool_names!.join(", ")}
-                    </Text>
+                    <ConnectorToolNames names={c.runtime.tool_names!} />
                   )}
                   {c.runtime.error && (
                     <Text size="sm" color="secondary" as="p">
@@ -1483,6 +1512,93 @@ function BrowserExtensionPanel() {
 
 const KB_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,.html,.htm,.csv";
 
+// Shared by the create form and the per-card editor: a 3-way Private/Group/
+// Public picker, plus (when Group is selected) the owner's default group and
+// a multi-select of additional groups to share with.
+function VisibilitySelector({
+  visibility,
+  onChange,
+  sharedGroupIds,
+  onSharedGroupIdsChange,
+  myGroupId,
+  myGroupName,
+  groups,
+}: {
+  visibility: "private" | "group" | "public";
+  onChange: (v: "private" | "group" | "public") => void;
+  sharedGroupIds: string[];
+  onSharedGroupIdsChange: (ids: string[]) => void;
+  myGroupId: string | null;
+  myGroupName: string | null;
+  groups: SimpleGroup[];
+}) {
+  const otherGroups = groups.filter((g) => g.id !== myGroupId);
+  return (
+    <div className="claw-field-group">
+      <Text size="sm" color="secondary">
+        Visibility
+      </Text>
+      <div className="claw-row">
+        <Button
+          label="Private"
+          size="sm"
+          variant={visibility === "private" ? "primary" : "secondary"}
+          clickAction={() => onChange("private")}
+        />
+        <Button
+          label="Group"
+          size="sm"
+          variant={visibility === "group" ? "primary" : "secondary"}
+          isDisabled={!myGroupId}
+          clickAction={() => onChange("group")}
+        />
+        <Button
+          label="Public"
+          size="sm"
+          variant={visibility === "public" ? "primary" : "secondary"}
+          clickAction={() => onChange("public")}
+        />
+      </div>
+      {!myGroupId && (
+        <Text size="sm" color="secondary">
+          Join a group first to use group visibility.
+        </Text>
+      )}
+      {visibility === "group" && myGroupId && (
+        <>
+          <Text size="sm" color="secondary">
+            Default: shared with your group ({myGroupName ?? "—"})
+          </Text>
+          {otherGroups.length > 0 && (
+            <>
+              <Text size="sm" color="secondary">
+                Also share with:
+              </Text>
+              <div className="claw-row">
+                {otherGroups.map((g) => (
+                  <Button
+                    key={g.id}
+                    label={g.name}
+                    size="sm"
+                    variant={sharedGroupIds.includes(g.id) ? "primary" : "secondary"}
+                    clickAction={() =>
+                      onSharedGroupIdsChange(
+                        sharedGroupIds.includes(g.id)
+                          ? sharedGroupIds.filter((id) => id !== g.id)
+                          : [...sharedGroupIds, g.id],
+                      )
+                    }
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function KnowledgePanel() {
   const [bases, setBases] = useState<KnowledgeBase[]>([]);
   const [error, setError] = useState("");
@@ -1490,7 +1606,10 @@ function KnowledgePanel() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [isPublic, setIsPublic] = useState(false);
+  const [visibility, setVisibility] = useState<"private" | "group" | "public">("private");
+  const [sharedGroupIds, setSharedGroupIds] = useState<string[]>([]);
+  const [groups, setGroups] = useState<SimpleGroup[]>([]);
+  const [myGroupId, setMyGroupId] = useState<string | null>(null);
   const toast = useToast();
 
   const load = useCallback(() => {
@@ -1510,15 +1629,27 @@ function KnowledgePanel() {
   }, []);
 
   useEffect(() => load(), [load]);
+  useEffect(() => {
+    void api.listGroups().then(setGroups);
+    void api.me().then((me) => setMyGroupId(me.group_id));
+  }, []);
+
+  const myGroupName = groups.find((g) => g.id === myGroupId)?.name ?? null;
 
   const create = async () => {
     if (!name.trim()) return;
     setError("");
     try {
-      await api.createKnowledge(name.trim(), description.trim(), isPublic ? "public" : "private");
+      await api.createKnowledge(
+        name.trim(),
+        description.trim(),
+        visibility,
+        visibility === "group" ? sharedGroupIds : undefined,
+      );
       setName("");
       setDescription("");
-      setIsPublic(false);
+      setVisibility("private");
+      setSharedGroupIds([]);
       setCreating(false);
       load();
     } catch (e) {
@@ -1531,7 +1662,7 @@ function KnowledgePanel() {
       <div className="claw-row claw-row-between">
         <Text color="secondary" size="sm">
           Upload documents (PDF, Word, text, Markdown, HTML) to build a knowledge base the agent can
-          search when answering. Choose Private (only you) or Public (everyone).
+          search when answering. Choose Private (only you), Group (your org group), or Public (everyone).
         </Text>
         {!creating && (
           <Button
@@ -1557,12 +1688,15 @@ function KnowledgePanel() {
               onChange={setDescription}
               placeholder="What's in this knowledge base?"
             />
-            <label className="claw-kb-visibility">
-              <Switch value={isPublic} changeAction={setIsPublic} label="Public" />
-              <Text size="sm" color="secondary">
-                {isPublic ? "Public — visible to everyone" : "Private — only you"}
-              </Text>
-            </label>
+            <VisibilitySelector
+              visibility={visibility}
+              onChange={setVisibility}
+              sharedGroupIds={sharedGroupIds}
+              onSharedGroupIdsChange={setSharedGroupIds}
+              myGroupId={myGroupId}
+              myGroupName={myGroupName}
+              groups={groups}
+            />
             <div className="claw-row">
               <Button label="Create" variant="primary" onClick={create}>
                 Create
@@ -1586,7 +1720,16 @@ function KnowledgePanel() {
       ) : (
         <div className="claw-kb-grid">
           {bases.map((kb) => (
-            <KnowledgeCard key={kb.id} kb={kb} onChanged={load} onPatch={patchBase} toast={toast} />
+            <KnowledgeCard
+              key={kb.id}
+              kb={kb}
+              onChanged={load}
+              onPatch={patchBase}
+              toast={toast}
+              groups={groups}
+              myGroupId={myGroupId}
+              myGroupName={myGroupName}
+            />
           ))}
         </div>
       )}
@@ -1606,11 +1749,17 @@ function KnowledgeCard({
   onChanged,
   onPatch,
   toast,
+  groups,
+  myGroupId,
+  myGroupName,
 }: {
   kb: KnowledgeBase;
   onChanged: () => void;
   onPatch: (id: string, patch: Partial<KnowledgeBase>) => void;
   toast: ReturnType<typeof useToast>;
+  groups: SimpleGroup[];
+  myGroupId: string | null;
+  myGroupName: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [docs, setDocs] = useState<KnowledgeDoc[] | null>(null);
@@ -1619,6 +1768,9 @@ function KnowledgeCard({
   // Separate from `busy` (which gates delete actions) so flipping visibility
   // never disables unrelated Delete buttons for the duration of the request.
   const [visibilityBusy, setVisibilityBusy] = useState(false);
+  const [editingVisibility, setEditingVisibility] = useState(false);
+  const [draftVisibility, setDraftVisibility] = useState<"private" | "group" | "public">(kb.visibility);
+  const [draftSharedGroupIds, setDraftSharedGroupIds] = useState<string[]>(kb.shared_group_ids ?? []);
   const fileRef = useRef<HTMLInputElement | null>(null);
   // Extracted-text preview (one open at a time), paged via next_offset.
   const [previewFor, setPreviewFor] = useState<string | null>(null);
@@ -1745,13 +1897,24 @@ function KnowledgeCard({
     }
   };
 
-  const toggleVisibility = async (makePublic: boolean) => {
+  const visibilityBadge = (v: KnowledgeBase["visibility"]) => {
+    const icon = v === "public" ? Globe : v === "group" ? Users : Lock;
+    const variant = v === "public" ? "success" : v === "group" ? "info" : "neutral";
+    const label = v === "public" ? "Public" : v === "group" ? "Group" : "Private";
+    return <Badge variant={variant} icon={<Icon icon={icon} size="xsm" />} label={label} />;
+  };
+
+  const saveVisibility = async () => {
     setVisibilityBusy(true);
     try {
-      const r = await api.updateKnowledge(kb.id, { visibility: makePublic ? "public" : "private" });
+      const r = await api.updateKnowledge(kb.id, {
+        visibility: draftVisibility,
+        shared_group_ids: draftVisibility === "group" ? draftSharedGroupIds : [],
+      });
       // Use the mutation response directly — no need to re-fetch the whole list
-      // (with its per-base doc-count aggregate) for a single boolean flip.
-      onPatch(kb.id, { visibility: r.visibility });
+      // (with its per-base doc-count aggregate) for a single-field change.
+      onPatch(kb.id, { visibility: r.visibility, shared_group_ids: r.shared_group_ids });
+      setEditingVisibility(false);
     } catch (e) {
       toast({ body: `Failed to update visibility: ${String(e)}`, type: "error" });
     } finally {
@@ -1771,29 +1934,54 @@ function KnowledgeCard({
                 type="button"
                 className="claw-kb-visibility-badge"
                 disabled={busy}
-                aria-label={kb.visibility === "public" ? "Make private" : "Make public"}
+                aria-label="Edit visibility"
                 title={
-                  kb.visibility === "public"
-                    ? "Public — click to make private"
-                    : "Private — click to make public"
+                  kb.visibility === "group" && kb.owner_group_name
+                    ? `Group — shared with ${kb.owner_group_name}. Click to edit.`
+                    : "Click to edit visibility"
                 }
-                onClick={() => toggleVisibility(kb.visibility !== "public")}
+                onClick={() => {
+                  setDraftVisibility(kb.visibility);
+                  setDraftSharedGroupIds(kb.shared_group_ids ?? []);
+                  setEditingVisibility((v) => !v);
+                }}
               >
-                <Badge
-                  variant={kb.visibility === "public" ? "success" : "neutral"}
-                  icon={<Icon icon={kb.visibility === "public" ? Globe : Lock} size="xsm" />}
-                  label={kb.visibility === "public" ? "Public" : "Private"}
-                />
+                {visibilityBadge(kb.visibility)}
               </button>
             ) : (
-              <Badge
-                variant={kb.visibility === "public" ? "success" : "neutral"}
-                icon={<Icon icon={kb.visibility === "public" ? Globe : Lock} size="xsm" />}
-                label={kb.visibility === "public" ? "Public" : "Private"}
-              />
+              visibilityBadge(kb.visibility)
             )}
           </div>
         </div>
+        {editingVisibility && (
+          <Card padding={2}>
+            <VisibilitySelector
+              visibility={draftVisibility}
+              onChange={setDraftVisibility}
+              sharedGroupIds={draftSharedGroupIds}
+              onSharedGroupIdsChange={setDraftSharedGroupIds}
+              myGroupId={myGroupId}
+              myGroupName={myGroupName}
+              groups={groups}
+            />
+            <div className="claw-row">
+              <Button
+                label="Save"
+                size="sm"
+                variant="primary"
+                isDisabled={visibilityBusy}
+                clickAction={saveVisibility}
+              />
+              <Button
+                label="Cancel"
+                size="sm"
+                variant="ghost"
+                isDisabled={visibilityBusy}
+                clickAction={() => setEditingVisibility(false)}
+              />
+            </div>
+          </Card>
+        )}
         {kb.description && (
           <Text size="sm" color="secondary" className="claw-kb-desc">
             {kb.description}
