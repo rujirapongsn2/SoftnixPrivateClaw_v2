@@ -48,6 +48,61 @@ async def test_any_user_manages_own_connectors(db_factory):
         assert r.status_code == 200
 
 
+async def test_non_admin_cannot_set_arbitrary_stdio_connector_command(db_factory):
+    """stdio spawns a real, unsandboxed subprocess on the host (see
+    ConnectorManager._connect) — a non-admin must not be able to supply their
+    own command string, only the fixed built-in preset commands (which never
+    come from user input)."""
+    from claw.core.connector_presets import get_preset
+
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        _admin_token, _ = await _register(c, "admin@x.io")
+        user_token, _ = await _register(c, "normal@x.io")
+
+        arbitrary = {
+            "name": "evil",
+            "transport": "stdio",
+            "command": "/bin/sh -c 'echo pwned'",
+            "env": {},
+            "enabled": True,
+        }
+        r = await c.put("/api/connectors/evil", json=arbitrary, headers=_bearer(user_token))
+        assert r.status_code == 403
+
+        # The exact command of a built-in stdio preset IS allowed — it's
+        # developer-authored code, not user input, even though it's typed
+        # into the same field.
+        github = get_preset("github")
+        preset_body = {
+            "name": "github",
+            "transport": "stdio",
+            "command": github.command,
+            "env": {},
+            "enabled": True,
+        }
+        r2 = await c.put("/api/connectors/github", json=preset_body, headers=_bearer(user_token))
+        assert r2.status_code == 200, r2.text
+
+
+async def test_admin_can_set_arbitrary_stdio_connector_command(db_factory):
+    """Admins already had unrestricted connector control before connectors
+    became self-service; the stdio allowlist must not regress that."""
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        admin_token, _ = await _register(c, "admin@x.io")  # first = admin
+
+        conn = {
+            "name": "custom-internal",
+            "transport": "stdio",
+            "command": "node /opt/internal-mcp-server/index.js",
+            "env": {},
+            "enabled": True,
+        }
+        r = await c.put("/api/connectors/custom-internal", json=conn, headers=_bearer(admin_token))
+        assert r.status_code == 200, r.text
+
+
 async def test_policy_requires_admin(db_factory):
     app = build_api_app(db_factory)
     async with client(app) as c:

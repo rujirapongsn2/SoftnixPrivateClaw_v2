@@ -759,6 +759,7 @@ function ConnectorsPanel() {
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
   const [editing, setEditing] = useState<Partial<ConnectorInfo> | null>(null);
   const [setupPreset, setSetupPreset] = useState<ConnectorPreset | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const { error, guard } = useAsyncError();
   // Live-sanitizing the name on every keystroke (slugifyConnectorName) would
   // otherwise reset the caret to the end of the field whenever sanitization
@@ -779,6 +780,7 @@ function ConnectorsPanel() {
   useEffect(() => {
     void reload();
     api.connectorPresets().then(setPresets).catch(() => setPresets([]));
+    void api.me().then((me) => setIsAdmin(me.is_admin));
   }, [reload]);
 
   const installedByName = new Map(connectors.map((c) => [c.name.toLowerCase(), c]));
@@ -795,7 +797,7 @@ function ConnectorsPanel() {
   );
 
   if (editing) {
-    const transport = editing.transport ?? "stdio";
+    const transport = editing.transport ?? "http";
     return (
       <div className="claw-panel">
         <TextInput
@@ -813,12 +815,18 @@ function ConnectorsPanel() {
           isDisabled={!!editing.id}
         />
         <div className="claw-row">
-          <Button
-            label="stdio (local command)"
-            size="sm"
-            variant={transport === "stdio" ? "primary" : "secondary"}
-            clickAction={() => setEditing({ ...editing, transport: "stdio" })}
-          />
+          {/* stdio spawns a real subprocess on the server (unsandboxed) — only
+              an admin may pick it for a NEW connector. An existing stdio
+              connector (a built-in preset the user installed) still shows so
+              they can manage it, but see the disabled Command field below. */}
+          {(isAdmin || transport === "stdio") && (
+            <Button
+              label="stdio (local command)"
+              size="sm"
+              variant={transport === "stdio" ? "primary" : "secondary"}
+              clickAction={() => setEditing({ ...editing, transport: "stdio" })}
+            />
+          )}
           <Button
             label="HTTP (remote server)"
             size="sm"
@@ -827,11 +835,19 @@ function ConnectorsPanel() {
           />
         </div>
         {transport === "stdio" ? (
-          <TextInput
-            label="Command (e.g. npx -y @modelcontextprotocol/server-github)"
-            value={editing.command ?? ""}
-            onChange={(v) => setEditing({ ...editing, command: v })}
-          />
+          <>
+            <TextInput
+              label="Command (e.g. npx -y @modelcontextprotocol/server-github)"
+              value={editing.command ?? ""}
+              onChange={(v) => setEditing({ ...editing, command: v })}
+              isDisabled={!isAdmin}
+            />
+            {!isAdmin && (
+              <Text size="sm" color="secondary">
+                Only an administrator can set a custom local command — ask them to change this.
+              </Text>
+            )}
+          </>
         ) : (
           <TextInput
             label="Server URL (e.g. https://mcp.example.com/mcp)"
@@ -901,7 +917,7 @@ function ConnectorsPanel() {
           icon={<Icon icon={Plus} size="sm" />}
           size="sm"
           variant="secondary"
-          clickAction={() => setEditing({ transport: "stdio", enabled: true })}
+          clickAction={() => setEditing({ transport: isAdmin ? "stdio" : "http", enabled: true })}
         />
       </div>
       {error && <ErrorText>{error}</ErrorText>}

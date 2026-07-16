@@ -174,6 +174,20 @@ async def upsert_connector(
         raise HTTPException(status_code=422, detail="stdio connector requires a command")
     if body.transport == "http" and not body.url.strip():
         raise HTTPException(status_code=422, detail="http connector requires a url")
+    if body.transport == "stdio" and not user.is_admin:
+        from claw.core.connector_presets import is_allowed_stdio_command
+
+        # A stdio connector's command is a real subprocess spawned unsandboxed
+        # on the host (see ConnectorManager._connect) — never let a non-admin
+        # supply their own; only the fixed, developer-authored preset commands
+        # (GitHub/Notion/OneDrive/Gmail/Outlook/Outlook Calendar/Tavily) are
+        # permitted. Everything else (http connectors, and stdio for admins)
+        # is unaffected.
+        if not is_allowed_stdio_command(body.command):
+            raise HTTPException(
+                status_code=403,
+                detail="custom stdio (local command) connectors require an administrator",
+            )
     row = await state.connectors.upsert(
         user.id,
         name.strip(),

@@ -256,3 +256,18 @@ def list_presets() -> list[dict]:
 
 def get_preset(key: str) -> ConnectorPreset | None:
     return _BY_KEY.get(key)
+
+
+# The exact `command` string of every built-in stdio preset (always
+# `python -m claw.integrations.<module>` — developer-authored code, never
+# user input). A non-admin's stdio connector must match one of these exactly;
+# see claw/api/manage.py::upsert_connector. Anything else is an ordinary
+# user's own command string, which would let it run arbitrary unsandboxed
+# subprocesses on the host — that stays admin-only.
+_ALLOWED_STDIO_COMMANDS: frozenset[str] = frozenset(
+    p.command for p in _PRESETS if p.transport == "stdio"
+)
+
+
+def is_allowed_stdio_command(command: str) -> bool:
+    return command.strip() in _ALLOWED_STDIO_COMMANDS
