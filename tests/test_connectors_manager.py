@@ -70,6 +70,50 @@ async def test_cancel_scope_error_becomes_connector_error_not_a_500(db_factory, 
     assert (await mgr.status(user.id))["scopey"]["status"] == "error"
 
 
+async def test_teardown_cancel_scope_error_does_not_escape(db_factory, monkeypatch):
+    """Symmetric to the connect path: tearing down a broken connector's
+    half-entered context on a later rebuild can raise CancelledError from
+    anyio's cross-task cancel-scope exit. _close_user must absorb it too —
+    otherwise it escapes sync_tools → the /connectors endpoint as a 500 on the
+    NEXT sync (config change / cooldown expiry), not just the first."""
+    users = UserStore(db_factory)
+    user = await users.create(email="teardown@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(user.id, "kb", transport="http", url="https://example.invalid/mcp", enabled=True)
+
+    class FakeSession:
+        async def list_tools(self):
+            class Listed:
+                tools = []
+
+            return Listed()
+
+    async def ok_connect(self, stack, connector):
+        session = FakeSession()
+        return session, await session.list_tools()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", ok_connect)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    # Replace the live stack with one whose aclose raises a cross-task
+    # CancelledError (what anyio surfaces when a context entered on another
+    # task is exited here), then force a rebuild via invalidate().
+    class CancellingStack:
+        async def aclose(self):
+            raise asyncio.CancelledError("Cancelled via cancel scope on teardown")
+
+    mgr._users[user.id].stack = CancellingStack()
+    await mgr.invalidate(user.id)
+
+    # Must NOT raise — the teardown cancellation is absorbed and the rebuild
+    # proceeds to reconnect.
+    await mgr.sync_tools(user.id, registry)
+    assert (await mgr.status(user.id))["kb"]["status"] == "connected"
+
+
 async def test_genuine_task_cancellation_still_propagates(db_factory, monkeypatch):
     """The CancelledError catch above must not swallow a genuine cancellation
     of the surrounding task (shutdown/drain, client hangup) — otherwise
@@ -267,7 +311,7 @@ async def test_errored_connector_retried_after_cooldown_elapses(db_factory, monk
     assert flaky.attempts == 1
 
     # Pretend the failure happened well before the cooldown window.
-    mgr._users[user.id].errored_at -= timedelta(seconds=120)
+    mgr._users[user.id].errored_monotonic -= 120
 
     await mgr.sync_tools(user.id, registry)
     assert (await mgr.status(user.id))["flaky"]["status"] == "connected"

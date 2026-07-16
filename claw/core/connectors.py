@@ -8,9 +8,10 @@ Connections are cached per user and rebuilt only when the config changes.
 import asyncio
 import shlex
 import sys
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -65,10 +66,6 @@ _TOOL_CALL_TIMEOUT_SECONDS = 60
 _ERROR_RETRY_COOLDOWN_SECONDS = 60
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 class McpToolProxy(Tool):
     def __init__(
         self,
@@ -115,9 +112,11 @@ class _UserConnections:
     stack: AsyncExitStack | None = None
     tool_names: list[str] = field(default_factory=list)
     statuses: dict[str, dict] = field(default_factory=dict)
-    # When the most recent sync left at least one connector in "error"; drives
-    # the retry cooldown in sync_tools. None once a sync ends fully healthy.
-    errored_at: datetime | None = None
+    # time.monotonic() of the most recent sync that left at least one connector
+    # in "error"; drives the retry cooldown in sync_tools. Monotonic (not
+    # wall-clock) so an NTP/clock adjustment can't skew the cooldown window.
+    # None once a sync ends fully healthy.
+    errored_monotonic: float | None = None
 
 
 class ConnectorManager:
@@ -188,8 +187,8 @@ class ConnectorManager:
             had_error = state is not None and any(s.get("status") == "error" for s in state.statuses.values())
             within_error_cooldown = (
                 had_error
-                and state.errored_at is not None
-                and (_now() - state.errored_at).total_seconds() < self.error_retry_cooldown_seconds
+                and state.errored_monotonic is not None
+                and (time.monotonic() - state.errored_monotonic) < self.error_retry_cooldown_seconds
             )
             if state is not None and state.signature == signature and (not had_error or within_error_cooldown):
                 return
@@ -238,7 +237,7 @@ class ConnectorManager:
             # Stamp the failure time so the next sync holds off retrying the
             # whole set until the cooldown elapses (see sync_tools docstring).
             if any(s.get("status") == "error" for s in state.statuses.values()):
-                state.errored_at = _now()
+                state.errored_monotonic = time.monotonic()
 
     async def _connect_one(self, stack: AsyncExitStack, connector) -> tuple[Any, Any, Any, dict | None]:
         """Connect+list one connector under its own timeout. Never raises —
@@ -328,6 +327,19 @@ class ConnectorManager:
         if state.stack is not None:
             try:
                 await state.stack.aclose()
+            except asyncio.CancelledError:
+                # Same cross-task anyio hazard as _connect_one: tearing down a
+                # (possibly half-entered) MCP client context that was entered
+                # on a different task can surface as a CancelledError — a
+                # BaseException the `except Exception` below would miss, so it
+                # would escape _close_user → sync_tools → the /connectors
+                # endpoint as a 500. Absorb this task's spurious cancellation
+                # (uncancel) and move on; a genuine cancellation of the caller
+                # still fires at its own next await. See _connect_one.
+                task = asyncio.current_task()
+                if task is not None:
+                    task.uncancel()
+                logger.debug("MCP stack close for {} cancelled across tasks; ignored", user_id)
             except Exception:
                 # MCP SDK cancel-scope cleanup can be noisy across tasks; harmless.
                 logger.debug("MCP stack close for {} raised; ignored", user_id)
