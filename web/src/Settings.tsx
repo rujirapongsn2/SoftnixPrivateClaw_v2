@@ -40,7 +40,7 @@ import {
   User as UserIcon,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ProvidersPanel } from "./Admin";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
@@ -742,12 +742,38 @@ function ConnectorToolNames({ names }: { names: string[] }) {
   );
 }
 
+// Connector names must match the backend's `^[a-z0-9_-]+$` (max 64 chars) —
+// sanitize as the user types instead of letting a friendly name like
+// "Softnix KB Intelligence" reach the API and bounce back as a raw 422.
+function slugifyConnectorName(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 64);
+}
+
 function ConnectorsPanel() {
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
   const [editing, setEditing] = useState<Partial<ConnectorInfo> | null>(null);
   const [setupPreset, setSetupPreset] = useState<ConnectorPreset | null>(null);
   const { error, guard } = useAsyncError();
+  // Live-sanitizing the name on every keystroke (slugifyConnectorName) would
+  // otherwise reset the caret to the end of the field whenever sanitization
+  // changes the string (React must overwrite a controlled input's value when
+  // it differs from the raw DOM edit) — capture where the caret should land
+  // in the SANITIZED string, then restore it after the re-render.
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingCaretRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (pendingCaretRef.current !== null && nameInputRef.current) {
+      const pos = pendingCaretRef.current;
+      nameInputRef.current.setSelectionRange(pos, pos);
+      pendingCaretRef.current = null;
+    }
+  }, [editing?.name]);
 
   const reload = useCallback(() => api.listConnectors().then(setConnectors), []);
   useEffect(() => {
@@ -773,9 +799,17 @@ function ConnectorsPanel() {
     return (
       <div className="claw-panel">
         <TextInput
+          ref={nameInputRef}
           label="Name (lowercase, e.g. github)"
           value={editing.name ?? ""}
-          onChange={(v) => setEditing({ ...editing, name: v })}
+          onChange={(v, e) => {
+            const caret = e?.target?.selectionStart ?? v.length;
+            // Approximate the caret's new position by sanitizing just the
+            // portion before it — good enough for a slug field, and avoids
+            // the end-of-string jump on every mid-string edit.
+            pendingCaretRef.current = slugifyConnectorName(v.slice(0, caret)).length;
+            setEditing({ ...editing, name: slugifyConnectorName(v) });
+          }}
           isDisabled={!!editing.id}
         />
         <div className="claw-row">
