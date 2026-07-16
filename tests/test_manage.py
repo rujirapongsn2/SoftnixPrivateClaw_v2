@@ -261,9 +261,11 @@ async def test_connector_store_crud(db_factory, stores):
 
 
 async def test_skill_put_endpoint_rejects_another_users_connector(db_factory):
-    # Connectors are admin-managed (PUT /connectors requires require_admin);
-    # skills are per-user (require_operator). The first registered user is
-    # the implicit admin.
+    # Connectors are per-user self-service (require_operator), same as skills
+    # — but each user's connectors are their own, so linking a skill to
+    # someone else's connector_id must still be rejected. The first
+    # registered user is the implicit admin; irrelevant here since connector
+    # ownership isn't admin-gated.
     app = build_api_app(db_factory)
     async with client(app) as c:
         admin_token, _ = await _register(c, "admin@x.io")

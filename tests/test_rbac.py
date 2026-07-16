@@ -30,15 +30,29 @@ async def test_any_user_manages_own_skills(db_factory):
         assert len(own) == 1 and own[0]["name"] == "s"
 
 
-async def test_connectors_and_policy_require_admin(db_factory):
+async def test_any_user_manages_own_connectors(db_factory):
+    """Connectors live under Settings (self-service, like skills/knowledge/
+    memory) — a non-admin user connects their own apps without needing an
+    admin. Only Control Plane-level config (e.g. /policy below) requires
+    is_admin."""
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        _admin_token, _ = await _register(c, "admin@x.io")  # first = admin
+        user_token, _ = await _register(c, "normal@x.io")  # second = non-admin
+
+        conn = {"name": "gh", "transport": "http", "url": "https://mcp.x/mcp", "env": {}, "enabled": True}
+        r = await c.put("/api/connectors/gh", json=conn, headers=_bearer(user_token))
+        assert r.status_code == 200  # own resource — allowed without admin
+
+        r = await c.delete(f"/api/connectors/{r.json()['id']}", headers=_bearer(user_token))
+        assert r.status_code == 200
+
+
+async def test_policy_requires_admin(db_factory):
     app = build_api_app(db_factory)
     async with client(app) as c:
         admin_token, _ = await _register(c, "admin@x.io")
         user_token, _ = await _register(c, "normal@x.io")
-
-        conn = {"name": "gh", "transport": "http", "url": "https://mcp.x/mcp", "env": {}, "enabled": True}
-        assert (await c.put("/api/connectors/gh", json=conn, headers=_bearer(user_token))).status_code == 403
-        assert (await c.put("/api/connectors/gh", json=conn, headers=_bearer(admin_token))).status_code == 200
 
         assert (await c.put("/api/policy", json={"monitor_only": True}, headers=_bearer(user_token))).status_code == 403
         assert (await c.put("/api/policy", json={"monitor_only": True}, headers=_bearer(admin_token))).status_code == 200

@@ -167,7 +167,7 @@ async def list_groups(user: User = Depends(current_user), state: AppState = Depe
 async def upsert_connector(
     name: str,
     body: ConnectorBody,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_operator),
     state: AppState = Depends(get_state),
 ) -> dict:
     if body.transport == "stdio" and not body.command.strip():
@@ -189,7 +189,7 @@ async def upsert_connector(
 
 @router.delete("/connectors/{connector_id}")
 async def delete_connector(
-    connector_id: str, user: User = Depends(require_admin), state: AppState = Depends(get_state)
+    connector_id: str, user: User = Depends(require_operator), state: AppState = Depends(get_state)
 ) -> dict:
     if not await state.connectors.delete(user.id, connector_id):
         raise HTTPException(status_code=404, detail="connector not found")
