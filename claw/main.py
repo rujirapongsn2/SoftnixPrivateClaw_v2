@@ -87,6 +87,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         connectors,
         connect_timeout_seconds=settings.connectors.connect_timeout_seconds,
         tool_call_timeout_seconds=settings.connectors.tool_call_timeout_seconds,
+        error_retry_cooldown_seconds=settings.connectors.error_retry_cooldown_seconds,
     )
     guardrails = GuardrailStore(factory)
     llm_config = LLMConfigStore(factory, secret_box=secret_box)

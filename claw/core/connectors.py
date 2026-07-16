@@ -10,7 +10,7 @@ import shlex
 import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -59,6 +59,15 @@ _CONNECT_TIMEOUT_SECONDS = 20
 # after the client has already reported the call as failed.
 _TOOL_CALL_TIMEOUT_SECONDS = 60
 
+# After a connector fails, hold off retrying the whole set for this long — see
+# ConnectorSettings.error_retry_cooldown_seconds and sync_tools() for why. A
+# module constant so direct construction (tests) has a sane default.
+_ERROR_RETRY_COOLDOWN_SECONDS = 60
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 class McpToolProxy(Tool):
     def __init__(
@@ -106,6 +115,9 @@ class _UserConnections:
     stack: AsyncExitStack | None = None
     tool_names: list[str] = field(default_factory=list)
     statuses: dict[str, dict] = field(default_factory=dict)
+    # When the most recent sync left at least one connector in "error"; drives
+    # the retry cooldown in sync_tools. None once a sync ends fully healthy.
+    errored_at: datetime | None = None
 
 
 class ConnectorManager:
@@ -114,10 +126,12 @@ class ConnectorManager:
         store: ConnectorStore,
         connect_timeout_seconds: float = _CONNECT_TIMEOUT_SECONDS,
         tool_call_timeout_seconds: float = _TOOL_CALL_TIMEOUT_SECONDS,
+        error_retry_cooldown_seconds: float = _ERROR_RETRY_COOLDOWN_SECONDS,
     ):
         self.store = store
         self.connect_timeout_seconds = connect_timeout_seconds
         self.tool_call_timeout_seconds = tool_call_timeout_seconds
+        self.error_retry_cooldown_seconds = error_retry_cooldown_seconds
         self._users: dict[str, _UserConnections] = {}
         # Serialize sync_tools per user: it is now driven both by chat turns and
         # by the connectors listing endpoint (composer menu), which can overlap.
@@ -155,17 +169,29 @@ class ConnectorManager:
 
     async def sync_tools(self, user_id: str, registry: ToolRegistry) -> None:
         """Ensure the registry reflects the user's enabled connectors. Cheap
-        when unchanged. A connector that ended in "error" last time
-        (including a connect timeout) is always retried here even though its
-        config didn't change — otherwise a transient failure would cache as
-        permanently broken until an admin edits the connector, which defeats
-        the point of timing failures out instead of hanging."""
+        when unchanged. A connector that ended in "error" last time (including
+        a connect timeout) is retried here even though its config didn't change
+        — otherwise a transient failure would cache as permanently broken until
+        an admin edits the connector. But that retry tears down and reconnects
+        ALL of the user's connectors, waiting the full connect timeout for the
+        broken one, and this method runs on every chat turn and every
+        /connectors listing. So the retry is held off for
+        `error_retry_cooldown_seconds` after the failure: within that window we
+        short-circuit on the cached (error) state, exactly as for an unchanged
+        all-healthy config, keeping turns and page loads fast. A config change
+        (signature) or an explicit invalidate() still forces an immediate
+        rebuild regardless of the cooldown."""
         async with self._lock(user_id):
             connectors = await self.store.enabled_for_user(user_id)
             signature = tuple(sorted((c.id, c.updated_at.isoformat()) for c in connectors))
             state = self._users.get(user_id)
             had_error = state is not None and any(s.get("status") == "error" for s in state.statuses.values())
-            if state is not None and state.signature == signature and not had_error:
+            within_error_cooldown = (
+                had_error
+                and state.errored_at is not None
+                and (_now() - state.errored_at).total_seconds() < self.error_retry_cooldown_seconds
+            )
+            if state is not None and state.signature == signature and (not had_error or within_error_cooldown):
                 return
 
             await self._close_user(user_id, registry)
@@ -209,6 +235,10 @@ class ConnectorManager:
                     "tool_names": registered_names,
                 }
                 logger.info("MCP connector {} connected with {} tools", connector.name, len(registered_names))
+            # Stamp the failure time so the next sync holds off retrying the
+            # whole set until the cooldown elapses (see sync_tools docstring).
+            if any(s.get("status") == "error" for s in state.statuses.values()):
+                state.errored_at = _now()
 
     async def _connect_one(self, stack: AsyncExitStack, connector) -> tuple[Any, Any, Any, dict | None]:
         """Connect+list one connector under its own timeout. Never raises —
@@ -223,6 +253,27 @@ class ConnectorManager:
             return connector, session, listed, None
         except TimeoutError:
             message = f"timed out after {self.connect_timeout_seconds}s connecting/listing tools"
+            return connector, None, None, {"status": "error", "error": message}
+        except asyncio.CancelledError:
+            # A broken connector's handshake fails deep inside the MCP SDK's
+            # anyio internals (e.g. a DNS error becomes "Attempted to exit
+            # cancel scope in a different task than it was entered in" because
+            # the client's contexts are held across tasks in a shared stack),
+            # which surfaces as a CancelledError on THIS gather-spawned child
+            # task — with our own wait_for timeout as another source.
+            # CancelledError is a BaseException, so the `except Exception`
+            # below misses it; left unhandled it escapes gather() →
+            # sync_tools() → warm_connectors()'s `except Exception` and
+            # surfaces as a 500 on the /connectors listing (and would abort a
+            # chat turn). uncancel() clears this child task's spurious
+            # cancellation so it doesn't leak, and we report the connector as
+            # errored. A genuine cancellation of the PARENT sync task is
+            # unaffected: it is awaiting gather(), so its own CancelledError
+            # still fires there regardless of what this child returns.
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            message = f"failed connecting (within {self.connect_timeout_seconds}s budget)"
             return connector, None, None, {"status": "error", "error": message}
         except Exception as exc:
             return connector, None, None, {"status": "error", "error": str(exc)[:300]}

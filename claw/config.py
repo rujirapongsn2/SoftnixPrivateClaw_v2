@@ -131,6 +131,14 @@ class ConnectorSettings(BaseModel):
     connect_timeout_seconds: int = 20
     # Budget for one already-connected MCP tool call.
     tool_call_timeout_seconds: int = 60
+    # After a connector fails to connect, hold off retrying the whole set for
+    # this long. sync_tools runs on every chat turn and every /connectors
+    # listing, and a retry reconnects ALL of the user's connectors (waiting the
+    # full connect_timeout for the broken one), so without this a single broken
+    # connector would add connect_timeout_seconds to every turn and page load
+    # indefinitely. A config change or explicit invalidate still retries
+    # immediately regardless. 0 = retry on every sync (the pre-cooldown behavior).
+    error_retry_cooldown_seconds: int = 60
 
 
 class SchedulerSettings(BaseModel):
