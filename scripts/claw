@@ -18,6 +18,10 @@ LAUNCHD_DAEMON_PLIST="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
 PIDFILE="$PROJECT_DIR/.claw.pid"
 LOGFILE="$PROJECT_DIR/claw.log"
 
+# Set by --force-stale (see below): permits restart/update to kill a process
+# that's blocking the port instead of just reporting it and failing.
+FORCE_STALE=false
+
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # Which supervisor is actually managing this install?
@@ -42,6 +46,94 @@ port() {
   local p="8700"
   [[ -f "$PROJECT_DIR/.env" ]] && p="$(grep -E '^CLAW_PORT=' "$PROJECT_DIR/.env" | tail -1 | cut -d= -f2 || true)"
   echo "${p:-8700}"
+}
+
+# ---------------------------------------------------------------- port/process ownership
+#
+# The whole point of this section: a restart command returning success (or
+# /api/ready answering OK) does NOT prove the NEW process is the one actually
+# bound to the port — a stale process from before the restart (a manually
+# started uvicorn, or one systemd/launchd lost track of) can still be the one
+# answering. Every helper here is read-only / diagnostic; nothing kills a
+# process unless --force-stale was passed explicitly (see cmd_restart).
+
+# cmdline of a PID, for diagnostic messages. Portable across Linux (reads
+# /proc directly) and macOS (falls back to ps).
+pid_cmd() {
+  local pid="${1:-}"
+  [[ -z "$pid" ]] && return 0
+  if [[ -r "/proc/$pid/cmdline" ]]; then
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true
+  else
+    ps -o command= -p "$pid" 2>/dev/null || true
+  fi
+}
+
+# Dependency-free fallback for Linux: cross-reference the listening socket's
+# inode (from /proc/net/tcp*, hex local port + state 0A = LISTEN) against
+# every process's open file descriptors (/proc/*/fd/*) to find which PID owns
+# it. No ss/lsof/fuser/netstat required — works even in minimal containers
+# that don't have those tools installed. (Only finds processes owned by the
+# same user as this script, same as any other /proc-based inspection.)
+_port_pid_from_proc() {
+  local p="$1" hexport inode fd target pidfound=""
+  hexport="$(printf '%04X' "$p" 2>/dev/null || true)"
+  [[ -z "$hexport" ]] && { echo ""; return 0; }
+  inode="$(awk -v hp=":$hexport" '$2 ~ hp"$" && $4=="0A" {print $10; exit}' /proc/net/tcp 2>/dev/null || true)"
+  if [[ -z "$inode" && -r /proc/net/tcp6 ]]; then
+    inode="$(awk -v hp=":$hexport" '$2 ~ hp"$" && $4=="0A" {print $10; exit}' /proc/net/tcp6 2>/dev/null || true)"
+  fi
+  [[ -z "$inode" ]] && { echo ""; return 0; }
+  for fd in /proc/[0-9]*/fd/*; do
+    [[ -L "$fd" ]] || continue
+    target="$(readlink "$fd" 2>/dev/null || true)"
+    if [[ "$target" == "socket:[$inode]" ]]; then
+      pidfound="${fd#/proc/}"
+      pidfound="${pidfound%%/*}"
+      break
+    fi
+  done
+  echo "$pidfound"
+}
+
+# PID of the process currently LISTENing on the given TCP port, or empty if
+# none found / undeterminable. Tries common tools in order of preference,
+# falling back to the dependency-free /proc parse above. Never fails the
+# script — an empty result just means "couldn't verify", handled by callers.
+port_pid() {
+  local p="$1" pid=""
+
+  if have ss; then
+    pid="$(ss -H -ltnp 2>/dev/null | awk -v pat=":$p" '$4 ~ pat"$"' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)"
+  fi
+
+  if [[ -z "$pid" ]] && have lsof; then
+    pid="$(lsof -iTCP:"$p" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+  fi
+
+  if [[ -z "$pid" ]] && have fuser; then
+    pid="$(fuser -n tcp "$p" 2>&1 | grep -oE '[0-9]+' | head -1 || true)"
+  fi
+
+  if [[ -z "$pid" ]] && have netstat; then
+    pid="$(netstat -ltnp 2>/dev/null | awk -v pat=":$p\$" '$4 ~ pat {print $7}' | cut -d/ -f1 | head -1 || true)"
+  fi
+
+  if [[ -z "$pid" ]] && [[ -r /proc/net/tcp ]]; then
+    pid="$(_port_pid_from_proc "$p" || true)"
+  fi
+
+  echo "$pid"
+}
+
+# MainPID of the systemd unit ("0" when inactive). Read-only query, no sudo
+# needed even for a non-root operator.
+systemd_main_pid() {
+  systemctl show -p MainPID "$SYSTEMD_UNIT" 2>/dev/null | cut -d= -f2 || true
+}
+
+systemd_is_active() {
+  [[ "$(systemctl is-active "$SYSTEMD_UNIT" 2>/dev/null || true)" == "active" ]]
 }
 
 cmd_start() {
@@ -70,21 +162,6 @@ cmd_stop() {
   esac
 }
 
-# Polls /api/ready for up to ~15s. The restart commands below (systemctl,
-# launchctl, nohup) all return/detach before the new uvicorn process has
-# necessarily finished booting and bound the port — this is the only way to
-# confirm the NEW process is actually the one answering requests, rather than
-# assuming success just because the restart command didn't error.
-wait_ready() {
-  local tries=15
-  while (( tries > 0 )); do
-    curl -fsS "http://127.0.0.1:$(port)/api/ready" >/dev/null 2>&1 && return 0
-    sleep 1
-    tries=$((tries - 1))
-  done
-  return 1
-}
-
 # The exact command an operator should run by hand if the automatic restart
 # didn't take effect (e.g. sudo needs an interactive password over SSH).
 manual_restart_hint() {
@@ -96,37 +173,181 @@ manual_restart_hint() {
   esac
 }
 
-cmd_restart() {
+# Issues the actual restart command for the active supervisor (no verification
+# — see verify_restart below for that). Split out from cmd_restart so
+# --force-stale can retry just this part after clearing a stale port holder.
+do_restart_command() {
   case "$(mode)" in
     # `|| true`: a failed restart command (e.g. sudo prompting for a password
-    # with no TTY) must not abort this function before the health check below
-    # runs — the check is what actually determines success or failure here.
+    # with no TTY) must not abort this function before verify_restart runs —
+    # that check is what actually determines success or failure here.
     systemd) sc restart "$SYSTEMD_UNIT" || true ;;
     *) cmd_stop; sleep 1; cmd_start ;;
   esac
-  if wait_ready; then
-    echo "  /api/ready: OK — the new build is live"
-  else
-    echo "  WARNING: backend did not become healthy after restart — it may"
-    echo "  still be running the OLD build. This commonly happens when the"
-    echo "  restart needs sudo/an interactive password (e.g. run over SSH"
-    echo "  without a TTY or passwordless sudo configured)."
-    echo "  Finish it by running this yourself, then re-check with 'claw status':"
-    echo "    $(manual_restart_hint)"
+}
+
+# Polls /api/ready for up to ~20s, then — critically — confirms the process
+# actually bound to the port is the one THIS restart just started, not a
+# stale process left over from before it. Without this second check, a stale
+# process still answering /api/ready would make this (and cmd_update) report
+# success while the old build keeps serving all real traffic.
+verify_restart() {
+  local tries=20 ready=false
+  while (( tries > 0 )); do
+    if curl -fsS "http://127.0.0.1:$(port)/api/ready" >/dev/null 2>&1; then
+      ready=true
+      break
+    fi
+    sleep 1
+    tries=$((tries - 1))
+  done
+
+  if ! $ready; then
+    echo "  /api/ready: not responding after restart"
     return 1
   fi
+
+  local owner_pid
+  owner_pid="$(port_pid "$(port)")"
+
+  case "$(mode)" in
+    systemd)
+      if ! systemd_is_active; then
+        echo "  ERROR: systemd unit '${SYSTEMD_UNIT}' is not active after restart"
+        echo "         (\`systemctl is-active ${SYSTEMD_UNIT}\` did not report 'active')."
+        if [[ -n "$owner_pid" ]]; then
+          echo "         Port $(port) is currently held by PID $owner_pid: $(pid_cmd "$owner_pid")"
+        fi
+        return 1
+      fi
+      local main_pid
+      main_pid="$(systemd_main_pid)"
+      if [[ -z "$owner_pid" ]]; then
+        echo "  WARNING: /api/ready is OK but couldn't determine which PID holds"
+        echo "           port $(port) (no ss/lsof/fuser/netstat/proc access available)."
+        echo "           Cannot confirm this is systemd's MainPID ($main_pid)."
+      elif [[ "$owner_pid" != "$main_pid" ]]; then
+        echo "  ERROR: port $(port) is held by PID $owner_pid ($(pid_cmd "$owner_pid")),"
+        echo "         not systemd's MainPID ($main_pid). A stale process from"
+        echo "         before this restart is still answering requests — the"
+        echo "         OLD build is what users are actually hitting, even though"
+        echo "         /api/ready reported OK."
+        echo "         Stop it yourself: kill $owner_pid   (or rerun with --force-stale)"
+        return 1
+      fi
+      ;;
+    nohup)
+      local recorded_pid=""
+      [[ -f "$PIDFILE" ]] && recorded_pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+      if [[ -z "$owner_pid" ]]; then
+        echo "  WARNING: /api/ready is OK but couldn't determine which PID holds"
+        echo "           port $(port) (no ss/lsof/fuser/netstat/proc access available)."
+      elif [[ -n "$recorded_pid" && "$owner_pid" != "$recorded_pid" ]]; then
+        echo "  ERROR: port $(port) is held by PID $owner_pid ($(pid_cmd "$owner_pid")),"
+        echo "         not the PID this script just started ($recorded_pid). A stale"
+        echo "         process is still answering requests on this port — the OLD"
+        echo "         build is what users are actually hitting, even though"
+        echo "         /api/ready reported OK."
+        echo "         Stop it yourself: kill $owner_pid   (or rerun with --force-stale)"
+        return 1
+      fi
+      ;;
+    launchd-daemon|launchd)
+      # launchd's own bookkeeping (checked in cmd_status) is best-effort only
+      # here; no reliable MainPID-equivalent to cross-check against.
+      :
+      ;;
+  esac
+
+  echo "  /api/ready: OK — the new build is live"
+  [[ -n "$owner_pid" ]] && echo "  port $(port) is held by PID $owner_pid: $(pid_cmd "$owner_pid")"
+  return 0
+}
+
+cmd_restart() {
+  do_restart_command
+  if verify_restart; then
+    return 0
+  fi
+
+  if $FORCE_STALE; then
+    local stale_pid
+    stale_pid="$(port_pid "$(port)")"
+    if [[ -n "$stale_pid" ]]; then
+      echo "==> --force-stale: stopping PID $stale_pid ($(pid_cmd "$stale_pid")) holding port $(port)"
+      kill "$stale_pid" 2>/dev/null || true
+      local _wait_tick
+      for _wait_tick in 1 2 3 4 5; do
+        kill -0 "$stale_pid" 2>/dev/null || break
+        sleep 1
+      done
+      if kill -0 "$stale_pid" 2>/dev/null; then
+        echo "==> --force-stale: PID $stale_pid did not exit, sending SIGKILL"
+        kill -9 "$stale_pid" 2>/dev/null || true
+        sleep 1
+      fi
+      echo "==> retrying restart"
+      do_restart_command
+      if verify_restart; then
+        return 0
+      fi
+    else
+      echo "  --force-stale: no process found holding port $(port) to stop."
+    fi
+  fi
+
+  echo "  Finish it by running this yourself, then re-check with 'claw status':"
+  echo "    $(manual_restart_hint)"
+  return 1
 }
 
 cmd_status() {
   echo "supervisor: $(mode)"
+  local owner_pid
+  owner_pid="$(port_pid "$(port)")"
+
   case "$(mode)" in
-    systemd) sc --no-pager status "$SYSTEMD_UNIT" || true ;;
+    systemd)
+      sc --no-pager status "$SYSTEMD_UNIT" || true
+      local main_pid
+      main_pid="$(systemd_main_pid)"
+      echo "systemd MainPID: ${main_pid:-unknown}"
+      if [[ -n "$owner_pid" ]]; then
+        echo "port $(port) held by PID $owner_pid: $(pid_cmd "$owner_pid")"
+        if [[ -n "$main_pid" && "$main_pid" != "0" && "$owner_pid" != "$main_pid" ]]; then
+          echo "WARNING: port owner PID does not match systemd MainPID — a stale"
+          echo "         process outside systemd's control may be serving traffic."
+        fi
+      else
+        echo "port $(port): no listener found (or ownership tool unavailable)"
+      fi
+      ;;
     launchd-daemon) lcd list | grep -E "PID|$LAUNCHD_LABEL" || echo "not loaded" ;;
     launchd) launchctl list | grep -E "PID|$LAUNCHD_LABEL" || echo "not loaded" ;;
     nohup)
       if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-        echo "running (pid $(cat "$PIDFILE"))"; else echo "not running"; fi ;;
+        local recorded_pid
+        recorded_pid="$(cat "$PIDFILE")"
+        echo "running (pid $recorded_pid)"
+        if [[ -n "$owner_pid" ]]; then
+          echo "port $(port) held by PID $owner_pid: $(pid_cmd "$owner_pid")"
+          if [[ "$owner_pid" != "$recorded_pid" ]]; then
+            echo "WARNING: port owner PID does not match the PID recorded in"
+            echo "         $PIDFILE — a stale process may be serving traffic."
+          fi
+        else
+          echo "port $(port): no listener found (or ownership tool unavailable)"
+        fi
+      else
+        echo "not running"
+        if [[ -n "$owner_pid" ]]; then
+          echo "WARNING: port $(port) is held by PID $owner_pid ($(pid_cmd "$owner_pid")),"
+          echo "         which is NOT tracked by $PIDFILE."
+        fi
+      fi
+      ;;
   esac
+
   echo "--- health ---"
   if curl -fsS "http://127.0.0.1:$(port)/api/ready" >/dev/null 2>&1; then
     echo "  /api/ready: OK (http://127.0.0.1:$(port))"
@@ -154,11 +375,27 @@ cmd_update() {
     echo "==> update complete — backend is running the new build"
   else
     echo "==> update INCOMPLETE — code/web/migrations are updated, but the"
-    echo "    backend restart above did not succeed. The old build is still"
-    echo "    serving requests until you run the manual command shown above."
+    echo "    backend restart above did not succeed and/or verify. The old"
+    echo "    build is still serving requests until you resolve this."
     exit 1
   fi
 }
+
+# ---------------------------------------------------------------- arg parsing
+#
+# --force-stale is accepted anywhere in the argument list for `restart` and
+# `update`; it's read by cmd_restart via the FORCE_STALE global. Deliberately
+# NOT the default: a stale process is killed automatically only when an
+# operator explicitly opts in, never as a side effect of a routine
+# restart/update.
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --force-stale) FORCE_STALE=true ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 case "${1:-}" in
   start)   cmd_start ;;
@@ -167,5 +404,5 @@ case "${1:-}" in
   status)  cmd_status ;;
   logs)    shift; cmd_logs "${1:-100}" ;;
   update)  cmd_update ;;
-  *) echo "Usage: claw {start|stop|restart|status|logs [N]|update}"; exit 1 ;;
+  *) echo "Usage: claw {start|stop|restart|status|logs [N]|update} [--force-stale]"; exit 1 ;;
 esac
