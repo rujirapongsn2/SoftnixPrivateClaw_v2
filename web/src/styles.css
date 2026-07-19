@@ -325,20 +325,23 @@ html[data-font-size="large"] {
 }
 /* Admin-set chat background pattern (Control Plane > Preferences), applied as a
    data-attribute on <html> by the BrandingProvider. Solid (default) leaves the
-   app wash showing through; Dots/Grid paint a subtle, low-contrast texture over
-   it. Kept faint (theme border color) so message text stays legible. */
+   app wash showing through. Dots/Grid paint a texture over it — deliberately
+   using a fixed rgba(black) rather than the `--color-border` token: that token
+   (~#ebebeb) sits only ~15 levels off the app's wash background (~#faf9f5),
+   making a 1px mark essentially invisible once anti-aliased. rgba(0,0,0,.14)/
+   .08 stays legible-but-subtle behind message text regardless of the active
+   theme's border color. `circle` + an explicit radius keeps the dot crisp
+   instead of the soft, near-zero-area blob a bare "1px, transparent 1px"
+   radial-gradient renders as. */
 html[data-chat-bg="dots"] .claw-chat {
-  background-image: radial-gradient(
-    var(--color-border, #e6e3dc) 1px,
-    transparent 1px
-  );
-  background-size: 22px 22px;
+  background-image: radial-gradient(circle, rgba(0, 0, 0, 0.14) 1.5px, transparent 1.5px);
+  background-size: 32px 32px;
 }
 html[data-chat-bg="grid"] .claw-chat {
   background-image:
-    linear-gradient(to right, var(--color-border, #e6e3dc) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--color-border, #e6e3dc) 1px, transparent 1px);
-  background-size: 24px 24px;
+    linear-gradient(to right, rgba(0, 0, 0, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.08) 1px, transparent 1px);
+  background-size: 32px 32px;
 }
 
 /* Control Plane > Preferences — logo upload rows. */
