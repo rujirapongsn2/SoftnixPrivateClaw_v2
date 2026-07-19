@@ -37,6 +37,14 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "en": "Your plan doesn't allow any of the currently available chat models. Ask an admin to adjust your plan or the model lineup.",
         "th": "แพ็กเกจของคุณไม่อนุญาตให้ใช้โมเดลแชทที่มีอยู่ในระบบตอนนี้เลย กรุณาติดต่อผู้ดูแลระบบเพื่อปรับแพ็กเกจหรือรายการโมเดล",
     },
+    # No Control Plane provider is configured AND the operator's env fallback
+    # (CLAW_LLM__API_KEY / CLAW_LLM__API_BASE) is empty, so there is no usable
+    # model at all — an admin-facing setup message, distinct from a raw provider
+    # auth error, so the operator knows exactly what to configure.
+    "error.no_model_configured": {
+        "en": "No chat model is configured yet. An administrator needs to set CLAW_LLM__API_KEY or CLAW_LLM__API_BASE in .env, or add an LLM provider in the Control Plane.",
+        "th": "ยังไม่ได้ตั้งค่าโมเดลแชท ผู้ดูแลระบบต้องตั้งค่า CLAW_LLM__API_KEY หรือ CLAW_LLM__API_BASE ใน .env หรือเพิ่ม LLM provider ใน Control Plane ก่อน",
+    },
     "reason.timeout": {"en": "connection timed out", "th": "การเชื่อมต่อหมดเวลา"},
     "reason.auth": {"en": "authentication failed", "th": "การยืนยันตัวตนล้มเหลว"},
     "reason.rate_limit": {"en": "rate limit exceeded", "th": "เกินขีดจำกัดการเรียกใช้งาน"},

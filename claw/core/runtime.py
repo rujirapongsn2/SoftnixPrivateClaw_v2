@@ -608,20 +608,50 @@ class AgentRuntime:
                 if effective_model is None:
                     effective_model = await self.llm_config.default_model_for(plan_chat_cost)
                 # A plan cost ceiling is in effect but no admin-global model
-                # satisfies it: reject the turn instead of falling through with
-                # model=None, which claw/core/loop.py would silently resolve to
-                # the operator's raw env-configured default — bypassing the
-                # ceiling entirely. (No ceiling in effect, i.e. plan_chat_cost
-                # is None, keeps the existing out-of-box env-default fallback.)
+                # satisfies it. Distinguish two cases before rejecting:
+                #   1. Admin-global models DO exist but the plan allows none of
+                #      them → genuine cost-ceiling gating; reject so the user
+                #      can't reach a pricier tier than their plan permits.
+                #   2. No admin-global model is configured at all → the
+                #      operator's env-configured default is the sole out-of-box
+                #      model and their deliberate baseline. Let it through
+                #      (model=None → claw/core/loop.py resolves the env default),
+                #      the same spirit as BYOK models bypassing the ceiling —
+                #      there is no lineup to gate. Otherwise a fresh install with
+                #      only CLAW_LLM__MODEL set would be unusable for every
+                #      non-admin on the default plan.
+                # (No ceiling in effect, i.e. plan_chat_cost is None, always kept
+                # the env-default fallback and is unchanged.)
                 if effective_model is None and plan_chat_cost is not None:
+                    any_global = await self.llm_config.default_model_for(None)
+                    if any_global is not None:
+                        await self.audit.log(
+                            "quota",
+                            {"event": "no_model_for_plan", "plan": plan["name"] if plan else None,
+                             "max_chat_cost": plan_chat_cost},
+                            user_id=user_id,
+                            session_id=session_id,
+                        )
+                        msg = t("error.no_model_for_plan", locale)
+                        self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
+                        return msg
+                # About to fall through to the operator's env-configured default
+                # (effective_model is None, no DB model available). If that env
+                # default has no usable credentials either (no api_key and no
+                # api_base — a local keyless endpoint would still set api_base),
+                # there is genuinely no model to call: surface a clear setup
+                # message to the operator instead of letting loop.py hit a raw,
+                # confusing provider auth error.
+                if effective_model is None and not (
+                    self.settings.llm.api_key or self.settings.llm.api_base
+                ):
                     await self.audit.log(
                         "quota",
-                        {"event": "no_model_for_plan", "plan": plan["name"] if plan else None,
-                         "max_chat_cost": plan_chat_cost},
+                        {"event": "no_model_configured"},
                         user_id=user_id,
                         session_id=session_id,
                     )
-                    msg = t("error.no_model_for_plan", locale)
+                    msg = t("error.no_model_configured", locale)
                     self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
                     return msg
                 if model and session is not None and session.model != model:

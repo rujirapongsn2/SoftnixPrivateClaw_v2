@@ -232,6 +232,38 @@ async def test_assign_plan_and_models_filter(db_factory):
         assert mine["plan"]["name"] == "Lite"
 
 
+async def test_models_endpoint_hides_env_default_without_credentials(db_factory):
+    # No Control Plane provider configured, and the env-configured model has
+    # no usable credentials (api_key/api_base both empty) — the picker must
+    # NOT advertise it, since the runtime (claw/core/runtime.py) would reject
+    # any turn sent against it with error.no_model_configured.
+    from claw.config import LLMSettings
+
+    app = build_api_app(db_factory, llm=LLMSettings(model="anthropic/claude-sonnet-4-5"))
+    async with client(app) as c:
+        _admin_token, _ = await _register(c, "admin@x.io")
+        user_token, _ = await _register(c, "u@x.io")
+        r = (await c.get("/api/models", headers=_bearer(user_token))).json()
+        assert r["models"] == []
+        assert r["default"] is None
+
+
+async def test_models_endpoint_shows_env_default_with_credentials(db_factory):
+    # Same as above but the env default DOES have a usable api_key — the
+    # picker must still fall back to it out of the box.
+    from claw.config import LLMSettings
+
+    app = build_api_app(
+        db_factory, llm=LLMSettings(model="anthropic/claude-sonnet-4-5", api_key="sk-env")
+    )
+    async with client(app) as c:
+        _admin_token, _ = await _register(c, "admin@x.io")
+        user_token, _ = await _register(c, "u@x.io")
+        r = (await c.get("/api/models", headers=_bearer(user_token))).json()
+        assert [m["model_id"] for m in r["models"]] == ["anthropic/claude-sonnet-4-5"]
+        assert r["default"] == "anthropic/claude-sonnet-4-5"
+
+
 async def test_image_plan_gates(db_factory):
     app = build_api_app(db_factory)
     async with client(app) as c:
@@ -483,6 +515,58 @@ async def test_no_allowed_model_rejects_turn_instead_of_bypassing_ceiling(db_fac
     out = await runtime.handle_message(user.id, session.id, "hi")
     assert "plan" in out.lower() or "แพ็กเกจ" in out
     assert provider.calls == []  # provider never invoked — turn rejected before any model call
+
+
+async def test_env_default_model_usable_on_default_plan_when_no_control_plane_model(
+    db_factory, stores, tmp_path
+):
+    # A fresh install with NO admin-global model configured (chat runs entirely
+    # off the operator's CLAW_LLM__MODEL env default). The default plan caps at
+    # "low", but there is no lineup to gate — the env default is the operator's
+    # deliberate baseline and MUST work, not be rejected as "plan disallows".
+    plans = await _seed_plans(db_factory)
+    default = await plans.default_plan()
+    await plans.update(default["id"], max_chat_cost="low")
+    llm_config = LLMConfigStore(db_factory)  # deliberately empty: no models at all
+
+    provider = FakeProvider([text_turn("hi from env default")])
+    runtime = make_runtime(stores, provider, tmp_path)
+    runtime.plans = plans
+    runtime.llm_config = llm_config
+    # Operator's env default is actually configured (has credentials), so the
+    # fallback is genuinely usable.
+    runtime.settings.llm.api_key = "sk-env"
+
+    user = await stores["users"].get_or_create_by_email("u@x.io")
+    session = await stores["sessions"].create(user.id)
+    out = await runtime.handle_message(user.id, session.id, "hi")
+    assert out == "hi from env default"  # turn ran on the env default, not rejected
+    assert provider.calls  # provider WAS invoked
+
+
+async def test_no_control_plane_model_and_no_env_config_gives_clear_setup_message(
+    db_factory, stores, tmp_path
+):
+    # No admin-global model AND the env default has no usable credentials
+    # (api_key and api_base both empty). Instead of letting the loop hit a raw
+    # provider auth error, surface an admin-facing "configure a model" message.
+    plans = await _seed_plans(db_factory)
+    default = await plans.default_plan()
+    await plans.update(default["id"], max_chat_cost="low")
+    llm_config = LLMConfigStore(db_factory)  # empty
+
+    provider = FakeProvider([text_turn("should not be reached")])
+    runtime = make_runtime(stores, provider, tmp_path)
+    runtime.plans = plans
+    runtime.llm_config = llm_config
+    # make_runtime's default Settings leaves llm.api_key and llm.api_base empty.
+    assert not runtime.settings.llm.api_key and not runtime.settings.llm.api_base
+
+    user = await stores["users"].get_or_create_by_email("u@x.io")
+    session = await stores["sessions"].create(user.id)
+    out = await runtime.handle_message(user.id, session.id, "hi")
+    assert "configured" in out.lower() or "ตั้งค่า" in out
+    assert provider.calls == []  # no model to call — provider never invoked
 
 
 async def test_messages_per_day_gate(db_factory, stores, tmp_path):

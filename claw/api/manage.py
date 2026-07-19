@@ -378,14 +378,20 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
 
     Filtered by the user's usage-plan cost ceiling (BYOK models exempt). Falls
     back to the env-configured model when no providers are set up, so chat
-    keeps working out of the box.
+    keeps working out of the box — but only when that env default actually has
+    usable credentials (api_key or api_base); otherwise it would show a model
+    the runtime (claw/core/runtime.py) can never use, since AgentRuntime rejects
+    the turn with error.no_model_configured in that case.
     """
     plan = await state.plans.resolve_for_user(user.id) if state.plans is not None else None
     chat_cost = plan["max_chat_cost"] if plan else None
     models = await state.llm_config.enabled_models(user.id, max_cost=chat_cost)
     default = await state.llm_config.default_model_for(chat_cost)
     if not models:
-        env_model = state.settings.llm.model
+        llm = state.settings.llm
+        if not (llm.api_key or llm.api_base):
+            return {"models": [], "default": None}
+        env_model = llm.model
         return {
             "models": [
                 {
