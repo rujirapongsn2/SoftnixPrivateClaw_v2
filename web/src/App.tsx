@@ -18,6 +18,7 @@ import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
+import { useT } from "./branding";
 import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
 import { ApiError, AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
@@ -62,10 +63,11 @@ function saveLastRead(map: Record<string, number>) {
  * plain full-width Button would overflow the collapsed sidenav's narrow rail. */
 function NewChatButton({ onClick }: { onClick: () => void }) {
   const { isCollapsed } = useSideNavCollapse();
+  const t = useT();
   if (isCollapsed) {
-    return <IconButton label="New chat" icon={<Icon icon={Plus} size="sm" />} clickAction={onClick} />;
+    return <IconButton label={t("nav.newChat")} icon={<Icon icon={Plus} size="sm" />} clickAction={onClick} />;
   }
-  return <Button label="New chat" icon={<Icon icon={Plus} size="sm" />} size="sm" clickAction={onClick} />;
+  return <Button label={t("nav.newChat")} icon={<Icon icon={Plus} size="sm" />} size="sm" clickAction={onClick} />;
 }
 
 /** Brand lockup that drops the wordmark in the collapsed rail, keeping just the
@@ -153,6 +155,7 @@ function RecentsNav({
   onDelete: (id: string) => void;
 }) {
   const { isCollapsed } = useSideNavCollapse();
+  const t = useT();
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [visible, setVisible] = useState(RECENTS_INITIAL);
@@ -180,11 +183,11 @@ function RecentsNav({
   const search = (
     <div className="claw-recents-search">
       <TextInput
-        label="Search chats"
+        label={t("nav.searchChats")}
         isLabelHidden
         size="sm"
         startIcon={<Icon icon={Search} size="sm" color="secondary" />}
-        placeholder="Search chats…"
+        placeholder={t("nav.searchChats")}
         value={query}
         onChange={setQuery}
         hasClear
@@ -335,6 +338,7 @@ function Auth({
   activationToken?: string;
   resetToken?: string;
 }) {
+  const t = useT();
   const [mode, setMode] = useState<"login" | "register" | "complete-setup" | "forgot-password" | "reset-password">(
     activationToken ? "complete-setup" : resetToken ? "reset-password" : "login",
   );
@@ -427,9 +431,9 @@ function Auth({
   if (mode === "forgot-password" && forgotSent) {
     return (
       <div className="claw-login">
-        <SoftnixLogo height={44} />
+        <SoftnixLogo height={44} slot="login" />
         <Text type="display-3">PrivateClaw</Text>
-        <Text color="secondary">Your personal AI agent</Text>
+        <Text color="secondary">{t("auth.tagline")}</Text>
         <Text size="sm" color="secondary">
           If an account exists for {email || "that email"}, we've sent instructions to access it. Check your
           inbox (and spam folder).
@@ -449,9 +453,9 @@ function Auth({
 
   return (
     <div className="claw-login">
-      <SoftnixLogo height={44} />
+      <SoftnixLogo height={44} slot="login" />
       <Text type="display-3">PrivateClaw</Text>
-      <Text color="secondary">Your personal AI agent</Text>
+      <Text color="secondary">{t("auth.tagline")}</Text>
       {mode === "complete-setup" && (
         <Text size="sm" color="secondary">
           {activationEmail
@@ -561,6 +565,7 @@ function Auth({
 }
 
 export default function App() {
+  const t = useT();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [checking, setChecking] = useState(true);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -793,7 +798,7 @@ export default function App() {
           <div className="claw-sidenav-footer">
             <SideNavItem label={user.display_name || user.email} icon={UserIcon}>
               <SideNavItem
-                label="Settings"
+                label={t("nav.settings")}
                 icon={SettingsIcon}
                 collapsible={{ defaultIsCollapsed: true }}
               >
@@ -815,7 +820,7 @@ export default function App() {
               {showAdmin && (
                 <div className="claw-nav-admin">
                   <SideNavItem
-                    label="Control Plane"
+                    label={t("nav.controlPlane")}
                     icon={Shield}
                     collapsible={{ defaultIsCollapsed: true }}
                   >
@@ -836,7 +841,7 @@ export default function App() {
                   </SideNavItem>
                 </div>
               )}
-              <SideNavItem label="Log out" icon={LogOut} onClick={logout} />
+              <SideNavItem label={t("nav.logout")} icon={LogOut} onClick={logout} />
             </SideNavItem>
           </div>
         }

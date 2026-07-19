@@ -113,6 +113,67 @@ async def features(user: User = Depends(current_user), state: AppState = Depends
     return {"speech_to_text": bool(state.settings.speech_api_key)}
 
 
+# ---- public branding (Control Plane > Preferences) --------------------------
+# Deliberately unauthenticated: the login screen renders BEFORE any auth, so the
+# logo/language/font/background must be readable with no credentials. Only
+# non-sensitive appearance settings are exposed here; mutation lives behind
+# require_admin in claw/api/admin.py.
+
+_LOGO_CONTENT_TYPE = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+
+
+@router.get("/api/branding")
+async def public_branding(response: Response, state: AppState = Depends(get_state)) -> dict:
+    """Global appearance for every client (incl. pre-auth login). Logo fields
+    become asset URLs carrying the stored filename as a `?v=` version token, so
+    a replaced logo gets a new URL instead of being masked by a stale browser
+    cache of the old one (see branding_asset's long-lived cache below).
+
+    Not HTTP-cached: an admin's Save must apply everywhere on the next fetch,
+    not up to a cache-lifetime later. BrandingStore.get() is in-process cached
+    (invalidated on every write), so this stays a cheap in-memory read even
+    though every client hits it on load — no unbounded DB cost at scale."""
+    response.headers["Cache-Control"] = "no-store"
+    cfg = await state.branding.get()
+    logos = {
+        slot: (f"/api/branding/assets/{slot}?v={cfg[f'logo_{slot}']}" if cfg.get(f"logo_{slot}") else None)
+        for slot in ("login", "chat", "sidebar")
+    }
+    return {
+        "language": cfg["language"],
+        "font_size": cfg["font_size"],
+        "chat_background": cfg["chat_background"],
+        "logos": logos,
+    }
+
+
+@router.get("/api/branding/assets/{slot}")
+async def branding_asset(slot: str, state: AppState = Depends(get_state)) -> FileResponse:
+    """Serve an admin-uploaded logo. Public; `slot` is a fixed enum and the
+    stored filename is server-generated, so there is no path-traversal surface.
+    Raster-only + explicit Content-Type + nosniff (the asset is served to every
+    visitor, so a mistyped/hostile file must never be sniffed as active
+    content). The URL is versioned by public_branding()'s `?v=` (ignored here,
+    unbound query params are simply dropped by FastAPI), so it's safe to cache
+    this response aggressively — a replace always produces a new filename and
+    therefore a new URL, never a stale hit."""
+    if slot not in ("login", "chat", "sidebar"):
+        raise HTTPException(status_code=404, detail="unknown logo slot")
+    cfg = await state.branding.get()
+    filename = cfg.get(f"logo_{slot}")
+    if not filename:
+        raise HTTPException(status_code=404, detail="no custom logo set")
+    path = (state.settings.branding_root / filename).resolve()
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="logo file missing")
+    ext = path.suffix.lstrip(".").lower()
+    return FileResponse(
+        path,
+        media_type=_LOGO_CONTENT_TYPE.get(ext, "application/octet-stream"),
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 @router.get("/api/sessions")
 async def list_sessions(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
     sessions = await state.sessions.list_for_user(user.id)
@@ -627,13 +688,24 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
             ]
             if not content and not media:
                 continue
+            # The admin-set global language (Control Plane > Preferences) drives
+            # the AI's response language for web turns. BrandingStore.get()
+            # always returns a language (defaults merged in), so this can only
+            # fall back to the user's stored locale if the branding read itself
+            # fails outright. Only the locale VALUE changes here — the turn
+            # orchestration is untouched. (get() is in-process cached, so this
+            # adds no per-turn DB round trip.)
+            try:
+                turn_locale = (await state.branding.get())["language"]
+            except Exception:
+                turn_locale = user.locale
             turn = asyncio.create_task(
                 state.runtime.handle_message(
                     user_id=user.id,
                     session_id=session_id,
                     content=content,
                     channel="web",
-                    locale=user.locale,
+                    locale=turn_locale,
                     media=media,
                     model=model,
                     permission_mode=permission_mode,

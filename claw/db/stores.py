@@ -2458,6 +2458,126 @@ class SmtpConfigStore:
             await db.commit()
 
 
+class BrandingStore:
+    """Admin-configured global branding & appearance (Control Plane >
+    Preferences): logos for the three surfaces, UI/AI language, font size, and
+    chat background. Global (one value for every user — no per-user override),
+    self-service from the Control Plane. Same AppSetting key/value shape as
+    SmtpConfigStore; nothing here is secret, so no secret_box.
+
+    ``get()`` always returns a full dict (defaults merged over any stored row),
+    so callers never have to special-case a fresh install — an unset install
+    just returns the built-in defaults (English, small font, solid background,
+    no custom logos → the frontend falls back to the bundled logo).
+
+    Logo fields hold an opaque on-disk filename (e.g. ``login-a1b2c3d4.png``)
+    written under settings.branding_root, NOT the image bytes — see
+    claw/api/admin.py for upload/serve. None ⇒ use the bundled default logo.
+
+    ``get()`` is backed by a small in-process cache (populated on first read,
+    replaced on every write below) — it's hit on every chat turn and every
+    page load's /api/branding fetch, so a per-call DB round trip would be
+    wasted work for a value that changes only when an admin saves Preferences.
+    This assumes a single worker process (see scripts/claw: uvicorn runs
+    without --workers), matching how PolicyEngine's live rule set is already
+    cached in-process rather than reloaded per request.
+    """
+
+    _KEY = "branding"
+    LANGUAGES = ("en", "th")
+    FONT_SIZES = ("small", "medium", "large")
+    CHAT_BACKGROUNDS = ("solid", "dots", "grid")
+    LOGO_SLOTS = ("login", "chat", "sidebar")
+    _DEFAULTS: dict[str, Any] = {
+        "language": "en",
+        "font_size": "small",
+        "chat_background": "solid",
+        "logo_login": None,
+        "logo_chat": None,
+        "logo_sidebar": None,
+    }
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+        self.factory = factory
+        self._cache: dict[str, Any] | None = None
+
+    async def get(self) -> dict[str, Any]:
+        if self._cache is None:
+            async with self.factory() as db:
+                row = await db.get(AppSetting, self._KEY)
+            self._cache = {**self._DEFAULTS, **(row.value if row else {})}
+        return dict(self._cache)  # copy: callers must not mutate the cache
+
+    async def set(
+        self,
+        *,
+        language: str,
+        font_size: str,
+        chat_background: str,
+    ) -> dict[str, Any]:
+        """Update the non-logo preferences (logos are managed by set_logo /
+        clear_logo so an image upload and a preference change stay independent).
+        Enum values are validated here as a defense-in-depth backstop even though
+        the API layer also constrains them with Literal types."""
+        if language not in self.LANGUAGES:
+            raise ValueError(f"invalid language: {language!r}")
+        if font_size not in self.FONT_SIZES:
+            raise ValueError(f"invalid font_size: {font_size!r}")
+        if chat_background not in self.CHAT_BACKGROUNDS:
+            raise ValueError(f"invalid chat_background: {chat_background!r}")
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+            current = {**self._DEFAULTS, **(row.value if row else {})}
+            current["language"] = language
+            current["font_size"] = font_size
+            current["chat_background"] = chat_background
+            if row is None:
+                db.add(AppSetting(key=self._KEY, value=current))
+            else:
+                row.value = current
+            await db.commit()
+            self._cache = dict(current)
+            return current
+
+    async def set_logo(self, slot: str, filename: str) -> dict[str, Any]:
+        """Point a logo slot at a newly-uploaded on-disk filename. Returns the
+        previous filename for that slot (or None) so the caller can delete the
+        stale file after committing."""
+        if slot not in self.LOGO_SLOTS:
+            raise ValueError(f"invalid logo slot: {slot!r}")
+        key = f"logo_{slot}"
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+            current = {**self._DEFAULTS, **(row.value if row else {})}
+            previous = current.get(key)
+            current[key] = filename
+            if row is None:
+                db.add(AppSetting(key=self._KEY, value=current))
+            else:
+                row.value = current
+            await db.commit()
+            self._cache = dict(current)
+        return previous
+
+    async def clear_logo(self, slot: str) -> str | None:
+        """Reset a logo slot to the bundled default. Returns the removed
+        filename (or None) so the caller can delete the file from disk."""
+        if slot not in self.LOGO_SLOTS:
+            raise ValueError(f"invalid logo slot: {slot!r}")
+        key = f"logo_{slot}"
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+            if row is None:
+                return None
+            current = {**self._DEFAULTS, **(row.value or {})}
+            previous = current.get(key)
+            current[key] = None
+            row.value = current
+            await db.commit()
+            self._cache = dict(current)
+        return previous
+
+
 class KnowledgeStore:
     """Knowledge bases (OKF bundles) + their documents and searchable chunks.
 

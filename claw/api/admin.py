@@ -4,8 +4,11 @@ import asyncio
 import csv
 import io
 import re
+import secrets
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Literal
 
 import openpyxl
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -1433,3 +1436,108 @@ async def audit_logs(
         "has_more": len(rows) == limit,
         "next_before": rows[-1]["created_at"] if rows else None,
     }
+
+
+# ---------------------------------------------------------------- preferences (branding)
+
+# Raster-only allow-list. The logo is served to EVERY user, including
+# unauthenticated visitors on the login screen, so SVG/HTML are excluded — a
+# crafted SVG could carry script and become app-wide stored XSS.
+_LOGO_MAX_BYTES = 1_000_000  # 1 MB
+_LOGO_EXT = {"png": "png", "jpeg": "jpg", "webp": "webp"}
+
+
+def _sniff_image_kind(data: bytes) -> str | None:
+    """Return "png"/"jpeg"/"webp" from the file's magic bytes, or None if the
+    bytes are not one of the allowed raster formats. Trusting the bytes (not the
+    client-supplied Content-Type or extension) is what closes the
+    "rename evil.svg to logo.png" hole."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if len(data) >= 12 and data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+class BrandingBody(BaseModel):
+    language: Literal["en", "th"] = "en"
+    font_size: Literal["small", "medium", "large"] = "small"
+    chat_background: Literal["solid", "dots", "grid"] = "solid"
+
+
+@router.get("/branding")
+async def get_branding(
+    admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    return await state.branding.get()
+
+
+@router.put("/branding")
+async def set_branding(
+    body: BrandingBody,
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    return await state.branding.set(
+        language=body.language,
+        font_size=body.font_size,
+        chat_background=body.chat_background,
+    )
+
+
+@router.post("/branding/logo/{slot}")
+async def upload_branding_logo(
+    slot: Literal["login", "chat", "sidebar"],
+    file: UploadFile = File(...),
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="Empty file.")
+    if len(data) > _LOGO_MAX_BYTES:
+        raise HTTPException(status_code=422, detail="Logo must be 1 MB or smaller.")
+    kind = _sniff_image_kind(data)
+    if kind is None:
+        raise HTTPException(
+            status_code=422, detail="Logo must be a PNG, JPG, or WebP image."
+        )
+    ext = _LOGO_EXT[kind]
+    root: Path = state.settings.branding_root
+    root.mkdir(parents=True, exist_ok=True)
+    # Random suffix so the served URL changes on replace (cache-bust) and the
+    # filename never reflects user-controlled input.
+    filename = f"{slot}-{secrets.token_hex(4)}.{ext}"
+    new_path = root / filename
+    await asyncio.to_thread(new_path.write_bytes, data)
+    try:
+        previous = await state.branding.set_logo(slot, filename)
+    except Exception:
+        # The DB write is the source of truth; if it fails, don't leave the
+        # just-written file orphaned on disk with nothing pointing at it.
+        await asyncio.to_thread(_unlink_quietly, new_path)
+        raise
+    if previous and previous != filename:
+        await asyncio.to_thread(_unlink_quietly, root / previous)
+    return await state.branding.get()
+
+
+@router.delete("/branding/logo/{slot}")
+async def delete_branding_logo(
+    slot: Literal["login", "chat", "sidebar"],
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    previous = await state.branding.clear_logo(slot)
+    if previous:
+        await asyncio.to_thread(_unlink_quietly, state.settings.branding_root / previous)
+    return await state.branding.get()
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass

@@ -15,6 +15,7 @@ from claw.db.models import User
 from claw.security.policy import PolicyEngine
 from claw.db.stores import (
     AuditStore,
+    BrandingStore,
     ConnectorStore,
     FeedbackStore,
     GroupStore,
@@ -68,6 +69,8 @@ class AppState:
     smtp_config: SmtpConfigStore
     # Usage-tier plans (model cost ceilings + daily/per-minute quotas).
     plans: PolicyPlanStore = None  # type: ignore[assignment]
+    # Global branding & appearance (Control Plane > Preferences).
+    branding: BrandingStore = None  # type: ignore[assignment]
     # Per-user throttle for the /images endpoint (its own limiter, separate
     # from the chat turn limiter which lives on the runtime).
     image_rate_limiter: RateLimiter = None  # type: ignore[assignment]

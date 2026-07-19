@@ -11,5 +11,6 @@ web/dist/
 web/tsconfig.tsbuildinfo
 workspaces/
 /knowledge/
+/branding/
 softnix-agenticclaw/
 .DS_Store

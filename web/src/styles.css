@@ -49,6 +49,17 @@ html {
   font-size: 87.5%;
 }
 
+/* Admin-set global font scale (Control Plane > Preferences). Small is the
+   historical default (87.5% above); Medium/Large bump the rem root so ALL
+   rem-based typography scales proportionally. Applied as a data-attribute on
+   <html> by the BrandingProvider. Absent attribute → the 87.5% default holds. */
+html[data-font-size="medium"] {
+  font-size: 100%;
+}
+html[data-font-size="large"] {
+  font-size: 112.5%;
+}
+
 /* ChatLayout's root isn't a flex container, so its two children (the
    message area, then the sticky composer dock) just stack in normal block
    flow. To keep the composer pinned to the bottom for short conversations,
@@ -311,6 +322,58 @@ html {
   display: flex;
   flex-direction: column;
   position: relative;
+}
+/* Admin-set chat background pattern (Control Plane > Preferences), applied as a
+   data-attribute on <html> by the BrandingProvider. Solid (default) leaves the
+   app wash showing through; Dots/Grid paint a subtle, low-contrast texture over
+   it. Kept faint (theme border color) so message text stays legible. */
+html[data-chat-bg="dots"] .claw-chat {
+  background-image: radial-gradient(
+    var(--color-border, #e6e3dc) 1px,
+    transparent 1px
+  );
+  background-size: 22px 22px;
+}
+html[data-chat-bg="grid"] .claw-chat {
+  background-image:
+    linear-gradient(to right, var(--color-border, #e6e3dc) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-border, #e6e3dc) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* Control Plane > Preferences — logo upload rows. */
+.claw-branding-logo-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.claw-branding-logo-preview {
+  flex: 0 0 auto;
+  width: 120px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border: 1px solid var(--color-border, #e6e3dc);
+  border-radius: 8px;
+  background: var(--color-background, #fff);
+}
+.claw-branding-logo-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.claw-branding-logo-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.claw-branding-logo-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
 }
 /* Empty landing (claude.ai-style): the greeting + composer + starter chips
    form one cluster centred in the viewport. The composer stays mounted in

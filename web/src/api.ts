@@ -499,6 +499,33 @@ export interface SmtpAdminConfigBody {
   enabled: boolean;
 }
 
+// Control Plane > Preferences (global branding & appearance).
+export type BrandingLanguage = "en" | "th";
+export type BrandingFontSize = "small" | "medium" | "large";
+export type BrandingChatBackground = "solid" | "dots" | "grid";
+export type BrandingLogoSlot = "login" | "chat" | "sidebar";
+// Public shape (GET /api/branding) — logos are ready-to-use URLs or null.
+export interface PublicBranding {
+  language: BrandingLanguage;
+  font_size: BrandingFontSize;
+  chat_background: BrandingChatBackground;
+  logos: Record<BrandingLogoSlot, string | null>;
+}
+// Admin shape (GET/PUT /api/admin/branding) — logos are raw stored filenames.
+export interface AdminBranding {
+  language: BrandingLanguage;
+  font_size: BrandingFontSize;
+  chat_background: BrandingChatBackground;
+  logo_login: string | null;
+  logo_chat: string | null;
+  logo_sidebar: string | null;
+}
+export interface BrandingBody {
+  language: BrandingLanguage;
+  font_size: BrandingFontSize;
+  chat_background: BrandingChatBackground;
+}
+
 export interface OAuthAppPublic {
   client_id: string;
   tenant: string;
@@ -702,6 +729,8 @@ export const api = {
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   providers: () => request<{ providers: string[] }>("/api/auth/providers"),
   features: () => request<{ speech_to_text: boolean }>("/api/features"),
+  // Public (no auth) — the login screen renders before authentication.
+  getBranding: () => request<PublicBranding>("/api/branding"),
 
   transcribe: async (audio: Blob, filename = "audio.webm"): Promise<string> => {
     const form = new FormData();
@@ -977,6 +1006,23 @@ export const api = {
     request<SmtpAdminConfig>("/api/admin/email/config", { method: "PUT", body: JSON.stringify(body) }),
   adminTestEmailConfig: (body: SmtpAdminConfigBody & { recipient: string }) =>
     request<{ ok: boolean }>("/api/admin/email/test", { method: "POST", body: JSON.stringify(body) }),
+
+  adminGetBranding: () => request<AdminBranding>("/api/admin/branding"),
+  adminSetBranding: (body: BrandingBody) =>
+    request<AdminBranding>("/api/admin/branding", { method: "PUT", body: JSON.stringify(body) }),
+  adminUploadBrandingLogo: async (slot: BrandingLogoSlot, file: File): Promise<AdminBranding> => {
+    const form = new FormData();
+    form.append("file", file);
+    const resp = await fetch(`/api/admin/branding/logo/${slot}`, {
+      method: "POST",
+      headers: authHeaders(), // no Content-Type: browser sets multipart boundary
+      body: form,
+    });
+    if (!resp.ok) throw new ApiError(resp.status, await resp.text());
+    return resp.json();
+  },
+  adminDeleteBrandingLogo: (slot: BrandingLogoSlot) =>
+    request<AdminBranding>(`/api/admin/branding/logo/${slot}`, { method: "DELETE" }),
 
   adminAudit: (
     filters: { kind?: string; user_id?: string; search?: string; before?: string; limit?: number } = {},

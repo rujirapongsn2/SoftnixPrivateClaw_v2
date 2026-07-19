@@ -8,6 +8,7 @@ import { Theme } from "@astryxdesign/core/theme";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { BrandingProvider } from "./branding";
 import { SharedView } from "./Shared";
 import { clawTheme } from "./theme";
 
@@ -23,7 +24,9 @@ const root = shareMatch ? (
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <Theme theme={clawTheme}>
-      <LayerProvider>{root}</LayerProvider>
+      <LayerProvider>
+        <BrandingProvider>{root}</BrandingProvider>
+      </LayerProvider>
     </Theme>
   </React.StrictMode>,
 );

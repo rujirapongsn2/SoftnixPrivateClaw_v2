@@ -67,6 +67,7 @@ import {
   openChatSocket,
 } from "./api";
 import { SoftnixLogo } from "./Logo";
+import { useT } from "./branding";
 import { sanitizeModelMarkdown } from "./markdown";
 
 // Copy text to the clipboard, falling back to execCommand for non-secure
@@ -275,6 +276,7 @@ export function Chat({
   initialModel,
   onOpenSettings,
 }: ChatProps) {
+  const t = useT();
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1182,7 +1184,7 @@ export function Chat({
   const greeting = (
     <div className="claw-greeting">
       <div className="claw-greeting-title">
-        <SoftnixLogo height={44} />
+        <SoftnixLogo height={44} slot="chat" />
         <Text type="display-2">
           {new Date().getHours() < 12 ? "Good morning" : "Hello"}
           {userName ? `, ${userName}` : " there"}
@@ -1240,8 +1242,8 @@ export function Chat({
                 imageMode
                   ? "Describe the image to generate…"
                   : isEmpty
-                    ? "How can Claw help you today?"
-                    : "Message Claw…"
+                    ? t("chat.composerEmpty")
+                    : t("chat.composerPlaceholder")
               }
               isDisabled={imageMode && imageBusy}
               input={<ChatComposerInput handleRef={composerHandleRef} />}

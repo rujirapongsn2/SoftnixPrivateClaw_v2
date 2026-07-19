@@ -188,7 +188,7 @@ docker run --rm "$SANDBOX_IMAGE" python -c "import reportlab, docx, openpyxl, pp
 
 # 4) Postgres container
 step "Setting up Postgres (Docker container '$PG_CONTAINER')"
-mkdir -p "$DATA_DIR/workspaces" "$DATA_DIR/knowledge"
+mkdir -p "$DATA_DIR/workspaces" "$DATA_DIR/knowledge" "$DATA_DIR/branding"
 if docker ps -a --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
   docker start "$PG_CONTAINER" >/dev/null 2>&1 || true
   ok "reusing existing container '$PG_CONTAINER'"
@@ -252,6 +252,7 @@ CLAW_SANDBOX__TIMEOUT_SECONDS=120
 # Persistent data (attachments/agent files + knowledge OKF bundles).
 CLAW_WORKSPACES_ROOT=${DATA_DIR}/workspaces
 CLAW_KNOWLEDGE_ROOT=${DATA_DIR}/knowledge
+CLAW_BRANDING_ROOT=${DATA_DIR}/branding
 
 # Optional speech-to-text (composer mic). Fill to enable.
 QROQ_KEY=

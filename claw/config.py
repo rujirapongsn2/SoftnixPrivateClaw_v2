@@ -198,6 +198,9 @@ class Settings(BaseSettings):
     workspaces_root: Path = Path("workspaces")
     # Root directory holding knowledge-base OKF bundles (one subdir per base).
     knowledge_root: Path = Path("knowledge")
+    # Root directory holding admin-uploaded branding assets (Control Plane >
+    # Preferences logos). Auto-created at startup like workspaces_root.
+    branding_root: Path = Path("branding")
 
     # When false, the control policy runs in monitor-only mode (logs hits, no mask/block).
     policy_enforce: bool = True

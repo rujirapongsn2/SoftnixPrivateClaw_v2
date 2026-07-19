@@ -32,6 +32,7 @@ import {
   LayoutDashboard,
   Mail,
   MessageSquare,
+  Palette,
   Pencil,
   Plus,
   Router,
@@ -54,8 +55,14 @@ import {
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
+import { useBranding } from "./branding";
 import {
   ActivityPoint,
+  AdminBranding,
+  type BrandingChatBackground,
+  type BrandingFontSize,
+  type BrandingLanguage,
+  type BrandingLogoSlot,
   AdminOverview,
   AdminUser,
   AuditRow,
@@ -93,6 +100,7 @@ export type AdminSection =
   | "oauth"
   | "telegram"
   | "email"
+  | "preferences"
   | "audit"
   | "users";
 
@@ -111,6 +119,7 @@ export const ADMIN_SECTIONS: { key: AdminSection; label: string; icon: IconType 
   { key: "oauth", label: "OAuth apps", icon: KeyRound },
   { key: "telegram", label: "Telegram", icon: Send },
   { key: "email", label: "Email Notification", icon: Mail },
+  { key: "preferences", label: "Preferences", icon: Palette },
   { key: "audit", label: "Audit Logs", icon: ScrollText },
   { key: "users", label: "Users", icon: Users },
 ];
@@ -138,6 +147,7 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
         {section === "email" && <EmailConfigPanel />}
+        {section === "preferences" && <PreferencesPanel />}
         {section === "audit" && <AuditPanel />}
         {section === "users" && <UsersPanel selfId={selfId} />}
       </div>
@@ -2971,6 +2981,204 @@ const SMTP_PRESETS: Record<string, { host: string; port: number; security: "tls"
   "Microsoft Outlook 365": { host: "smtp.office365.com", port: 587, security: "tls" },
   "Gmail": { host: "smtp.gmail.com", port: 587, security: "tls" },
 };
+
+const LOGO_SLOT_META: { slot: BrandingLogoSlot; title: string; hint: string }[] = [
+  { slot: "login", title: "Login page", hint: "Shown on the sign-in screen. Recommended ~ 220×48 px." },
+  { slot: "chat", title: "Chat landing", hint: "Shown above the greeting on an empty chat. Recommended ~ 220×48 px." },
+  { slot: "sidebar", title: "Sidebar menu", hint: "Shown at the top of the left menu. A square mark works best in the collapsed rail." },
+];
+
+function LogoUploadRow({
+  meta,
+  filename,
+  onChange,
+}: {
+  meta: { slot: BrandingLogoSlot; title: string; hint: string };
+  filename: string | null;
+  onChange: (next: AdminBranding) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const { error, guard } = useAsyncError();
+  const toast = useToast();
+
+  const pick = (file: File | undefined) => {
+    if (!file) return;
+    setBusy(true);
+    void guard(async () => {
+      try {
+        const next = await api.adminUploadBrandingLogo(meta.slot, file);
+        onChange(next);
+        toast({ body: `${meta.title} logo updated`, type: "info", autoHideDuration: 2500 });
+      } finally {
+        setBusy(false);
+        if (inputRef.current) inputRef.current.value = "";
+      }
+    });
+  };
+
+  const clear = () => {
+    setBusy(true);
+    void guard(async () => {
+      try {
+        const next = await api.adminDeleteBrandingLogo(meta.slot);
+        onChange(next);
+        toast({ body: `${meta.title} logo reset to default`, type: "info", autoHideDuration: 2500 });
+      } finally {
+        setBusy(false);
+      }
+    });
+  };
+
+  return (
+    <Card padding={2}>
+      <div className="claw-branding-logo-row">
+        <div className="claw-branding-logo-preview">
+          <img
+            // Cache-bust on the stored filename so a replace shows immediately.
+            src={filename ? `/api/branding/assets/${meta.slot}?v=${encodeURIComponent(filename)}` : "/logo-softnix.png"}
+            alt={`${meta.title} logo`}
+          />
+        </div>
+        <div className="claw-branding-logo-body">
+          <Text weight="semibold">{meta.title}</Text>
+          <Text size="sm" color="secondary">{meta.hint}</Text>
+          <Text size="sm" color="secondary">PNG, JPG, or WebP · up to 1 MB.</Text>
+          {error && <ErrorText>{error}</ErrorText>}
+          <div className="claw-branding-logo-actions">
+            <input
+              ref={inputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              style={{ display: "none" }}
+              onChange={(e) => pick(e.target.files?.[0])}
+            />
+            <Button
+              label={filename ? "Replace" : "Upload"}
+              variant="secondary"
+              size="sm"
+              icon={<Icon icon={Upload} size="sm" />}
+              isDisabled={busy}
+              clickAction={() => inputRef.current?.click()}
+            />
+            {filename && (
+              <Button
+                label="Reset to default"
+                variant="ghost"
+                size="sm"
+                isDisabled={busy}
+                clickAction={clear}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function PreferencesPanel() {
+  const { refresh } = useBranding();
+  const [cfg, setCfg] = useState<AdminBranding | null>(null);
+  const [language, setLanguage] = useState<BrandingLanguage>("en");
+  const [fontSize, setFontSize] = useState<BrandingFontSize>("small");
+  const [chatBg, setChatBg] = useState<BrandingChatBackground>("solid");
+  const [saving, setSaving] = useState(false);
+  const { error, guard } = useAsyncError();
+  const toast = useToast();
+
+  const apply = useCallback((c: AdminBranding) => {
+    setCfg(c);
+    setLanguage(c.language);
+    setFontSize(c.font_size);
+    setChatBg(c.chat_background);
+  }, []);
+
+  const reload = useCallback(() => api.adminGetBranding().then(apply), [apply]);
+  useEffect(() => {
+    void guard(async () => await reload());
+  }, [guard, reload]);
+
+  if (error && !cfg) return <ErrorText>{error}</ErrorText>;
+  if (!cfg) return <Text color="secondary">Loading…</Text>;
+
+  const dirty = language !== cfg.language || fontSize !== cfg.font_size || chatBg !== cfg.chat_background;
+
+  const save = () => {
+    setSaving(true);
+    void guard(async () => {
+      try {
+        const next = await api.adminSetBranding({ language, font_size: fontSize, chat_background: chatBg });
+        setCfg((prev) => (prev ? { ...prev, ...next } : next));
+        await refresh(); // apply live (font size / chat bg / language) without a reload
+        toast({ body: "Preferences saved", type: "info", autoHideDuration: 2500 });
+      } finally {
+        setSaving(false);
+      }
+    });
+  };
+
+  // After a logo upload/delete, refresh both the admin state here and the live
+  // branding context so the new logo appears immediately app-wide.
+  const onLogoChange = (next: AdminBranding) => {
+    setCfg(next);
+    void refresh();
+  };
+
+  return (
+    <div className="claw-panel">
+      <Text color="secondary">
+        Global branding &amp; appearance for everyone in this workspace. These apply to all users; individual
+        users can't override them.
+      </Text>
+
+      <Text weight="semibold">Logos</Text>
+      {LOGO_SLOT_META.map((m) => (
+        <LogoUploadRow
+          key={m.slot}
+          meta={m}
+          filename={cfg[`logo_${m.slot}` as const] as string | null}
+          onChange={onLogoChange}
+        />
+      ))}
+
+      <Card padding={2}>
+        <div className="claw-panel">
+          <div>
+            <Text weight="semibold">Language</Text>
+            <Text size="sm" color="secondary">
+              Applies to key interface surfaces and the AI's replies. English is the default.
+            </Text>
+            <SegmentedControl value={language} onChange={(v) => setLanguage(v as BrandingLanguage)} label="Language">
+              <SegmentedControlItem value="en" label="English" />
+              <SegmentedControlItem value="th" label="ไทย (Thai)" />
+            </SegmentedControl>
+          </div>
+          <div>
+            <Text weight="semibold">Font size</Text>
+            <SegmentedControl value={fontSize} onChange={(v) => setFontSize(v as BrandingFontSize)} label="Font size">
+              <SegmentedControlItem value="small" label="Small" />
+              <SegmentedControlItem value="medium" label="Medium" />
+              <SegmentedControlItem value="large" label="Large" />
+            </SegmentedControl>
+          </div>
+          <div>
+            <Text weight="semibold">Chat background</Text>
+            <SegmentedControl value={chatBg} onChange={(v) => setChatBg(v as BrandingChatBackground)} label="Chat background">
+              <SegmentedControlItem value="solid" label="Solid" />
+              <SegmentedControlItem value="dots" label="Dots" />
+              <SegmentedControlItem value="grid" label="Grid" />
+            </SegmentedControl>
+          </div>
+          {error && <ErrorText>{error}</ErrorText>}
+          <div>
+            <Button label="Save preferences" isDisabled={!dirty || saving} clickAction={save} />
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
 
 function EmailConfigPanel() {
   const [cfg, setCfg] = useState<SmtpAdminConfig | null>(null);

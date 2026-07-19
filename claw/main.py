@@ -36,6 +36,7 @@ from claw.security.policy import (
 from claw.db.engine import create_engine_and_factory, init_db
 from claw.db.stores import (
     AuditStore,
+    BrandingStore,
     ConnectorStore,
     FeedbackStore,
     GroupStore,
@@ -98,6 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     knowledge_service = KnowledgeService(knowledge, settings.knowledge_root, settings.knowledge)
     shares = ShareStore(factory)
     plans = PolicyPlanStore(factory)
+    branding = BrandingStore(factory)
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
 
     browser_mgr = None
@@ -173,6 +175,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await init_db(engine)
         else:
             await init_db(engine)
+        # Ensure the branding asset dir exists (admin-uploaded logos land here).
+        try:
+            settings.branding_root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.exception("Could not create branding_root {}", settings.branding_root)
         # Seed built-in guardrail rules once, then load persisted rules + toggle
         # into the live policy engine so enforcement matches the admin config.
         try:
@@ -255,6 +262,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         telegram_mgr=telegram_mgr,
         smtp_config=smtp_config,
         plans=plans,
+        branding=branding,
         image_rate_limiter=RateLimiter(settings.image.per_minute),
         guardrails=guardrails,
         llm_config=llm_config,

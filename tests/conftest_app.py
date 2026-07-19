@@ -22,6 +22,7 @@ from claw.core.connectors import ConnectorManager
 from claw.core.limits import RateLimiter
 from claw.db.stores import (
     AuditStore,
+    BrandingStore,
     ConnectorStore,
     FeedbackStore,
     GroupStore,
@@ -86,6 +87,7 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         telegram_config=TelegramConfigStore(db_factory),
         smtp_config=SmtpConfigStore(db_factory),
         plans=PolicyPlanStore(db_factory),
+        branding=BrandingStore(db_factory),
         image_rate_limiter=RateLimiter(60),
         telegram_mgr=TelegramManager(
             None, UserStore(db_factory), SessionStore(db_factory, is_postgres=False), LinkCodeService()
