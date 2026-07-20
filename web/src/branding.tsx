@@ -8,7 +8,7 @@
  * covers the KEY user-facing surfaces (nav / auth / chat) only, by design —
  * deep admin/settings forms stay English.
  */
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import {
   api,
   type BrandingChatBackground,
@@ -25,15 +25,32 @@ const DEFAULT_BRANDING: PublicBranding = {
   logos: { login: null, chat: null, sidebar: null },
 };
 
+/** The logged-in user's own Settings > Profile > Preferences — each field
+ * null means "no personal override, inherit the global default". Logos stay
+ * admin-only/global (there's no per-user logo concept), so only these three
+ * fields exist here. */
+export interface UserAppearanceOverride {
+  language: BrandingLanguage | null;
+  font_size: BrandingFontSize | null;
+  chat_background: BrandingChatBackground | null;
+}
+
 interface BrandingContextValue {
+  /** Global default merged with the current user's override, if any — this
+   * is what everything in the app should render/apply. */
   branding: PublicBranding;
-  /** Re-fetch after an admin edit so the change is visible without a reload. */
+  /** Re-fetch the global default after an admin edit so the change is
+   * visible without a reload. */
   refresh: () => Promise<void>;
+  /** Called by the app shell whenever the logged-in user changes (login,
+   * logout, or a Preferences save) so the merged branding stays in sync. */
+  setUserOverride: (override: UserAppearanceOverride | null) => void;
 }
 
 const BrandingContext = createContext<BrandingContextValue>({
   branding: DEFAULT_BRANDING,
   refresh: async () => {},
+  setUserOverride: () => {},
 });
 
 /** Apply the appearance choices that live as root-level attributes (the CSS in
@@ -46,17 +63,19 @@ function applyAppearance(font_size: BrandingFontSize, chat_background: BrandingC
 }
 
 export function BrandingProvider({ children }: { children: React.ReactNode }) {
-  const [branding, setBranding] = useState<PublicBranding>(DEFAULT_BRANDING);
+  const [globalBranding, setGlobalBranding] = useState<PublicBranding>(DEFAULT_BRANDING);
+  const [userOverride, setUserOverride] = useState<UserAppearanceOverride | null>(null);
 
   const load = useCallback(async () => {
     try {
       const cfg = await api.getBranding();
-      setBranding(cfg);
-      applyAppearance(cfg.font_size, cfg.chat_background);
+      setGlobalBranding(cfg);
     } catch {
-      // Network/endpoint failure → keep the built-in defaults (bundled logo,
-      // English, small, solid). Branding is cosmetic; never block the app.
-      applyAppearance(DEFAULT_BRANDING.font_size, DEFAULT_BRANDING.chat_background);
+      // Network/endpoint failure → leave whatever branding is already
+      // loaded (built-in defaults on first load, or last-known-good on a
+      // later refresh()) untouched. Branding is cosmetic; never block the
+      // app, and never let a transient refetch failure wipe an admin's
+      // saved logos/language back to the bundled defaults.
     }
   }, []);
 
@@ -64,8 +83,26 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
     void load();
   }, [load]);
 
+  // The personal preference (if the logged-in user has saved one) wins over
+  // the global default, field by field — logos are never overridden.
+  const branding = useMemo<PublicBranding>(
+    () => ({
+      ...globalBranding,
+      language: userOverride?.language ?? globalBranding.language,
+      font_size: userOverride?.font_size ?? globalBranding.font_size,
+      chat_background: userOverride?.chat_background ?? globalBranding.chat_background,
+    }),
+    [globalBranding, userOverride],
+  );
+
+  useEffect(() => {
+    applyAppearance(branding.font_size, branding.chat_background);
+  }, [branding.font_size, branding.chat_background]);
+
   return (
-    <BrandingContext.Provider value={{ branding, refresh: load }}>{children}</BrandingContext.Provider>
+    <BrandingContext.Provider value={{ branding, refresh: load, setUserOverride }}>
+      {children}
+    </BrandingContext.Provider>
   );
 }
 

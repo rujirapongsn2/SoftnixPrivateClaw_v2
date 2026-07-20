@@ -688,17 +688,25 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
             ]
             if not content and not media:
                 continue
-            # The admin-set global language (Control Plane > Preferences) drives
-            # the AI's response language for web turns. BrandingStore.get()
-            # always returns a language (defaults merged in), so this can only
-            # fall back to the user's stored locale if the branding read itself
+            # The user's own Settings > Profile > Preferences language (if
+            # saved) drives the AI's response language for web turns; else
+            # the admin-set global default (Control Plane > Preferences).
+            # Re-read the user row fresh each turn (cheap indexed-PK lookup,
+            # dwarfed by the LLM call that follows) rather than trusting the
+            # `user` object captured once at connect time, so a preference
+            # saved from another tab mid-session takes effect on the very
+            # next message instead of only after a reconnect. BrandingStore.
+            # get() always returns a language (defaults merged in), so this
+            # can only fall back to the connect-time locale if either read
             # fails outright. Only the locale VALUE changes here — the turn
-            # orchestration is untouched. (get() is in-process cached, so this
-            # adds no per-turn DB round trip.)
+            # orchestration is untouched.
             try:
-                turn_locale = (await state.branding.get())["language"]
+                current = await state.users.get(user.id)
+                turn_locale = (current.ui_language if current else user.ui_language) or (
+                    await state.branding.get()
+                )["language"]
             except Exception:
-                turn_locale = user.locale
+                turn_locale = user.ui_language or user.locale
             turn = asyncio.create_task(
                 state.runtime.handle_message(
                     user_id=user.id,

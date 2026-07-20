@@ -10,6 +10,7 @@ from fastapi.responses import RedirectResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from claw.api.branding_shared import ChatBackground, FontSize, Language
 from claw.api.deps import AppState, current_user, get_state
 from claw.auth import oidc
 from claw.auth.activation import make_activation_token, verify_activation_token
@@ -60,6 +61,18 @@ class ChangePasswordBody(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class PreferencesBody(BaseModel):
+    """Settings > Profile > Preferences — a personal override of the Control
+    Plane's global branding defaults (same value shapes as admin's
+    BrandingBody in claw/api/admin.py). Each field is optional and
+    independent: omitting a field (or sending it as null) leaves that
+    field's stored override untouched rather than clearing it."""
+
+    language: Language | None = None
+    font_size: FontSize | None = None
+    chat_background: ChatBackground | None = None
+
+
 def _user_json(user: User) -> dict:
     return {
         "id": user.id,
@@ -76,6 +89,12 @@ def _user_json(user: User) -> dict:
         # separate admin-only lookup. The frontend resolves the display name
         # via the org-wide GET /api/groups list.
         "group_id": user.group_id,
+        # Personal appearance overrides — null until the user's first Save in
+        # Settings > Profile > Preferences, meaning "inherit the Control
+        # Plane's global branding default" (see branding.tsx's merge logic).
+        "language": user.ui_language,
+        "font_size": user.font_size,
+        "chat_background": user.chat_background,
     }
 
 
@@ -441,6 +460,29 @@ async def change_password(
     await _log_auth(state, "password_changed", user)
     _spawn_background(_send_password_reset_confirmed_email(state, user.id))
     return {"ok": True}
+
+
+@router.put("/preferences")
+async def update_preferences(
+    body: PreferencesBody, user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> dict:
+    """Settings > Profile > Preferences. Personal, not global — see
+    PUT /api/admin/branding (claw/api/admin.py) for the admin-wide default
+    these override on this user's own client only."""
+    updated = await state.users.update_preferences(
+        user.id,
+        ui_language=body.language,
+        font_size=body.font_size,
+        chat_background=body.chat_background,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="account no longer exists")
+    await state.audit.log(
+        "auth",
+        {"event": "preferences_updated", "email": updated.email},
+        user_id=updated.id,
+    )
+    return _user_json(updated)
 
 
 @router.post("/activation")

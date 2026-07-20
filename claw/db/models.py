@@ -79,6 +79,14 @@ class User(Base):
     # can be redeemed at most once and a newly-requested reset invalidates
     # any prior unredeemed one.
     password_reset_nonce: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Personal appearance overrides (Settings > Profile > Preferences). Null =
+    # no override, inherit the Control Plane's global branding default for
+    # that field. Deliberately separate from `locale` above (which only feeds
+    # the AI's reply language as a last-resort fallback) so changing the
+    # global default never silently changes what "no override" means.
+    ui_language: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    font_size: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    chat_background: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     __table_args__ = (
         # Enforces (and indexes) case-insensitive email uniqueness — the

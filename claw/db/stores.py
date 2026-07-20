@@ -813,6 +813,34 @@ class UserStore:
             await db.commit()
             return user
 
+    async def update_preferences(
+        self,
+        user_id: str,
+        *,
+        ui_language: str | None = None,
+        font_size: str | None = None,
+        chat_background: str | None = None,
+    ) -> User | None:
+        """Settings > Profile > Preferences — a personal override of the
+        Control Plane's global branding defaults. All three are stored null
+        until the user's first save (see BrandingStore for the global
+        fallback these are layered on top of in the frontend). Each field is
+        independent: a None here means "leave this field's stored override
+        alone", not "clear it" — mirrors update_flags/update_profile above so
+        saving one field never wipes the other two back to null."""
+        async with self.factory() as db:
+            user = await db.get(User, user_id)
+            if user is None:
+                return None
+            if ui_language is not None:
+                user.ui_language = ui_language
+            if font_size is not None:
+                user.font_size = font_size
+            if chat_background is not None:
+                user.chat_background = chat_background
+            await db.commit()
+            return user
+
     async def claim_activation_send(self, user_id: str, now: datetime, cooldown_seconds: int) -> bool:
         """Atomically claim the right to send an imported-user activation
         email right now, enforcing the resend cooldown at the DB layer

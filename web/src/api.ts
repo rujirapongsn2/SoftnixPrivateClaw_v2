@@ -225,6 +225,12 @@ export interface AuthUser {
   // form on the Profile settings page.
   has_password: boolean;
   group_id: string | null;
+  // Personal appearance overrides (Settings > Profile > Preferences). Null
+  // until the user's first save there — meaning "inherit the Control Plane's
+  // global branding default" (see branding.tsx's merge logic).
+  language: BrandingLanguage | null;
+  font_size: BrandingFontSize | null;
+  chat_background: BrandingChatBackground | null;
 }
 
 export interface AdminUser extends AuthUser {
@@ -525,6 +531,14 @@ export interface BrandingBody {
   font_size: BrandingFontSize;
   chat_background: BrandingChatBackground;
 }
+// Settings > Profile > Preferences — unlike admin's BrandingBody (always a
+// full save), a personal override save only sends the field(s) the user
+// actually changed; omitted fields leave that field's stored override alone.
+export interface PreferencesUpdateBody {
+  language?: BrandingLanguage;
+  font_size?: BrandingFontSize;
+  chat_background?: BrandingChatBackground;
+}
 
 export interface OAuthAppPublic {
   client_id: string;
@@ -725,6 +739,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ current_password, new_password }),
     }),
+  // Settings > Profile > Preferences — personal override of the Control
+  // Plane's global branding defaults (same body shape, different scope).
+  updateMyPreferences: (body: PreferencesUpdateBody) =>
+    request<AuthUser>("/api/auth/preferences", { method: "PUT", body: JSON.stringify(body) }),
   me: () => request<AuthUser>("/api/auth/me"),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   providers: () => request<{ providers: string[] }>("/api/auth/providers"),

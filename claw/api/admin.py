@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from claw.api import llm_shared as llm
 from claw.api.auth import _is_pending_imported_account, _send_activation_email
+from claw.api.branding_shared import ChatBackground, FontSize, Language
 from claw.api.deps import AppState, get_state, require_admin
 from claw.auth import oidc
 from claw.auth.passwords import hash_password
@@ -87,6 +88,11 @@ def _user_row(
         "plan_id": user.plan_id,
         "plan_name": plan_names.get(user.plan_id) if user.plan_id else None,
         "created_at": user.created_at.isoformat(),
+        # Personal appearance overrides (Settings > Profile > Preferences) —
+        # AdminUser extends AuthUser on the frontend, which requires these.
+        "language": user.ui_language,
+        "font_size": user.font_size,
+        "chat_background": user.chat_background,
     }
 
 
@@ -1462,9 +1468,9 @@ def _sniff_image_kind(data: bytes) -> str | None:
 
 
 class BrandingBody(BaseModel):
-    language: Literal["en", "th"] = "en"
-    font_size: Literal["small", "medium", "large"] = "small"
-    chat_background: Literal["solid", "dots", "grid"] = "solid"
+    language: Language = "en"
+    font_size: FontSize = "small"
+    chat_background: ChatBackground = "solid"
 
 
 @router.get("/branding")

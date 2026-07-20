@@ -7,6 +7,7 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon, type IconName, type IconType } from "@astryxdesign/core/Icon";
 import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { MoreMenu } from "@astryxdesign/core/MoreMenu";
+import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
@@ -42,10 +43,14 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ProvidersPanel } from "./Admin";
+import { useBranding } from "./branding";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
 import {
   AuthUser,
+  BrandingChatBackground,
+  BrandingFontSize,
+  BrandingLanguage,
   ConnectorInfo,
   ConnectorPreset,
   KnowledgeBase,
@@ -171,6 +176,7 @@ function ProfilePanel() {
           </Text>
         </div>
       </Card>
+      <PreferencesCard me={me} onSaved={setMe} />
       <Card padding={2}>
         <div className="claw-panel">
           <Text weight="semibold">Change password</Text>
@@ -203,6 +209,86 @@ function ProfilePanel() {
         </div>
       </Card>
     </div>
+  );
+}
+
+/** Settings > Profile > Preferences — a personal override of the Control
+ * Plane's global branding defaults (Admin.tsx's PreferencesPanel). Unset
+ * fields (me.language/font_size/chat_background === null) show whichever
+ * value is currently in effect (the global default), same as the admin
+ * panel's own fields — saving only sends the field(s) actually changed, so
+ * the other two stay whatever they already were (override or inherited). */
+function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUser) => void }) {
+  const { branding, setUserOverride } = useBranding();
+  const [language, setLanguage] = useState<BrandingLanguage>(me.language ?? branding.language);
+  const [fontSize, setFontSize] = useState<BrandingFontSize>(me.font_size ?? branding.font_size);
+  const [chatBg, setChatBg] = useState<BrandingChatBackground>(me.chat_background ?? branding.chat_background);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const toast = useToast();
+
+  const dirtyLanguage = language !== (me.language ?? branding.language);
+  const dirtyFontSize = fontSize !== (me.font_size ?? branding.font_size);
+  const dirtyChatBg = chatBg !== (me.chat_background ?? branding.chat_background);
+  const dirty = dirtyLanguage || dirtyFontSize || dirtyChatBg;
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError("");
+    try {
+      // Only send the field(s) actually changed — the backend leaves
+      // omitted fields' stored overrides untouched, so sending all three
+      // unconditionally would silently pin the other two forever.
+      const updated = await api.updateMyPreferences({
+        ...(dirtyLanguage ? { language } : {}),
+        ...(dirtyFontSize ? { font_size: fontSize } : {}),
+        ...(dirtyChatBg ? { chat_background: chatBg } : {}),
+      });
+      onSaved(updated);
+      setUserOverride({ language: updated.language, font_size: updated.font_size, chat_background: updated.chat_background });
+      toast({ body: "Preferences saved", type: "info", autoHideDuration: 2500 });
+    } catch (e) {
+      setSaveError(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card padding={2}>
+      <div className="claw-panel">
+        <div>
+          <Text weight="semibold">Language</Text>
+          <Text size="sm" color="secondary">
+            Applies to key interface surfaces and the AI's replies. English is the default.
+          </Text>
+          <SegmentedControl value={language} onChange={(v) => setLanguage(v as BrandingLanguage)} label="Language">
+            <SegmentedControlItem value="en" label="English" />
+            <SegmentedControlItem value="th" label="ไทย (Thai)" />
+          </SegmentedControl>
+        </div>
+        <div>
+          <Text weight="semibold">Font size</Text>
+          <SegmentedControl value={fontSize} onChange={(v) => setFontSize(v as BrandingFontSize)} label="Font size">
+            <SegmentedControlItem value="small" label="Small" />
+            <SegmentedControlItem value="medium" label="Medium" />
+            <SegmentedControlItem value="large" label="Large" />
+          </SegmentedControl>
+        </div>
+        <div>
+          <Text weight="semibold">Chat background</Text>
+          <SegmentedControl value={chatBg} onChange={(v) => setChatBg(v as BrandingChatBackground)} label="Chat background">
+            <SegmentedControlItem value="solid" label="Solid" />
+            <SegmentedControlItem value="dots" label="Dots" />
+            <SegmentedControlItem value="grid" label="Grid" />
+          </SegmentedControl>
+        </div>
+        {saveError && <ErrorText>{saveError}</ErrorText>}
+        <div>
+          <Button label="Save preferences" isDisabled={!dirty || saving} clickAction={save} />
+        </div>
+      </div>
+    </Card>
   );
 }
 

@@ -18,7 +18,7 @@ import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
-import { useT } from "./branding";
+import { useBranding, useT } from "./branding";
 import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
 import { ApiError, AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
@@ -566,6 +566,7 @@ function Auth({
 
 export default function App() {
   const t = useT();
+  const { setUserOverride } = useBranding();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [checking, setChecking] = useState(true);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -655,6 +656,15 @@ export default function App() {
   useEffect(() => {
     if (user) void refresh();
   }, [user, refresh]);
+
+  // Personal appearance override (Settings > Profile > Preferences) follows
+  // whichever user is currently signed in — cleared on logout so the next
+  // login (possibly a different account) doesn't inherit a stale override.
+  useEffect(() => {
+    setUserOverride(
+      user ? { language: user.language, font_size: user.font_size, chat_background: user.chat_background } : null,
+    );
+  }, [user, setUserOverride]);
 
   // One-time migration: the very first time a real session list loads on
   // this browser, treat everything already there as "read" — otherwise
