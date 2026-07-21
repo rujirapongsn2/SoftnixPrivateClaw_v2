@@ -230,10 +230,16 @@ class McpConnector(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(64))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     transport: Mapped[str] = mapped_column(String(16), default="stdio")  # stdio|http
     command: Mapped[str] = mapped_column(Text, default="")  # stdio: command line
     url: Mapped[str] = mapped_column(String(500), default="")  # http: endpoint
     env: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Per-connector connect/tool-call timeout override, in milliseconds. Null =
+    # use the instance-wide ConnectorSettings default (claw/config.py) — see
+    # claw/core/connectors.py's _effective_timeout_seconds for the clamp
+    # applied on top of whatever value is stored here.
+    timeout_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

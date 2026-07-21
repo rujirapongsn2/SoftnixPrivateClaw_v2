@@ -23,7 +23,9 @@ import {
   Download,
   ExternalLink,
   Eye,
+  FileSpreadsheet,
   FileText,
+  FileType,
   Globe,
   HeartPulse,
   Library,
@@ -33,6 +35,7 @@ import {
   Pencil,
   Play,
   Plug,
+  Presentation,
   Plus,
   Send,
   Sparkles,
@@ -294,10 +297,96 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
 
 // ---------------------------------------------------------------- Skills
 
+const BUILTIN_SKILL_ICONS: Record<string, IconType> = {
+  pptx: Presentation,
+  xlsx: FileSpreadsheet,
+  pdf: FileType,
+  docx: FileText,
+};
+
+function builtinSkillIcon(name: string): IconType {
+  return BUILTIN_SKILL_ICONS[name] ?? Sparkles;
+}
+
+function SkillDetailModal({
+  skill,
+  isOpen,
+  onOpenChange,
+}: {
+  skill: SkillInfo | null;
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const capabilities = skill?.capabilities ?? [];
+  return (
+    // Kept mounted always, with only `isOpen` toggling — Dialog's own close
+    // effect (dialog.close() + returning focus to the trigger) runs on an
+    // isOpen transition while mounted, but never fires if we unmount it
+    // instead (see the KB-doc-preview Dialog elsewhere in this file for the
+    // same pattern).
+    <Dialog isOpen={isOpen} onOpenChange={onOpenChange} width={640} purpose="info">
+      <Layout
+        header={
+          <DialogHeader
+            title={skill?.name ?? ""}
+            subtitle="Skill"
+            startContent={<Icon icon={builtinSkillIcon(skill?.name ?? "")} size="md" />}
+            onOpenChange={onOpenChange}
+          />
+        }
+        content={
+          <LayoutContent>
+            <div className="claw-panel">
+              {capabilities.length > 0 && (
+                <>
+                  <Text size="sm" color="secondary" weight="semibold" className="claw-skill-capability-label">
+                    Capabilities covered
+                  </Text>
+                  <div className="claw-skill-capability-grid">
+                    {capabilities.map((cap) => (
+                      <Card key={cap.title} padding={2}>
+                        <Text weight="semibold">{cap.title}</Text>
+                        <Text size="sm" color="secondary" as="p">
+                          {cap.description}
+                        </Text>
+                      </Card>
+                    ))}
+                  </div>
+                </>
+              )}
+              {skill?.summary && (
+                <div className="claw-skill-summary-box">
+                  <Text size="sm" color="secondary" as="p">
+                    {skill.summary}
+                  </Text>
+                </div>
+              )}
+              <TextArea
+                label="Instructions (loaded when the agent uses this skill)"
+                value={skill?.content ?? ""}
+                onChange={() => {}}
+                rows={14}
+                isDisabled
+              />
+            </div>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter hasDivider>
+            <Button label="Close" variant="ghost" clickAction={() => onOpenChange(false)} />
+          </LayoutFooter>
+        }
+      />
+    </Dialog>
+  );
+}
+
 function SkillsPanel() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [editing, setEditing] = useState<Partial<SkillInfo> | null>(null);
+  const [viewingDetail, setViewingDetail] = useState<SkillInfo | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
   const { error, guard } = useAsyncError();
 
   const reload = useCallback(() => api.listSkills().then(setSkills), []);
@@ -418,6 +507,11 @@ function SkillsPanel() {
                 <Text size="sm" color="secondary" as="p">
                   {skill.description || "—"}
                 </Text>
+                {skill.shadows_builtin && (
+                  <Text size="sm" color="secondary" as="p">
+                    This name matches a built-in skill — yours takes priority, and the built-in is hidden.
+                  </Text>
+                )}
               </div>
               {skill.builtin ? (
                 <Button
@@ -425,7 +519,14 @@ function SkillsPanel() {
                   icon={<Icon icon={ExternalLink} size="sm" />}
                   size="sm"
                   variant="ghost"
-                  clickAction={() => setEditing(skill)}
+                  clickAction={() => {
+                    if (skill.capabilities?.length) {
+                      setViewingDetail(skill);
+                      setDetailOpen(true);
+                    } else {
+                      setEditing(skill);
+                    }
+                  }}
                 />
               ) : (
                 <div className="claw-row">
@@ -465,6 +566,7 @@ function SkillsPanel() {
           </Card>
         ))
       )}
+      <SkillDetailModal skill={viewingDetail} isOpen={detailOpen} onOpenChange={setDetailOpen} />
     </div>
   );
 }
@@ -676,10 +778,12 @@ function GuidedSetup({
       if (preset.url_configurable && !effectiveUrl) throw new Error("MCP endpoint URL is required.");
       await api.saveConnector({
         name: preset.name,
+        description: preset.description ?? "",
         transport: preset.transport,
         command: preset.command,
         url: effectiveUrl,
         env,
+        timeout_ms: null,
         enabled: true,
       });
       await onSaved();
@@ -847,6 +951,17 @@ function ConnectorsPanel() {
   const [setupPreset, setSetupPreset] = useState<ConnectorPreset | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const { error, guard } = useAsyncError();
+  // Timeout field keeps its own raw text so a keystroke that doesn't parse
+  // (e.g. a stray non-digit, or a value mid-edit) doesn't silently stop
+  // updating the visible input while `editing.timeout_ms` stays unchanged —
+  // reset only when we start editing a different connector (or a new one).
+  const [timeoutText, setTimeoutText] = useState("");
+  const [timeoutTextFor, setTimeoutTextFor] = useState<string | null>(null);
+  const editingKey = editing ? (editing.id ?? "__new__") : null;
+  if (editingKey !== timeoutTextFor) {
+    setTimeoutTextFor(editingKey);
+    setTimeoutText(editing?.timeout_ms != null ? String(editing.timeout_ms) : "");
+  }
   // Live-sanitizing the name on every keystroke (slugifyConnectorName) would
   // otherwise reset the caret to the end of the field whenever sanitization
   // changes the string (React must overwrite a controlled input's value when
@@ -900,6 +1015,12 @@ function ConnectorsPanel() {
           }}
           isDisabled={!!editing.id}
         />
+        <TextArea
+          label="Description (optional)"
+          value={editing.description ?? ""}
+          onChange={(v) => setEditing({ ...editing, description: v })}
+          rows={2}
+        />
         <div className="claw-row">
           {/* stdio spawns a real subprocess on the server (unsandboxed) — only
               an admin may pick it for a NEW connector. An existing stdio
@@ -947,6 +1068,30 @@ function ConnectorsPanel() {
           onChange={(v) => setEditing({ ...editing, env: parseEnvText(v) })}
           rows={3}
         />
+        <TextInput
+          label="Timeout (ms)"
+          placeholder="Default (instance-wide setting)"
+          description="1000-120000. Out-of-range values are clamped on save."
+          value={timeoutText}
+          onChange={(v) => {
+            setTimeoutText(v);
+            if (v.trim() === "") {
+              setEditing({ ...editing, timeout_ms: null });
+              return;
+            }
+            const parsed = parseInt(v, 10);
+            if (Number.isNaN(parsed)) return;
+            // Don't clamp while typing — clamping a partial value (e.g. the
+            // "5" in "5000") mid-entry rewrites the field out from under the
+            // next keystroke. Clamp once, on save, instead.
+            setEditing({ ...editing, timeout_ms: parsed });
+          }}
+        />
+        <Switch
+          value={editing.enabled ?? true}
+          label="Enable server"
+          changeAction={(checked) => setEditing({ ...editing, enabled: checked })}
+        />
         {error && <ErrorText>{error}</ErrorText>}
         <div className="claw-row">
           <Button
@@ -956,10 +1101,15 @@ function ConnectorsPanel() {
               guard(async () => {
                 await api.saveConnector({
                   name: (editing.name ?? "").trim(),
+                  description: editing.description ?? "",
                   transport,
                   command: editing.command ?? "",
                   url: editing.url ?? "",
                   env: editing.env ?? {},
+                  timeout_ms:
+                    editing.timeout_ms != null
+                      ? Math.max(1000, Math.min(120000, editing.timeout_ms))
+                      : null,
                   enabled: editing.enabled ?? true,
                 });
                 setEditing(null);
@@ -1031,6 +1181,11 @@ function ConnectorsPanel() {
                         onClick: () =>
                           guard(async () => {
                             await api.deleteConnector(installed.id);
+                            // If an edit form for this same connector was opened
+                            // (from a stale pre-delete snapshot) while the delete
+                            // was in flight, close it — otherwise Save would
+                            // resurrect the just-deleted connector as a new row.
+                            setEditing((prev) => (prev?.id === installed.id ? null : prev));
                             await reload();
                           }),
                       },
@@ -1124,6 +1279,10 @@ function ConnectorsPanel() {
                     changeAction={(checked) =>
                       guard(async () => {
                         await api.saveConnector({ ...c, enabled: checked });
+                        // Keep an already-open edit form for this same connector
+                        // in sync, so a stale `editing.enabled` snapshot can't
+                        // later overwrite this toggle when the form is saved.
+                        setEditing((prev) => (prev?.id === c.id ? { ...prev, enabled: checked } : prev));
                         await reload();
                       })
                     }
@@ -1143,6 +1302,10 @@ function ConnectorsPanel() {
                     clickAction={() =>
                       guard(async () => {
                         await api.deleteConnector(c.id);
+                        // See the "Remove" MoreMenu item above — closes a
+                        // same-connector edit form opened mid-delete so Save
+                        // can't resurrect the row that was just removed.
+                        setEditing((prev) => (prev?.id === c.id ? null : prev));
                         await reload();
                       })
                     }

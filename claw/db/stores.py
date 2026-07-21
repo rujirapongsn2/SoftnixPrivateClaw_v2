@@ -504,7 +504,20 @@ class ConnectorStore:
             if row is None:
                 row = McpConnector(user_id=user_id, name=name)
                 db.add(row)
-            for key in ("transport", "command", "url", "env", "enabled"):
+            # `description`/`timeout_ms` are the only nullable columns, so only
+            # those two support `key in fields` (caller explicitly passed
+            # `timeout_ms=None` to clear an override back to "use the
+            # instance-wide default"). The rest are NOT NULL columns — for
+            # those, `None` can't mean "clear it" (there's no valid empty
+            # state to clear to), so they keep the older "explicit None ==
+            # leave untouched" behavior, same as omitting the kwarg entirely
+            # (e.g. connector_oauth.py's preset install never passes these).
+            nullable_keys = ("description", "timeout_ms")
+            not_null_keys = ("transport", "command", "url", "env", "enabled")
+            for key in nullable_keys:
+                if key in fields:
+                    setattr(row, key, fields[key])
+            for key in not_null_keys:
                 if key in fields and fields[key] is not None:
                     value = fields[key]
                     if key == "env" and self.secret_box is not None:

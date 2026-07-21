@@ -6,6 +6,8 @@ provider redirects to `callback`, which exchanges the code and creates the
 connector for the user, then bounces back to the web app.
 """
 
+from typing import Any
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
@@ -72,14 +74,22 @@ async def callback(
     if not env.get(f"{preset.env_prefix}_TOKEN"):
         return bounce("error", preset.key)
 
-    await app_state.connectors.upsert(
-        payload["u"],
-        preset.name,
+    existing = await app_state.connectors.list_for_user(payload["u"])
+    is_new = not any(c.name == preset.name for c in existing)
+
+    fields: dict[str, Any] = dict(
         transport=preset.transport,
         command=preset.command,
         url=preset.url,
         env=env,
         enabled=True,
     )
+    if is_new:
+        # Only seed the preset's description on first install — re-running
+        # this flow (e.g. a token refresh) must not clobber a description the
+        # user has since edited themselves.
+        fields["description"] = preset.description
+
+    await app_state.connectors.upsert(payload["u"], preset.name, **fields)
     await app_state.connectors_mgr.invalidate(payload["u"])
     return bounce("connected", preset.key)

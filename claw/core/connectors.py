@@ -65,6 +65,13 @@ _TOOL_CALL_TIMEOUT_SECONDS = 60
 # module constant so direct construction (tests) has a sane default.
 _ERROR_RETRY_COOLDOWN_SECONDS = 60
 
+# Bounds for a connector's own `timeout_ms` override (Settings > Connectors'
+# "Timeout (ms)" field) — mirrors the range enforced by ConnectorBody in
+# claw/api/manage.py, re-checked here in case anything else ever writes
+# timeout_ms directly (defense in depth, not the primary validation).
+_MIN_TIMEOUT_MS = 1000
+_MAX_TIMEOUT_MS = 120_000
+
 
 class McpToolProxy(Tool):
     def __init__(
@@ -143,6 +150,16 @@ class ConnectorManager:
             self._locks[user_id] = lock
         return lock
 
+    def _effective_timeout_seconds(self, connector, default_seconds: float) -> float:
+        """A connector's own `timeout_ms` (if set) overrides the instance-wide
+        connect/tool-call default, for both budgets — the UI exposes a single
+        "Timeout (ms)" field per connector rather than separate connect vs.
+        tool-call knobs."""
+        raw = getattr(connector, "timeout_ms", None)
+        if raw is None:
+            return default_seconds
+        return max(_MIN_TIMEOUT_MS, min(_MAX_TIMEOUT_MS, raw)) / 1000
+
     async def status(self, user_id: str) -> dict[str, dict]:
         return dict(self._users.get(user_id, _UserConnections()).statuses)
 
@@ -173,8 +190,11 @@ class ConnectorManager:
         — otherwise a transient failure would cache as permanently broken until
         an admin edits the connector. But that retry tears down and reconnects
         ALL of the user's connectors, waiting the full connect timeout for the
-        broken one, and this method runs on every chat turn and every
-        /connectors listing. So the retry is held off for
+        broken one — up to a connector's own `timeout_ms` override if it has
+        one (see `_effective_timeout_seconds`), which can be as long as
+        `_MAX_TIMEOUT_MS` (120s), not just the shorter instance-wide default —
+        and this method runs on every chat turn and every /connectors
+        listing. So the retry is held off for
         `error_retry_cooldown_seconds` after the failure: within that window we
         short-circuit on the cached (error) state, exactly as for an unchanged
         all-healthy config, keeping turns and page loads fast. A config change
@@ -218,7 +238,9 @@ class ConnectorManager:
                         tool.name,
                         tool.description or "",
                         tool.inputSchema or {},
-                        tool_call_timeout_seconds=self.tool_call_timeout_seconds,
+                        tool_call_timeout_seconds=self._effective_timeout_seconds(
+                            connector, self.tool_call_timeout_seconds
+                        ),
                     )
                     registry.register(proxy)
                     state.tool_names.append(proxy.name)
@@ -244,14 +266,15 @@ class ConnectorManager:
         returns (connector, session, listed, error_status), so callers can
         run several of these concurrently (via asyncio.gather) and still
         tell which ones failed."""
+        timeout = self._effective_timeout_seconds(connector, self.connect_timeout_seconds)
         try:
             session, listed = await asyncio.wait_for(
                 self._connect_and_list(stack, connector),
-                timeout=self.connect_timeout_seconds,
+                timeout=timeout,
             )
             return connector, session, listed, None
         except TimeoutError:
-            message = f"timed out after {self.connect_timeout_seconds}s connecting/listing tools"
+            message = f"timed out after {timeout}s connecting/listing tools"
             return connector, None, None, {"status": "error", "error": message}
         except asyncio.CancelledError:
             # A broken connector's handshake fails deep inside the MCP SDK's
@@ -272,7 +295,7 @@ class ConnectorManager:
             task = asyncio.current_task()
             if task is not None:
                 task.uncancel()
-            message = f"failed connecting (within {self.connect_timeout_seconds}s budget)"
+            message = f"failed connecting (within {timeout}s budget)"
             return connector, None, None, {"status": "error", "error": message}
         except Exception as exc:
             return connector, None, None, {"status": "error", "error": str(exc)[:300]}

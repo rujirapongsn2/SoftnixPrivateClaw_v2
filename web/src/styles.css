@@ -2650,3 +2650,24 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-share-link:hover {
   text-decoration: underline;
 }
+
+/* ---- built-in skill detail modal (Settings > Skills > View) ---- */
+.claw-skill-capability-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.claw-skill-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+@media (max-width: 560px) {
+  .claw-skill-capability-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.claw-skill-summary-box {
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--color-surface-subtle, rgba(0, 0, 0, 0.04));
+}

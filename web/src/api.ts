@@ -101,6 +101,13 @@ export interface SkillInfo {
   // skill's own text can stay generic instead of hardcoding a connector name
   // that could later be renamed — null = no linked connector.
   connector_id?: string | null;
+  // "CAPABILITIES COVERED" detail-view cards — only set for built-in skills
+  // that have them (e.g. pptx/xlsx/pdf/docx), empty/absent otherwise.
+  capabilities?: { title: string; description: string }[];
+  summary?: string;
+  // True when this (user-owned) skill's name matches a built-in's, hiding
+  // that built-in from the list — surfaced so the collision isn't silent.
+  shadows_builtin?: boolean;
 }
 
 export interface MemoryInfo {
@@ -111,10 +118,14 @@ export interface MemoryInfo {
 export interface ConnectorInfo {
   id: string;
   name: string;
+  description: string;
   transport: "stdio" | "http";
   command: string;
   url: string;
   env: Record<string, string>;
+  // Per-connector connect/tool-call timeout override, in milliseconds. null =
+  // use the instance-wide default.
+  timeout_ms: number | null;
   enabled: boolean;
   // tool_names are the exact `mcp_{connector}_{tool}` names a skill must
   // reference to call one of this connector's tools — not the server's own

@@ -22,10 +22,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Document / data stack. Pinned to majors so rebuilds stay reproducible while
 # still picking up patch releases.
+#  - pypdf: PDF merge/split/extract/form-fill (previously only present as an
+#    undeclared transitive dep of xhtml2pdf — pinned directly so it can't
+#    silently disappear on an xhtml2pdf upgrade).
+#  - PyMuPDF (fitz): the other half of the PDF skill — text/table extraction
+#    with layout, thumbnail rendering.
 RUN pip install --no-cache-dir \
         "reportlab>=4.1" \
         "weasyprint>=62" \
         "xhtml2pdf>=0.2.16" \
+        "pypdf>=6.0" \
+        "PyMuPDF>=1.24" \
         "openpyxl>=3.1" \
         "python-docx>=1.1" \
         "python-pptx>=1.0" \

@@ -31,7 +31,7 @@ class SkillBody(BaseModel):
     connector_id: str | None = None
 
 
-def _skill_json(s, builtin: bool = False) -> dict:
+def _skill_json(s, builtin: bool = False, shadows_builtin: bool = False) -> dict:
     return {
         "id": s.id,
         "name": s.name,
@@ -41,6 +41,14 @@ def _skill_json(s, builtin: bool = False) -> dict:
         "connector_id": getattr(s, "connector_id", None),
         "updated_at": s.updated_at.isoformat(),
         "builtin": builtin,
+        # Only BuiltinSkill instances carry these (the "CAPABILITIES COVERED"
+        # detail view) — user/ORM skills never set them, hence the getattr.
+        "capabilities": [{"title": t, "description": d} for t, d in getattr(s, "capabilities", ())],
+        "summary": getattr(s, "summary", "") or "",
+        # True when this user skill's name matches a built-in's, so it's
+        # hiding that built-in from the list below — surfaced in the UI so
+        # the collision isn't silent.
+        "shadows_builtin": shadows_builtin,
     }
 
 
@@ -50,9 +58,12 @@ async def list_skills(user: User = Depends(current_user), state: AppState = Depe
 
     user_skills = await state.skills.list_for_user(user.id)
     user_names = {s.name for s in user_skills}
+    builtin_names = {b.name for b in builtin_skills()}
     # Built-ins first (read-only), skipping any a user skill shadows by name.
     builtins = [_skill_json(b, builtin=True) for b in builtin_skills() if b.name not in user_names]
-    return builtins + [_skill_json(s) for s in user_skills]
+    return builtins + [
+        _skill_json(s, shadows_builtin=s.name in builtin_names) for s in user_skills
+    ]
 
 
 @router.put("/skills/{name}")
@@ -118,10 +129,14 @@ async def update_memory(
 
 class ConnectorBody(BaseModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_\-]+$")
+    description: str = Field(default="", max_length=2000)
     transport: str = Field(default="stdio", pattern=r"^(stdio|http)$")
     command: str = ""
     url: str = ""
     env: dict[str, str] = Field(default_factory=dict)
+    # Per-connector connect/tool-call timeout override, in milliseconds. None =
+    # use the instance-wide default (claw/config.py's ConnectorSettings).
+    timeout_ms: int | None = Field(default=None, ge=1000, le=120000)
     enabled: bool = True
 
 
@@ -129,10 +144,12 @@ def _connector_json(c, status: dict | None = None) -> dict:
     return {
         "id": c.id,
         "name": c.name,
+        "description": c.description or "",
         "transport": c.transport,
         "command": c.command,
         "url": c.url,
         "env": c.env or {},
+        "timeout_ms": c.timeout_ms,
         "enabled": c.enabled,
         "runtime": status or {"status": "not_connected"},
     }
@@ -188,13 +205,21 @@ async def upsert_connector(
                 status_code=403,
                 detail="custom stdio (local command) connectors require an administrator",
             )
+    # Full-replace PUT, like the other upsert_* routes in this file (e.g.
+    # upsert_skill) — every ConnectorBody field is always forwarded, so a
+    # caller that omits a field gets that field's Pydantic default written
+    # through (e.g. omitting "description" clears it to ""), not "leave
+    # untouched". The shipped frontend always sends every field on every
+    # save; a different/future API caller must do the same.
     row = await state.connectors.upsert(
         user.id,
         name.strip(),
+        description=body.description,
         transport=body.transport,
         command=body.command,
         url=body.url,
         env=body.env,
+        timeout_ms=body.timeout_ms,
         enabled=body.enabled,
     )
     await state.connectors_mgr.invalidate(user.id)
