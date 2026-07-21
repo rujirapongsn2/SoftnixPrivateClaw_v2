@@ -53,3 +53,40 @@ export function sanitizeModelMarkdown(text: string): string {
 
   return work.replace(RESTORE_RE, (_s, i) => code[Number(i)]);
 }
+
+/**
+ * Reduce assistant markdown to plain, speakable text for the "read aloud"
+ * (text-to-speech) button — strips syntax a TTS engine would otherwise read
+ * literally (e.g. "asterisk asterisk bold asterisk asterisk").
+ */
+export function stripMarkdownForSpeech(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/```[\s\S]*?```/g, " ") // fenced code blocks
+    .replace(/`([^`\n]*)`/g, "$1") // inline code
+    .replace(/!\[[^\]]*]\([^)]*\)/g, "") // images
+    .replace(/\[([^\]]*)]\([^)]*\)/g, "$1") // links -> link text
+    .replace(/^#{1,6}\s+/gm, "") // heading markers
+    .replace(/^>\s?/gm, "") // blockquote markers
+    .replace(/^\s*[-*+]\s+/gm, "") // bullet list markers
+    .replace(/^\s*\d+[.)]\s+/gm, "") // numbered list markers
+    .replace(/^\s*(?:---|\*\*\*|___)\s*$/gm, "") // horizontal rules
+    // Emphasis markers: require a non-whitespace char flanking the inside of
+    // each pair (real markdown emphasis never wraps whitespace) so this can't
+    // lazily jump to some unrelated later delimiter on the same line (e.g.
+    // "3 * 4 = 12 and 5 * 6 = 30" — spaced multiplication, not italics).
+    // Underscore variants additionally require a non-word char (or
+    // start/end of string) outside each delimiter, since CommonMark treats
+    // "_" as emphasis only outside word boundaries — otherwise this would
+    // wreck snake_case identifiers and ENV__VAR names.
+    .replace(/\*\*\*(?!\s)(.+?)(?<!\s)\*\*\*/g, "$1") // bold+italic (*)
+    .replace(/(?<!\w)___(?!\s)(.+?)(?<!\s)___(?!\w)/g, "$1") // bold+italic (_)
+    .replace(/\*\*(?!\s)(.+?)(?<!\s)\*\*/g, "$1") // bold (*)
+    .replace(/(?<!\w)__(?!\s)(.+?)(?<!\s)__(?!\w)/g, "$1") // bold (_)
+    .replace(/(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)/g, "$1") // italic (_)
+    .replace(/\*(?!\s)(.+?)(?<!\s)\*/g, "$1") // italic (*)
+    .replace(/~~(.+?)~~/g, "$1") // strikethrough
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}

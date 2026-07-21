@@ -2175,6 +2175,38 @@ class LLMConfigStore:
             "api_base": p.api_base,
         }
 
+    async def resolve_admin_openai_provider(self) -> dict[str, str] | None:
+        """The admin-global provider registered with model_prefix "openai", if
+        any — used by side features (e.g. text-to-speech) that just need an
+        OpenAI-wire-compatible key, not a full chat/image LLMModel row. Same
+        prefix-based detection resolve_image() already relies on for its
+        "openai/azure -> /images endpoint" strategy pick, so a "Softnix GenAI"
+        or self-hosted "OpenAI-compatible" provider (both also tagged
+        model_prefix="openai") is indistinguishable from real api.openai.com
+        here too — callers should fail soft (treat an upstream error as "not
+        available") rather than surface a hard error to the end user."""
+        async with self.factory() as db:
+            row = await db.scalar(
+                select(LLMProvider)
+                .where(
+                    LLMProvider.owner_id.is_(None),
+                    LLMProvider.model_prefix == "openai",
+                    LLMProvider.enabled.is_(True),
+                )
+                # Deterministic pick if more than one qualifies (e.g. a real
+                # OpenAI key alongside a self-hosted "OpenAI-compatible" gateway
+                # both tagged this prefix) — oldest-configured wins, same
+                # tiebreak style as resolve()/resolve_image().
+                .order_by(LLMProvider.created_at.asc())
+                .limit(1)
+            )
+        if row is None:
+            return None
+        return {
+            "api_key": self._clean_key(self._dec(row.api_key)),
+            "api_base": row.api_base or "https://api.openai.com/v1",
+        }
+
     async def resolve_image(
         self, model_id: str, user_id: str | None = None, max_cost: str | None = None
     ) -> dict[str, str] | None:

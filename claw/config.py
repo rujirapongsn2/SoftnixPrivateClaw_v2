@@ -121,6 +121,23 @@ class ImageSettings(BaseModel):
     max_stored_per_user: int = 200
 
 
+class TtsSettings(BaseModel):
+    """Text-to-speech (the "read aloud" speaker button on assistant messages).
+    Reuses whichever admin-global provider is registered with model_prefix
+    "openai" in Control Plane > LLM Providers — see
+    LLMConfigStore.resolve_admin_openai_provider() — so there is no separate
+    API key setting here; the feature is simply unavailable (button hidden)
+    when no such provider is configured."""
+
+    model: str = "tts-1"
+    voice: str = "alloy"
+    timeout_seconds: int = 30
+    # OpenAI's /audio/speech input cap is 4096 chars; stay a bit under it.
+    max_chars: int = 4000
+    # Per-user calls per minute (0 = unlimited) — each call hits a paid provider.
+    per_minute: int = 20
+
+
 class ConnectorSettings(BaseModel):
     """MCP connector connect/tool-call timeouts. A single misbehaving remote
     MCP server (e.g. one that hangs instead of raising, after sending a
@@ -229,6 +246,7 @@ class Settings(BaseSettings):
     knowledge: KnowledgeSettings = KnowledgeSettings()
     connectors: ConnectorSettings = ConnectorSettings()
     image: ImageSettings = ImageSettings()
+    tts: TtsSettings = TtsSettings()
 
     @model_validator(mode="after")
     def _default_web_base_url_to_public(self) -> "Settings":

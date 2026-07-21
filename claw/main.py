@@ -264,6 +264,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         plans=plans,
         branding=branding,
         image_rate_limiter=RateLimiter(settings.image.per_minute),
+        tts_rate_limiter=RateLimiter(settings.tts.per_minute),
         guardrails=guardrails,
         llm_config=llm_config,
         audit=audit,

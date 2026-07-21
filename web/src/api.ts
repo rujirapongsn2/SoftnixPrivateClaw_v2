@@ -757,7 +757,7 @@ export const api = {
   me: () => request<AuthUser>("/api/auth/me"),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   providers: () => request<{ providers: string[] }>("/api/auth/providers"),
-  features: () => request<{ speech_to_text: boolean }>("/api/features"),
+  features: () => request<{ speech_to_text: boolean; text_to_speech: boolean }>("/api/features"),
   // Public (no auth) — the login screen renders before authentication.
   getBranding: () => request<PublicBranding>("/api/branding"),
 
@@ -771,6 +771,18 @@ export const api = {
     });
     if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
     return (await resp.json()).text as string;
+  },
+
+  // Text-to-speech for the assistant message "read aloud" button. Returns raw
+  // audio bytes (audio/mpeg) — not JSON, so this bypasses request<T>().
+  speak: async (text: string): Promise<Blob> => {
+    const resp = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ text }),
+    });
+    if (!resp.ok) throw new ApiError(resp.status, await resp.text());
+    return resp.blob();
   },
 
   listSessions: () => request<SessionInfo[]>("/api/sessions"),

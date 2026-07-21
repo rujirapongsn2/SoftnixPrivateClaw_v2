@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
+from loguru import logger
 from pydantic import BaseModel
 
 from claw.api.deps import AppState, current_user, current_user_ws, get_state
@@ -109,8 +110,19 @@ async def me(user: User = Depends(current_user)) -> dict:
 
 @router.get("/api/features")
 async def features(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
-    """Optional capabilities the UI conditionally shows (e.g. the composer mic)."""
-    return {"speech_to_text": bool(state.settings.speech_api_key)}
+    """Optional capabilities the UI conditionally shows (e.g. the composer mic,
+    the per-message "read aloud" speaker)."""
+    try:
+        tts_available = (await state.llm_config.resolve_admin_openai_provider()) is not None
+    except Exception:
+        # Fail soft: a DB hiccup resolving the TTS provider must not also take
+        # down the (unrelated, DB-free) speech_to_text flag for every caller.
+        logger.exception("Failed to resolve TTS provider for /api/features")
+        tts_available = False
+    return {
+        "speech_to_text": bool(state.settings.speech_api_key),
+        "text_to_speech": tts_available,
+    }
 
 
 # ---- public branding (Control Plane > Preferences) --------------------------
@@ -640,6 +652,50 @@ async def transcribe(
         raise HTTPException(status_code=502, detail=f"speech provider error: {resp.text[:300]}")
     text = (resp.json().get("text") or "").strip()
     return {"text": text}
+
+
+class SpeakRequest(BaseModel):
+    text: str
+
+
+@router.post("/api/tts")
+async def speak(
+    body: SpeakRequest,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> Response:
+    """Text-to-speech for the assistant message "read aloud" button: forward
+    text to the OpenAI-wire-compatible provider configured in Control Plane >
+    LLM Providers and return the generated audio. A one-shot request/response
+    path, entirely separate from the agent loop — same shape as /transcribe."""
+    import httpx
+
+    provider = await state.llm_config.resolve_admin_openai_provider()
+    if provider is None:
+        raise HTTPException(status_code=503, detail="text-to-speech is not configured")
+
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="text is required")
+    if len(text) > state.settings.tts.max_chars:
+        raise HTTPException(status_code=413, detail="text is too long")
+
+    if state.tts_rate_limiter is not None and not state.tts_rate_limiter.allow(user.id):
+        raise HTTPException(status_code=429, detail="Too many read-aloud requests; please wait a moment.")
+
+    base = provider["api_base"].rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=state.settings.tts.timeout_seconds) as client:
+            resp = await client.post(
+                f"{base}/audio/speech",
+                headers={"Authorization": f"Bearer {provider['api_key']}"},
+                json={"model": state.settings.tts.model, "voice": state.settings.tts.voice, "input": text},
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"speech provider unreachable: {exc}") from exc
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"speech provider error: {resp.text[:300]}")
+    return Response(content=resp.content, media_type="audio/mpeg")
 
 
 @router.websocket("/ws/chat/{session_id}")

@@ -48,6 +48,7 @@ import {
   ThumbsDown,
   ThumbsUp,
   Users,
+  Volume2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -68,7 +69,7 @@ import {
 } from "./api";
 import { SoftnixLogo } from "./Logo";
 import { useT } from "./branding";
-import { sanitizeModelMarkdown } from "./markdown";
+import { sanitizeModelMarkdown, stripMarkdownForSpeech } from "./markdown";
 
 // Copy text to the clipboard, falling back to execCommand for non-secure
 // contexts (plain-http LAN/Tailscale IPs) where navigator.clipboard is absent.
@@ -319,6 +320,14 @@ export function Chat({
   // mic's live state (idle → recording → transcribing).
   const [sttEnabled, setSttEnabled] = useState(false);
   const [micState, setMicState] = useState<"idle" | "recording" | "transcribing">("idle");
+  // Text-to-speech: whether the backend has an OpenAI-compatible provider
+  // configured for the per-message "read aloud" speaker button, plus each
+  // message's own loading/playing state and the audio element currently playing.
+  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [speaking, setSpeaking] = useState<Record<number, "loading" | "playing" | undefined>>({});
+  const speakingAudioRef = useRef<HTMLAudioElement | null>(null);
+  const speakingIndexRef = useRef<number | null>(null);
+  const speakingUrlRef = useRef<string | null>(null);
   // Right execution panel: remember the user's explicit show/hide choice; a tool
   // starting auto-opens it transiently without overwriting that saved default.
   const [execOpen, setExecOpen] = useState(() => localStorage.getItem("claw_exec_open") === "1");
@@ -375,6 +384,12 @@ export function Chat({
   }, []);
 
   useEffect(() => {
+    // Switching sessions must not leave the previous session's "read aloud"
+    // audio playing (or its per-index state) bleeding into the new one.
+    // Deliberately not in the deps array: stopSpeaking has a stable identity
+    // (empty-dep useCallback further down), and listing it here would try to
+    // evaluate an as-yet-undeclared const at this point in the render.
+    stopSpeaking();
     setItems([]);
     setStreaming("");
     setError("");
@@ -679,7 +694,16 @@ export function Chat({
 
   // Show the composer mic only when the backend has speech-to-text configured.
   useEffect(() => {
-    api.features().then((f) => setSttEnabled(f.speech_to_text)).catch(() => setSttEnabled(false));
+    api
+      .features()
+      .then((f) => {
+        setSttEnabled(f.speech_to_text);
+        setTtsEnabled(f.text_to_speech);
+      })
+      .catch(() => {
+        setSttEnabled(false);
+        setTtsEnabled(false);
+      });
   }, []);
 
   // Recover a completion missed while navigated away: when the parent's poll
@@ -1131,6 +1155,63 @@ export function Chat({
       }
     },
     [toast],
+  );
+
+  // Stop whatever message is currently being read aloud, if any.
+  const stopSpeaking = useCallback(() => {
+    speakingAudioRef.current?.pause();
+    speakingAudioRef.current = null;
+    if (speakingUrlRef.current) {
+      URL.revokeObjectURL(speakingUrlRef.current);
+      speakingUrlRef.current = null;
+    }
+    const idx = speakingIndexRef.current;
+    speakingIndexRef.current = null;
+    if (idx !== null) setSpeaking((prev) => ({ ...prev, [idx]: undefined }));
+  }, []);
+
+  useEffect(() => stopSpeaking, [stopSpeaking]);
+
+  // Read one assistant message aloud (text-to-speech). Clicking the button on
+  // the message currently playing stops it instead of restarting it.
+  const speakMessage = useCallback(
+    async (index: number, content: string) => {
+      if (speakingIndexRef.current === index) {
+        stopSpeaking();
+        return;
+      }
+      stopSpeaking();
+      speakingIndexRef.current = index;
+      setSpeaking((prev) => ({ ...prev, [index]: "loading" }));
+      try {
+        const plain = stripMarkdownForSpeech(content);
+        const blob = await api.speak(plain);
+        if (speakingIndexRef.current !== index) return; // superseded/stopped
+        const url = URL.createObjectURL(blob);
+        speakingUrlRef.current = url;
+        const audioEl = new Audio(url);
+        speakingAudioRef.current = audioEl;
+        setSpeaking((prev) => ({ ...prev, [index]: "playing" }));
+        audioEl.onended = () => {
+          if (speakingUrlRef.current === url) {
+            URL.revokeObjectURL(url);
+            speakingUrlRef.current = null;
+          }
+          if (speakingIndexRef.current === index) {
+            speakingIndexRef.current = null;
+            setSpeaking((prev) => ({ ...prev, [index]: undefined }));
+          }
+        };
+        await audioEl.play();
+      } catch {
+        toast({ body: "Couldn't read this response aloud", type: "error" });
+        if (speakingIndexRef.current === index) {
+          speakingIndexRef.current = null;
+          setSpeaking((prev) => ({ ...prev, [index]: undefined }));
+        }
+      }
+    },
+    [stopSpeaking, toast],
   );
 
   // Share one answer (plus its preceding question, for context) as a public,
@@ -1852,6 +1933,26 @@ export function Chat({
                               size="sm"
                               clickAction={() => copyMessage(i, item.content)}
                             />
+                            {ttsEnabled && (
+                              <IconButton
+                                label={speaking[i] === "playing" ? "Stop reading aloud" : "Read aloud"}
+                                icon={
+                                  speaking[i] === "loading" ? (
+                                    <Spinner size="sm" />
+                                  ) : (
+                                    <Icon
+                                      icon={Volume2}
+                                      size="sm"
+                                      color={speaking[i] === "playing" ? "primary" : "secondary"}
+                                    />
+                                  )
+                                }
+                                variant="ghost"
+                                size="sm"
+                                isDisabled={speaking[i] === "loading"}
+                                clickAction={() => speakMessage(i, item.content)}
+                              />
+                            )}
                             <IconButton
                               label="Good response"
                               icon={
