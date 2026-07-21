@@ -258,6 +258,13 @@ CLAW_BRANDING_ROOT=${DATA_DIR}/branding
 QROQ_KEY=
 QROQ_URL=https://api.groq.com/openai/v1
 QROQ_MODEL=whisper-large-v3
+
+# Optional text-to-speech (read-aloud speaker button). Fill CLAW_TTS__API_KEY
+# to enable; any OpenAI-wire-compatible /audio/speech endpoint works.
+CLAW_TTS__API_BASE=https://api.openai.com/v1
+CLAW_TTS__API_KEY=
+CLAW_TTS__MODEL=tts-1
+CLAW_TTS__VOICE=alloy
 EOF
   chmod 600 .env
   ok ".env written (secret key generated)"

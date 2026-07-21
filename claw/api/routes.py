@@ -9,7 +9,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
-from loguru import logger
 from pydantic import BaseModel
 
 from claw.api.deps import AppState, current_user, current_user_ws, get_state
@@ -112,16 +111,9 @@ async def me(user: User = Depends(current_user)) -> dict:
 async def features(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
     """Optional capabilities the UI conditionally shows (e.g. the composer mic,
     the per-message "read aloud" speaker)."""
-    try:
-        tts_available = (await state.llm_config.resolve_admin_openai_provider()) is not None
-    except Exception:
-        # Fail soft: a DB hiccup resolving the TTS provider must not also take
-        # down the (unrelated, DB-free) speech_to_text flag for every caller.
-        logger.exception("Failed to resolve TTS provider for /api/features")
-        tts_available = False
     return {
         "speech_to_text": bool(state.settings.speech_api_key),
-        "text_to_speech": tts_available,
+        "text_to_speech": bool(state.settings.tts.api_key),
     }
 
 
@@ -665,31 +657,31 @@ async def speak(
     state: AppState = Depends(get_state),
 ) -> Response:
     """Text-to-speech for the assistant message "read aloud" button: forward
-    text to the OpenAI-wire-compatible provider configured in Control Plane >
-    LLM Providers and return the generated audio. A one-shot request/response
-    path, entirely separate from the agent loop — same shape as /transcribe."""
+    text to the OpenAI-wire-compatible endpoint configured via CLAW_TTS__* env
+    vars and return the generated audio. A one-shot request/response path,
+    entirely separate from the agent loop — same shape as /transcribe."""
     import httpx
 
-    provider = await state.llm_config.resolve_admin_openai_provider()
-    if provider is None:
+    tts = state.settings.tts
+    if not tts.api_key:
         raise HTTPException(status_code=503, detail="text-to-speech is not configured")
 
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
-    if len(text) > state.settings.tts.max_chars:
+    if len(text) > tts.max_chars:
         raise HTTPException(status_code=413, detail="text is too long")
 
     if state.tts_rate_limiter is not None and not state.tts_rate_limiter.allow(user.id):
         raise HTTPException(status_code=429, detail="Too many read-aloud requests; please wait a moment.")
 
-    base = provider["api_base"].rstrip("/")
+    base = tts.api_base.rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=state.settings.tts.timeout_seconds) as client:
+        async with httpx.AsyncClient(timeout=tts.timeout_seconds) as client:
             resp = await client.post(
                 f"{base}/audio/speech",
-                headers={"Authorization": f"Bearer {provider['api_key']}"},
-                json={"model": state.settings.tts.model, "voice": state.settings.tts.voice, "input": text},
+                headers={"Authorization": f"Bearer {tts.api_key}"},
+                json={"model": tts.model, "voice": tts.voice, "input": text},
             )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"speech provider unreachable: {exc}") from exc

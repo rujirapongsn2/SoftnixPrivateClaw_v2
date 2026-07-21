@@ -217,9 +217,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.exception("Telegram startup failed")
         logger.info(
-            "Softnix PrivateClaw up — model={}, sandbox={}, browser={}",
+            "Softnix PrivateClaw up — model={}, sandbox={}, browser={}, tts={}",
             settings.llm.model, runtime.sandbox.describe(),
             "enabled" if browser_mgr is not None else "disabled",
+            "enabled" if settings.tts.api_key else "disabled (CLAW_TTS__API_KEY not set)",
         )
         yield
         # Stop intake, then let in-flight turns finish before tearing down.

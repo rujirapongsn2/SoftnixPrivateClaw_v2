@@ -123,12 +123,16 @@ class ImageSettings(BaseModel):
 
 class TtsSettings(BaseModel):
     """Text-to-speech (the "read aloud" speaker button on assistant messages).
-    Reuses whichever admin-global provider is registered with model_prefix
-    "openai" in Control Plane > LLM Providers — see
-    LLMConfigStore.resolve_admin_openai_provider() — so there is no separate
-    API key setting here; the feature is simply unavailable (button hidden)
-    when no such provider is configured."""
+    Fully independent of Control Plane > LLM Providers — configured entirely
+    via these CLAW_TTS__* env vars so it can point at any OpenAI-wire-compatible
+    /audio/speech endpoint (real OpenAI, OpenRouter, a self-hosted gateway,
+    ...) regardless of what chat/image providers are set up. The feature is
+    unavailable (button hidden, /api/tts returns 503) whenever api_key is unset
+    — that is the sole on/off switch, so there's no way to half-configure this
+    into a broken-but-visible state."""
 
+    api_base: str = "https://api.openai.com/v1"
+    api_key: str = ""
     model: str = "tts-1"
     voice: str = "alloy"
     timeout_seconds: int = 30
@@ -136,6 +140,21 @@ class TtsSettings(BaseModel):
     max_chars: int = 4000
     # Per-user calls per minute (0 = unlimited) — each call hits a paid provider.
     per_minute: int = 20
+
+    @model_validator(mode="after")
+    def _sanitize(self) -> "TtsSettings":
+        # API keys are ASCII; pasting one from a web page/chat easily smuggles
+        # in a non-breaking space, stray whitespace, or other unicode that
+        # httpx can't encode into an Authorization header (a crash, not a
+        # clean error). Strip to printable ASCII, same as LLMConfigStore's
+        # _clean_key for DB-stored keys.
+        self.api_key = "".join(ch for ch in self.api_key if 33 <= ord(ch) <= 126)
+        # An explicitly-blank CLAW_TTS__API_BASE ("=" with nothing after it)
+        # binds api_base to "", bypassing the field default entirely — fall
+        # back the same way the old DB-backed lookup did (`api_base or default`).
+        if not self.api_base.strip():
+            self.api_base = "https://api.openai.com/v1"
+        return self
 
 
 class ConnectorSettings(BaseModel):

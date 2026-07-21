@@ -54,6 +54,11 @@ services:
       QROQ_KEY: ${QROQ_KEY:-}
       QROQ_URL: ${QROQ_URL:-https://api.groq.com/openai/v1}
       QROQ_MODEL: ${QROQ_MODEL:-whisper-large-v3}
+      # Optional text-to-speech (read-aloud speaker button). Fill CLAW_TTS__API_KEY to enable.
+      CLAW_TTS__API_BASE: ${CLAW_TTS__API_BASE:-https://api.openai.com/v1}
+      CLAW_TTS__API_KEY: ${CLAW_TTS__API_KEY:-}
+      CLAW_TTS__MODEL: ${CLAW_TTS__MODEL:-tts-1}
+      CLAW_TTS__VOICE: ${CLAW_TTS__VOICE:-alloy}
       # Optional: social login + Telegram (leave blank to disable).
       CLAW_OIDC_GOOGLE_CLIENT_ID: ${CLAW_OIDC_GOOGLE_CLIENT_ID:-}
       CLAW_OIDC_GOOGLE_CLIENT_SECRET: ${CLAW_OIDC_GOOGLE_CLIENT_SECRET:-}
