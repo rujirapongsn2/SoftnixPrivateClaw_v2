@@ -267,6 +267,13 @@ interface ChatProps {
   onOpenSettings?: (section: "skills" | "connectors" | "knowledge" | "models") => void;
 }
 
+// Cap on WebSocket reconnect attempts before giving up and surfacing an error
+// instead of retrying forever — a deleted/foreign session or a permanently
+// invalid token both close the socket in a way the browser can't reliably
+// distinguish from a transient drop, so silence isn't an option but neither
+// is an infinite retry loop.
+const MAX_RECONNECT_ATTEMPTS = 6;
+
 export function Chat({
   sessionId,
   userName,
@@ -352,10 +359,20 @@ export function Chat({
   const sentCountRef = useRef(0);
   // A message typed on the draft landing, held until the freshly-created
   // session's socket opens, then flushed. Lets the composer create the session
-  // lazily (like claude.ai) instead of on page load.
+  // lazily (like claude.ai) instead of on page load. Also doubles as the
+  // offline-send queue for an EXISTING session whose socket dropped (see
+  // reconnect handling below) — `sessionId: null` means "the next session to
+  // be created" (draft handoff), a real id means "only that session's onopen
+  // may flush this," so a message queued in one session can't be delivered
+  // into, or wrongly mistaken for a fresh empty session by, a different one.
   // Captures the model chosen at send-click too, so the flush uses exactly what
   // the user picked even if `model` state changes during the create handoff.
-  const pendingRef = useRef<{ content: string; atts: AttachmentRef[]; model: string } | null>(null);
+  const pendingRef = useRef<{
+    sessionId: string | null;
+    content: string;
+    atts: AttachmentRef[];
+    model: string;
+  } | null>(null);
   const rawSendRef = useRef<(content: string, atts: AttachmentRef[], modelOverride?: string) => void>(
     () => {},
   );
@@ -370,6 +387,17 @@ export function Chat({
   const sawCompletionRef = useRef(false);
   const prevRunningRef = useRef(false);
   const toast = useToast();
+  // Mobile browsers (iOS Safari, Chrome/Android) aggressively tear down open
+  // WebSockets on backgrounding, screen lock, or a WiFi<->cellular handoff —
+  // desktop doesn't do this, which is why the bug below only shows up on
+  // phones. Without a reconnect path, the socket just stays CLOSED until the
+  // user picks a different session (which re-runs the per-session effect).
+  // These let code outside that effect (send/rawSend, visibility/online
+  // listeners) trigger a reconnect without restructuring its closures.
+  const openSocketRef = useRef<() => void>(() => {});
+  const ensureConnectedRef = useRef<() => void>(() => {});
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     // Safari's contenteditable text layout picks shaping rules from the
@@ -406,17 +434,25 @@ export function Chat({
     sentCountRef.current = 0;
     sawCompletionRef.current = false;
     prevRunningRef.current = !!running;
+    // A prior session's flap count must not inflate this session's first
+    // reconnect delay.
+    reconnectAttemptRef.current = 0;
     // Draft landing: no session yet, so no socket and nothing to load.
     if (!sessionId) {
       setBusy(false);
       return;
     }
-    // A pending draft message means this session was just created and is
-    // therefore empty — skip the message fetch (which would race the flush
-    // and could clobber the optimistic bubble) and keep the spinner up so the
-    // greeting doesn't flash back in during the handoff. Also keep the spinner
-    // up when reopening a session the backend says is still processing.
-    const handoff = pendingRef.current !== null;
+    // A pending draft message (queued with sessionId: null) means this
+    // session was just created and is therefore empty — skip the message
+    // fetch (which would race the flush and could clobber the optimistic
+    // bubble) and keep the spinner up so the greeting doesn't flash back in
+    // during the handoff. A message queued for a DIFFERENT, already-existing
+    // session (offline-send while that session's socket was down) must NOT
+    // trigger this — this session has real history to load — so only a
+    // null-tagged (draft) pending counts as a handoff.
+    const handoff = pendingRef.current?.sessionId === null;
+    // Also keep the spinner up when reopening a session the backend says is
+    // still processing.
     // A pending image prompt is the same "fresh, empty session" situation,
     // but it's a REST call with no socket turn to eventually clear `busy` —
     // only skip the fetch (so it can't clobber the optimistic user bubble
@@ -427,8 +463,13 @@ export function Chat({
     let cancelled = false;
     let socket: WebSocket | null = null;
     const onOpen = () => {
+      reconnectAttemptRef.current = 0;
       const pending = pendingRef.current;
-      if (pending) {
+      // Only flush a pending message that's either a draft handoff (targets
+      // whichever session gets created next) or explicitly queued for THIS
+      // session — otherwise a message queued in a different, still-open
+      // session would get delivered down this one's socket.
+      if (pending && (pending.sessionId === null || pending.sessionId === sessionId)) {
         pendingRef.current = null;
         rawSendRef.current(pending.content, pending.atts, pending.model);
       }
@@ -604,18 +645,76 @@ export function Chat({
           break;
       }
     };
+    // A give-up (permanent auth failure, or reconnect attempts exhausted)
+    // leaves a queued message stranded forever otherwise — surface that
+    // instead of silently discarding it.
+    const discardQueuedMessage = () => {
+      const pending = pendingRef.current;
+      if (pending && (pending.sessionId === null || pending.sessionId === sessionId)) {
+        pendingRef.current = null;
+        toast({ body: "Your message couldn't be sent — please try again.", type: "error" });
+      }
+    };
     const onClose = (ev: CloseEvent) => {
-      if (ev.code === 4401) setError("Authentication failed — check your token and email.");
+      if (ev.code === 4401) {
+        setError("Authentication failed — check your token and email.");
+        discardQueuedMessage();
+        return;
+      }
+      // Any other close (network drop, mobile suspension, server restart) is
+      // abnormal — retry with capped exponential backoff instead of leaving
+      // the session stuck until the user manually starts a new chat. Note:
+      // a permanently-failing close (e.g. a deleted/foreign session, closed
+      // server-side before the WS handshake completes) isn't distinguishable
+      // from a transient drop by close code alone — such closes never reach
+      // the browser with their real code, only as an aborted handshake — so
+      // this can't special-case them; the attempt cap below bounds the
+      // damage instead.
+      if (cancelled) return;
+      const attempt = reconnectAttemptRef.current + 1;
+      reconnectAttemptRef.current = attempt;
+      if (attempt > MAX_RECONNECT_ATTEMPTS) {
+        setError("Couldn't reconnect — check your connection, then reload or start a new chat.");
+        discardQueuedMessage();
+        return;
+      }
+      const delay = Math.min(1000 * 2 ** (attempt - 1), 15000);
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = setTimeout(() => openSocketRef.current(), delay);
     };
 
     const openSocket = () => {
       if (cancelled) return;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       socket = openChatSocket(sessionId);
       socketRef.current = socket;
       socket.onopen = onOpen;
       socket.onmessage = onMessage;
       socket.onclose = onClose;
     };
+    openSocketRef.current = openSocket;
+    // Reconnect immediately (skipping the backoff delay) when the tab regains
+    // focus or the network comes back — don't make the user wait out a timer
+    // that was sized for a background retry once they're actively looking.
+    ensureConnectedRef.current = () => {
+      if (cancelled) return;
+      const state = socketRef.current?.readyState;
+      if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return;
+      reconnectAttemptRef.current = 0;
+      openSocketRef.current();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") ensureConnectedRef.current();
+    };
+    // Not gated on visibility: network can recover while the tab is still
+    // backgrounded, and a hidden tab's backoff timer is subject to browser
+    // throttling — don't wait on it when a real "online" signal fires.
+    const onOnline = () => ensureConnectedRef.current();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onOnline);
 
     if (skipMessageFetch) {
       // Fresh draft session — connect immediately to flush the pending message.
@@ -648,6 +747,12 @@ export function Chat({
 
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onOnline);
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       const s = socket;
       if (!s) return;
       // Closing a socket still mid-handshake (React StrictMode remount) logs a
@@ -965,6 +1070,22 @@ export function Chat({
     rawSendRef.current = rawSend;
   }, [rawSend]);
 
+  // Shared by both pendingRef writers (draft handoff and offline-send queue,
+  // below). Only one message can be queued at a time — warn instead of
+  // silently dropping if a still-unflushed message for a DIFFERENT session
+  // is about to be overwritten (e.g. user starts a new chat while a previous
+  // session's send is still waiting to reconnect).
+  const queueOfflineMessage = useCallback(
+    (targetSessionId: string | null, content: string, atts: AttachmentRef[], model: string) => {
+      const prior = pendingRef.current;
+      if (prior && prior.sessionId !== targetSessionId) {
+        toast({ body: "Your previous message couldn't be sent — try resending it.", type: "error" });
+      }
+      pendingRef.current = { sessionId: targetSessionId, content, atts, model };
+    },
+    [toast],
+  );
+
   const send = useCallback(
     (value: string) => {
       const content = value.trim();
@@ -973,7 +1094,7 @@ export function Chat({
       // Draft landing: create the session first, then flush this message once
       // its socket connects (handled in the session effect's onopen).
       if (!sessionId) {
-        pendingRef.current = { content, atts, model };
+        queueOfflineMessage(null, content, atts, model);
         setAttachments([]);
         setError("");
         onRequireSession?.().catch((e) => {
@@ -982,11 +1103,30 @@ export function Chat({
         });
         return;
       }
-      if (socketRef.current?.readyState !== WebSocket.OPEN) return;
+      if (socketRef.current?.readyState !== WebSocket.OPEN) {
+        // Socket dropped (common on mobile: backgrounding/lock/network switch)
+        // — don't silently swallow the tap. Queue it the same way the draft
+        // landing does (flushed by the session effect's onopen once
+        // reconnected) and kick a reconnect attempt right away instead of
+        // waiting out the backoff timer. Only the latest queued message for
+        // THIS session is kept; a burst of sends while offline collapses to
+        // the last one. uniqueID collapses repeat taps into one toast instead
+        // of stacking a new one per tap.
+        queueOfflineMessage(sessionId, content, atts, model);
+        setAttachments([]);
+        setError("");
+        toast({
+          body: "Connection lost — reconnecting, your message will send once back online.",
+          type: "info",
+          uniqueID: "ws-reconnect",
+        });
+        ensureConnectedRef.current();
+        return;
+      }
       rawSend(content, atts);
       setAttachments([]);
     },
-    [attachments, sessionId, onRequireSession, rawSend, model],
+    [attachments, sessionId, onRequireSession, rawSend, model, toast, queueOfflineMessage],
   );
 
   const onPickFiles = useCallback(
