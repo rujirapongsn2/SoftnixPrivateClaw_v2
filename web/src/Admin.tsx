@@ -21,6 +21,7 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
+  Cloud,
   Coins,
   Cpu,
   Diamond,
@@ -32,6 +33,7 @@ import {
   LayoutDashboard,
   Mail,
   MessageSquare,
+  Moon,
   Palette,
   Pencil,
   Plus,
@@ -51,6 +53,7 @@ import {
   User as UserIcon,
   UserPlus,
   Users,
+  Zap,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
@@ -949,6 +952,9 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
   { key: "softnix", name: "Softnix GenAI", subtitle: "Private GenAI Platform", icon: Cpu, apiBase: "https://genai.softnix.ai/external/openai", needsBase: false, prefix: "openai/", example: "openai/gemini-3.1-pro-preview" },
   { key: "openrouter", name: "OpenRouter", subtitle: "Any model", icon: Router, apiBase: "https://openrouter.ai/api/v1", needsBase: false, prefix: "openrouter/", example: "openrouter/anthropic/claude-sonnet-5" },
   { key: "compatible", name: "OpenAI-compatible", subtitle: "vLLM, Ollama, LM Studio", icon: Server, apiBase: "", needsBase: true, prefix: "openai/", example: "openai/your-model" },
+  { key: "moonshot", name: "Kimi", subtitle: "Moonshot AI", icon: Moon, apiBase: "https://api.moonshot.ai/v1", needsBase: false, prefix: "moonshot/", example: "moonshot/kimi-k2" },
+  { key: "zai", name: "Z.AI", subtitle: "Zhipu GLM", icon: Zap, apiBase: "https://api.z.ai/api/paas/v4", needsBase: false, prefix: "zai/", example: "zai/glm-4.6" },
+  { key: "dashscope", name: "Qwen", subtitle: "Alibaba Cloud", icon: Cloud, apiBase: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", needsBase: false, prefix: "dashscope/", example: "dashscope/qwen3-max" },
 ];
 
 // Brand logos via github.com/TypingMind/model-icons (MIT) — see
@@ -964,6 +970,9 @@ const PROVIDER_LOGO: Record<string, string> = {
   deepseek: "/llm-providers/deepseek.png",
   groq: "/llm-providers/groq.svg",
   softnix: "/llm-providers/softnix.png",
+  moonshot: "/llm-providers/moonshot.png",
+  zai: "/llm-providers/zai.png",
+  dashscope: "/llm-providers/qwen.png",
 };
 
 function logoForModelId(modelId: string): string | null {
@@ -1007,6 +1016,7 @@ const LITELLM_PREFIXES = new Set([
   "openai", "anthropic", "gemini", "vertex_ai", "openrouter", "azure", "bedrock",
   "cohere", "mistral", "groq", "ollama", "deepseek", "xai", "together_ai",
   "fireworks_ai", "perplexity", "cerebras", "replicate", "huggingface", "watsonx",
+  "moonshot", "zai", "dashscope",
 ]);
 
 function modelPrefixWarning(modelId: string): string | null {

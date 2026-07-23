@@ -323,9 +323,21 @@ html[data-font-size="large"] {
   flex-direction: column;
   position: relative;
 }
+/* PrivateClaw brand accent: a soft lime glow tucked into the top-right corner.
+   Fixed pixel radius (not a % of the box) so it stays a corner accent instead
+   of ballooning across tall viewports; low opacity (0.16, within the intended
+   0.12-0.18 band) keeps it well behind message text at any font size. Listed
+   first in each background-image below so the dots/grid patterns layer on
+   top of it rather than replacing it. */
+.claw-chat {
+  background-image: radial-gradient(circle 480px at top right, rgba(163, 230, 53, 0.16), transparent 70%);
+  background-repeat: no-repeat;
+}
 /* Admin-set chat background pattern (Control Plane > Preferences), applied as a
    data-attribute on <html> by the BrandingProvider. Solid (default) leaves the
-   app wash showing through. Dots/Grid paint a texture over it — deliberately
+   app wash showing through, aside from the brand lime-glow layer above, which
+   is intentionally not gated behind any data-chat-bg value. Dots/Grid paint a
+   texture over it — deliberately
    using a fixed rgba(black) rather than the `--color-border` token: that token
    (~#ebebeb) sits only ~15 levels off the app's wash background (~#faf9f5),
    making a 1px mark essentially invisible once anti-aliased. rgba(0,0,0,.14)/
@@ -334,14 +346,19 @@ html[data-font-size="large"] {
    instead of the soft, near-zero-area blob a bare "1px, transparent 1px"
    radial-gradient renders as. */
 html[data-chat-bg="dots"] .claw-chat {
-  background-image: radial-gradient(circle, rgba(0, 0, 0, 0.14) 1.5px, transparent 1.5px);
-  background-size: 32px 32px;
+  background-image:
+    radial-gradient(circle 480px at top right, rgba(163, 230, 53, 0.16), transparent 70%),
+    radial-gradient(circle, rgba(0, 0, 0, 0.14) 1.5px, transparent 1.5px);
+  background-repeat: no-repeat, repeat;
+  background-size: auto, 32px 32px;
 }
 html[data-chat-bg="grid"] .claw-chat {
   background-image:
+    radial-gradient(circle 480px at top right, rgba(163, 230, 53, 0.16), transparent 70%),
     linear-gradient(to right, rgba(0, 0, 0, 0.08) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(0, 0, 0, 0.08) 1px, transparent 1px);
-  background-size: 32px 32px;
+  background-repeat: no-repeat, repeat, repeat;
+  background-size: auto, 32px 32px, 32px 32px;
 }
 
 /* Control Plane > Preferences — logo upload rows. */

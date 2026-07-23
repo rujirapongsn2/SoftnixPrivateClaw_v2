@@ -149,7 +149,9 @@ class OutlookCalendarClient:
         if select:
             params["$select"] = str(select).strip()
         else:
-            params["$select"] = "id,subject,start,end,location,organizer,attendees,isOnlineMeeting,onlineMeetingProvider"
+            params["$select"] = (
+                "id,subject,start,end,location,organizer,attendees,isOnlineMeeting,onlineMeetingProvider"
+            )
         if filter:
             params["$filter"] = str(filter).strip()
         if search:
@@ -178,7 +180,9 @@ class OutlookCalendarClient:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         params = {"$select": str(select).strip()} if str(select or "").strip() else None
-        return self._request("GET", f"{self._user_path(user_id)}/events/{str(event_id).strip()}", params=params)
+        return self._request(
+            "GET", f"{self._user_path(user_id)}/events/{str(event_id).strip()}", params=params
+        )
 
     def create_event(
         self,
@@ -255,11 +259,37 @@ class OutlookCalendarClient:
             payload["onlineMeetingProvider"] = str(online_meeting_provider)
         if not payload:
             raise ValueError("At least one event field is required for update")
-        return self._request("PATCH", f"{self._user_path(user_id)}/events/{str(event_id).strip()}", json_data=payload)
+        return self._request(
+            "PATCH", f"{self._user_path(user_id)}/events/{str(event_id).strip()}", json_data=payload
+        )
 
     def delete_event(self, event_id: str, *, user_id: str | None = None) -> dict[str, Any]:
         self.ensure_write_scope(required_scope="Calendars.ReadWrite")
         return self._request("DELETE", f"{self._user_path(user_id)}/events/{str(event_id).strip()}")
+
+    def get_schedule(
+        self,
+        *,
+        schedules: str,
+        start_date_time: str,
+        end_date_time: str,
+        timezone: str = "UTC",
+        availability_view_interval: int = 30,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Free/busy lookup via Graph's getSchedule — works for any mailbox in the
+        tenant under plain Calendars.Read(Write), unlike /events which 403s
+        without the target explicitly sharing their calendar."""
+        schedule_list = _normalize_recipients(schedules)
+        if not schedule_list:
+            raise ValueError("At least one schedule (email address) is required")
+        payload = {
+            "schedules": schedule_list,
+            "startTime": {"dateTime": str(start_date_time), "timeZone": str(timezone or "UTC")},
+            "endTime": {"dateTime": str(end_date_time), "timeZone": str(timezone or "UTC")},
+            "availabilityViewInterval": int(availability_view_interval),
+        }
+        return self._request("POST", f"{self._user_path(user_id)}/calendar/getSchedule", json_data=payload)
 
     def token_scopes(self) -> set[str]:
         return _decode_access_token_permissions(self.token)
@@ -323,7 +353,10 @@ class OutlookCalendarClient:
         explicit = str(self.token_uri or "").strip()
         if explicit:
             return explicit
-        tenant = str(self.tenant_id or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT).strip() or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT
+        tenant = (
+            str(self.tenant_id or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT).strip()
+            or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT
+        )
         return f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 
     def has_refresh_credentials(self) -> bool:
@@ -342,8 +375,7 @@ def _normalize_recipients(value: str | None) -> list[str]:
 
 def _build_attendees(value: str | None) -> list[dict[str, Any]]:
     return [
-        {"emailAddress": {"address": address}, "type": "required"}
-        for address in _normalize_recipients(value)
+        {"emailAddress": {"address": address}, "type": "required"} for address in _normalize_recipients(value)
     ]
 
 
@@ -425,11 +457,18 @@ def _extract_response_detail(response: httpx.Response) -> str:
 
 
 def _client_from_env() -> OutlookCalendarClient:
-    tenant_id = str(os.environ.get("OUTLOOK_CALENDAR_TENANT_ID") or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT).strip() or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT
+    tenant_id = (
+        str(os.environ.get("OUTLOOK_CALENDAR_TENANT_ID") or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT).strip()
+        or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT
+    )
     return OutlookCalendarClient(
         token=str(os.environ.get("OUTLOOK_CALENDAR_TOKEN") or "").strip(),
-        graph_base=str(os.environ.get("OUTLOOK_CALENDAR_GRAPH_BASE") or OUTLOOK_CALENDAR_GRAPH_BASE_DEFAULT).strip() or OUTLOOK_CALENDAR_GRAPH_BASE_DEFAULT,
-        user_id=str(os.environ.get("OUTLOOK_CALENDAR_USER_ID") or OUTLOOK_CALENDAR_USER_ID_DEFAULT).strip() or OUTLOOK_CALENDAR_USER_ID_DEFAULT,
+        graph_base=str(
+            os.environ.get("OUTLOOK_CALENDAR_GRAPH_BASE") or OUTLOOK_CALENDAR_GRAPH_BASE_DEFAULT
+        ).strip()
+        or OUTLOOK_CALENDAR_GRAPH_BASE_DEFAULT,
+        user_id=str(os.environ.get("OUTLOOK_CALENDAR_USER_ID") or OUTLOOK_CALENDAR_USER_ID_DEFAULT).strip()
+        or OUTLOOK_CALENDAR_USER_ID_DEFAULT,
         refresh_token=str(os.environ.get("OUTLOOK_CALENDAR_REFRESH_TOKEN") or "").strip(),
         client_id=str(os.environ.get("OUTLOOK_CALENDAR_CLIENT_ID") or "").strip(),
         client_secret=str(os.environ.get("OUTLOOK_CALENDAR_CLIENT_SECRET") or "").strip(),
@@ -441,10 +480,19 @@ def _client_from_env() -> OutlookCalendarClient:
 
 
 def _connector_context() -> dict[str, Any]:
-    tenant_id = str(os.environ.get("OUTLOOK_CALENDAR_TENANT_ID") or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT).strip() or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT
-    default_user_id = str(os.environ.get("OUTLOOK_CALENDAR_USER_ID") or OUTLOOK_CALENDAR_USER_ID_DEFAULT).strip() or OUTLOOK_CALENDAR_USER_ID_DEFAULT
+    tenant_id = (
+        str(os.environ.get("OUTLOOK_CALENDAR_TENANT_ID") or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT).strip()
+        or OUTLOOK_CALENDAR_TENANT_ID_DEFAULT
+    )
+    default_user_id = (
+        str(os.environ.get("OUTLOOK_CALENDAR_USER_ID") or OUTLOOK_CALENDAR_USER_ID_DEFAULT).strip()
+        or OUTLOOK_CALENDAR_USER_ID_DEFAULT
+    )
     return {
-        "graph_base": str(os.environ.get("OUTLOOK_CALENDAR_GRAPH_BASE") or OUTLOOK_CALENDAR_GRAPH_BASE_DEFAULT).strip() or OUTLOOK_CALENDAR_GRAPH_BASE_DEFAULT,
+        "graph_base": str(
+            os.environ.get("OUTLOOK_CALENDAR_GRAPH_BASE") or OUTLOOK_CALENDAR_GRAPH_BASE_DEFAULT
+        ).strip()
+        or OUTLOOK_CALENDAR_GRAPH_BASE_DEFAULT,
         "has_token": bool(str(os.environ.get("OUTLOOK_CALENDAR_TOKEN") or "").strip()),
         "has_refresh_token": bool(str(os.environ.get("OUTLOOK_CALENDAR_REFRESH_TOKEN") or "").strip()),
         "has_client_id": bool(str(os.environ.get("OUTLOOK_CALENDAR_CLIENT_ID") or "").strip()),
@@ -453,7 +501,7 @@ def _connector_context() -> dict[str, Any]:
         "tenant_id": tenant_id,
         "token_uri": str(os.environ.get("OUTLOOK_CALENDAR_TOKEN_URI") or "").strip()
         or f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
-        "capabilities": ["calendar.read", "calendar.write"],
+        "capabilities": ["calendar.read", "calendar.write", "calendar.freebusy"],
     }
 
 
@@ -461,7 +509,8 @@ mcp = FastMCP(
     "outlook-calendar-connector",
     instructions=(
         "Outlook Calendar connector for calendar list, event search, event inspection, "
-        "and event create/update/delete tasks through Microsoft Graph."
+        "event create/update/delete, and free/busy schedule lookups (including other "
+        "mailboxes in the same tenant) through Microsoft Graph."
     ),
 )
 
@@ -573,7 +622,34 @@ def delete_event(event_id: str, user_id: str | None = None) -> dict[str, Any]:
     return _client_from_env().delete_event(event_id=event_id, user_id=user_id)
 
 
-@mcp.tool(description="Return the Outlook Calendar connector runtime context, including configured mailbox user ID.")
+@mcp.tool(
+    description=(
+        "Check free/busy availability for one or more mailboxes (e.g. colleagues in the same "
+        "tenant) over a time range, without needing them to explicitly share their calendar. "
+        "schedules is a comma/semicolon-separated list of email addresses/UPNs."
+    )
+)
+def get_schedule(
+    schedules: str,
+    start_date_time: str,
+    end_date_time: str,
+    timezone: str = "UTC",
+    availability_view_interval: int = 30,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    return _client_from_env().get_schedule(
+        schedules=schedules,
+        start_date_time=start_date_time,
+        end_date_time=end_date_time,
+        timezone=timezone,
+        availability_view_interval=availability_view_interval,
+        user_id=user_id,
+    )
+
+
+@mcp.tool(
+    description="Return the Outlook Calendar connector runtime context, including configured mailbox user ID."
+)
 def get_connector_context() -> dict[str, Any]:
     return _connector_context()
 
