@@ -289,7 +289,10 @@ class OutlookCalendarClient:
             "endTime": {"dateTime": str(end_date_time), "timeZone": str(timezone or "UTC")},
             "availabilityViewInterval": int(availability_view_interval),
         }
-        return self._request("POST", f"{self._user_path(user_id)}/calendar/getSchedule", json_data=payload)
+        response = self._request(
+            "POST", f"{self._user_path(user_id)}/calendar/getSchedule", json_data=payload
+        )
+        return _flag_schedule_errors(response)
 
     def token_scopes(self) -> set[str]:
         return _decode_access_token_permissions(self.token)
@@ -363,14 +366,43 @@ class OutlookCalendarClient:
         return bool(str(self.refresh_token or "").strip() and str(self.client_id or "").strip())
 
 
-def _normalize_recipients(value: str | None) -> list[str]:
+def _normalize_recipients(value: Any) -> list[str]:
     if value is None:
         return []
+    if isinstance(value, (list, tuple, set)):
+        out: list[str] = []
+        for entry in value:
+            out.extend(_normalize_recipients(entry))
+        return out
     if isinstance(value, str):
         items = value.replace(";", ",").split(",")
     else:
         items = [str(value)]
     return [item.strip() for item in items if item and item.strip()]
+
+
+def _flag_schedule_errors(response: Any) -> Any:
+    """getSchedule can return HTTP 200 with a per-mailbox `error` object (no
+    permission, mailbox not found, etc.) instead of raising — flag those so a
+    failed lookup isn't mistaken for a mailbox that's simply free all day."""
+    if not isinstance(response, dict):
+        return response
+    failed = [
+        str(item.get("scheduleId") or "unknown mailbox")
+        for item in response.get("value") or []
+        if isinstance(item, dict) and item.get("error")
+    ]
+    if failed:
+        return {
+            **response,
+            "lookup_failed_for": failed,
+            "lookup_failed_note": (
+                "Free/busy could not be determined for these mailboxes (no permission, not "
+                "found, or restricted) — do NOT report them as free; tell the user the lookup "
+                "failed for them instead."
+            ),
+        }
+    return response
 
 
 def _build_attendees(value: str | None) -> list[dict[str, Any]]:
@@ -626,7 +658,9 @@ def delete_event(event_id: str, user_id: str | None = None) -> dict[str, Any]:
     description=(
         "Check free/busy availability for one or more mailboxes (e.g. colleagues in the same "
         "tenant) over a time range, without needing them to explicitly share their calendar. "
-        "schedules is a comma/semicolon-separated list of email addresses/UPNs."
+        "schedules is a comma/semicolon-separated list of email addresses/UPNs. If the result "
+        "includes 'lookup_failed_for', treat those mailboxes as unknown — the lookup failed for "
+        "them (no permission / not found), do not report them as free."
     )
 )
 def get_schedule(

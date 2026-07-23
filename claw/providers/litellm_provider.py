@@ -470,6 +470,10 @@ class LiteLLMProvider(LLMProvider):
             kwargs["api_key"] = key
         if base:
             kwargs["api_base"] = base
+        # Deliberately does NOT call apply_model_overrides: the dashscope qwen3
+        # override sets enable_thinking=True, which DashScope only accepts on
+        # streaming calls — this path is non-streaming (no image-generation
+        # model in practice matches "qwen3" anyway, but don't risk it).
         resp = await acompletion(**kwargs)  # deliberately NO tools / NO stream
         choices = getattr(resp, "choices", None) or []
         if not choices:

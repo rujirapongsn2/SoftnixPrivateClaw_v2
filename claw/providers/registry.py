@@ -32,9 +32,11 @@ _SPECS: tuple[ProviderSpec, ...] = (
         ("dashscope/",),
         supports_prompt_caching=True,
         # DashScope requires enable_thinking to be explicit for Qwen3
-        # models; this app always streams, so True is always correct
-        # here (DashScope only rejects enable_thinking=true for
-        # non-streaming calls, which this provider never makes).
+        # models; this override is only correct for streaming calls
+        # (DashScope rejects enable_thinking=true on non-streaming calls).
+        # apply_model_overrides() is only called from stream_chat(); the
+        # non-streaming image-generation path deliberately skips it, see
+        # LiteLLMProvider._image_via_chat.
         model_overrides=(("qwen3", {"extra_body": {"enable_thinking": True}}),),
     ),
     ProviderSpec("deepseek", ("deepseek/", "deepseek-")),

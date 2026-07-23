@@ -280,6 +280,9 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
         </div>
         <div>
           <Text weight="semibold">Chat background</Text>
+          <Text size="sm" color="secondary">
+            Solid, Dots, or Grid — a subtle brand accent glow is always present in the corner.
+          </Text>
           <SegmentedControl value={chatBg} onChange={(v) => setChatBg(v as BrandingChatBackground)} label="Chat background">
             <SegmentedControlItem value="solid" label="Solid" />
             <SegmentedControlItem value="dots" label="Dots" />
