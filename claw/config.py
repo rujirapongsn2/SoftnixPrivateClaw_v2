@@ -12,7 +12,7 @@ class LLMSettings(BaseModel):
     api_base: str = ""
     max_tokens: int = 4096
     temperature: float = 0.1
-    max_iterations: int = 30
+    max_iterations: int = 60
     # Token budget for the assembled prompt (input side).
     max_context_tokens: int = 60_000
 
