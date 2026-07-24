@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { WorkingPlan } from "./api";
+import { useT } from "./branding";
 
 export interface ExecSubStep {
   key: string;
@@ -90,6 +91,7 @@ export function ExecutionPanel({
   running: boolean;
   onClose: () => void;
 }) {
+  const t = useT();
   const [expanded, setExpanded] = useState<number | null>(null);
 
   const planSteps = plan?.steps ?? [];
@@ -120,7 +122,7 @@ export function ExecutionPanel({
   // Build the list: Request → each tool step → Response.
   const rows: Row[] = [];
   if (steps.length > 0 || running) {
-    rows.push({ kind: "request", title: "Request", status: "complete", icon: MessageSquare });
+    rows.push({ kind: "request", title: t("exec.request"), status: "complete", icon: MessageSquare });
   }
   steps.forEach((s, i) => {
     rows.push({
@@ -136,14 +138,18 @@ export function ExecutionPanel({
       substeps: s.substeps,
       counter:
         s.status === "running" && s.stepIndex && s.stepTotal
-          ? `step ${s.stepIndex} of ${s.stepTotal}`
+          ? t("exec.stepCounter", { index: String(s.stepIndex), total: String(s.stepTotal) })
           : undefined,
     });
   });
   if (steps.length > 0 || running) {
     rows.push({
       kind: "response",
-      title: running ? (anyStepRunning ? "Waiting…" : "Generating response…") : "Response",
+      title: running
+        ? anyStepRunning
+          ? t("exec.waiting")
+          : t("exec.generatingResponse")
+        : t("exec.response"),
       status: running ? (anyStepRunning ? "pending" : "running") : "complete",
       icon: Sparkles,
     });
@@ -153,7 +159,7 @@ export function ExecutionPanel({
     <aside className="claw-exec-panel">
       <div className="claw-exec-header">
         <div className="claw-row">
-          <Text weight="semibold">Execution</Text>
+          <Text weight="semibold">{t("exec.title")}</Text>
           {active ? (
             <span className="claw-exec-live">
               <Icon icon={Loader2} size="xsm" />
@@ -161,12 +167,12 @@ export function ExecutionPanel({
             </span>
           ) : steps.length > 0 ? (
             <Text size="sm" color="secondary">
-              {steps.length} step{steps.length === 1 ? "" : "s"}
+              {t("exec.stepCount", { count: String(steps.length), plural: steps.length === 1 ? "" : "s" })}
             </Text>
           ) : null}
         </div>
         <IconButton
-          label="Hide execution"
+          label={t("exec.hide")}
           icon={<Icon icon={X} size="sm" />}
           variant="ghost"
           size="sm"
@@ -178,7 +184,7 @@ export function ExecutionPanel({
         <div className="claw-plan-card">
           <div className="claw-plan-head">
             <Icon icon={ListChecks} size="xsm" color="secondary" />
-            <span className="claw-plan-title">Plan</span>
+            <span className="claw-plan-title">{t("exec.plan")}</span>
             {planSteps.length > 0 && (
               <span className="claw-plan-progress">
                 {planDone}/{planSteps.length}
@@ -209,7 +215,7 @@ export function ExecutionPanel({
       {rows.length === 0 && !hasPlan ? (
         <div className="claw-exec-empty">
           <Text size="sm" color="secondary">
-            No activity yet — steps appear here while Claw works.
+            {t("exec.empty")}
           </Text>
         </div>
       ) : (
@@ -254,14 +260,14 @@ export function ExecutionPanel({
                   <div className="claw-xexpand">
                     {row.detail && (
                       <>
-                        <div className="claw-xexpand-label">Input</div>
+                        <div className="claw-xexpand-label">{t("exec.input")}</div>
                         <pre className="claw-xpre">{row.detail}</pre>
                       </>
                     )}
                     {row.result && (
                       <>
                         <div className="claw-xexpand-label">
-                          {row.isError ? "Error" : "Result"}
+                          {row.isError ? t("exec.error") : t("exec.result")}
                         </div>
                         <pre className={`claw-xpre${row.isError ? " claw-xpre--error" : ""}`}>
                           {row.result}

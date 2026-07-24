@@ -100,11 +100,11 @@ async function writeClipboard(text: string): Promise<boolean> {
   }
 }
 
-const COST_LABEL: Record<string, string> = {
-  low: "Low cost",
-  medium: "Medium cost",
-  high: "High cost",
-  very_high: "Very high cost",
+const COST_LABEL_KEY: Record<string, string> = {
+  low: "chat.cost.low",
+  medium: "chat.cost.medium",
+  high: "chat.cost.high",
+  very_high: "chat.cost.veryHigh",
 };
 
 // Starter chips shown on the empty landing screen, à la claude.ai — tailored to
@@ -210,18 +210,25 @@ interface ConfirmRow {
   status: "pending" | "approved" | "denied";
 }
 
-// Confirmation-card copy per gated tool (Ask mode). The default covers any
-// future gated tool without a code change.
-const CONFIRM_COPY: Record<string, { pending: string; approved: string }> = {
-  exec: { pending: "Run this command in the sandbox?", approved: "Approved — command ran" },
-  workflow: { pending: "Start this multi-step workflow?", approved: "Approved — workflow started" },
-  spawn: { pending: "Run this delegated task?", approved: "Approved — task started" },
+// Confirmation-card copy keys per gated tool (Ask mode). The default covers
+// any future gated tool without a code change.
+const CONFIRM_COPY_KEY: Record<string, { pending: string; approved: string }> = {
+  exec: { pending: "chat.confirm.exec.pending", approved: "chat.confirm.exec.approved" },
+  workflow: { pending: "chat.confirm.workflow.pending", approved: "chat.confirm.workflow.approved" },
+  spawn: { pending: "chat.confirm.spawn.pending", approved: "chat.confirm.spawn.approved" },
 };
-function confirmTitle(tool: string, status: ConfirmRow["status"]): string {
-  const copy = CONFIRM_COPY[tool] ?? { pending: "Run this action?", approved: "Approved" };
-  if (status === "pending") return copy.pending;
-  if (status === "approved") return copy.approved;
-  return "Declined";
+function confirmTitle(
+  t: (key: string) => string,
+  tool: string,
+  status: ConfirmRow["status"],
+): string {
+  const copy = CONFIRM_COPY_KEY[tool] ?? {
+    pending: "chat.confirm.default.pending",
+    approved: "chat.confirm.default.approved",
+  };
+  if (status === "pending") return t(copy.pending);
+  if (status === "approved") return t(copy.approved);
+  return t("chat.confirm.declined");
 }
 
 type TranscriptItem =
@@ -231,20 +238,20 @@ type TranscriptItem =
 
 const PERMISSION_OPTS: {
   key: PermissionMode;
-  label: string;
-  desc: string;
+  labelKey: string;
+  descKey: string;
   icon: typeof ShieldCheck;
 }[] = [
   {
     key: "ask",
-    label: "Ask",
-    desc: "Ask before sandbox commands and multi-step workflows",
+    labelKey: "chat.permission.ask.label",
+    descKey: "chat.permission.ask.desc",
     icon: ShieldCheck,
   },
   {
     key: "auto",
-    label: "Auto",
-    desc: "Run everything automatically without asking",
+    labelKey: "chat.permission.auto.label",
+    descKey: "chat.permission.auto.desc",
     icon: ShieldAlert,
   },
 ];
@@ -655,12 +662,12 @@ export function Chat({
       const pending = pendingRef.current;
       if (pending && (pending.sessionId === null || pending.sessionId === sessionId)) {
         pendingRef.current = null;
-        toast({ body: "Your message couldn't be sent — please try again.", type: "error" });
+        toast({ body: t("chat.error.sendFailed"), type: "error" });
       }
     };
     const onClose = (ev: CloseEvent) => {
       if (ev.code === 4401) {
-        setError("Authentication failed — check your token and email.");
+        setError(t("chat.error.authFailed"));
         discardQueuedMessage();
         return;
       }
@@ -677,7 +684,7 @@ export function Chat({
       const attempt = reconnectAttemptRef.current + 1;
       reconnectAttemptRef.current = attempt;
       if (attempt > MAX_RECONNECT_ATTEMPTS) {
-        setError("Couldn't reconnect — check your connection, then reload or start a new chat.");
+        setError(t("chat.error.reconnectFailed"));
         discardQueuedMessage();
         return;
       }
@@ -907,7 +914,7 @@ export function Chat({
           <button
             type="button"
             className="claw-mention-chip-remove"
-            aria-label={`Remove ${name}`}
+            aria-label={t("chat.mention.remove", { name })}
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -919,7 +926,7 @@ export function Chat({
         </span>
       ),
     }),
-    [removeMentionChip],
+    [removeMentionChip, t],
   );
 
   const insertMention = useCallback(
@@ -949,20 +956,20 @@ export function Chat({
       ...skills.map((s) => ({
         id: `skill:${s.id}`,
         label: s.name,
-        auxiliaryData: { icon: BookOpen, kind: "Skill" },
+        auxiliaryData: { icon: BookOpen, kind: t("chat.slash.kind.skill") },
       })),
       ...connectors.map((c) => ({
         id: `connector:${c.id}`,
         label: c.name,
-        auxiliaryData: { icon: Plug, kind: "Connector" },
+        auxiliaryData: { icon: Plug, kind: t("chat.slash.kind.connector") },
       })),
       ...knowledge.map((k) => ({
         id: `knowledge:${k.id}`,
         label: k.name,
-        auxiliaryData: { icon: Library, kind: "Knowledge" },
+        auxiliaryData: { icon: Library, kind: t("chat.slash.kind.knowledge") },
       })),
     ],
-    [skills, connectors, knowledge],
+    [skills, connectors, knowledge, t],
   );
 
   const composerTriggers = useMemo<ChatComposerTrigger[]>(
@@ -970,8 +977,8 @@ export function Chat({
       {
         character: "/",
         searchSource: createStaticSource(slashItems),
-        menuLabel: "Skills, connectors & knowledge",
-        emptySearchResultsText: "No skills, connectors, or knowledge bases match",
+        menuLabel: t("chat.slash.menuLabel"),
+        emptySearchResultsText: t("chat.slash.empty"),
         renderItem: (item) => {
           const data = (item as SlashMentionItem).auxiliaryData;
           return (
@@ -988,7 +995,7 @@ export function Chat({
         },
       },
     ],
-    [slashItems, mentionToken],
+    [slashItems, mentionToken, t],
   );
 
   // Jump from the "+" menu straight to the matching Settings section — keeps
@@ -1045,7 +1052,7 @@ export function Chat({
     }
     if (micState === "transcribing") return;
     if (!navigator.mediaDevices?.getUserMedia) {
-      toast({ body: "Microphone not available in this browser", type: "error" });
+      toast({ body: t("chat.error.micUnavailable"), type: "error" });
       return;
     }
     try {
@@ -1068,9 +1075,9 @@ export function Chat({
           const ext = (recorder.mimeType || "audio/webm").includes("ogg") ? "ogg" : "webm";
           const text = await api.transcribe(blob, `speech.${ext}`);
           if (text) appendTranscript(text);
-          else toast({ body: "Didn't catch that — try again", type: "info" });
+          else toast({ body: t("chat.error.micNoSpeech"), type: "info" });
         } catch (e) {
-          toast({ body: `Transcription failed: ${String(e)}`, type: "error" });
+          toast({ body: `${t("chat.error.transcriptionFailed")}: ${String(e)}`, type: "error" });
         } finally {
           setMicState("idle");
         }
@@ -1078,10 +1085,10 @@ export function Chat({
       recorder.start();
       setMicState("recording");
     } catch {
-      toast({ body: "Microphone permission denied", type: "error" });
+      toast({ body: t("chat.error.micDenied"), type: "error" });
       setMicState("idle");
     }
-  }, [micState, appendTranscript, toast]);
+  }, [micState, appendTranscript, toast, t]);
 
   // Push a message over the (open) socket and reflect it locally. Assumes a
   // connected session — the draft path in `send` routes through here only
@@ -1141,11 +1148,11 @@ export function Chat({
     (targetSessionId: string | null, content: string, atts: AttachmentRef[], model: string) => {
       const prior = pendingRef.current;
       if (prior && prior.sessionId !== targetSessionId) {
-        toast({ body: "Your previous message couldn't be sent — try resending it.", type: "error" });
+        toast({ body: t("chat.error.prevMessageFailed"), type: "error" });
       }
       pendingRef.current = { sessionId: targetSessionId, content, atts, model };
     },
-    [toast],
+    [toast, t],
   );
 
   const send = useCallback(
@@ -1161,7 +1168,7 @@ export function Chat({
         setError("");
         onRequireSession?.().catch((e) => {
           pendingRef.current = null;
-          setError(`Couldn't start chat: ${String(e)}`);
+          setError(`${t("chat.error.startChatFailed")}: ${String(e)}`);
         });
         return;
       }
@@ -1178,7 +1185,7 @@ export function Chat({
         setAttachments([]);
         setError("");
         toast({
-          body: "Connection lost — reconnecting, your message will send once back online.",
+          body: t("chat.info.reconnecting"),
           type: "info",
           uniqueID: "ws-reconnect",
         });
@@ -1188,7 +1195,7 @@ export function Chat({
       rawSend(content, atts);
       setAttachments([]);
     },
-    [attachments, sessionId, onRequireSession, rawSend, model, toast, queueOfflineMessage],
+    [attachments, sessionId, onRequireSession, rawSend, model, toast, queueOfflineMessage, t],
   );
 
   const onPickFiles = useCallback(
@@ -1204,13 +1211,13 @@ export function Chat({
         const refs = await api.uploadAttachments(sid, Array.from(files));
         setAttachments((prev) => [...prev, ...refs]);
       } catch (e) {
-        setError(`Upload failed: ${String(e)}`);
+        setError(`${t("chat.error.uploadFailed")}: ${String(e)}`);
       } finally {
         setUploading(false);
         if (fileRef.current) fileRef.current.value = "";
       }
     },
-    [sessionId, onRequireSession],
+    [sessionId, onRequireSession, t],
   );
 
   // Text-to-image generation: a one-shot REST call (no socket, no agent loop).
@@ -1261,12 +1268,12 @@ export function Chat({
           }
           return prev;
         });
-        setError(`Image generation failed: ${e instanceof ApiError ? e.message : String(e)}`);
+        setError(`${t("chat.error.imageGenFailed")}: ${e instanceof ApiError ? e.message : String(e)}`);
       } finally {
         if (stillOnThisSession()) setImageBusy(false);
       }
     },
-    [imageModel, onFirstMessage],
+    [imageModel, onFirstMessage, t],
   );
 
   const generateImage = useCallback(
@@ -1289,10 +1296,10 @@ export function Chat({
       onRequireSession?.().catch((e) => {
         pendingImageRef.current = null;
         setImageBusy(false);
-        setError(`Image generation failed: ${e instanceof ApiError ? e.message : String(e)}`);
+        setError(`${t("chat.error.imageGenFailed")}: ${e instanceof ApiError ? e.message : String(e)}`);
       });
     },
-    [imageModel, imageBusy, sessionId, onRequireSession, runGeneratedImage],
+    [imageModel, imageBusy, sessionId, onRequireSession, runGeneratedImage, t],
   );
 
   // Runs after the per-session reset effect (defined earlier, so it commits
@@ -1321,7 +1328,7 @@ export function Chat({
       const markCopied = () => {
         setCopied((prev) => ({ ...prev, [index]: true }));
         setTimeout(() => setCopied((prev) => ({ ...prev, [index]: false })), 1500);
-        toast({ body: "Copied to clipboard", type: "info", autoHideDuration: 2000 });
+        toast({ body: t("chat.info.copied"), type: "info", autoHideDuration: 2000 });
       };
       const legacyCopy = () => {
         // Fallback for browsers/contexts without the Clipboard API — e.g. any
@@ -1337,10 +1344,10 @@ export function Chat({
           if (document.execCommand("copy")) {
             markCopied();
           } else {
-            toast({ body: "Couldn't copy to clipboard", type: "error" });
+            toast({ body: t("chat.error.copyFailed"), type: "error" });
           }
         } catch {
-          toast({ body: "Couldn't copy to clipboard", type: "error" });
+          toast({ body: t("chat.error.copyFailed"), type: "error" });
         } finally {
           document.body.removeChild(textarea);
         }
@@ -1356,7 +1363,7 @@ export function Chat({
         legacyCopy();
       }
     },
-    [toast],
+    [toast, t],
   );
 
   // Stop whatever message is currently being read aloud, if any.
@@ -1406,14 +1413,14 @@ export function Chat({
         };
         await audioEl.play();
       } catch {
-        toast({ body: "Couldn't read this response aloud", type: "error" });
+        toast({ body: t("chat.error.speakFailed"), type: "error" });
         if (speakingIndexRef.current === index) {
           speakingIndexRef.current = null;
           setSpeaking((prev) => ({ ...prev, [index]: undefined }));
         }
       }
     },
-    [stopSpeaking, toast],
+    [stopSpeaking, toast, t],
   );
 
   // Share one answer (plus its preceding question, for context) as a public,
@@ -1442,16 +1449,16 @@ export function Chat({
         const ok = await writeClipboard(url);
         toast(
           ok
-            ? { body: "Link copied", type: "info", autoHideDuration: 2500 }
-            : { body: `Share link: ${url}`, type: "info", autoHideDuration: 10000 },
+            ? { body: t("chat.info.linkCopied"), type: "info", autoHideDuration: 2500 }
+            : { body: `${t("chat.info.shareLinkFallback")}: ${url}`, type: "info", autoHideDuration: 10000 },
         );
       } catch {
-        toast({ body: "Couldn't create the share link", type: "error" });
+        toast({ body: t("chat.error.shareFailed"), type: "error" });
       } finally {
         setSharing(false);
       }
     },
-    [sessionId, items, sharing, toast],
+    [sessionId, items, sharing, toast, t],
   );
 
   const isEmpty = items.length === 0 && !streaming && !busy && !imageBusy;
@@ -1469,8 +1476,8 @@ export function Chat({
       <div className="claw-greeting-title">
         <SoftnixLogo height={44} slot="chat" />
         <Text type="display-2">
-          {new Date().getHours() < 12 ? "Good morning" : "Hello"}
-          {userName ? `, ${userName}` : " there"}
+          {new Date().getHours() < 12 ? t("chat.greeting.morning") : t("chat.greeting.hello")}
+          {userName ? t("chat.greeting.withName", { name: userName }) : t("chat.greeting.anonymous")}
         </Text>
       </div>
     </div>
@@ -1481,7 +1488,7 @@ export function Chat({
     <div className={`claw-chat${isEmpty ? " claw-chat--empty" : ""}`}>
       {!isEmpty && !execOpen && (
         <IconButton
-          label="Show execution"
+          label={t("chat.exec.show")}
           icon={<Icon icon={PanelRight} size="sm" />}
           variant="ghost"
           clickAction={() => toggleExec(true)}
@@ -1500,7 +1507,7 @@ export function Chat({
                     <Icon icon={a.is_image ? ImageIcon : FileIcon} size="sm" color="secondary" />
                     {a.name}
                     <IconButton
-                      label="Remove attachment"
+                      label={t("chat.composer.removeAttachment")}
                       icon={<Icon icon="close" size="xsm" />}
                       variant="ghost"
                       size="sm"
@@ -1523,7 +1530,7 @@ export function Chat({
               onChange={imageMode ? setImagePrompt : undefined}
               placeholder={
                 imageMode
-                  ? "Describe the image to generate…"
+                  ? t("chat.composer.imagePlaceholder")
                   : isEmpty
                     ? t("chat.composerEmpty")
                     : t("chat.composerPlaceholder")
@@ -1544,13 +1551,13 @@ export function Chat({
                       }}
                     >
                       <Icon icon={ArrowLeft} size="sm" color="secondary" />
-                      <span className="claw-image-mode-back-label">Back to chat</span>
+                      <span className="claw-image-mode-back-label">{t("chat.composer.backToChat")}</span>
                     </button>
                   </div>
                 ) : (
                 <div className="claw-composer-actions">
                   <Popover
-                    label="Add"
+                    label={t("chat.composer.add")}
                     placement="above"
                     alignment="start"
                     isOpen={plusOpen}
@@ -1573,7 +1580,7 @@ export function Chat({
                               }}
                             >
                               <Icon icon={Paperclip} size="sm" color="secondary" />
-                              <span>Add files or photos</span>
+                              <span>{t("chat.composer.addFiles")}</span>
                             </button>
                             <div className="claw-plus-divider" />
                             <button
@@ -1582,7 +1589,7 @@ export function Chat({
                               onClick={() => setPlusView("skills")}
                             >
                               <Icon icon={BookOpen} size="sm" color="secondary" />
-                              <span>Skills</span>
+                              <span>{t("chat.composer.skills")}</span>
                               <Icon icon={ChevronRight} size="sm" color="secondary" />
                             </button>
                             <button
@@ -1591,7 +1598,7 @@ export function Chat({
                               onClick={() => setPlusView("connectors")}
                             >
                               <Icon icon={Plug} size="sm" color="secondary" />
-                              <span>Connectors</span>
+                              <span>{t("chat.composer.connectors")}</span>
                               <Icon icon={ChevronRight} size="sm" color="secondary" />
                             </button>
                             <button
@@ -1600,7 +1607,7 @@ export function Chat({
                               onClick={() => setPlusView("knowledge")}
                             >
                               <Icon icon={Library} size="sm" color="secondary" />
-                              <span>Knowledge</span>
+                              <span>{t("chat.composer.knowledge")}</span>
                               <Icon icon={ChevronRight} size="sm" color="secondary" />
                             </button>
                             <button
@@ -1609,7 +1616,7 @@ export function Chat({
                               onClick={() => {
                                 if (imageModels.length === 0) {
                                   toast({
-                                    body: "Image generation isn't included in your current plan. Ask an admin to upgrade your plan or enable an image model in the Control Plane.",
+                                    body: t("chat.error.imageGenUnavailable"),
                                     type: "info",
                                   });
                                   return;
@@ -1619,7 +1626,7 @@ export function Chat({
                               }}
                             >
                               <Icon icon={ImageIcon} size="sm" color="secondary" />
-                              <span>Create image</span>
+                              <span>{t("chat.composer.createImage")}</span>
                             </button>
                           </>
                         )}
@@ -1631,13 +1638,13 @@ export function Chat({
                               onClick={() => setPlusView("root")}
                             >
                               <Icon icon={ArrowLeft} size="sm" color="secondary" />
-                              <span>Skills</span>
+                              <span>{t("chat.composer.skills")}</span>
                             </button>
                             <div className="claw-plus-divider" />
                             {skills.length === 0 ? (
                               <div className="claw-plus-empty">
                                 <Text size="sm" color="secondary">
-                                  No skills enabled.
+                                  {t("chat.composer.noSkills")}
                                 </Text>
                               </div>
                             ) : (
@@ -1660,7 +1667,7 @@ export function Chat({
                               onClick={() => manageSettings("skills")}
                             >
                               <Icon icon={ExternalLink} size="sm" color="secondary" />
-                              <span>Manage skills in Settings</span>
+                              <span>{t("chat.composer.manageSkills")}</span>
                             </button>
                           </>
                         )}
@@ -1672,13 +1679,13 @@ export function Chat({
                               onClick={() => setPlusView("root")}
                             >
                               <Icon icon={ArrowLeft} size="sm" color="secondary" />
-                              <span>Connectors</span>
+                              <span>{t("chat.composer.connectors")}</span>
                             </button>
                             <div className="claw-plus-divider" />
                             {connectors.length === 0 ? (
                               <div className="claw-plus-empty">
                                 <Text size="sm" color="secondary">
-                                  No connectors ready.
+                                  {t("chat.composer.noConnectors")}
                                 </Text>
                               </div>
                             ) : (
@@ -1702,7 +1709,7 @@ export function Chat({
                               onClick={() => manageSettings("connectors")}
                             >
                               <Icon icon={ExternalLink} size="sm" color="secondary" />
-                              <span>Manage connectors in Settings</span>
+                              <span>{t("chat.composer.manageConnectors")}</span>
                             </button>
                           </>
                         )}
@@ -1714,13 +1721,13 @@ export function Chat({
                               onClick={() => setPlusView("root")}
                             >
                               <Icon icon={ArrowLeft} size="sm" color="secondary" />
-                              <span>Knowledge</span>
+                              <span>{t("chat.composer.knowledge")}</span>
                             </button>
                             <div className="claw-plus-divider" />
                             {knowledge.length === 0 ? (
                               <div className="claw-plus-empty">
                                 <Text size="sm" color="secondary">
-                                  No knowledge bases with documents yet.
+                                  {t("chat.composer.noKnowledge")}
                                 </Text>
                               </div>
                             ) : (
@@ -1744,7 +1751,7 @@ export function Chat({
                               onClick={() => manageSettings("knowledge")}
                             >
                               <Icon icon={ExternalLink} size="sm" color="secondary" />
-                              <span>Manage knowledge in Settings</span>
+                              <span>{t("chat.composer.manageKnowledge")}</span>
                             </button>
                           </>
                         )}
@@ -1752,14 +1759,14 @@ export function Chat({
                     }
                   >
                     <IconButton
-                      label={uploading ? "Uploading…" : "Add"}
+                      label={uploading ? t("chat.composer.uploading") : t("chat.composer.add")}
                       icon={<Icon icon={Plus} size="sm" />}
                       variant="ghost"
                       isDisabled={uploading}
                     />
                   </Popover>
                   <Popover
-                    label="Permission mode"
+                    label={t("chat.composer.permissionMode")}
                     placement="above"
                     alignment="start"
                     isOpen={permOpen}
@@ -1777,8 +1784,8 @@ export function Chat({
                           >
                             <Icon icon={opt.icon} size="sm" color="secondary" />
                             <div className="claw-perm-option-main">
-                              <span className="claw-perm-option-name">{opt.label}</span>
-                              <span className="claw-perm-option-desc">{opt.desc}</span>
+                              <span className="claw-perm-option-name">{t(opt.labelKey)}</span>
+                              <span className="claw-perm-option-desc">{t(opt.descKey)}</span>
                             </div>
                             {permission === opt.key && <Icon icon={Check} size="sm" color="secondary" />}
                           </button>
@@ -1793,7 +1800,7 @@ export function Chat({
                         color="secondary"
                       />
                       <span className="claw-perm-trigger-label">
-                        {permission === "ask" ? "Ask" : "Auto"}
+                        {permission === "ask" ? t("chat.permission.ask.label") : t("chat.permission.auto.label")}
                       </span>
                       <Icon icon={ChevronDown} size="xsm" color="secondary" />
                     </button>
@@ -1805,17 +1812,17 @@ export function Chat({
                       onClick={() => void toggleMic()}
                       aria-label={
                         micState === "recording"
-                          ? "Stop recording"
+                          ? t("chat.mic.stop")
                           : micState === "transcribing"
-                            ? "Transcribing…"
-                            : "Dictate with your voice"
+                            ? t("chat.mic.transcribing")
+                            : t("chat.mic.dictate")
                       }
                       title={
                         micState === "recording"
-                          ? "Stop recording"
+                          ? t("chat.mic.stop")
                           : micState === "transcribing"
-                            ? "Transcribing…"
-                            : "Dictate with your voice"
+                            ? t("chat.mic.transcribing")
+                            : t("chat.mic.dictate")
                       }
                       disabled={micState === "transcribing"}
                     >
@@ -1833,7 +1840,7 @@ export function Chat({
                 imageMode ? (
                   imageModels.length > 1 ? (
                     <Popover
-                      label="Select image model"
+                      label={t("chat.model.selectImage")}
                       placement="above"
                       alignment="end"
                       isOpen={imageModelOpen}
@@ -1844,7 +1851,7 @@ export function Chat({
                         <div className="claw-model-menu">
                           <div className="claw-model-menu-title">
                             <Text size="sm" weight="semibold" color="secondary">
-                              Select image model
+                              {t("chat.model.selectImage")}
                             </Text>
                           </div>
                           <div className="claw-plus-divider" />
@@ -1862,9 +1869,9 @@ export function Chat({
                                 <div className="claw-model-option-head">
                                   <span className="claw-model-option-name">{m.label}</span>
                                   {m.scope === "private" && (
-                                    <span className="claw-model-option-private">Private</span>
+                                    <span className="claw-model-option-private">{t("chat.model.private")}</span>
                                   )}
-                                  <span className={`claw-cost claw-cost-${m.cost}`}>{COST_LABEL[m.cost]}</span>
+                                  <span className={`claw-cost claw-cost-${m.cost}`}>{t(COST_LABEL_KEY[m.cost])}</span>
                                 </div>
                                 {m.description && (
                                   <span className="claw-model-option-desc">{m.description}</span>
@@ -1881,7 +1888,7 @@ export function Chat({
                       <button type="button" className="claw-model-trigger">
                         <Icon icon={ImageIcon} size="sm" color="secondary" />
                         <span className="claw-model-trigger-label">
-                          {imageModels.find((m) => m.model_id === imageModel)?.label ?? "Model"}
+                          {imageModels.find((m) => m.model_id === imageModel)?.label ?? t("chat.model.fallback")}
                         </span>
                         <Icon icon={ChevronDown} size="xsm" color="secondary" />
                       </button>
@@ -1889,7 +1896,7 @@ export function Chat({
                   ) : undefined
                 ) : models.length > 0 ? (
                   <Popover
-                    label="Select model"
+                    label={t("chat.model.select")}
                     placement="above"
                     alignment="end"
                     isOpen={modelOpen}
@@ -1900,7 +1907,7 @@ export function Chat({
                       <div className="claw-model-menu">
                         <div className="claw-model-menu-title">
                           <Text size="sm" weight="semibold" color="secondary">
-                            Select model
+                            {t("chat.model.select")}
                           </Text>
                         </div>
                         <div className="claw-plus-divider" />
@@ -1918,9 +1925,9 @@ export function Chat({
                               <div className="claw-model-option-head">
                                 <span className="claw-model-option-name">{m.label}</span>
                                 {m.scope === "private" && (
-                                  <span className="claw-model-option-private">Private</span>
+                                  <span className="claw-model-option-private">{t("chat.model.private")}</span>
                                 )}
-                                <span className={`claw-cost claw-cost-${m.cost}`}>{COST_LABEL[m.cost]}</span>
+                                <span className={`claw-cost claw-cost-${m.cost}`}>{t(COST_LABEL_KEY[m.cost])}</span>
                               </div>
                               {m.description && (
                                 <span className="claw-model-option-desc">{m.description}</span>
@@ -1938,7 +1945,7 @@ export function Chat({
                           onClick={manageModelSettings}
                         >
                           <Icon icon={ExternalLink} size="sm" color="secondary" />
-                          <span>Manage my models in Settings</span>
+                          <span>{t("chat.model.manage")}</span>
                         </button>
                       </div>
                     }
@@ -1946,7 +1953,7 @@ export function Chat({
                     <button type="button" className="claw-model-trigger">
                       <Icon icon={Box} size="sm" color="secondary" />
                       <span className="claw-model-trigger-label">
-                        {models.find((m) => m.model_id === model)?.label ?? "Model"}
+                        {models.find((m) => m.model_id === model)?.label ?? t("chat.model.fallback")}
                       </span>
                       <Icon icon={ChevronDown} size="xsm" color="secondary" />
                     </button>
@@ -1979,7 +1986,7 @@ export function Chat({
                     <Icon icon={activeCategory.icon} size="sm" color="secondary" />
                     <Text weight="semibold">{activeCategory.label}</Text>
                     <IconButton
-                      label="Close"
+                      label={t("chat.common.close")}
                       icon={<Icon icon="close" size="sm" />}
                       variant="ghost"
                       size="sm"
@@ -2044,7 +2051,7 @@ export function Chat({
                       color={item.row.status === "denied" ? "error" : item.row.status === "approved" ? "success" : "secondary"}
                     />
                     <Text size="sm" weight="semibold">
-                      {confirmTitle(item.row.tool, item.row.status)}
+                      {confirmTitle(t, item.row.tool, item.row.status)}
                     </Text>
                   </div>
                   {item.row.argsPreview && (
@@ -2053,20 +2060,20 @@ export function Chat({
                   {item.row.status === "pending" && (
                     <div className="claw-confirm-actions">
                       <Button
-                        label="Decline"
+                        label={t("chat.confirm.decline")}
                         variant="secondary"
                         size="sm"
                         clickAction={() => sendDecision(item.row.requestId, false)}
                       >
-                        Decline
+                        {t("chat.confirm.decline")}
                       </Button>
                       <Button
-                        label="Approve and run"
+                        label={t("chat.confirm.approve")}
                         variant="primary"
                         size="sm"
                         clickAction={() => sendDecision(item.row.requestId, true)}
                       >
-                        Approve &amp; run
+                        {t("chat.confirm.approve")}
                       </Button>
                     </div>
                   )}
@@ -2093,7 +2100,7 @@ export function Chat({
                                   href={href}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  title={`View ${p}`}
+                                  title={t("chat.artifact.view", { name: p })}
                                   onClick={(e) => {
                                     // Plain left-click opens the in-app lightbox instead of
                                     // navigating; cmd/ctrl/shift/middle-click fall through to
@@ -2117,7 +2124,7 @@ export function Chat({
                                 href={href}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                title={`Open ${p}`}
+                                title={t("chat.artifact.open", { name: p })}
                               >
                                 <Icon icon={FileIcon} size="sm" color="secondary" />
                                 <span className="claw-artifact-name">{p.split("/").pop()}</span>
@@ -2131,7 +2138,7 @@ export function Chat({
                         footer={
                           <div className="claw-feedback">
                             <IconButton
-                              label={copied[i] ? "Copied" : "Copy response"}
+                              label={copied[i] ? t("chat.msg.copied") : t("chat.msg.copyResponse")}
                               icon={<Icon icon={copied[i] ? Check : Copy} size="sm" color={copied[i] ? "success" : "secondary"} />}
                               variant="ghost"
                               size="sm"
@@ -2139,7 +2146,7 @@ export function Chat({
                             />
                             {ttsEnabled && (
                               <IconButton
-                                label={speaking[i] === "playing" ? "Stop reading aloud" : "Read aloud"}
+                                label={speaking[i] === "playing" ? t("chat.msg.stopReading") : t("chat.msg.readAloud")}
                                 icon={
                                   speaking[i] === "loading" ? (
                                     <Spinner size="sm" />
@@ -2158,7 +2165,7 @@ export function Chat({
                               />
                             )}
                             <IconButton
-                              label="Good response"
+                              label={t("chat.msg.good")}
                               icon={
                                 <Icon icon={ThumbsUp} size="sm" color={feedback[i] === "up" ? "success" : "secondary"} />
                               }
@@ -2167,7 +2174,7 @@ export function Chat({
                               clickAction={() => rate(i, item.content, "up")}
                             />
                             <IconButton
-                              label="Bad response"
+                              label={t("chat.msg.bad")}
                               icon={
                                 <Icon icon={ThumbsDown} size="sm" color={feedback[i] === "down" ? "error" : "secondary"} />
                               }
@@ -2177,7 +2184,7 @@ export function Chat({
                             />
                             {sessionId && (
                               <IconButton
-                                label="Share answer"
+                                label={t("chat.msg.share")}
                                 icon={<Icon icon={Share2} size="sm" color="secondary" />}
                                 variant="ghost"
                                 size="sm"
@@ -2196,7 +2203,7 @@ export function Chat({
                         footer={
                           <div className="claw-feedback">
                             <IconButton
-                              label={copied[i] ? "Copied" : "Copy message"}
+                              label={copied[i] ? t("chat.msg.copied") : t("chat.msg.copyMessage")}
                               icon={<Icon icon={copied[i] ? Check : Copy} size="sm" color={copied[i] ? "success" : "secondary"} />}
                               variant="ghost"
                               size="sm"
@@ -2222,7 +2229,7 @@ export function Chat({
               <ChatMessage sender="assistant">
                 <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
                   <span className="claw-thinking">
-                    <Spinner size="sm" shade="subtle" /> Thinking…
+                    <Spinner size="sm" shade="subtle" /> {t("chat.msg.thinking")}
                   </span>
                 </ChatMessageBubble>
               </ChatMessage>
@@ -2231,7 +2238,7 @@ export function Chat({
               <ChatMessage sender="assistant">
                 <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
                   <span className="claw-thinking">
-                    <Spinner size="sm" shade="subtle" /> Generating image…
+                    <Spinner size="sm" shade="subtle" /> {t("chat.msg.generatingImage")}
                   </span>
                 </ChatMessageBubble>
               </ChatMessage>

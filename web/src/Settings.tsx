@@ -48,7 +48,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ProvidersPanel } from "./Admin";
-import { useBranding } from "./branding";
+import { useBranding, useT } from "./branding";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
 import {
@@ -81,20 +81,25 @@ export type SettingsSection =
   | "telegram"
   | "browser-extension";
 
-export const SETTINGS_SECTIONS: { key: SettingsSection; label: string; icon: IconType | IconName }[] = [
-  { key: "profile", label: "Profile", icon: UserIcon },
-  { key: "skills", label: "Skills", icon: Sparkles },
-  { key: "knowledge", label: "Knowledge", icon: Library },
-  { key: "memory", label: "Memory", icon: Brain },
-  { key: "models", label: "My Models", icon: Cpu },
-  { key: "connectors", label: "Connectors", icon: Plug },
-  { key: "schedules", label: "Schedule", icon: "calendar" },
-  { key: "heartbeat", label: "Heartbeat", icon: HeartPulse },
-  { key: "telegram", label: "Telegram", icon: Send },
-  { key: "browser-extension", label: "Browser extension", icon: Puzzle },
+// `labelKey` (not a pre-resolved label) because this array is built at module
+// scope, outside any component — it can't call the `useT()` hook itself.
+// Consumers (this file's SettingsPanel, and App.tsx's nav) resolve it via
+// `t(s.labelKey)` at render time so the label follows the current language.
+export const SETTINGS_SECTIONS: { key: SettingsSection; labelKey: string; icon: IconType | IconName }[] = [
+  { key: "profile", labelKey: "settings.nav.profile", icon: UserIcon },
+  { key: "skills", labelKey: "settings.nav.skills", icon: Sparkles },
+  { key: "knowledge", labelKey: "settings.nav.knowledge", icon: Library },
+  { key: "memory", labelKey: "settings.nav.memory", icon: Brain },
+  { key: "models", labelKey: "settings.nav.models", icon: Cpu },
+  { key: "connectors", labelKey: "settings.nav.connectors", icon: Plug },
+  { key: "schedules", labelKey: "settings.nav.schedules", icon: "calendar" },
+  { key: "heartbeat", labelKey: "settings.nav.heartbeat", icon: HeartPulse },
+  { key: "telegram", labelKey: "settings.nav.telegram", icon: Send },
+  { key: "browser-extension", labelKey: "settings.nav.browserExt", icon: Puzzle },
 ];
 
 export function SettingsPanel({ section }: { section: SettingsSection }) {
+  const t = useT();
   const meta = SETTINGS_SECTIONS.find((s) => s.key === section);
   // My Models is a data table, same reasoning as the admin LLM Providers page
   // (see AdminPanel) — give it the wider column instead of the shared 720px
@@ -104,7 +109,7 @@ export function SettingsPanel({ section }: { section: SettingsSection }) {
     <div className="claw-settings-panel">
       <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
         <Icon icon={meta?.icon ?? "check"} size="lg" color="secondary" />
-        <Text type="display-3">{meta?.label}</Text>
+        <Text type="display-3">{meta ? t(meta.labelKey) : ""}</Text>
       </div>
       <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
         {section === "profile" && <ProfilePanel />}
@@ -138,6 +143,7 @@ function useAsyncError() {
 // ---------------------------------------------------------------- Profile
 
 function ProfilePanel() {
+  const t = useT();
   const [me, setMe] = useState<AuthUser | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -158,7 +164,7 @@ function ProfilePanel() {
       await api.changePassword(currentPassword, newPassword);
       setCurrentPassword("");
       setNewPassword("");
-      toast({ body: "Password updated", type: "info", autoHideDuration: 2500 });
+      toast({ body: t("settings.profile.passwordUpdated"), type: "info", autoHideDuration: 2500 });
     } catch (e) {
       // Inline, not an early-return replacing the whole panel — a wrong
       // current password shouldn't wipe out the form the user is mid-typing.
@@ -169,7 +175,7 @@ function ProfilePanel() {
   };
 
   if (error) return <ErrorText>{error}</ErrorText>;
-  if (!me) return <Text color="secondary">Loading…</Text>;
+  if (!me) return <Text color="secondary">{t("settings.common.loading")}</Text>;
 
   return (
     <div className="claw-panel">
@@ -184,25 +190,28 @@ function ProfilePanel() {
       <PreferencesCard me={me} onSaved={setMe} />
       <Card padding={2}>
         <div className="claw-panel">
-          <Text weight="semibold">Change password</Text>
+          <Text weight="semibold">{t("settings.profile.changePassword")}</Text>
           {!me.has_password ? (
             <Text size="sm" color="secondary">
-              This account doesn't use a password (signed in via Google/Microsoft, or hasn't finished
-              activation yet).
+              {t("settings.profile.noPasswordAccount")}
             </Text>
           ) : (
             <>
-              <PasswordField label="Current password" value={currentPassword} onChange={setCurrentPassword} />
               <PasswordField
-                label="New password"
-                description="At least 8 characters."
+                label={t("settings.profile.currentPassword")}
+                value={currentPassword}
+                onChange={setCurrentPassword}
+              />
+              <PasswordField
+                label={t("settings.profile.newPassword")}
+                description={t("settings.profile.newPasswordDesc")}
                 value={newPassword}
                 onChange={setNewPassword}
               />
               {formError && <ErrorText>{formError}</ErrorText>}
               <div className="claw-row">
                 <Button
-                  label={busy ? "…" : "Update password"}
+                  label={busy ? "…" : t("settings.profile.updatePassword")}
                   variant="primary"
                   icon={<Icon icon="check" size="sm" />}
                   isDisabled={busy || !currentPassword || newPassword.length < 8}
@@ -224,6 +233,7 @@ function ProfilePanel() {
  * panel's own fields — saving only sends the field(s) actually changed, so
  * the other two stay whatever they already were (override or inherited). */
 function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUser) => void }) {
+  const t = useT();
   const { branding, setUserOverride } = useBranding();
   const [language, setLanguage] = useState<BrandingLanguage>(me.language ?? branding.language);
   const [fontSize, setFontSize] = useState<BrandingFontSize>(me.font_size ?? branding.font_size);
@@ -251,7 +261,7 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
       });
       onSaved(updated);
       setUserOverride({ language: updated.language, font_size: updated.font_size, chat_background: updated.chat_background });
-      toast({ body: "Preferences saved", type: "info", autoHideDuration: 2500 });
+      toast({ body: t("settings.profile.preferencesSaved"), type: "info", autoHideDuration: 2500 });
     } catch (e) {
       setSaveError(String(e).replace(/^Error:\s*/, ""));
     } finally {
@@ -263,37 +273,52 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
     <Card padding={2}>
       <div className="claw-panel">
         <div>
-          <Text weight="semibold">Language</Text>
+          <Text weight="semibold">{t("settings.profile.language")}</Text>
           <Text size="sm" color="secondary">
-            Applies to key interface surfaces and the AI's replies. English is the default.
+            {t("settings.profile.languageDesc")}
           </Text>
-          <SegmentedControl value={language} onChange={(v) => setLanguage(v as BrandingLanguage)} label="Language">
+          <SegmentedControl
+            value={language}
+            onChange={(v) => setLanguage(v as BrandingLanguage)}
+            label={t("settings.profile.language")}
+          >
+            {/* Language names are shown as endonyms (in their own language), not
+                translated per the current UI language — same convention as any
+                language picker. */}
             <SegmentedControlItem value="en" label="English" />
             <SegmentedControlItem value="th" label="ไทย (Thai)" />
           </SegmentedControl>
         </div>
         <div>
-          <Text weight="semibold">Font size</Text>
-          <SegmentedControl value={fontSize} onChange={(v) => setFontSize(v as BrandingFontSize)} label="Font size">
-            <SegmentedControlItem value="small" label="Small" />
-            <SegmentedControlItem value="medium" label="Medium" />
-            <SegmentedControlItem value="large" label="Large" />
+          <Text weight="semibold">{t("settings.profile.fontSize")}</Text>
+          <SegmentedControl
+            value={fontSize}
+            onChange={(v) => setFontSize(v as BrandingFontSize)}
+            label={t("settings.profile.fontSize")}
+          >
+            <SegmentedControlItem value="small" label={t("settings.profile.fontSize.small")} />
+            <SegmentedControlItem value="medium" label={t("settings.profile.fontSize.medium")} />
+            <SegmentedControlItem value="large" label={t("settings.profile.fontSize.large")} />
           </SegmentedControl>
         </div>
         <div>
-          <Text weight="semibold">Chat background</Text>
+          <Text weight="semibold">{t("settings.profile.chatBackground")}</Text>
           <Text size="sm" color="secondary">
-            Solid, Dots, or Grid — a subtle brand accent glow is always present in the corner.
+            {t("settings.profile.chatBackgroundDesc")}
           </Text>
-          <SegmentedControl value={chatBg} onChange={(v) => setChatBg(v as BrandingChatBackground)} label="Chat background">
-            <SegmentedControlItem value="solid" label="Solid" />
-            <SegmentedControlItem value="dots" label="Dots" />
-            <SegmentedControlItem value="grid" label="Grid" />
+          <SegmentedControl
+            value={chatBg}
+            onChange={(v) => setChatBg(v as BrandingChatBackground)}
+            label={t("settings.profile.chatBackground")}
+          >
+            <SegmentedControlItem value="solid" label={t("settings.profile.bg.solid")} />
+            <SegmentedControlItem value="dots" label={t("settings.profile.bg.dots")} />
+            <SegmentedControlItem value="grid" label={t("settings.profile.bg.grid")} />
           </SegmentedControl>
         </div>
         {saveError && <ErrorText>{saveError}</ErrorText>}
         <div>
-          <Button label="Save preferences" isDisabled={!dirty || saving} clickAction={save} />
+          <Button label={t("settings.profile.savePreferences")} isDisabled={!dirty || saving} clickAction={save} />
         </div>
       </div>
     </Card>
@@ -324,6 +349,7 @@ function SkillDetailModal({
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const t = useT();
   const capabilities = skill?.capabilities ?? [];
   return (
     // Kept mounted always, with only `isOpen` toggling — Dialog's own close
@@ -336,7 +362,7 @@ function SkillDetailModal({
         header={
           <DialogHeader
             title={skill?.name ?? ""}
-            subtitle="Skill"
+            subtitle={t("settings.skills.subtitle")}
             startContent={<Icon icon={builtinSkillIcon(skill?.name ?? "")} size="md" />}
             onOpenChange={onOpenChange}
           />
@@ -347,7 +373,7 @@ function SkillDetailModal({
               {capabilities.length > 0 && (
                 <>
                   <Text size="sm" color="secondary" weight="semibold" className="claw-skill-capability-label">
-                    Capabilities covered
+                    {t("settings.skills.capabilities")}
                   </Text>
                   <div className="claw-skill-capability-grid">
                     {capabilities.map((cap) => (
@@ -369,7 +395,7 @@ function SkillDetailModal({
                 </div>
               )}
               <TextArea
-                label="Instructions (loaded when the agent uses this skill)"
+                label={t("settings.skills.instructions")}
                 value={skill?.content ?? ""}
                 onChange={() => {}}
                 rows={14}
@@ -380,7 +406,7 @@ function SkillDetailModal({
         }
         footer={
           <LayoutFooter hasDivider>
-            <Button label="Close" variant="ghost" clickAction={() => onOpenChange(false)} />
+            <Button label={t("settings.common.close")} variant="ghost" clickAction={() => onOpenChange(false)} />
           </LayoutFooter>
         }
       />
@@ -389,6 +415,7 @@ function SkillDetailModal({
 }
 
 function SkillsPanel() {
+  const t = useT();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [editing, setEditing] = useState<Partial<SkillInfo> | null>(null);
@@ -408,23 +435,23 @@ function SkillsPanel() {
       <div className="claw-panel">
         {readOnly && (
           <Text size="sm" color="secondary">
-            This is a built-in skill — view only. Use it as a reference for authoring your own.
+            {t("settings.skills.builtinNotice")}
           </Text>
         )}
         <TextInput
-          label="Name"
+          label={t("settings.skills.name")}
           value={editing.name ?? ""}
           onChange={(v) => setEditing({ ...editing, name: v })}
           isDisabled={readOnly || !!editing.id}
         />
         <TextInput
-          label="Description (shown to the agent in every chat)"
+          label={t("settings.skills.description")}
           value={editing.description ?? ""}
           onChange={(v) => setEditing({ ...editing, description: v })}
           isDisabled={readOnly}
         />
         <TextArea
-          label="Instructions (loaded when the agent uses this skill)"
+          label={t("settings.skills.instructions")}
           value={editing.content ?? ""}
           onChange={(v) => setEditing({ ...editing, content: v })}
           rows={10}
@@ -433,16 +460,14 @@ function SkillsPanel() {
         {!readOnly && connectors.length > 0 && (
           <div className="claw-field-group">
             <Text size="sm" color="secondary">
-              Linked connector (optional)
+              {t("settings.skills.linkedConnector")}
             </Text>
             <Text size="sm" color="secondary" as="p">
-              If this skill calls a connector's tools, link it here instead of writing the tool's
-              exact name in the instructions above — Claw resolves the current tool names for you,
-              so it keeps working even if the connector is later renamed.
+              {t("settings.skills.linkedConnectorDesc")}
             </Text>
             <div className="claw-row">
               <Button
-                label="None"
+                label={t("settings.skills.none")}
                 size="sm"
                 variant={!editing.connector_id ? "primary" : "secondary"}
                 clickAction={() => setEditing({ ...editing, connector_id: null })}
@@ -463,7 +488,7 @@ function SkillsPanel() {
         <div className="claw-row">
           {!readOnly && (
             <Button
-              label="Save skill"
+              label={t("settings.skills.save")}
               icon={<Icon icon="check" size="sm" />}
               clickAction={() =>
                 guard(async () => {
@@ -480,7 +505,11 @@ function SkillsPanel() {
               }
             />
           )}
-          <Button label={readOnly ? "Back" : "Cancel"} variant="ghost" clickAction={() => setEditing(null)} />
+          <Button
+            label={readOnly ? t("settings.skills.back") : t("settings.common.cancel")}
+            variant="ghost"
+            clickAction={() => setEditing(null)}
+          />
         </div>
       </div>
     );
@@ -489,11 +518,9 @@ function SkillsPanel() {
   return (
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
-        <Text color="secondary">
-          Skills teach Claw reusable procedures. Enabled skills appear in its context.
-        </Text>
+        <Text color="secondary">{t("settings.skills.intro")}</Text>
         <Button
-          label="New skill"
+          label={t("settings.skills.new")}
           icon={<Icon icon={Plus} size="sm" />}
           size="sm"
           clickAction={() => setEditing({ enabled: true })}
@@ -501,7 +528,7 @@ function SkillsPanel() {
       </div>
       {error && <ErrorText>{error}</ErrorText>}
       {skills.length === 0 ? (
-        <EmptyState title="No skills yet" description="Create a skill to teach Claw a procedure." />
+        <EmptyState title={t("settings.skills.emptyTitle")} description={t("settings.skills.emptyDesc")} />
       ) : (
         skills.map((skill) => (
           <Card key={skill.id} padding={2}>
@@ -516,13 +543,13 @@ function SkillsPanel() {
                 </Text>
                 {skill.shadows_builtin && (
                   <Text size="sm" color="secondary" as="p">
-                    This name matches a built-in skill — yours takes priority, and the built-in is hidden.
+                    {t("settings.skills.shadowsBuiltin")}
                   </Text>
                 )}
               </div>
               {skill.builtin ? (
                 <Button
-                  label="View"
+                  label={t("settings.skills.view")}
                   icon={<Icon icon={ExternalLink} size="sm" />}
                   size="sm"
                   variant="ghost"
@@ -539,7 +566,7 @@ function SkillsPanel() {
                 <div className="claw-row">
                   <Switch
                     value={skill.enabled}
-                    label={`Enable ${skill.name}`}
+                    label={t("settings.common.enable", { name: skill.name })}
                     isLabelHidden
                     changeAction={(checked) =>
                       guard(async () => {
@@ -549,14 +576,14 @@ function SkillsPanel() {
                     }
                   />
                   <Button
-                    label="Edit"
+                    label={t("settings.common.edit")}
                     icon={<Icon icon={Pencil} size="sm" />}
                     size="sm"
                     variant="ghost"
                     clickAction={() => setEditing(skill)}
                   />
                   <Button
-                    label="Delete"
+                    label={t("settings.common.delete")}
                     icon={<Icon icon={Trash2} size="sm" />}
                     size="sm"
                     variant="destructive"
@@ -581,6 +608,7 @@ function SkillsPanel() {
 // ---------------------------------------------------------------- Memory
 
 function MemoryPanel() {
+  const t = useT();
   const [memory, setMemory] = useState<MemoryInfo | null>(null);
   const [draft, setDraft] = useState("");
   const [saved, setSaved] = useState(false);
@@ -593,16 +621,13 @@ function MemoryPanel() {
     });
   }, []);
 
-  if (!memory) return <Text color="secondary">Loading…</Text>;
+  if (!memory) return <Text color="secondary">{t("settings.common.loading")}</Text>;
 
   return (
     <div className="claw-panel">
-      <Text color="secondary">
-        Core memory is included in every conversation. Edit it to correct or remove what Claw
-        remembers about you.
-      </Text>
+      <Text color="secondary">{t("settings.memory.intro")}</Text>
       <TextArea
-        label="Core memory"
+        label={t("settings.memory.label")}
         value={draft}
         onChange={(v) => {
           setDraft(v);
@@ -613,7 +638,7 @@ function MemoryPanel() {
       {error && <ErrorText>{error}</ErrorText>}
       <div className="claw-row">
         <Button
-          label="Save memory"
+          label={t("settings.memory.save")}
           icon={<Icon icon="check" size="sm" />}
           clickAction={() =>
             guard(async () => {
@@ -622,13 +647,15 @@ function MemoryPanel() {
             })
           }
         />
-        {saved && <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label="Saved" />}
+        {saved && (
+          <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label={t("settings.memory.saved")} />
+        )}
       </div>
       <Divider />
-      <Text weight="semibold">Recent consolidation history</Text>
+      <Text weight="semibold">{t("settings.memory.historyTitle")}</Text>
       {memory.history.length === 0 ? (
         <Text color="secondary" size="sm">
-          Nothing consolidated yet — history entries appear as conversations grow.
+          {t("settings.memory.historyEmpty")}
         </Text>
       ) : (
         memory.history
@@ -665,9 +692,9 @@ const PRESET_LOGO: Record<string, string> = {
 
 // A short auth-method chip on the catalog card, so users know what setup to
 // expect (one-click sign-in vs. pasting a key) before they open the form.
-function presetAuthHint(p: ConnectorPreset): string | null {
-  if (p.setup === "oauth") return "1-click sign-in";
-  if (p.setup === "api_key" || p.setup === "token") return "API key";
+function presetAuthHint(p: ConnectorPreset, t: (key: string) => string): string | null {
+  if (p.setup === "oauth") return t("settings.connectors.authHint.oauth");
+  if (p.setup === "api_key" || p.setup === "token") return t("settings.connectors.authHint.apiKey");
   return null;
 }
 
@@ -702,6 +729,7 @@ function GuidedSetup({
   onSaved: () => Promise<void>;
   onManage: (c: ConnectorInfo) => void;
 }) {
+  const t = useT();
   const [values, setValues] = useState<Record<string, string>>({});
   const [url, setUrl] = useState(preset.url);
   const [error, setError] = useState("");
@@ -733,8 +761,8 @@ function GuidedSetup({
         setBusy(false);
         setError(
           /not_configured/.test(msg)
-            ? `${provider} sign-in isn't set up yet. Ask your administrator to enable it in the Control Plane.`
-            : "Couldn't start sign-in. Please try again.",
+            ? t("settings.connectors.oauthNotConfigured", { provider })
+            : t("settings.connectors.oauthStartFailed"),
         );
       }
     };
@@ -742,27 +770,32 @@ function GuidedSetup({
       <div className="claw-panel claw-setup">
         {header}
         {installed?.runtime.status === "connected" && (
-          <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label="Connected" />
+          <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label={t("settings.connectors.connected")} />
         )}
         <Card padding={3} variant="muted">
-          <Text weight="semibold">Sign in with {provider}</Text>
+          <Text weight="semibold">{t("settings.connectors.signInWith", { provider })}</Text>
           <Text size="sm" color="secondary" as="p">
-            You'll be redirected to {provider} to grant access. Nothing is stored except a secure token,
-            encrypted at rest.
+            {t("settings.connectors.oauthDesc", { provider })}
           </Text>
         </Card>
         {error && <ErrorText>{error}</ErrorText>}
         <div className="claw-row">
           <Button
-            label={busy ? "Redirecting…" : installed ? `Reconnect with ${provider}` : `Connect with ${provider}`}
+            label={
+              busy
+                ? t("settings.connectors.redirecting")
+                : installed
+                  ? t("settings.connectors.reconnectWith", { provider })
+                  : t("settings.connectors.connectWith", { provider })
+            }
             icon={<Icon icon={LinkIcon} size="sm" />}
             isDisabled={busy}
             clickAction={connect}
           />
           {installed && (
-            <Button label="Manage" variant="secondary" clickAction={() => onManage(installed)} />
+            <Button label={t("settings.connectors.manage")} variant="secondary" clickAction={() => onManage(installed)} />
           )}
-          <Button label="Cancel" variant="ghost" clickAction={onCancel} />
+          <Button label={t("settings.common.cancel")} variant="ghost" clickAction={onCancel} />
         </div>
       </div>
     );
@@ -777,13 +810,13 @@ function GuidedSetup({
       for (const f of preset.fields) {
         const raw = (values[f.key] ?? "").trim();
         if (!raw) {
-          if (!f.optional) throw new Error(`${f.label} is required.`);
+          if (!f.optional) throw new Error(t("settings.connectors.fieldRequired", { label: f.label }));
           continue;
         }
         env[f.key] = f.prefix && !raw.startsWith(f.prefix) ? f.prefix + raw : raw;
       }
       const effectiveUrl = preset.url_configurable ? url.trim() || preset.url : preset.url;
-      if (preset.url_configurable && !effectiveUrl) throw new Error("MCP endpoint URL is required.");
+      if (preset.url_configurable && !effectiveUrl) throw new Error(t("settings.connectors.mcpUrlRequired"));
       await api.saveConnector({
         name: preset.name,
         description: preset.description ?? "",
@@ -807,22 +840,21 @@ function GuidedSetup({
       {preset.url_configurable && (
         <div className="claw-setup-field">
           <TextInput
-            label="MCP endpoint URL"
+            label={t("settings.connectors.mcpUrlLabel")}
             type="text"
             value={url}
             placeholder={preset.url}
             onChange={setUrl}
           />
           <Text size="sm" color="secondary" as="p" className="claw-setup-help">
-            Defaults to Softnix's hosted endpoint. Change this only if your organization runs its
-            own Softnix ONE instance.
+            {t("settings.connectors.mcpUrlHelp")}
           </Text>
         </div>
       )}
       {preset.fields.map((f) => (
         <div key={f.key} className="claw-setup-field">
           <TextInput
-            label={f.optional ? `${f.label} (optional)` : f.label}
+            label={f.optional ? t("settings.connectors.fieldOptional", { label: f.label }) : f.label}
             type={f.secret ? "password" : "text"}
             value={values[f.key] ?? ""}
             placeholder={f.placeholder}
@@ -838,12 +870,12 @@ function GuidedSetup({
       {error && <ErrorText>{error}</ErrorText>}
       <div className="claw-row">
         <Button
-          label={busy ? "Saving…" : "Add connector"}
+          label={busy ? t("settings.connectors.saving") : t("settings.connectors.addConnector")}
           icon={<Icon icon="check" size="sm" />}
           isDisabled={busy}
           clickAction={save}
         />
-        <Button label="Cancel" variant="ghost" clickAction={onCancel} />
+        <Button label={t("settings.common.cancel")} variant="ghost" clickAction={onCancel} />
       </div>
     </div>
   );
@@ -917,6 +949,7 @@ function formatEnvText(env: Record<string, string> | undefined): string {
 // by default since a connector like an all-in-one CRM can expose 80+ tools,
 // which would otherwise dwarf the rest of the connector card.
 function ConnectorToolNames({ names }: { names: string[] }) {
+  const t = useT();
   const [expanded, setExpanded] = useState(false);
   return (
     <div className="claw-connector-tool-names">
@@ -928,7 +961,10 @@ function ConnectorToolNames({ names }: { names: string[] }) {
       >
         <Icon icon={expanded ? ChevronDown : ChevronRight} size="xsm" color="secondary" />
         <Text size="sm" color="secondary">
-          {names.length} tool name{names.length === 1 ? "" : "s"} to reference in a skill
+          {t("settings.connectors.toolNamesCount", {
+            count: String(names.length),
+            plural: names.length === 1 ? "" : "s",
+          })}
         </Text>
       </button>
       {expanded && (
@@ -953,6 +989,7 @@ function slugifyConnectorName(raw: string): string {
 }
 
 function ConnectorsPanel() {
+  const t = useT();
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
   const [editing, setEditing] = useState<Partial<ConnectorInfo> | null>(null);
@@ -1006,6 +1043,9 @@ function ConnectorsPanel() {
   ];
   const grouped = new Map<string, ConnectorPreset[]>();
   for (const p of presets) {
+    // Kept as the raw English literal (not t()) so it stays a stable grouping/sort
+    // key and matches categoryOrder below — sibling categories (Productivity, etc.)
+    // are backend-provided and untranslated for the same reason.
     const cat = p.category || "Other";
     (grouped.get(cat) ?? grouped.set(cat, []).get(cat)!).push(p);
   }
@@ -1019,7 +1059,7 @@ function ConnectorsPanel() {
       <div className="claw-panel">
         <TextInput
           ref={nameInputRef}
-          label="Name (lowercase, e.g. github)"
+          label={t("settings.connectors.nameLabel")}
           value={editing.name ?? ""}
           onChange={(v, e) => {
             const caret = e?.target?.selectionStart ?? v.length;
@@ -1032,7 +1072,7 @@ function ConnectorsPanel() {
           isDisabled={!!editing.id}
         />
         <TextArea
-          label="Description (optional)"
+          label={t("settings.connectors.descOptional")}
           value={editing.description ?? ""}
           onChange={(v) => setEditing({ ...editing, description: v })}
           rows={2}
@@ -1044,14 +1084,14 @@ function ConnectorsPanel() {
               they can manage it, but see the disabled Command field below. */}
           {(isAdmin || transport === "stdio") && (
             <Button
-              label="stdio (local command)"
+              label={t("settings.connectors.transportStdio")}
               size="sm"
               variant={transport === "stdio" ? "primary" : "secondary"}
               clickAction={() => setEditing({ ...editing, transport: "stdio" })}
             />
           )}
           <Button
-            label="HTTP (remote server)"
+            label={t("settings.connectors.transportHttp")}
             size="sm"
             variant={transport === "http" ? "primary" : "secondary"}
             clickAction={() => setEditing({ ...editing, transport: "http" })}
@@ -1060,34 +1100,34 @@ function ConnectorsPanel() {
         {transport === "stdio" ? (
           <>
             <TextInput
-              label="Command (e.g. npx -y @modelcontextprotocol/server-github)"
+              label={t("settings.connectors.commandLabel")}
               value={editing.command ?? ""}
               onChange={(v) => setEditing({ ...editing, command: v })}
               isDisabled={!isAdmin}
             />
             {!isAdmin && (
               <Text size="sm" color="secondary">
-                Only an administrator can set a custom local command — ask them to change this.
+                {t("settings.connectors.commandAdminOnly")}
               </Text>
             )}
           </>
         ) : (
           <TextInput
-            label="Server URL (e.g. https://mcp.example.com/mcp)"
+            label={t("settings.connectors.urlLabel")}
             value={editing.url ?? ""}
             onChange={(v) => setEditing({ ...editing, url: v })}
           />
         )}
         <TextArea
-          label="Environment variables (KEY=value, or Header-Name: value for an HTTP header, or QUERY_name=value for a URL query param — one per line)"
+          label={t("settings.connectors.envLabel")}
           value={formatEnvText(editing.env)}
           onChange={(v) => setEditing({ ...editing, env: parseEnvText(v) })}
           rows={3}
         />
         <TextInput
-          label="Timeout (ms)"
-          placeholder="Default (instance-wide setting)"
-          description="1000-120000. Out-of-range values are clamped on save."
+          label={t("settings.connectors.timeoutLabel")}
+          placeholder={t("settings.connectors.timeoutPlaceholder")}
+          description={t("settings.connectors.timeoutDesc")}
           value={timeoutText}
           onChange={(v) => {
             setTimeoutText(v);
@@ -1105,13 +1145,13 @@ function ConnectorsPanel() {
         />
         <Switch
           value={editing.enabled ?? true}
-          label="Enable server"
+          label={t("settings.connectors.enableServer")}
           changeAction={(checked) => setEditing({ ...editing, enabled: checked })}
         />
         {error && <ErrorText>{error}</ErrorText>}
         <div className="claw-row">
           <Button
-            label="Save connector"
+            label={t("settings.connectors.saveConnector")}
             icon={<Icon icon="check" size="sm" />}
             clickAction={() =>
               guard(async () => {
@@ -1133,7 +1173,7 @@ function ConnectorsPanel() {
               })
             }
           />
-          <Button label="Cancel" variant="ghost" clickAction={() => setEditing(null)} />
+          <Button label={t("settings.common.cancel")} variant="ghost" clickAction={() => setEditing(null)} />
         </div>
       </div>
     );
@@ -1160,12 +1200,9 @@ function ConnectorsPanel() {
   return (
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
-        <Text color="secondary">
-          Add a connector to give Claw access to your apps. You supply your own keys — stored
-          encrypted.
-        </Text>
+        <Text color="secondary">{t("settings.connectors.intro")}</Text>
         <Button
-          label="Add custom"
+          label={t("settings.connectors.addCustom")}
           icon={<Icon icon={Plus} size="sm" />}
           size="sm"
           variant="secondary"
@@ -1185,14 +1222,14 @@ function ConnectorsPanel() {
               const installed = installedByName.get(p.name.toLowerCase());
               const menuItems = [
                 ...(p.docs
-                  ? [{ label: "View docs", icon: ExternalLink, onClick: () => window.open(p.docs, "_blank", "noopener") }]
+                  ? [{ label: t("settings.connectors.viewDocs"), icon: ExternalLink, onClick: () => window.open(p.docs, "_blank", "noopener") }]
                   : []),
                 ...(installed
                   ? [
-                      { label: "Edit", icon: Pencil, onClick: () => setEditing(installed) },
+                      { label: t("settings.common.edit"), icon: Pencil, onClick: () => setEditing(installed) },
                       { type: "divider" as const },
                       {
-                        label: "Remove",
+                        label: t("settings.connectors.remove"),
                         icon: Trash2,
                         onClick: () =>
                           guard(async () => {
@@ -1223,13 +1260,13 @@ function ConnectorsPanel() {
                         <Badge
                           variant="success"
                           icon={<Icon icon="check" size="xsm" />}
-                          label={`${installed.runtime.tools ?? 0} tools`}
+                          label={t("settings.connectors.toolsCount", { count: String(installed.runtime.tools ?? 0) })}
                         />
                       ) : installed?.runtime.status === "error" ? (
-                        <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label="Error" />
+                        <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.error")} />
                       ) : (
                         (() => {
-                          const hint = presetAuthHint(p);
+                          const hint = presetAuthHint(p, t);
                           return hint ? <span className="claw-connector-auth">{hint}</span> : null;
                         })()
                       )}
@@ -1238,15 +1275,22 @@ function ConnectorsPanel() {
                   <div className="claw-connector-actions">
                     {installed ? (
                       <Button
-                        label="Manage"
+                        label={t("settings.connectors.manage")}
                         size="sm"
                         variant="secondary"
                         clickAction={() => setEditing(installed)}
                       />
                     ) : (
-                      <Button label="Add" size="sm" variant="primary" clickAction={() => setSetupPreset(p)} />
+                      <Button
+                        label={t("settings.connectors.add")}
+                        size="sm"
+                        variant="primary"
+                        clickAction={() => setSetupPreset(p)}
+                      />
                     )}
-                    {menuItems.length > 0 && <MoreMenu label={`${p.label} options`} size="sm" items={menuItems} />}
+                    {menuItems.length > 0 && (
+                      <MoreMenu label={t("settings.connectors.optionsFor", { label: p.label })} size="sm" items={menuItems} />
+                    )}
                   </div>
                 </Card>
               );
@@ -1258,7 +1302,7 @@ function ConnectorsPanel() {
       {connectors.length > 0 && (
         <div className="claw-connector-category">
           <Text type="label" color="secondary" className="claw-connector-cat-title">
-            Your connectors
+            {t("settings.connectors.yourConnectors")}
           </Text>
           <Divider />
           {connectors.map((c) => (
@@ -1269,10 +1313,14 @@ function ConnectorsPanel() {
                     <Text weight="semibold">{c.name}</Text>
                     <Badge variant="neutral" label={c.transport} />
                     {c.runtime.status === "connected" && (
-                      <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label={`${c.runtime.tools} tools`} />
+                      <Badge
+                        variant="success"
+                        icon={<Icon icon="check" size="xsm" />}
+                        label={t("settings.connectors.toolsCount", { count: String(c.runtime.tools) })}
+                      />
                     )}
                     {c.runtime.status === "error" && (
-                      <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label="error" />
+                      <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.error")} />
                     )}
                   </div>
                   <Text size="sm" color="secondary" as="p">
@@ -1290,7 +1338,7 @@ function ConnectorsPanel() {
                 <div className="claw-row">
                   <Switch
                     value={c.enabled}
-                    label={`Enable ${c.name}`}
+                    label={t("settings.common.enable", { name: c.name })}
                     isLabelHidden
                     changeAction={(checked) =>
                       guard(async () => {
@@ -1304,14 +1352,14 @@ function ConnectorsPanel() {
                     }
                   />
                   <Button
-                    label="Edit"
+                    label={t("settings.common.edit")}
                     icon={<Icon icon={Pencil} size="sm" />}
                     size="sm"
                     variant="ghost"
                     clickAction={() => setEditing(c)}
                   />
                   <Button
-                    label="Delete"
+                    label={t("settings.common.delete")}
                     icon={<Icon icon={Trash2} size="sm" />}
                     size="sm"
                     variant="destructive"
@@ -1339,6 +1387,7 @@ function ConnectorsPanel() {
 // ---------------------------------------------------------------- Schedules
 
 function SchedulesPanel() {
+  const t = useT();
   const [schedules, setSchedules] = useState<ScheduleInfo[]>([]);
   const [editing, setEditing] = useState<Partial<ScheduleInfo> | null>(null);
   const { error, guard } = useAsyncError();
@@ -1352,23 +1401,23 @@ function SchedulesPanel() {
     return (
       <div className="claw-panel">
         <TextInput
-          label="Name"
+          label={t("settings.schedules.name")}
           value={editing.name ?? ""}
           onChange={(v) => setEditing({ ...editing, name: v })}
         />
         <TextArea
-          label="Prompt to send to Claw"
+          label={t("settings.schedules.prompt")}
           value={editing.prompt ?? ""}
           onChange={(v) => setEditing({ ...editing, prompt: v })}
           rows={4}
         />
         <TextInput
-          label="Cron expression (e.g. 0 9 * * * = daily 09:00) — leave empty to use interval"
+          label={t("settings.schedules.cron")}
           value={editing.cron ?? ""}
           onChange={(v) => setEditing({ ...editing, cron: v })}
         />
         <TextInput
-          label="Interval minutes (used when cron is empty; 0 = run once now)"
+          label={t("settings.schedules.interval")}
           value={String(Math.round((editing.interval_seconds ?? 0) / 60))}
           onChange={(v) =>
             setEditing({ ...editing, interval_seconds: Math.max(0, parseInt(v) || 0) * 60 })
@@ -1377,7 +1426,7 @@ function SchedulesPanel() {
         {error && <ErrorText>{error}</ErrorText>}
         <div className="claw-row">
           <Button
-            label="Save schedule"
+            label={t("settings.schedules.save")}
             icon={<Icon icon="check" size="sm" />}
             clickAction={() =>
               guard(async () => {
@@ -1398,7 +1447,7 @@ function SchedulesPanel() {
               })
             }
           />
-          <Button label="Cancel" variant="ghost" clickAction={() => setEditing(null)} />
+          <Button label={t("settings.common.cancel")} variant="ghost" clickAction={() => setEditing(null)} />
         </div>
       </div>
     );
@@ -1407,11 +1456,9 @@ function SchedulesPanel() {
   return (
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
-        <Text color="secondary">
-          Scheduled prompts run automatically — results appear as new chats.
-        </Text>
+        <Text color="secondary">{t("settings.schedules.intro")}</Text>
         <Button
-          label="New schedule"
+          label={t("settings.schedules.new")}
           icon={<Icon icon={Plus} size="sm" />}
           size="sm"
           clickAction={() => setEditing({ enabled: true, interval_seconds: 0 })}
@@ -1420,8 +1467,8 @@ function SchedulesPanel() {
       {error && <ErrorText>{error}</ErrorText>}
       {schedules.length === 0 ? (
         <EmptyState
-          title="No schedules"
-          description="Create one, e.g. “Summarize my tasks” every morning at 9:00."
+          title={t("settings.schedules.emptyTitle")}
+          description={t("settings.schedules.emptyDesc")}
         />
       ) : (
         schedules.map((s) => (
@@ -1434,7 +1481,9 @@ function SchedulesPanel() {
                     variant="neutral"
                     label={
                       s.cron ||
-                      (s.interval_seconds ? `every ${Math.round(s.interval_seconds / 60)}m` : "once")
+                      (s.interval_seconds
+                        ? t("settings.schedules.every", { minutes: String(Math.round(s.interval_seconds / 60)) })
+                        : t("settings.schedules.once"))
                     }
                   />
                   {s.last_status && (
@@ -1447,13 +1496,15 @@ function SchedulesPanel() {
                 </div>
                 <Text size="sm" color="secondary" as="p">
                   {s.prompt.slice(0, 90)}
-                  {s.next_run_at ? ` · next: ${new Date(s.next_run_at).toLocaleString()}` : ""}
+                  {s.next_run_at
+                    ? t("settings.schedules.nextRun", { time: new Date(s.next_run_at).toLocaleString() })
+                    : ""}
                 </Text>
               </div>
               <div className="claw-row">
                 <Switch
                   value={s.enabled}
-                  label={`Enable ${s.name}`}
+                  label={t("settings.common.enable", { name: s.name })}
                   isLabelHidden
                   changeAction={(checked) =>
                     guard(async () => {
@@ -1463,7 +1514,7 @@ function SchedulesPanel() {
                   }
                 />
                 <Button
-                  label="Run now"
+                  label={t("settings.schedules.runNow")}
                   icon={<Icon icon={Play} size="sm" />}
                   size="sm"
                   variant="secondary"
@@ -1475,14 +1526,14 @@ function SchedulesPanel() {
                   }
                 />
                 <Button
-                  label="Edit"
+                  label={t("settings.common.edit")}
                   icon={<Icon icon={Pencil} size="sm" />}
                   size="sm"
                   variant="ghost"
                   clickAction={() => setEditing(s)}
                 />
                 <Button
-                  label="Delete"
+                  label={t("settings.common.delete")}
                   icon={<Icon icon={Trash2} size="sm" />}
                   size="sm"
                   variant="destructive"
@@ -1504,15 +1555,18 @@ function SchedulesPanel() {
 
 // ---------------------------------------------------------------- Heartbeat
 
+// `labelKey`, not a pre-resolved label — this array is module-level (can't
+// call useT()); HeartbeatPanel resolves it via t(p.labelKey) at render time.
 const HEARTBEAT_PRESETS = [
-  { label: "Off", minutes: 0 },
-  { label: "Every 30 min", minutes: 30 },
-  { label: "Hourly", minutes: 60 },
-  { label: "Every 4 hours", minutes: 240 },
-  { label: "Daily", minutes: 1440 },
+  { labelKey: "settings.heartbeat.off", minutes: 0 },
+  { labelKey: "settings.heartbeat.every30", minutes: 30 },
+  { labelKey: "settings.heartbeat.hourly", minutes: 60 },
+  { labelKey: "settings.heartbeat.every4h", minutes: 240 },
+  { labelKey: "settings.heartbeat.daily", minutes: 1440 },
 ];
 
 function HeartbeatPanel() {
+  const t = useT();
   const [state, setState] = useState<{ interval_minutes: number; enabled: boolean; next_run_at: string | null } | null>(
     null,
   );
@@ -1522,19 +1576,16 @@ function HeartbeatPanel() {
     api.getHeartbeat().then(setState);
   }, []);
 
-  if (!state) return <Text color="secondary">Loading…</Text>;
+  if (!state) return <Text color="secondary">{t("settings.common.loading")}</Text>;
 
   return (
     <div className="claw-panel">
-      <Text color="secondary">
-        When enabled, Claw periodically reviews your memory and reaches out proactively only if
-        something is genuinely worth raising (a reminder or follow-up). Results appear as new chats.
-      </Text>
+      <Text color="secondary">{t("settings.heartbeat.intro")}</Text>
       <div className="claw-row">
         {HEARTBEAT_PRESETS.map((p) => (
           <Button
             key={p.minutes}
-            label={p.label}
+            label={t(p.labelKey)}
             size="sm"
             variant={state.interval_minutes === p.minutes ? "primary" : "secondary"}
             clickAction={() =>
@@ -1551,14 +1602,14 @@ function HeartbeatPanel() {
           <Badge
             variant="success"
             icon={<Icon icon={HeartPulse} size="xsm" />}
-            label={`On · every ${state.interval_minutes} min`}
+            label={t("settings.heartbeat.onEvery", { minutes: String(state.interval_minutes) })}
           />
         ) : (
-          <Badge variant="neutral" label="Off" />
+          <Badge variant="neutral" label={t("settings.heartbeat.off")} />
         )}
         {state.next_run_at && (
           <Text size="sm" color="secondary">
-            Next check-in: {new Date(state.next_run_at).toLocaleString()}
+            {t("settings.heartbeat.nextCheckIn", { time: new Date(state.next_run_at).toLocaleString() })}
           </Text>
         )}
       </div>
@@ -1569,6 +1620,7 @@ function HeartbeatPanel() {
 // ---------------------------------------------------------------- Telegram
 
 function TelegramPanel() {
+  const t = useT();
   const [status, setStatus] = useState<{ enabled: boolean; linked: boolean; bot_username: string } | null>(
     null,
   );
@@ -1580,40 +1632,34 @@ function TelegramPanel() {
     void reload();
   }, [reload]);
 
-  if (!status) return <Text color="secondary">Loading…</Text>;
+  if (!status) return <Text color="secondary">{t("settings.common.loading")}</Text>;
 
   if (!status.enabled) {
     return (
       <div className="claw-panel">
-        <Text color="secondary">
-          Telegram isn't set up on this workspace yet. Ask an administrator to connect a bot in
-          Control Plane → Telegram.
-        </Text>
+        <Text color="secondary">{t("settings.telegram.notSetUp")}</Text>
       </div>
     );
   }
 
-  const botHandle = status.bot_username ? `@${status.bot_username}` : "the bot";
+  const botHandle = status.bot_username ? `@${status.bot_username}` : t("settings.telegram.theBot");
   const botUrl = status.bot_username ? `https://t.me/${status.bot_username}` : "";
 
   return (
     <div className="claw-panel">
-      <Text color="secondary">
-        Link your Telegram account so you can chat with Claw from Telegram using the same memory,
-        skills, and history as here.
-      </Text>
+      <Text color="secondary">{t("settings.telegram.intro")}</Text>
       <div className="claw-row">
         {status.linked ? (
-          <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label="Linked" />
+          <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label={t("settings.telegram.linked")} />
         ) : (
-          <Badge variant="neutral" label="Not linked" />
+          <Badge variant="neutral" label={t("settings.telegram.notLinked")} />
         )}
       </div>
       {error && <ErrorText>{error}</ErrorText>}
 
       {status.linked ? (
         <Button
-          label="Unlink Telegram"
+          label={t("settings.telegram.unlink")}
           icon={<Icon icon={Trash2} size="sm" />}
           variant="destructive"
           clickAction={() =>
@@ -1627,19 +1673,21 @@ function TelegramPanel() {
       ) : (
         <>
           <Card padding={2} variant="muted">
-            <Text weight="semibold">3 steps to link</Text>
+            <Text weight="semibold">{t("settings.telegram.stepsTitle")}</Text>
             <ol className="claw-telegram-steps">
               <li>
-                Open {botHandle} in Telegram and tap <strong>Start</strong>.
+                {t("settings.telegram.step1Prefix", { bot: botHandle })}
+                <strong>Start</strong>
+                {t("settings.telegram.step1Suffix")}
               </li>
-              <li>Click "Generate link code" below.</li>
-              <li>Send the code back to the bot as a message.</li>
+              <li>{t("settings.telegram.step2")}</li>
+              <li>{t("settings.telegram.step3")}</li>
             </ol>
           </Card>
           <div className="claw-row">
             {botUrl && (
               <Button
-                label="Open in Telegram"
+                label={t("settings.telegram.openInTelegram")}
                 icon={<Icon icon={ExternalLink} size="sm" />}
                 variant="secondary"
                 href={botUrl}
@@ -1648,7 +1696,7 @@ function TelegramPanel() {
               />
             )}
             <Button
-              label="Generate link code"
+              label={t("settings.telegram.generateCode")}
               icon={<Icon icon={Send} size="sm" />}
               clickAction={() =>
                 guard(async () => {
@@ -1660,14 +1708,14 @@ function TelegramPanel() {
           </div>
           {code && (
             <Card padding={2} variant="muted">
-              <Text weight="semibold">Your link code</Text>
+              <Text weight="semibold">{t("settings.telegram.yourCode")}</Text>
               <Text type="display-3">{code}</Text>
               <Text size="sm" color="secondary" as="p">
-                Send this to {botHandle} as a message:
+                {t("settings.telegram.sendAsMessage", { bot: botHandle })}
               </Text>
               <Text type="code">/link {code}</Text>
               <Text size="sm" color="secondary" as="p">
-                Expires in a few minutes. Once sent, come back and refresh this page.
+                {t("settings.telegram.expires")}
               </Text>
             </Card>
           )}
@@ -1680,6 +1728,7 @@ function TelegramPanel() {
 // ---------------------------------------------------------------- Browser extension
 
 function BrowserExtensionPanel() {
+  const t = useT();
   const [status, setStatus] = useState<Awaited<ReturnType<typeof api.browserExtensionStatus>> | null>(
     null,
   );
@@ -1702,24 +1751,17 @@ function BrowserExtensionPanel() {
   if (isMobile) {
     return (
       <div className="claw-panel">
-        <Text color="secondary">
-          The browser extension pairs Claw with Chrome on your computer, so it's set up on a
-          desktop — not on a phone or tablet. Open Softnix PrivateClaw on your computer, then go to
-          Settings → Browser extension.
-        </Text>
+        <Text color="secondary">{t("settings.browserExt.mobileNotice")}</Text>
       </div>
     );
   }
 
-  if (!status) return <Text color="secondary">Loading…</Text>;
+  if (!status) return <Text color="secondary">{t("settings.common.loading")}</Text>;
 
   if (!status.client_extension_enabled) {
     return (
       <div className="claw-panel">
-        <Text color="secondary">
-          The browser extension is not enabled on this server. An administrator must set
-          CLAW_BROWSER__CLIENT_EXTENSION_ENABLED=true to allow pairing.
-        </Text>
+        <Text color="secondary">{t("settings.browserExt.notEnabled")}</Text>
       </div>
     );
   }
@@ -1730,35 +1772,35 @@ function BrowserExtensionPanel() {
 
   return (
     <div className="claw-panel">
-      <Text color="secondary">
-        Pair your own Chrome so Claw can act inside your real browser tabs (logged-in sites,
-        multi-step flows) instead of an isolated server browser.
-      </Text>
+      <Text color="secondary">{t("settings.browserExt.intro")}</Text>
 
       <div className="claw-row">
         {status.paired ? (
-          <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label="Paired" />
+          <Badge
+            variant="success"
+            icon={<Icon icon="check" size="xsm" />}
+            label={t("settings.browserExt.paired")}
+          />
         ) : (
-          <Badge variant="neutral" label="Not paired" />
+          <Badge variant="neutral" label={t("settings.browserExt.notPaired")} />
         )}
         {status.paired &&
           (status.online ? (
-            <Badge variant="success" label="Online" />
+            <Badge variant="success" label={t("settings.browserExt.online")} />
           ) : (
-            <Badge variant="warning" label="Offline" />
+            <Badge variant="warning" label={t("settings.browserExt.offline")} />
           ))}
       </div>
       {error && <ErrorText>{error}</ErrorText>}
 
       <Card padding={2} variant="muted">
-        <Text weight="semibold">1. Install the extension</Text>
+        <Text weight="semibold">{t("settings.browserExt.step1Title")}</Text>
         <Text size="sm" color="secondary" as="p">
-          Download the package, unzip it, then load it in Chrome via chrome://extensions → enable
-          Developer mode → “Load unpacked” → pick the unzipped folder.
+          {t("settings.browserExt.step1Desc")}
         </Text>
         <div className="claw-row">
           <Button
-            label="Download extension"
+            label={t("settings.browserExt.download")}
             icon={<Icon icon={Download} size="sm" />}
             clickAction={() => {
               window.location.href = "/api/browser-extension/download";
@@ -1768,14 +1810,13 @@ function BrowserExtensionPanel() {
       </Card>
 
       <Card padding={2} variant="muted">
-        <Text weight="semibold">2. Pair your browser</Text>
+        <Text weight="semibold">{t("settings.browserExt.step2Title")}</Text>
         <Text size="sm" color="secondary" as="p">
-          Generate pairing details, copy them, open the extension popup, and paste into “Paste
-          pairing details”. The ticket expires in a few minutes.
+          {t("settings.browserExt.step2Desc")}
         </Text>
         <div className="claw-row">
           <Button
-            label="Generate pairing details"
+            label={t("settings.browserExt.generateDetails")}
             icon={<Icon icon={LinkIcon} size="sm" />}
             clickAction={() =>
               guard(async () => {
@@ -1790,7 +1831,7 @@ function BrowserExtensionPanel() {
             <Text type="code">{pairingText}</Text>
             <div className="claw-row">
               <Button
-                label={copied ? "Copied" : "Copy pairing details"}
+                label={copied ? t("settings.browserExt.copied") : t("settings.browserExt.copyDetails")}
                 icon={<Icon icon={Copy} size="sm" />}
                 variant="secondary"
                 clickAction={() =>
@@ -1807,7 +1848,7 @@ function BrowserExtensionPanel() {
 
       {status.paired && (
         <Button
-          label="Unpair browser"
+          label={t("settings.browserExt.unpair")}
           icon={<Icon icon={Trash2} size="sm" />}
           variant="destructive"
           clickAction={() =>
@@ -1847,28 +1888,29 @@ function VisibilitySelector({
   myGroupName: string | null;
   groups: SimpleGroup[];
 }) {
+  const t = useT();
   const otherGroups = groups.filter((g) => g.id !== myGroupId);
   return (
     <div className="claw-field-group">
       <Text size="sm" color="secondary">
-        Visibility
+        {t("settings.knowledge.visibility")}
       </Text>
       <div className="claw-row">
         <Button
-          label="Private"
+          label={t("settings.knowledge.private")}
           size="sm"
           variant={visibility === "private" ? "primary" : "secondary"}
           clickAction={() => onChange("private")}
         />
         <Button
-          label="Group"
+          label={t("settings.knowledge.group")}
           size="sm"
           variant={visibility === "group" ? "primary" : "secondary"}
           isDisabled={!myGroupId}
           clickAction={() => onChange("group")}
         />
         <Button
-          label="Public"
+          label={t("settings.knowledge.public")}
           size="sm"
           variant={visibility === "public" ? "primary" : "secondary"}
           clickAction={() => onChange("public")}
@@ -1876,18 +1918,18 @@ function VisibilitySelector({
       </div>
       {!myGroupId && (
         <Text size="sm" color="secondary">
-          Join a group first to use group visibility.
+          {t("settings.knowledge.joinGroupFirst")}
         </Text>
       )}
       {visibility === "group" && myGroupId && (
         <>
           <Text size="sm" color="secondary">
-            Default: shared with your group ({myGroupName ?? "—"})
+            {t("settings.knowledge.defaultSharedWith", { group: myGroupName ?? "—" })}
           </Text>
           {otherGroups.length > 0 && (
             <>
               <Text size="sm" color="secondary">
-                Also share with:
+                {t("settings.knowledge.alsoShareWith")}
               </Text>
               <div className="claw-row">
                 {otherGroups.map((g) => (
@@ -1926,6 +1968,7 @@ function KnowledgePanel() {
   const [groups, setGroups] = useState<SimpleGroup[]>([]);
   const [myGroupId, setMyGroupId] = useState<string | null>(null);
   const toast = useToast();
+  const t = useT();
 
   const load = useCallback(() => {
     setLoading(true);
@@ -1976,17 +2019,16 @@ function KnowledgePanel() {
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
         <Text color="secondary" size="sm">
-          Upload documents (PDF, Word, text, Markdown, HTML) to build a knowledge base the agent can
-          search when answering. Choose Private (only you), Group (your org group), or Public (everyone).
+          {t("settings.knowledge.intro")}
         </Text>
         {!creating && (
           <Button
-            label="New knowledge base"
+            label={t("settings.knowledge.newBase")}
             variant="secondary"
             icon={<Icon icon={Plus} size="sm" />}
             onClick={() => setCreating(true)}
           >
-            New
+            {t("settings.knowledge.newShort")}
           </Button>
         )}
       </div>
@@ -1996,12 +2038,17 @@ function KnowledgePanel() {
       {creating && (
         <Card padding={3}>
           <div className="claw-kb-form">
-            <TextInput label="Name" value={name} onChange={setName} placeholder="e.g. Company Handbook" />
             <TextInput
-              label="Description"
+              label={t("settings.knowledge.name")}
+              value={name}
+              onChange={setName}
+              placeholder={t("settings.knowledge.namePlaceholder")}
+            />
+            <TextInput
+              label={t("settings.knowledge.description")}
               value={description}
               onChange={setDescription}
-              placeholder="What's in this knowledge base?"
+              placeholder={t("settings.knowledge.descPlaceholder")}
             />
             <VisibilitySelector
               visibility={visibility}
@@ -2013,11 +2060,11 @@ function KnowledgePanel() {
               groups={groups}
             />
             <div className="claw-row">
-              <Button label="Create" variant="primary" onClick={create}>
-                Create
+              <Button label={t("settings.knowledge.create")} variant="primary" onClick={create}>
+                {t("settings.knowledge.create")}
               </Button>
-              <Button label="Cancel" variant="ghost" onClick={() => setCreating(false)}>
-                Cancel
+              <Button label={t("settings.common.cancel")} variant="ghost" onClick={() => setCreating(false)}>
+                {t("settings.common.cancel")}
               </Button>
             </div>
           </div>
@@ -2025,12 +2072,12 @@ function KnowledgePanel() {
       )}
 
       {loading ? (
-        <Text color="secondary">Loading…</Text>
+        <Text color="secondary">{t("settings.common.loading")}</Text>
       ) : bases.length === 0 && !creating ? (
         <EmptyState
           icon={<Icon icon={Library} size="lg" />}
-          title="No knowledge bases yet"
-          description="Create one and upload documents so Claw can answer from them."
+          title={t("settings.knowledge.emptyTitle")}
+          description={t("settings.knowledge.emptyDesc")}
         />
       ) : (
         <div className="claw-kb-grid">
@@ -2076,6 +2123,7 @@ function KnowledgeCard({
   myGroupId: string | null;
   myGroupName: string | null;
 }) {
+  const t = useT();
   const [expanded, setExpanded] = useState(false);
   const [docs, setDocs] = useState<KnowledgeDoc[] | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -2127,7 +2175,7 @@ function KnowledgeCard({
       setPreviewMore(Boolean(r.has_more));
     } catch (e) {
       if (token !== previewReq.current) return;
-      setPreviewText(`Preview unavailable: ${String(e)}`);
+      setPreviewText(t("settings.knowledge.previewUnavailable", { error: String(e) }));
       setPreviewMore(false);
     } finally {
       if (token === previewReq.current) setPreviewLoading(false);
@@ -2140,7 +2188,7 @@ function KnowledgeCard({
     try {
       const r = await api.previewKnowledgeDoc(kb.id, docId, previewNext);
       if (token !== previewReq.current) return;
-      setPreviewText((t) => t + (r.text ?? ""));
+      setPreviewText((prev) => prev + (r.text ?? ""));
       setPreviewNext(r.next_offset ?? previewNext);
       setPreviewMore(Boolean(r.has_more));
     } finally {
@@ -2174,7 +2222,11 @@ function KnowledgeCard({
     try {
       const res = await api.uploadKnowledgeDocs(kb.id, Array.from(files));
       if (res.ingested.length) {
-        toast({ body: `Queued ${res.ingested.length} document(s) in ${kb.name} — processing…`, type: "info", autoHideDuration: 2500 });
+        toast({
+          body: t("settings.knowledge.queued", { count: String(res.ingested.length), name: kb.name }),
+          type: "info",
+          autoHideDuration: 2500,
+        });
       }
       if (res.errors.length) {
         toast({ body: res.errors.join("; "), type: "error" });
@@ -2183,7 +2235,7 @@ function KnowledgeCard({
       setExpanded(true);
       onChanged();
     } catch (e) {
-      toast({ body: `Upload failed: ${String(e)}`, type: "error" });
+      toast({ body: t("settings.knowledge.uploadFailed", { error: String(e) }), type: "error" });
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -2202,7 +2254,7 @@ function KnowledgeCard({
   };
 
   const removeBase = async () => {
-    if (!window.confirm(`Delete knowledge base "${kb.name}" and all its documents?`)) return;
+    if (!window.confirm(t("settings.knowledge.confirmDelete", { name: kb.name }))) return;
     setBusy(true);
     try {
       await api.deleteKnowledge(kb.id);
@@ -2215,7 +2267,12 @@ function KnowledgeCard({
   const visibilityBadge = (v: KnowledgeBase["visibility"]) => {
     const icon = v === "public" ? Globe : v === "group" ? Users : Lock;
     const variant = v === "public" ? "success" : v === "group" ? "info" : "neutral";
-    const label = v === "public" ? "Public" : v === "group" ? "Group" : "Private";
+    const label =
+      v === "public"
+        ? t("settings.knowledge.public")
+        : v === "group"
+          ? t("settings.knowledge.group")
+          : t("settings.knowledge.private");
     return <Badge variant={variant} icon={<Icon icon={icon} size="xsm" />} label={label} />;
   };
 
@@ -2231,7 +2288,7 @@ function KnowledgeCard({
       onPatch(kb.id, { visibility: r.visibility, shared_group_ids: r.shared_group_ids });
       setEditingVisibility(false);
     } catch (e) {
-      toast({ body: `Failed to update visibility: ${String(e)}`, type: "error" });
+      toast({ body: t("settings.knowledge.updateVisibilityFailed", { error: String(e) }), type: "error" });
     } finally {
       setVisibilityBusy(false);
     }
@@ -2249,11 +2306,11 @@ function KnowledgeCard({
                 type="button"
                 className="claw-kb-visibility-badge"
                 disabled={busy}
-                aria-label="Edit visibility"
+                aria-label={t("settings.knowledge.editVisibility")}
                 title={
                   kb.visibility === "group" && kb.owner_group_name
-                    ? `Group — shared with ${kb.owner_group_name}. Click to edit.`
-                    : "Click to edit visibility"
+                    ? t("settings.knowledge.groupSharedTitle", { group: kb.owner_group_name })
+                    : t("settings.knowledge.clickToEditVisibility")
                 }
                 onClick={() => {
                   setDraftVisibility(kb.visibility);
@@ -2281,14 +2338,14 @@ function KnowledgeCard({
             />
             <div className="claw-row">
               <Button
-                label="Save"
+                label={t("settings.common.save")}
                 size="sm"
                 variant="primary"
                 isDisabled={visibilityBusy}
                 clickAction={saveVisibility}
               />
               <Button
-                label="Cancel"
+                label={t("settings.common.cancel")}
                 size="sm"
                 variant="ghost"
                 isDisabled={visibilityBusy}
@@ -2304,9 +2361,10 @@ function KnowledgeCard({
         )}
         <div className="claw-kb-meta">
           <span>
-            <Icon icon={FileText} size="xsm" color="secondary" /> {kb.docs} document{kb.docs === 1 ? "" : "s"}
+            <Icon icon={FileText} size="xsm" color="secondary" />{" "}
+            {t("settings.knowledge.docsCount", { count: String(kb.docs), plural: kb.docs === 1 ? "" : "s" })}
           </span>
-          {!kb.is_owner && <span className="claw-kb-shared">shared</span>}
+          {!kb.is_owner && <span className="claw-kb-shared">{t("settings.knowledge.shared")}</span>}
         </div>
 
         <input
@@ -2320,7 +2378,7 @@ function KnowledgeCard({
         <div className="claw-kb-actions">
           {kb.is_owner && (
             <Button
-              label={uploading ? "Uploading…" : "Upload"}
+              label={uploading ? t("settings.knowledge.uploading") : t("settings.knowledge.upload")}
               variant="secondary"
               size="sm"
               isDisabled={uploading}
@@ -2328,12 +2386,17 @@ function KnowledgeCard({
               onClick={() => fileRef.current?.click()}
             />
           )}
-          <Button label={expanded ? "Hide documents" : "View documents"} variant="ghost" size="sm" onClick={toggle}>
-            {expanded ? "Hide" : "Documents"}
+          <Button
+            label={expanded ? t("settings.knowledge.hideDocuments") : t("settings.knowledge.viewDocuments")}
+            variant="ghost"
+            size="sm"
+            onClick={toggle}
+          >
+            {expanded ? t("settings.knowledge.hide") : t("settings.knowledge.documents")}
           </Button>
           {kb.is_owner && (
             <Button
-              label="Delete knowledge base"
+              label={t("settings.knowledge.deleteBase")}
               variant="ghost"
               size="sm"
               isIconOnly
@@ -2348,11 +2411,11 @@ function KnowledgeCard({
           <div className="claw-kb-docs">
             {docs === null ? (
               <Text size="sm" color="secondary">
-                Loading…
+                {t("settings.common.loading")}
               </Text>
             ) : docs.length === 0 ? (
               <Text size="sm" color="secondary">
-                No documents yet — upload one to get started.
+                {t("settings.knowledge.noDocsYet")}
               </Text>
             ) : (
               docs.map((d) => (
@@ -2364,20 +2427,22 @@ function KnowledgeCard({
                     </span>
                     {d.status === "failed" ? (
                       <span className="claw-kb-doc-meta claw-kb-doc-failed" title={d.error}>
-                        Failed
+                        {t("settings.knowledge.failed")}
                       </span>
                     ) : d.status === "pending" || d.status === "processing" ? (
-                      <span className="claw-kb-doc-meta claw-kb-doc-processing">Processing…</span>
+                      <span className="claw-kb-doc-meta claw-kb-doc-processing">
+                        {t("settings.knowledge.processing")}
+                      </span>
                     ) : (
                       <span className="claw-kb-doc-meta">
-                        {d.chunks} chunk{d.chunks === 1 ? "" : "s"}
+                        {t("settings.knowledge.chunksCount", { count: String(d.chunks), plural: d.chunks === 1 ? "" : "s" })}
                       </span>
                     )}
                     {d.status === "ready" && (
                       <button
                         type="button"
                         className="claw-kb-doc-del"
-                        aria-label="Preview extracted text"
+                        aria-label={t("settings.knowledge.previewText")}
                         onClick={() => openPreview(d.id)}
                       >
                         <Icon icon={Eye} size="xsm" color={previewFor === d.id ? "primary" : "secondary"} />
@@ -2387,7 +2452,7 @@ function KnowledgeCard({
                       <button
                         type="button"
                         className="claw-kb-doc-del"
-                        aria-label="Delete document"
+                        aria-label={t("settings.knowledge.deleteDoc")}
                         disabled={busy}
                         onClick={() => removeDoc(d.id)}
                       >
@@ -2399,14 +2464,17 @@ function KnowledgeCard({
                     <div className="claw-kb-doc-preview">
                       <div className="claw-kb-doc-preview-head">
                         <Text size="sm" color="secondary">
-                          Extracted text{" "}
+                          {t("settings.knowledge.extractedText")}{" "}
                           {previewTotal > 0 &&
-                            `· ${previewLoadedChars.toLocaleString()} / ${previewTotal.toLocaleString()} chars`}
+                            t("settings.knowledge.charsCount", {
+                              loaded: previewLoadedChars.toLocaleString(),
+                              total: previewTotal.toLocaleString(),
+                            })}
                         </Text>
                         <button
                           type="button"
                           className="claw-kb-doc-expand"
-                          aria-label="Open in expanded view"
+                          aria-label={t("settings.knowledge.expandView")}
                           onClick={() => setPreviewExpanded(true)}
                         >
                           <Icon icon={Maximize2} size="xsm" color="secondary" />
@@ -2415,7 +2483,7 @@ function KnowledgeCard({
                       <pre className="claw-kb-doc-preview-body">{previewText}</pre>
                       {previewMore && (
                         <Button
-                          label={previewLoading ? "Loading…" : "Load more"}
+                          label={previewLoading ? t("settings.common.loading") : t("settings.knowledge.loadMore")}
                           size="sm"
                           variant="ghost"
                           isDisabled={previewLoading}
@@ -2441,7 +2509,10 @@ function KnowledgeCard({
                             title={previewTitle || d.title}
                             subtitle={
                               previewTotal > 0
-                                ? `${previewLoadedChars.toLocaleString()} / ${previewTotal.toLocaleString()} chars extracted`
+                                ? t("settings.knowledge.charsExtracted", {
+                                    loaded: previewLoadedChars.toLocaleString(),
+                                    total: previewTotal.toLocaleString(),
+                                  })
                                 : undefined
                             }
                             onOpenChange={setPreviewExpanded}
@@ -2458,7 +2529,7 @@ function KnowledgeCard({
                           previewMore ? (
                             <LayoutFooter hasDivider>
                               <Button
-                                label={previewLoading ? "Loading…" : "Load more"}
+                                label={previewLoading ? t("settings.common.loading") : t("settings.knowledge.loadMore")}
                                 size="sm"
                                 variant="secondary"
                                 isDisabled={previewLoading}

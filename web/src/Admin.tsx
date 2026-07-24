@@ -58,7 +58,7 @@ import {
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
-import { useBranding } from "./branding";
+import { useBranding, useT } from "./branding";
 import {
   ActivityPoint,
   AdminBranding,
@@ -107,27 +107,33 @@ export type AdminSection =
   | "audit"
   | "users";
 
+// Reuses the chat-side cost-tier vocabulary (identical wording) rather than
+// duplicating a second admin.cost.* catalog for the same four words.
 export const COST_LABEL: Record<ModelCost, string> = {
-  low: "Low cost",
-  medium: "Medium cost",
-  high: "High cost",
-  very_high: "Very high cost",
+  low: "chat.cost.low",
+  medium: "chat.cost.medium",
+  high: "chat.cost.high",
+  very_high: "chat.cost.veryHigh",
 };
 
-export const ADMIN_SECTIONS: { key: AdminSection; label: string; icon: IconType | IconName }[] = [
-  { key: "overview", label: "Overview", icon: LayoutDashboard },
-  { key: "providers", label: "LLM Providers", icon: Cpu },
-  { key: "plans", label: "Plans", icon: Gauge },
-  { key: "guardrails", label: "Guardrails", icon: ShieldCheck },
-  { key: "oauth", label: "OAuth apps", icon: KeyRound },
-  { key: "telegram", label: "Telegram", icon: Send },
-  { key: "email", label: "Email Notification", icon: Mail },
-  { key: "preferences", label: "Preferences", icon: Palette },
-  { key: "audit", label: "Audit Logs", icon: ScrollText },
-  { key: "users", label: "Users", icon: Users },
+// `labelKey` (not a pre-resolved label) because this array is built at module
+// scope, before any component (and its `useT()`) exists — consumers call
+// `t(s.labelKey)` at render time so the label follows the current language.
+export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconType | IconName }[] = [
+  { key: "overview", labelKey: "admin.nav.overview", icon: LayoutDashboard },
+  { key: "providers", labelKey: "admin.nav.providers", icon: Cpu },
+  { key: "plans", labelKey: "admin.nav.plans", icon: Gauge },
+  { key: "guardrails", labelKey: "admin.nav.guardrails", icon: ShieldCheck },
+  { key: "oauth", labelKey: "admin.nav.oauth", icon: KeyRound },
+  { key: "telegram", labelKey: "admin.nav.telegram", icon: Send },
+  { key: "email", labelKey: "admin.nav.email", icon: Mail },
+  { key: "preferences", labelKey: "admin.nav.preferences", icon: Palette },
+  { key: "audit", labelKey: "admin.nav.audit", icon: ScrollText },
+  { key: "users", labelKey: "admin.nav.users", icon: Users },
 ];
 
 export function AdminPanel({ section, selfId }: { section: AdminSection; selfId: string }) {
+  const t = useT();
   const meta = ADMIN_SECTIONS.find((s) => s.key === section);
   // LLM Providers is a data table (model id, cost, status, several action
   // buttons per row) — the shared 720px prose-reading column that suits every
@@ -140,7 +146,7 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
     <div className="claw-settings-panel">
       <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
         <Icon icon={meta?.icon ?? "check"} size="lg" color="secondary" />
-        <Text type="display-3">{meta?.label}</Text>
+        <Text type="display-3">{meta ? t(meta.labelKey) : ""}</Text>
       </div>
       <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
         {section === "overview" && <OverviewPanel />}
@@ -301,30 +307,31 @@ function StackedBarChart({ buckets, series }: { buckets: string[]; series: Token
 
 // ---------------------------------------------------------------- Overview
 
-const STAT_CARDS: { key: string; label: string; icon: IconType }[] = [
-  { key: "users", label: "Users", icon: Users },
-  { key: "active_users", label: "Active (7d)", icon: Users },
-  { key: "sessions", label: "Sessions", icon: MessageSquare },
-  { key: "messages", label: "Messages", icon: MessageSquare },
-  { key: "turns", label: "LLM turns", icon: Cpu },
-  { key: "prompt_tokens", label: "Prompt tokens", icon: Cpu },
-  { key: "consolidations", label: "Memory consolidations", icon: Sparkles },
-  { key: "memory_users", label: "Users with memory", icon: Brain },
+const STAT_CARDS: { key: string; labelKey: string; icon: IconType }[] = [
+  { key: "users", labelKey: "admin.overview.stat.users", icon: Users },
+  { key: "active_users", labelKey: "admin.overview.stat.activeUsers", icon: Users },
+  { key: "sessions", labelKey: "admin.overview.stat.sessions", icon: MessageSquare },
+  { key: "messages", labelKey: "admin.overview.stat.messages", icon: MessageSquare },
+  { key: "turns", labelKey: "admin.overview.stat.turns", icon: Cpu },
+  { key: "prompt_tokens", labelKey: "admin.overview.stat.promptTokens", icon: Cpu },
+  { key: "consolidations", labelKey: "admin.overview.stat.consolidations", icon: Sparkles },
+  { key: "memory_users", labelKey: "admin.overview.stat.memoryUsers", icon: Brain },
 ];
 
 // Overview groups its metrics into tabs (Summary / Activity / Models / Safety)
 // so the page stays scannable as more data is added. Everything comes from one
 // adminOverview() fetch, so switching tabs is an instant client-side view swap.
-const OVERVIEW_TABS: { key: string; label: string; icon: IconType }[] = [
-  { key: "summary", label: "Summary", icon: LayoutDashboard },
-  { key: "activity", label: "Activity", icon: MessageSquare },
-  { key: "models", label: "Models", icon: Cpu },
-  { key: "tokens", label: "Tokens", icon: Coins },
-  { key: "plans", label: "Plans", icon: Gauge },
-  { key: "safety", label: "Safety", icon: ShieldCheck },
+const OVERVIEW_TABS: { key: string; labelKey: string; icon: IconType }[] = [
+  { key: "summary", labelKey: "admin.overview.tab.summary", icon: LayoutDashboard },
+  { key: "activity", labelKey: "admin.overview.tab.activity", icon: MessageSquare },
+  { key: "models", labelKey: "admin.overview.tab.models", icon: Cpu },
+  { key: "tokens", labelKey: "admin.overview.tab.tokens", icon: Coins },
+  { key: "plans", labelKey: "admin.overview.tab.plans", icon: Gauge },
+  { key: "safety", labelKey: "admin.overview.tab.safety", icon: ShieldCheck },
 ];
 
 function OverviewPanel() {
+  const t = useT();
   const [data, setData] = useState<AdminOverview | null>(null);
   const [tab, setTab] = useState("summary");
   const { error, guard } = useAsyncError();
@@ -334,13 +341,13 @@ function OverviewPanel() {
   }, [guard]);
 
   if (error) return <ErrorText>{error}</ErrorText>;
-  if (!data) return <Text color="secondary">Loading…</Text>;
+  if (!data) return <Text color="secondary">{t("admin.common.loading")}</Text>;
 
   return (
     <div className="claw-panel">
-      <TabList value={tab} onChange={setTab} hasDivider aria-label="Overview sections">
-        {OVERVIEW_TABS.map((t) => (
-          <Tab key={t.key} value={t.key} label={t.label} icon={<Icon icon={t.icon} size="sm" />} />
+      <TabList value={tab} onChange={setTab} hasDivider aria-label={t("admin.overview.sectionsAria")}>
+        {OVERVIEW_TABS.map((tabItem) => (
+          <Tab key={tabItem.key} value={tabItem.key} label={t(tabItem.labelKey)} icon={<Icon icon={tabItem.icon} size="sm" />} />
         ))}
       </TabList>
       {tab === "summary" && <OverviewSummary data={data} />}
@@ -354,6 +361,7 @@ function OverviewPanel() {
 }
 
 function OverviewSummary({ data }: { data: AdminOverview }) {
+  const t = useT();
   const s = data.stats;
   return (
     <>
@@ -364,7 +372,7 @@ function OverviewSummary({ data }: { data: AdminOverview }) {
               <Icon icon={c.icon} size="sm" color="secondary" />
               <Text type="display-3">{Number(s[c.key] ?? 0).toLocaleString()}</Text>
               <Text size="sm" color="secondary">
-                {c.label}
+                {t(c.labelKey)}
               </Text>
             </div>
           </Card>
@@ -372,22 +380,30 @@ function OverviewSummary({ data }: { data: AdminOverview }) {
       </div>
 
       <div className="claw-row">
-        <Badge variant="neutral" icon={<Icon icon={Shield} size="xsm" />} label={`${s.admins ?? 0} admins`} />
-        <Badge variant="neutral" icon={<Icon icon={Ban} size="xsm" />} label={`${s.suspended ?? 0} suspended`} />
+        <Badge
+          variant="neutral"
+          icon={<Icon icon={Shield} size="xsm" />}
+          label={t("admin.overview.badge.admins", { count: String(s.admins ?? 0) })}
+        />
+        <Badge
+          variant="neutral"
+          icon={<Icon icon={Ban} size="xsm" />}
+          label={t("admin.overview.badge.suspended", { count: String(s.suspended ?? 0) })}
+        />
         <Badge
           variant={s.policy_enforcing ? "success" : "neutral"}
           icon={<Icon icon={ShieldCheck} size="xsm" />}
-          label={s.policy_enforcing ? "guardrails enforcing" : "monitor-only"}
+          label={s.policy_enforcing ? t("admin.overview.badge.enforcing") : t("admin.overview.badge.monitorOnly")}
         />
         <Badge
           variant={s.browser_enabled ? "success" : "neutral"}
           icon={<Icon icon={Globe} size="xsm" />}
-          label={s.browser_enabled ? "browser on" : "browser off"}
+          label={s.browser_enabled ? t("admin.overview.badge.browserOn") : t("admin.overview.badge.browserOff")}
         />
         <Badge
           variant={s.telegram_enabled ? "success" : "neutral"}
           icon={<Icon icon={Send} size="xsm" />}
-          label={s.telegram_enabled ? "telegram on" : "telegram off"}
+          label={s.telegram_enabled ? t("admin.overview.badge.telegramOn") : t("admin.overview.badge.telegramOff")}
         />
       </div>
     </>
@@ -395,32 +411,33 @@ function OverviewSummary({ data }: { data: AdminOverview }) {
 }
 
 function OverviewActivity({ data }: { data: AdminOverview }) {
+  const t = useT();
   return (
     <>
       <Card padding={3}>
-        <Text weight="semibold">CLAW activity — last 14 days</Text>
+        <Text weight="semibold">{t("admin.overview.activity.title")}</Text>
         <BarChart data={data.activity_by_day} />
       </Card>
       <Card padding={3}>
-        <Text weight="semibold">Activity by hour of day</Text>
+        <Text weight="semibold">{t("admin.overview.activity.byHour")}</Text>
         <BarChart data={data.activity_by_hour} accent="var(--color-info, #2f9e6f)" />
       </Card>
 
       <Card padding={3}>
-        <Text weight="semibold">Sessions started — last 7 days</Text>
+        <Text weight="semibold">{t("admin.overview.activity.sessionsStarted")}</Text>
         {data.sessions_by_day_7d.every((d) => d.count === 0) ? (
           <Text size="sm" color="secondary">
-            No sessions started in the last 7 days.
+            {t("admin.overview.activity.noSessions7d")}
           </Text>
         ) : (
           <BarChart data={data.sessions_by_day_7d} accent="var(--color-warning, #d97706)" />
         )}
       </Card>
       <Card padding={3}>
-        <Text weight="semibold">Sessions by user — last 7 days</Text>
+        <Text weight="semibold">{t("admin.overview.activity.sessionsByUser")}</Text>
         {data.sessions_by_user_7d.length === 0 ? (
           <Text size="sm" color="secondary">
-            No sessions started in the last 7 days.
+            {t("admin.overview.activity.noSessions7d")}
           </Text>
         ) : (
           <SessionsByUserList data={data.sessions_by_user_7d} />
@@ -431,13 +448,14 @@ function OverviewActivity({ data }: { data: AdminOverview }) {
 }
 
 function OverviewModels({ data }: { data: AdminOverview }) {
+  const t = useT();
   return (
     <>
       <Card padding={3}>
-        <Text weight="semibold">LLM providers in use</Text>
+        <Text weight="semibold">{t("admin.overview.models.providersInUse")}</Text>
         {data.providers.length === 0 ? (
           <Text size="sm" color="secondary">
-            No providers configured yet — add one in the LLM Providers section.
+            {t("admin.overview.models.noProviders")}
           </Text>
         ) : (
           <div className="claw-provider-usage-list">
@@ -447,14 +465,17 @@ function OverviewModels({ data }: { data: AdminOverview }) {
                 <span className="claw-provider-usage-name">{p.name}</span>
                 <Badge
                   variant={p.enabled ? "success" : "neutral"}
-                  label={p.enabled ? "enabled" : "disabled"}
+                  label={p.enabled ? t("admin.overview.models.enabled") : t("admin.overview.models.disabled")}
                 />
                 <Badge
                   variant={p.has_key ? "neutral" : "warning"}
-                  label={p.has_key ? "key set" : "no key"}
+                  label={p.has_key ? t("admin.overview.models.keySet") : t("admin.overview.models.noKey")}
                 />
                 <span className="claw-provider-usage-models">
-                  {p.enabled_model_count}/{p.model_count} models enabled
+                  {t("admin.overview.models.modelsEnabled", {
+                    enabled: String(p.enabled_model_count),
+                    total: String(p.model_count),
+                  })}
                 </span>
               </div>
             ))}
@@ -463,10 +484,10 @@ function OverviewModels({ data }: { data: AdminOverview }) {
       </Card>
 
       <Card padding={3}>
-        <Text weight="semibold">Tokens used per model</Text>
+        <Text weight="semibold">{t("admin.overview.models.tokensPerModel")}</Text>
         {data.usage_by_model.length === 0 ? (
           <Text size="sm" color="secondary">
-            No usage recorded yet — token counts appear here after chats run.
+            {t("admin.overview.models.noUsage")}
           </Text>
         ) : (
           <ModelUsageChart data={data.usage_by_model} />
@@ -478,8 +499,10 @@ function OverviewModels({ data }: { data: AdminOverview }) {
 
 // Generic ranked bar-list — reused for "hits by user" and "hits by rule" (any
 // single-number-per-key breakdown), so the two Safety cards below share one
-// renderer instead of two near-identical copies.
+// renderer instead of two near-identical copies. `unit` is a translated noun
+// supplied by the caller (e.g. t("admin.overview.unitHit")).
 function RankedBarList({ data, unit }: { data: { key: string; label: string; count: number }[]; unit: string }) {
+  const t = useT();
   const max = Math.max(1, ...data.map((d) => d.count));
   return (
     <div className="claw-model-usage-list">
@@ -488,8 +511,11 @@ function RankedBarList({ data, unit }: { data: { key: string; label: string; cou
           <div className="claw-model-usage-head">
             <span className="claw-model-usage-name claw-model-usage-name--user">{d.label}</span>
             <span className="claw-model-usage-total">
-              {d.count.toLocaleString()} {unit}
-              {d.count === 1 ? "" : "s"}
+              {t("admin.overview.countUnit", {
+                count: d.count.toLocaleString(),
+                unit,
+                plural: d.count === 1 ? "" : "s",
+              })}
             </span>
           </div>
           <div className="claw-model-usage-bar">
@@ -502,6 +528,7 @@ function RankedBarList({ data, unit }: { data: { key: string; label: string; cou
 }
 
 function OverviewSafety({ data }: { data: AdminOverview }) {
+  const t = useT();
   // The enforcing/monitor-only badge already lives in the Summary tab (a
   // glance-level fact); Safety owns the detailed hit history, not a second
   // copy of the same badge.
@@ -509,42 +536,42 @@ function OverviewSafety({ data }: { data: AdminOverview }) {
     <>
       <Card padding={3}>
         <div className="claw-card-heading">
-          <Text weight="semibold">Guardrail hits — last 14 days</Text>
+          <Text weight="semibold">{t("admin.overview.safety.hitsByDay")}</Text>
           <Text size="sm" color="secondary" as="p">
-            Turns where a guardrail rule matched the input, output, or a tool call.
+            {t("admin.overview.safety.hitsByDayDesc")}
           </Text>
         </div>
         {data.guardrail_hits_by_day.every((d) => d.count === 0) ? (
           <Text size="sm" color="secondary">
-            No guardrail matches in the last 14 days.
+            {t("admin.overview.safety.noHits")}
           </Text>
         ) : (
           <BarChart data={data.guardrail_hits_by_day} accent="var(--color-error, #c0392b)" />
         )}
       </Card>
       <Card padding={3}>
-        <Text weight="semibold">Guardrail hits by user — last 14 days</Text>
+        <Text weight="semibold">{t("admin.overview.safety.hitsByUser")}</Text>
         {data.guardrail_hits_by_user.length === 0 ? (
           <Text size="sm" color="secondary">
-            No guardrail matches in the last 14 days.
+            {t("admin.overview.safety.noHits")}
           </Text>
         ) : (
           <RankedBarList
             data={data.guardrail_hits_by_user.map((u) => ({ key: u.user_id, label: u.label, count: u.count }))}
-            unit="hit"
+            unit={t("admin.overview.unitHit")}
           />
         )}
       </Card>
       <Card padding={3}>
-        <Text weight="semibold">Guardrail hits by rule — last 14 days</Text>
+        <Text weight="semibold">{t("admin.overview.safety.hitsByRule")}</Text>
         {data.guardrail_hits_by_rule.length === 0 ? (
           <Text size="sm" color="secondary">
-            No guardrail matches in the last 14 days.
+            {t("admin.overview.safety.noHits")}
           </Text>
         ) : (
           <RankedBarList
             data={data.guardrail_hits_by_rule.map((r) => ({ key: r.rule, label: r.rule, count: r.count }))}
-            unit="hit"
+            unit={t("admin.overview.unitHit")}
           />
         )}
       </Card>
@@ -555,13 +582,13 @@ function OverviewSafety({ data }: { data: AdminOverview }) {
 // Plans overview — reads entirely from the already-fetched adminOverview()
 // payload (data.plans_report), so switching to this tab is an instant
 // client-side view swap with no extra fetch (per CLAUDE.md rule 1).
-const PLAN_LADDER_COLUMNS = [
-  "Plan",
-  "Chat ceiling",
-  "Image",
-  "Messages/day",
-  "Images/day",
-  "Turns/min",
+const PLAN_LADDER_COLUMN_KEYS = [
+  "admin.overview.plans.colPlan",
+  "admin.overview.plans.colChatCeiling",
+  "admin.overview.plans.colImage",
+  "admin.overview.plans.colMessagesDay",
+  "admin.overview.plans.colImagesDay",
+  "admin.overview.plans.colTurnsMin",
 ];
 
 // 0 encodes "unlimited" (daily quotas) — render it as ∞ rather than a literal 0.
@@ -570,6 +597,7 @@ function planLimitText(n: number): string {
 }
 
 function OverviewPlans({ data }: { data: AdminOverview }) {
+  const t = useT();
   const report = data.plans_report;
   // Ranked low→high so the ladder reads as a progression, matching the Plans
   // management section's ordering.
@@ -579,29 +607,29 @@ function OverviewPlans({ data }: { data: AdminOverview }) {
   return (
     <>
       <Card padding={3}>
-        <Text weight="semibold">Users per plan</Text>
+        <Text weight="semibold">{t("admin.overview.plans.usersPerPlan")}</Text>
         {perPlan.length === 0 ? (
           <Text size="sm" color="secondary">
-            No plans configured yet — add one in the Plans section.
+            {t("admin.overview.plans.noPlans")}
           </Text>
         ) : (
-          <RankedBarList data={perPlan} unit="user" />
+          <RankedBarList data={perPlan} unit={t("admin.overview.plans.unitUser")} />
         )}
       </Card>
 
       <Card padding={3}>
-        <Text weight="semibold">Plan ladder</Text>
+        <Text weight="semibold">{t("admin.overview.plans.ladder")}</Text>
         {plans.length === 0 ? (
           <Text size="sm" color="secondary">
-            No plans configured yet.
+            {t("admin.overview.plans.noPlansShort")}
           </Text>
         ) : (
           // One grid spanning the header + every plan row — same table-without-a-
           // table approach as the models grid, so columns align across all rows.
           <div className="claw-plan-ladder">
-            {PLAN_LADDER_COLUMNS.map((h) => (
-              <Text key={h} size="2xs" color="secondary" className="claw-models-grid-head">
-                {h}
+            {PLAN_LADDER_COLUMN_KEYS.map((hKey) => (
+              <Text key={hKey} size="2xs" color="secondary" className="claw-models-grid-head">
+                {t(hKey)}
               </Text>
             ))}
             {plans.map((p) => (
@@ -609,19 +637,19 @@ function OverviewPlans({ data }: { data: AdminOverview }) {
                 <div className="claw-model-name-cell">
                   <Text className="claw-model-label">{p.name}</Text>
                   {p.is_default && (
-                    <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default" />
+                    <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label={t("admin.overview.plans.default")} />
                   )}
                 </div>
                 <span className={`claw-cost claw-cost-${p.max_chat_cost}`}>
-                  {COST_LABEL[p.max_chat_cost]}
+                  {t(COST_LABEL[p.max_chat_cost])}
                 </span>
                 {p.allow_image ? (
                   <span className={`claw-cost claw-cost-${p.max_image_cost}`}>
-                    {COST_LABEL[p.max_image_cost]}
+                    {t(COST_LABEL[p.max_image_cost])}
                   </span>
                 ) : (
                   <Text size="sm" color="secondary">
-                    Off
+                    {t("admin.overview.plans.off")}
                   </Text>
                 )}
                 <Text size="sm" color="secondary">
@@ -631,7 +659,7 @@ function OverviewPlans({ data }: { data: AdminOverview }) {
                   {planLimitText(p.images_per_day)}
                 </Text>
                 <Text size="sm" color="secondary">
-                  {p.turns_per_minute > 0 ? p.turns_per_minute.toLocaleString() : "global"}
+                  {p.turns_per_minute > 0 ? p.turns_per_minute.toLocaleString() : t("admin.overview.plans.global")}
                 </Text>
               </Fragment>
             ))}
@@ -641,15 +669,14 @@ function OverviewPlans({ data }: { data: AdminOverview }) {
 
       <Card padding={3}>
         <div className="claw-card-heading">
-          <Text weight="semibold">Today's top users</Text>
+          <Text weight="semibold">{t("admin.overview.plans.topUsersTitle")}</Text>
           <Text size="sm" color="secondary" as="p">
-            Consumption against each user's plan quota so far today. Highlighted rows are at or over
-            a quota.
+            {t("admin.overview.plans.topUsersDesc")}
           </Text>
         </div>
         {report.usage_today.length === 0 ? (
           <Text size="sm" color="secondary">
-            No usage recorded today.
+            {t("admin.overview.plans.noUsageToday")}
           </Text>
         ) : (
           <div className="claw-plan-usage-list">
@@ -664,12 +691,18 @@ function OverviewPlans({ data }: { data: AdminOverview }) {
                   className={`claw-plan-usage-row${msgOver || imgOver ? " is-over" : ""}`}
                 >
                   <span className="claw-plan-usage-name">{r.label}</span>
-                  <Badge variant="neutral" label={r.plan_name ?? "Default"} />
+                  <Badge variant="neutral" label={r.plan_name ?? t("admin.overview.plans.defaultPlanBadge")} />
                   <span className="claw-plan-usage-metric">
-                    {r.turns.toLocaleString()} / {planLimitText(r.messages_limit)} msgs
+                    {t("admin.overview.plans.msgsUnit", {
+                      turns: r.turns.toLocaleString(),
+                      limit: planLimitText(r.messages_limit),
+                    })}
                   </span>
                   <span className="claw-plan-usage-metric">
-                    {r.images.toLocaleString()} / {planLimitText(r.images_limit)} imgs
+                    {t("admin.overview.plans.imgsUnit", {
+                      images: r.images.toLocaleString(),
+                      limit: planLimitText(r.images_limit),
+                    })}
                   </span>
                 </div>
               );
@@ -681,22 +714,23 @@ function OverviewPlans({ data }: { data: AdminOverview }) {
   );
 }
 
-const GRANULARITIES: { key: TokenUsageParams["granularity"]; label: string }[] = [
-  { key: "daily", label: "Daily" },
-  { key: "weekly", label: "Weekly" },
-  { key: "monthly", label: "Monthly" },
-  { key: "yearly", label: "Yearly" },
+const GRANULARITIES: { key: TokenUsageParams["granularity"]; labelKey: string }[] = [
+  { key: "daily", labelKey: "admin.overview.tokens.daily" },
+  { key: "weekly", labelKey: "admin.overview.tokens.weekly" },
+  { key: "monthly", labelKey: "admin.overview.tokens.monthly" },
+  { key: "yearly", labelKey: "admin.overview.tokens.yearly" },
 ];
-const TOKEN_GROUPS: { key: TokenUsageParams["group_by"]; label: string }[] = [
-  { key: "user", label: "User" },
-  { key: "model", label: "Model" },
-  { key: "provider", label: "Provider" },
+const TOKEN_GROUPS: { key: TokenUsageParams["group_by"]; labelKey: string }[] = [
+  { key: "user", labelKey: "admin.overview.tokens.byUser" },
+  { key: "model", labelKey: "admin.overview.tokens.byModel" },
+  { key: "provider", labelKey: "admin.overview.tokens.byProvider" },
 ];
 
 // Tokens Usage tab — its own lazy fetch (only runs while this tab is mounted),
 // re-querying when a control changes. Reads the usage_daily rollup via
 // /admin/usage/tokens, so any range/granularity is cheap regardless of history.
 function OverviewTokens() {
+  const t = useT();
   const [granularity, setGranularity] = useState<NonNullable<TokenUsageParams["granularity"]>>("daily");
   const [groupBy, setGroupBy] = useState<NonNullable<TokenUsageParams["group_by"]>>("user");
   const [userId, setUserId] = useState("");
@@ -765,37 +799,37 @@ function OverviewTokens() {
     <>
       <Card padding={2} variant="muted">
         <div className="claw-token-controls">
-          <SegmentedControl value={granularity} onChange={(v) => setGranularity(v as typeof granularity)} label="Granularity" size="sm">
+          <SegmentedControl value={granularity} onChange={(v) => setGranularity(v as typeof granularity)} label={t("admin.overview.tokens.granularity")} size="sm">
             {GRANULARITIES.map((g) => (
-              <SegmentedControlItem key={g.key} value={g.key!} label={g.label} />
+              <SegmentedControlItem key={g.key} value={g.key!} label={t(g.labelKey)} />
             ))}
           </SegmentedControl>
-          <SegmentedControl value={groupBy} onChange={(v) => setGroupBy(v as typeof groupBy)} label="Group by" size="sm">
+          <SegmentedControl value={groupBy} onChange={(v) => setGroupBy(v as typeof groupBy)} label={t("admin.overview.tokens.groupBy")} size="sm">
             {TOKEN_GROUPS.map((g) => (
-              <SegmentedControlItem key={g.key} value={g.key!} label={g.label} />
+              <SegmentedControlItem key={g.key} value={g.key!} label={t(g.labelKey)} />
             ))}
           </SegmentedControl>
           <div className="claw-token-filter-group">
             {users.length > 10 && (
               <TextInput
-                label="Search users"
+                label={t("admin.overview.tokens.searchUsers")}
                 isLabelHidden
                 startIcon={<Icon icon={Search} size="sm" color="secondary" />}
-                placeholder="Search users…"
+                placeholder={t("admin.overview.tokens.searchUsersPlaceholder")}
                 value={userQuery}
                 onChange={setUserQuery}
                 hasClear
               />
             )}
-            <select className="claw-token-filter" value={userId} onChange={(e) => setUserId(e.target.value)} aria-label="Filter by user">
-              <option value="">All users</option>
+            <select className="claw-token-filter" value={userId} onChange={(e) => setUserId(e.target.value)} aria-label={t("admin.overview.tokens.filterByUser")}>
+              <option value="">{t("admin.overview.tokens.allUsers")}</option>
               {filteredUsers.map((u) => (
                 <option key={u.id} value={u.id}>{u.display_name || u.email}</option>
               ))}
             </select>
           </div>
-          <select className="claw-token-filter" value={provider} onChange={(e) => handleProviderChange(e.target.value)} aria-label="Filter by provider">
-            <option value="">All providers</option>
+          <select className="claw-token-filter" value={provider} onChange={(e) => handleProviderChange(e.target.value)} aria-label={t("admin.overview.tokens.filterByProvider")}>
+            <option value="">{t("admin.overview.tokens.allProviders")}</option>
             {providerNames.map((p) => (
               <option key={p} value={p}>{p}</option>
             ))}
@@ -803,17 +837,17 @@ function OverviewTokens() {
           <div className="claw-token-filter-group">
             {modelsForProvider.length > 10 && (
               <TextInput
-                label="Search models"
+                label={t("admin.overview.tokens.searchModels")}
                 isLabelHidden
                 startIcon={<Icon icon={Search} size="sm" color="secondary" />}
-                placeholder="Search models…"
+                placeholder={t("admin.overview.tokens.searchModelsPlaceholder")}
                 value={modelQuery}
                 onChange={setModelQuery}
                 hasClear
               />
             )}
-            <select className="claw-token-filter" value={model} onChange={(e) => setModel(e.target.value)} aria-label="Filter by model">
-              <option value="">All models</option>
+            <select className="claw-token-filter" value={model} onChange={(e) => setModel(e.target.value)} aria-label={t("admin.overview.tokens.filterByModel")}>
+              <option value="">{t("admin.overview.tokens.allModels")}</option>
               {filteredModels.map((m) => (
                 <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
               ))}
@@ -824,29 +858,31 @@ function OverviewTokens() {
 
       {error && <ErrorText>{error}</ErrorText>}
       {!report ? (
-        <Text color="secondary">Loading…</Text>
+        <Text color="secondary">{t("admin.common.loading")}</Text>
       ) : report.series.length === 0 ? (
-        <Text size="sm" color="secondary">No token usage recorded for this range.</Text>
+        <Text size="sm" color="secondary">{t("admin.overview.tokens.noUsage")}</Text>
       ) : (
         <>
           <div className="claw-row">
-            <Badge variant="neutral" icon={<Icon icon={Cpu} size="xsm" />} label={`${report.totals.turns.toLocaleString()} turns`} />
-            <Badge variant="neutral" label={`prompt ${report.totals.prompt_tokens.toLocaleString()}`} />
-            <Badge variant="neutral" label={`completion ${report.totals.completion_tokens.toLocaleString()}`} />
+            <Badge variant="neutral" icon={<Icon icon={Cpu} size="xsm" />} label={t("admin.overview.tokens.turnsCount", { count: report.totals.turns.toLocaleString() })} />
+            <Badge variant="neutral" label={t("admin.overview.tokens.promptCount", { count: report.totals.prompt_tokens.toLocaleString() })} />
+            <Badge variant="neutral" label={t("admin.overview.tokens.completionCount", { count: report.totals.completion_tokens.toLocaleString() })} />
             <Badge
               variant="success"
-              label={`${(report.totals.prompt_tokens + report.totals.completion_tokens).toLocaleString()} total tokens`}
+              label={t("admin.overview.tokens.totalTokens", {
+                count: (report.totals.prompt_tokens + report.totals.completion_tokens).toLocaleString(),
+              })}
             />
           </div>
           <Card padding={3}>
             <Text weight="semibold">
-              Tokens over time — by {groupBy}
+              {t("admin.overview.tokens.overTimeBy", { groupBy })}
             </Text>
             <StackedBarChart buckets={report.buckets} series={report.series} />
           </Card>
           <Card padding={3}>
             <Text weight="semibold">
-              By {groupBy} · {granularity}
+              {t("admin.overview.tokens.byGroupAndGranularity", { groupBy, granularity })}
             </Text>
             <ModelUsageChart
               data={report.series.map((s) => ({
@@ -864,6 +900,7 @@ function OverviewTokens() {
 }
 
 function SessionsByUserList({ data }: { data: SessionsByUserPoint[] }) {
+  const t = useT();
   const max = Math.max(1, ...data.map((d) => d.sessions));
   return (
     <div className="claw-model-usage-list">
@@ -872,7 +909,7 @@ function SessionsByUserList({ data }: { data: SessionsByUserPoint[] }) {
           <div className="claw-model-usage-head">
             <span className="claw-model-usage-name claw-model-usage-name--user">{d.label}</span>
             <span className="claw-model-usage-total">
-              {d.sessions.toLocaleString()} session{d.sessions === 1 ? "" : "s"}
+              {t("admin.overview.activity.sessionsCount", { count: d.sessions.toLocaleString(), plural: d.sessions === 1 ? "" : "s" })}
             </span>
           </div>
           <div className="claw-model-usage-bar">
@@ -888,6 +925,7 @@ function SessionsByUserList({ data }: { data: SessionsByUserPoint[] }) {
 }
 
 function ModelUsageChart({ data }: { data: ModelUsagePoint[] }) {
+  const t = useT();
   const totals = data.map((d) => d.prompt_tokens + d.completion_tokens);
   const max = Math.max(1, ...totals);
   return (
@@ -901,7 +939,7 @@ function ModelUsageChart({ data }: { data: ModelUsagePoint[] }) {
             <div className="claw-model-usage-head">
               <span className="claw-model-usage-name">{d.model}</span>
               <span className="claw-model-usage-total">
-                {total.toLocaleString()} tokens · {d.turns.toLocaleString()} turns
+                {t("admin.overview.models.tokensAndTurns", { tokens: total.toLocaleString(), turns: d.turns.toLocaleString() })}
               </span>
             </div>
             <div className="claw-model-usage-bar">
@@ -913,11 +951,11 @@ function ModelUsageChart({ data }: { data: ModelUsagePoint[] }) {
             </div>
             <div className="claw-model-usage-legend">
               <span>
-                <i className="claw-legend-dot claw-legend-dot--prompt" /> prompt{" "}
+                <i className="claw-legend-dot claw-legend-dot--prompt" /> {t("admin.overview.models.promptLegend")}{" "}
                 {d.prompt_tokens.toLocaleString()}
               </span>
               <span>
-                <i className="claw-legend-dot claw-legend-dot--completion" /> completion{" "}
+                <i className="claw-legend-dot claw-legend-dot--completion" /> {t("admin.overview.models.completionLegend")}{" "}
                 {d.completion_tokens.toLocaleString()}
               </span>
             </div>
@@ -1019,12 +1057,12 @@ const LITELLM_PREFIXES = new Set([
   "moonshot", "zai", "dashscope",
 ]);
 
-function modelPrefixWarning(modelId: string): string | null {
+function modelPrefixWarning(t: (key: string) => string, modelId: string): string | null {
   const id = modelId.trim();
   if (!id) return null;
   const prefix = id.split("/")[0];
   if (id.includes("/") && LITELLM_PREFIXES.has(prefix)) return null;
-  return "Start the model id with a provider prefix — e.g. openrouter/, openai/, anthropic/, gemini/. Without it the model can't be reached.";
+  return t("admin.providers.modelPrefixWarning");
 }
 
 // When a provider has a known LiteLLM prefix, admins only ever type the part
@@ -1045,8 +1083,9 @@ function composeModelId(prefix: string, rest: string): string {
 // Single-select cost tier — a connected segmented control, not a row of
 // independent buttons (which read as separate actions).
 function CostSegmented({ value, onChange }: { value: ModelCost; onChange: (c: ModelCost) => void }) {
+  const t = useT();
   return (
-    <div className="claw-segmented" role="group" aria-label="Cost tier">
+    <div className="claw-segmented" role="group" aria-label={t("admin.providers.costTierAria")}>
       {COSTS.map((c) => (
         <button
           key={c}
@@ -1055,7 +1094,7 @@ function CostSegmented({ value, onChange }: { value: ModelCost; onChange: (c: Mo
           aria-pressed={value === c}
           onClick={() => onChange(c)}
         >
-          {COST_LABEL[c]}
+          {t(COST_LABEL[c])}
         </button>
       ))}
     </div>
@@ -1066,8 +1105,9 @@ function CostSegmented({ value, onChange }: { value: ModelCost; onChange: (c: Mo
 // of the chat picker (they can't do tool calling) and offered in the composer's
 // separate "+ Image" picker instead.
 function KindSegmented({ value, onChange }: { value: ModelKind; onChange: (k: ModelKind) => void }) {
+  const t = useT();
   return (
-    <div className="claw-segmented" role="group" aria-label="Model type">
+    <div className="claw-segmented" role="group" aria-label={t("admin.providers.modelTypeAria")}>
       {(["chat", "image"] as ModelKind[]).map((k) => (
         <button
           key={k}
@@ -1076,7 +1116,7 @@ function KindSegmented({ value, onChange }: { value: ModelKind; onChange: (k: Mo
           aria-pressed={value === k}
           onClick={() => onChange(k)}
         >
-          {k === "chat" ? "Chat" : "Image"}
+          {k === "chat" ? t("admin.providers.kindChat") : t("admin.providers.kindImage")}
         </button>
       ))}
     </div>
@@ -1090,6 +1130,7 @@ function KindSegmented({ value, onChange }: { value: ModelKind; onChange: (k: Mo
 export type ProvidersScope = "admin" | "user";
 
 export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: ProvidersScope }) {
+  const t = useT();
   const [providers, setProviders] = useState<LLMProviderCfg[]>([]);
   const [adding, setAdding] = useState(false);
   const { error, guard } = useAsyncError();
@@ -1103,13 +1144,11 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
         <Text color="secondary">
-          {scope === "user"
-            ? "Add your own LLM providers with your own API key. They're private to you and appear in your chat model picker alongside the built-in models. Keys are stored encrypted."
-            : "Configure upstream LLM providers and the models users can pick in chat. API keys are stored encrypted."}
+          {scope === "user" ? t("admin.providers.userDescription") : t("admin.providers.adminDescription")}
         </Text>
         {!adding && (
           <Button
-            label="Add provider"
+            label={t("admin.providers.addProvider")}
             icon={<Icon icon={Plus} size="sm" />}
             size="sm"
             clickAction={() => setAdding(true)}
@@ -1124,12 +1163,8 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
 
       {providers.length === 0 && !adding ? (
         <EmptyState
-          title="No providers"
-          description={
-            scope === "user"
-              ? "Add a provider to use your own models in chat."
-              : "Add a provider to let users choose models in chat."
-          }
+          title={t("admin.providers.noProvidersTitle")}
+          description={scope === "user" ? t("admin.providers.noProvidersUserDesc") : t("admin.providers.noProvidersAdminDesc")}
         />
       ) : (
         providers.map((p) => (
@@ -1151,6 +1186,7 @@ function AddProviderForm({
   reload: () => Promise<void>;
   onClose: () => void;
 }) {
+  const t = useT();
   const [preset, setPreset] = useState<ProviderPreset | null>(null);
   const [name, setName] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -1169,7 +1205,7 @@ function AddProviderForm({
     <Card padding={2}>
       <div className="claw-panel">
         <Text size="sm" weight="semibold" color="secondary">
-          Choose a provider
+          {t("admin.providers.chooseProvider")}
         </Text>
         <div className="claw-preset-grid">
           {PROVIDER_PRESETS.map((p) => (
@@ -1191,12 +1227,12 @@ function AddProviderForm({
         {preset && (
           <>
             <Divider />
-            <TextInput label="Display name" placeholder={preset.name} value={name} onChange={setName} />
+            <TextInput label={t("admin.providers.displayName")} placeholder={preset.name} value={name} onChange={setName} />
 
             {preset.needsBase ? (
               <TextInput
-                label="Base URL"
-                description="Required for OpenAI-compatible servers, e.g. http://localhost:8000/v1"
+                label={t("admin.providers.baseUrl")}
+                description={t("admin.providers.baseUrlDesc")}
                 placeholder="http://localhost:8000/v1"
                 value={apiBase}
                 onChange={setApiBase}
@@ -1208,13 +1244,13 @@ function AddProviderForm({
                   className="claw-link-btn"
                   onClick={() => setShowAdvanced((s) => !s)}
                 >
-                  {showAdvanced ? "Hide" : "Advanced"} — override base URL
+                  {showAdvanced ? t("admin.providers.hideBaseUrlOverride") : t("admin.providers.showBaseUrlOverride")}
                 </button>
                 {showAdvanced && (
                   <TextInput
-                    label="Base URL (optional)"
-                    description="Leave blank to use the standard endpoint."
-                    placeholder={preset.apiBase || "standard endpoint"}
+                    label={t("admin.providers.baseUrlOptional")}
+                    description={t("admin.providers.baseUrlOptionalDesc")}
+                    placeholder={preset.apiBase || t("admin.providers.standardEndpoint")}
                     value={apiBase}
                     onChange={setApiBase}
                   />
@@ -1223,7 +1259,7 @@ function AddProviderForm({
             )}
 
             <TextInput
-              label={preset.needsBase ? "API key (optional for local servers)" : "API key"}
+              label={preset.needsBase ? t("admin.providers.apiKeyOptionalLocal") : t("admin.providers.apiKey")}
               type="password"
               value={apiKey}
               onChange={setApiKey}
@@ -1232,15 +1268,16 @@ function AddProviderForm({
             <div className="claw-info-box">
               <Icon icon={Info} size="sm" color="secondary" />
               <Text size="sm" color="secondary">
-                You'll add models after creating the provider — just the model's real name (e.g.{" "}
-                <code>{preset.example.replace(preset.prefix, "")}</code>). We prepend{" "}
-                <code>{preset.prefix}</code> automatically so you don't need to know it.
+                {t("admin.providers.addModelsInfo1")}{" "}
+                <code>{preset.example.replace(preset.prefix, "")}</code>
+                {t("admin.providers.addModelsInfo2")}{" "}
+                <code>{preset.prefix}</code> {t("admin.providers.addModelsInfo3")}
               </Text>
             </div>
 
             <div className="claw-row">
               <Button
-                label="Create provider"
+                label={t("admin.providers.createProvider")}
                 variant="primary"
                 icon={<Icon icon="check" size="sm" />}
                 isDisabled={!name.trim() || (preset.needsBase && !apiBase.trim())}
@@ -1252,13 +1289,13 @@ function AddProviderForm({
                       api_base: apiBase.trim(),
                       model_prefix: preset.prefix.replace(/\/$/, ""),
                     });
-                    toast({ body: `${name.trim()} added`, type: "info", autoHideDuration: 2500 });
+                    toast({ body: t("admin.providers.addedToast", { name: name.trim() }), type: "info", autoHideDuration: 2500 });
                     onClose();
                     await reload();
                   })
                 }
               />
-              <Button label="Cancel" variant="ghost" clickAction={onClose} />
+              <Button label={t("admin.common.cancel")} variant="ghost" clickAction={onClose} />
             </div>
           </>
         )}
@@ -1280,6 +1317,7 @@ function ProviderCard({
   llmApi: LlmApi;
   scope: ProvidersScope;
 }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [addingModel, setAddingModel] = useState(false);
   const [name, setName] = useState(provider.name);
@@ -1299,22 +1337,22 @@ function ProviderCard({
             <div className="claw-row">
               <Text weight="semibold">{provider.name}</Text>
               {provider.has_key && (
-                <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label="key set" />
+                <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label={t("admin.providers.keySet")} />
               )}
             </div>
             <Text size="sm" color="secondary" as="p">
-              {provider.api_base || "default endpoint"}
+              {provider.api_base || t("admin.providers.defaultEndpoint")}
             </Text>
           </div>
         </div>
         <div className="claw-row">
           <label className="claw-toggle">
             <Text size="sm" color="secondary">
-              Enabled
+              {t("admin.providers.enabled")}
             </Text>
             <Switch
               value={provider.enabled}
-              label={`Enable ${provider.name}`}
+              label={t("admin.providers.enableName", { name: provider.name })}
               isLabelHidden
               changeAction={(checked) =>
                 guard(async () => {
@@ -1325,7 +1363,7 @@ function ProviderCard({
             />
           </label>
           <Button
-            label="Edit"
+            label={t("admin.common.edit")}
             icon={<Icon icon={Pencil} size="sm" />}
             size="sm"
             variant="ghost"
@@ -1338,14 +1376,14 @@ function ProviderCard({
             }}
           />
           <Button
-            label="Delete"
+            label={t("admin.common.delete")}
             icon={<Icon icon={Trash2} size="sm" />}
             size="sm"
             variant="destructive"
             clickAction={() =>
               guard(async () => {
                 await llmApi.deleteProvider(provider.id);
-                toast({ body: `${provider.name} deleted`, type: "info", autoHideDuration: 2500 });
+                toast({ body: t("admin.providers.deletedToast", { name: provider.name }), type: "info", autoHideDuration: 2500 });
                 await reload();
               })
             }
@@ -1356,21 +1394,20 @@ function ProviderCard({
       {editing && (
         <Card padding={2} variant="muted">
           <div className="claw-panel">
-            <TextInput label="Name" value={name} onChange={setName} />
-            <TextInput label="API base URL" value={apiBase} onChange={setApiBase} />
+            <TextInput label={t("admin.providers.name")} value={name} onChange={setName} />
+            <TextInput label={t("admin.providers.apiBaseUrl")} value={apiBase} onChange={setApiBase} />
             <TextInput
-              label={provider.has_key ? "API key (leave blank to keep current)" : "API key"}
+              label={provider.has_key ? t("admin.providers.apiKeyKeepCurrent") : t("admin.providers.apiKey")}
               type="password"
               value={apiKey}
               onChange={setApiKey}
             />
             <TextInput
-              label="Model id prefix (advanced)"
+              label={t("admin.providers.modelPrefixLabel")}
               description={
                 provider.model_prefix
-                  ? "Prepended automatically to every model id you add below."
-                  : "Set this once and adding models below just needs the model's real name — " +
-                    "no LiteLLM prefix to remember. Leave blank to keep typing full ids manually."
+                  ? t("admin.providers.modelPrefixDescSet")
+                  : t("admin.providers.modelPrefixDescUnset")
               }
               placeholder="openai"
               value={modelPrefix}
@@ -1378,7 +1415,7 @@ function ProviderCard({
             />
             <div className="claw-row">
               <Button
-                label="Save changes"
+                label={t("admin.common.saveChanges")}
                 variant="primary"
                 icon={<Icon icon="check" size="sm" />}
                 size="sm"
@@ -1391,12 +1428,12 @@ function ProviderCard({
                       model_prefix: modelPrefix,
                     });
                     setEditing(false);
-                    toast({ body: "Provider updated", type: "info", autoHideDuration: 2500 });
+                    toast({ body: t("admin.providers.providerUpdatedToast"), type: "info", autoHideDuration: 2500 });
                     await reload();
                   })
                 }
               />
-              <Button label="Cancel" variant="ghost" size="sm" clickAction={() => setEditing(false)} />
+              <Button label={t("admin.common.cancel")} variant="ghost" size="sm" clickAction={() => setEditing(false)} />
             </div>
           </div>
         </Card>
@@ -1404,11 +1441,11 @@ function ProviderCard({
 
       <Divider />
       <Text size="sm" weight="semibold" color="secondary">
-        Models
+        {t("admin.providers.modelsHeading")}
       </Text>
       {provider.models.length === 0 && !addingModel && (
         <Text size="sm" color="secondary">
-          No models yet. Add one so it appears in the chat picker.
+          {t("admin.providers.noModelsYet")}
         </Text>
       )}
       {provider.models.length > 0 && (
@@ -1418,20 +1455,20 @@ function ProviderCard({
         // (which would fight the inline Edit-expands-to-a-form pattern below).
         <div className={`claw-models-grid claw-models-grid-${scope}`}>
           <Text size="2xs" color="secondary" className="claw-models-grid-head">
-            Model
+            {t("admin.providers.colModel")}
           </Text>
           <Text size="2xs" color="secondary" className="claw-models-grid-head">
-            Cost
+            {t("admin.providers.colCost")}
           </Text>
           <Text size="2xs" color="secondary" className="claw-models-grid-head">
-            Model ID
+            {t("admin.providers.colModelId")}
           </Text>
           <Text size="2xs" color="secondary" className="claw-models-grid-head">
-            Status
+            {t("admin.providers.colStatus")}
           </Text>
           {scope === "admin" && (
             <Text size="2xs" color="secondary" className="claw-models-grid-head">
-              Default
+              {t("admin.providers.colDefault")}
             </Text>
           )}
           <span className="claw-models-grid-head" />
@@ -1465,7 +1502,7 @@ function ProviderCard({
         />
       ) : (
         <Button
-          label="Add model"
+          label={t("admin.providers.addModel")}
           icon={<Icon icon={Plus} size="sm" />}
           size="sm"
           variant="secondary"
@@ -1493,6 +1530,7 @@ function ModelRow({
   llmApi: LlmApi;
   scope: ProvidersScope;
 }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   // Whether this model's stored id actually starts with the provider's known
   // prefix — decided silently from the data, never exposed as a UI choice.
@@ -1517,47 +1555,47 @@ function ModelRow({
           <div className="claw-info-box">
             <Icon icon={Pencil} size="sm" color="secondary" />
             <Text size="sm" color="secondary">
-              Editing <b>{model.label || stripKnownPrefix(modelPrefix, model.model_id)}</b>
+              {t("admin.providers.editingPrefix")} <b>{model.label || stripKnownPrefix(modelPrefix, model.model_id)}</b>
             </Text>
           </div>
           <div className="claw-row claw-row-2col">
             <TextInput
-              label="Model id"
+              label={t("admin.providers.modelId")}
               placeholder={prefixApplies ? "your-model-name" : "anthropic/claude-sonnet-5"}
               value={modelId}
               onChange={setModelId}
             />
-            <TextInput label="Display name" placeholder={modelId} value={label} onChange={setLabel} />
+            <TextInput label={t("admin.providers.displayName")} placeholder={modelId} value={label} onChange={setLabel} />
           </div>
-          {!prefixApplies && modelPrefixWarning(modelId) && (
+          {!prefixApplies && modelPrefixWarning(t, modelId) && (
             <div className="claw-info-box is-warning">
               <Icon icon={Info} size="sm" color="warning" />
               <Text size="sm" color="secondary">
-                {modelPrefixWarning(modelId)}
+                {modelPrefixWarning(t, modelId)}
               </Text>
             </div>
           )}
           <TextInput
-            label="Description"
-            description="Shown in the model picker"
+            label={t("admin.providers.description")}
+            description={t("admin.providers.descriptionHint")}
             value={description}
             onChange={setDescription}
           />
           <div className="claw-row">
             <Text size="sm" color="secondary">
-              Type
+              {t("admin.providers.type")}
             </Text>
             <KindSegmented value={kind} onChange={setKind} />
           </div>
           <div className="claw-row">
             <Text size="sm" color="secondary">
-              Cost tier
+              {t("admin.providers.costTier")}
             </Text>
             <CostSegmented value={cost} onChange={setCost} />
           </div>
           <div className="claw-row">
             <Button
-              label="Save changes"
+              label={t("admin.common.saveChanges")}
               variant="primary"
               icon={<Icon icon="check" size="sm" />}
               size="sm"
@@ -1572,13 +1610,13 @@ function ModelRow({
                     kind,
                   });
                   setEditing(false);
-                  toast({ body: "Model saved", type: "info", autoHideDuration: 2500 });
+                  toast({ body: t("admin.providers.modelSavedToast"), type: "info", autoHideDuration: 2500 });
                   await reload();
                 })
               }
             />
             <Button
-              label="Cancel"
+              label={t("admin.common.cancel")}
               variant="ghost"
               size="sm"
               clickAction={() => {
@@ -1601,23 +1639,23 @@ function ModelRow({
       <div className="claw-model-name-cell">
         <Text className="claw-model-label">{model.label || stripKnownPrefix(modelPrefix, model.model_id)}</Text>
         {model.is_default && (
-          <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default" />
+          <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label={t("admin.providers.defaultBadge")} />
         )}
       </div>
       <div className="claw-model-cost-cell">
-        {model.kind === "image" && <Badge variant="neutral" label="Image" />}
-        <span className={`claw-cost claw-cost-${model.cost}`}>{COST_LABEL[model.cost]}</span>
+        {model.kind === "image" && <Badge variant="neutral" label={t("admin.providers.kindImage")} />}
+        <span className={`claw-cost claw-cost-${model.cost}`}>{t(COST_LABEL[model.cost])}</span>
       </div>
       <Text size="sm" color="secondary" className="claw-model-id">
         {stripKnownPrefix(modelPrefix, model.model_id)}
       </Text>
       <label className="claw-toggle-inline">
         <Text size="sm" color="secondary">
-          {model.enabled ? "On" : "Off"}
+          {model.enabled ? t("admin.providers.on") : t("admin.providers.off")}
         </Text>
         <Switch
           value={model.enabled}
-          label={`Enable ${model.label}`}
+          label={t("admin.providers.enableName", { name: model.label })}
           isLabelHidden
           changeAction={(checked) =>
             guard(async () => {
@@ -1631,7 +1669,7 @@ function ModelRow({
           model is never the global default, so this control is admin-only. */}
       {scope === "admin" && (
         <Button
-          label={model.is_default ? "Default" : "Set default"}
+          label={model.is_default ? t("admin.providers.defaultLabel") : t("admin.providers.setDefault")}
           size="sm"
           variant={model.is_default ? "secondary" : "ghost"}
           // An image model can never be the chat default.
@@ -1645,14 +1683,14 @@ function ModelRow({
         />
       )}
       <Button
-        label="Edit"
+        label={t("admin.common.edit")}
         icon={<Icon icon={Pencil} size="sm" />}
         size="sm"
         variant="ghost"
         clickAction={() => setEditing(true)}
       />
       <Button
-        label="Remove"
+        label={t("admin.providers.remove")}
         icon={<Icon icon={Trash2} size="sm" />}
         size="sm"
         variant="ghost"
@@ -1682,6 +1720,7 @@ function AddModelForm({
   llmApi: LlmApi;
   onClose: () => void;
 }) {
+  const t = useT();
   const [modelId, setModelId] = useState("");
   const [label, setLabel] = useState("");
   const [cost, setCost] = useState<ModelCost>("medium");
@@ -1697,47 +1736,47 @@ function AddModelForm({
         <div className="claw-info-box">
           <Icon icon={Plus} size="sm" color="secondary" />
           <Text size="sm" color="secondary">
-            Adding a new model to this provider
+            {t("admin.providers.addingModelInfo")}
           </Text>
         </div>
         <div className="claw-row claw-row-2col">
           <TextInput
-            label="Model id"
+            label={t("admin.providers.modelId")}
             placeholder={hasPrefix ? "your-model-name" : "anthropic/claude-sonnet-5"}
             value={modelId}
             onChange={setModelId}
           />
-          <TextInput label="Display name" placeholder={modelId || "Claude Sonnet 5"} value={label} onChange={setLabel} />
+          <TextInput label={t("admin.providers.displayName")} placeholder={modelId || "Claude Sonnet 5"} value={label} onChange={setLabel} />
         </div>
-        {!hasPrefix && modelPrefixWarning(modelId) && (
+        {!hasPrefix && modelPrefixWarning(t, modelId) && (
           <div className="claw-info-box is-warning">
             <Icon icon={Info} size="sm" color="warning" />
             <Text size="sm" color="secondary">
-              {modelPrefixWarning(modelId)}
+              {modelPrefixWarning(t, modelId)}
             </Text>
           </div>
         )}
         <TextInput
-          label="Description"
-          description="Shown in the model picker"
+          label={t("admin.providers.description")}
+          description={t("admin.providers.descriptionHint")}
           value={description}
           onChange={setDescription}
         />
         <div className="claw-row">
           <Text size="sm" color="secondary">
-            Type
+            {t("admin.providers.type")}
           </Text>
           <KindSegmented value={kind} onChange={setKind} />
         </div>
         <div className="claw-row">
           <Text size="sm" color="secondary">
-            Cost tier
+            {t("admin.providers.costTier")}
           </Text>
           <CostSegmented value={cost} onChange={setCost} />
         </div>
         <div className="claw-row">
           <Button
-            label="Add model"
+            label={t("admin.providers.addModel")}
             variant="primary"
             icon={<Icon icon={Plus} size="sm" />}
             size="sm"
@@ -1751,13 +1790,13 @@ function AddModelForm({
                   description: description.trim(),
                   kind,
                 });
-                toast({ body: "Model added", type: "info", autoHideDuration: 2500 });
+                toast({ body: t("admin.providers.modelAddedToast"), type: "info", autoHideDuration: 2500 });
                 onClose();
                 await reload();
               })
             }
           />
-          <Button label="Cancel" variant="ghost" size="sm" clickAction={onClose} />
+          <Button label={t("admin.common.cancel")} variant="ghost" size="sm" clickAction={onClose} />
         </div>
       </div>
     </Card>
@@ -1771,6 +1810,7 @@ function AddModelForm({
 // users. Structurally mirrors the LLM Providers panel — a list of Cards, each
 // with an inline Edit form, plus an Add form toggled from the header.
 function PlansPanel() {
+  const t = useT();
   const [plans, setPlans] = useState<PlanInfo[]>([]);
   const [adding, setAdding] = useState(false);
   const { error, guard } = useAsyncError();
@@ -1787,13 +1827,11 @@ function PlansPanel() {
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
         <Text color="secondary">
-          Usage-tier plans set the highest-cost chat and image models a user can pick, plus daily
-          message / image quotas and a per-minute turn rate. Assign a plan to a group or an
-          individual user; anyone without one falls back to the default plan.
+          {t("admin.plans.intro")}
         </Text>
         {!adding && (
           <Button
-            label="Add plan"
+            label={t("admin.plans.addPlan")}
             icon={<Icon icon={Plus} size="sm" />}
             size="sm"
             clickAction={() => setAdding(true)}
@@ -1806,8 +1844,8 @@ function PlansPanel() {
 
       {plans.length === 0 && !adding ? (
         <EmptyState
-          title="No plans"
-          description="Add a usage-tier plan to gate model cost and set per-user quotas."
+          title={t("admin.plans.noPlansTitle")}
+          description={t("admin.plans.noPlansDesc")}
         />
       ) : (
         sorted.map((p) => <PlanCard key={p.id} plan={p} reload={reload} guard={guard} />)
@@ -1832,6 +1870,7 @@ function PlanCard({
   reload: () => Promise<void>;
   guard: (fn: () => Promise<void>) => Promise<void>;
 }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(plan.name);
   const [rank, setRank] = useState(String(plan.rank));
@@ -1863,54 +1902,56 @@ function PlanCard({
           <div className="claw-row">
             <Text weight="semibold">{plan.name}</Text>
             {plan.is_default && (
-              <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="Default" />
+              <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label={t("admin.overview.plans.default")} />
             )}
-            <Badge variant="neutral" label={`rank ${plan.rank}`} />
+            <Badge variant="neutral" label={t("admin.plans.rankBadge", { rank: String(plan.rank) })} />
             <Badge
               variant="neutral"
               icon={<Icon icon={Users} size="xsm" />}
-              label={`${plan.user_count ?? 0} ${(plan.user_count ?? 0) === 1 ? "user" : "users"}`}
+              label={t("admin.plans.userCount", { count: String(plan.user_count ?? 0), plural: (plan.user_count ?? 0) === 1 ? "" : "s" })}
             />
           </div>
           <div className="claw-plan-specs">
-            <span>Chat ≤ {COST_LABEL[plan.max_chat_cost]}</span>
+            <span>{t("admin.plans.chatSpec", { cost: t(COST_LABEL[plan.max_chat_cost]) })}</span>
             <span>
-              Image: {plan.allow_image ? `≤ ${COST_LABEL[plan.max_image_cost]}` : "off"}
+              {plan.allow_image
+                ? t("admin.plans.imageSpecOn", { cost: t(COST_LABEL[plan.max_image_cost]) })
+                : t("admin.plans.imageSpecOff")}
             </span>
             <span>
               {plan.messages_per_day > 0
-                ? `${plan.messages_per_day.toLocaleString()} messages/day`
-                : "unlimited messages"}
+                ? t("admin.plans.messagesPerDaySpec", { count: plan.messages_per_day.toLocaleString() })
+                : t("admin.plans.unlimitedMessages")}
             </span>
             <span>
               {plan.images_per_day > 0
-                ? `${plan.images_per_day.toLocaleString()} images/day`
-                : "unlimited images"}
+                ? t("admin.plans.imagesPerDaySpec", { count: plan.images_per_day.toLocaleString() })
+                : t("admin.plans.unlimitedImages")}
             </span>
             <span>
               {plan.turns_per_minute > 0
-                ? `${plan.turns_per_minute.toLocaleString()} turns/min`
-                : "global turn rate"}
+                ? t("admin.plans.turnsPerMinSpec", { count: plan.turns_per_minute.toLocaleString() })
+                : t("admin.plans.globalTurnRate")}
             </span>
           </div>
         </div>
         <div className="claw-row">
           {!plan.is_default && (
             <Button
-              label="Make default"
+              label={t("admin.plans.makeDefault")}
               size="sm"
               variant="ghost"
               clickAction={() =>
                 guard(async () => {
                   await api.adminSetDefaultPlan(plan.id);
-                  toast({ body: `${plan.name} is now the default plan`, type: "info", autoHideDuration: 2500 });
+                  toast({ body: t("admin.plans.nowDefaultToast", { name: plan.name }), type: "info", autoHideDuration: 2500 });
                   await reload();
                 })
               }
             />
           )}
           <Button
-            label="Edit"
+            label={t("admin.common.edit")}
             icon={<Icon icon={Pencil} size="sm" />}
             size="sm"
             variant="ghost"
@@ -1920,21 +1961,17 @@ function PlanCard({
             }}
           />
           <Button
-            label="Delete"
+            label={t("admin.common.delete")}
             icon={<Icon icon={Trash2} size="sm" />}
             size="sm"
             variant="destructive"
             clickAction={() =>
               guard(async () => {
-                if (
-                  !window.confirm(
-                    `Delete plan “${plan.name}”? Users and groups on this plan fall back to the default plan.`,
-                  )
-                ) {
+                if (!window.confirm(t("admin.plans.deleteConfirm", { name: plan.name }))) {
                   return;
                 }
                 await api.adminDeletePlan(plan.id);
-                toast({ body: `Plan “${plan.name}” deleted`, type: "info", autoHideDuration: 2500 });
+                toast({ body: t("admin.plans.deletedToast", { name: plan.name }), type: "info", autoHideDuration: 2500 });
                 await reload();
               })
             }
@@ -1946,63 +1983,63 @@ function PlanCard({
         <Card padding={2} variant="muted">
           <div className="claw-panel">
             <div className="claw-row claw-row-2col">
-              <TextInput label="Name" value={name} onChange={setName} />
+              <TextInput label={t("admin.providers.name")} value={name} onChange={setName} />
               <TextInput
-                label="Rank"
-                description="Higher = more premium; orders the ladder."
+                label={t("admin.plans.rank")}
+                description={t("admin.plans.rankDesc")}
                 value={rank}
                 onChange={setRank}
               />
             </div>
             <div className="claw-row">
               <Text size="sm" color="secondary">
-                Max chat cost
+                {t("admin.plans.maxChatCost")}
               </Text>
               <CostSegmented value={maxChatCost} onChange={setMaxChatCost} />
             </div>
             <label className="claw-toggle-inline">
-              <Switch value={allowImage} label="Allow image generation" isLabelHidden changeAction={setAllowImage} />
+              <Switch value={allowImage} label={t("admin.plans.allowImageGen")} isLabelHidden changeAction={setAllowImage} />
               <Text size="sm" color="secondary">
-                Allow image generation
+                {t("admin.plans.allowImageGen")}
               </Text>
             </label>
             {allowImage && (
               <div className="claw-row">
                 <Text size="sm" color="secondary">
-                  Max image cost
+                  {t("admin.plans.maxImageCost")}
                 </Text>
                 <CostSegmented value={maxImageCost} onChange={setMaxImageCost} />
               </div>
             )}
             <div className="claw-row claw-row-2col">
               <TextInput
-                label="Messages per day"
-                description="0 = unlimited"
+                label={t("admin.plans.messagesPerDay")}
+                description={t("admin.plans.zeroUnlimited")}
                 value={messagesPerDay}
                 onChange={setMessagesPerDay}
               />
               <TextInput
-                label="Images per day"
-                description="0 = unlimited"
+                label={t("admin.plans.imagesPerDay")}
+                description={t("admin.plans.zeroUnlimited")}
                 value={imagesPerDay}
                 onChange={setImagesPerDay}
               />
             </div>
             <TextInput
-              label="Turns per minute"
-              description="0 = inherit the global rate limit"
+              label={t("admin.plans.turnsPerMinute")}
+              description={t("admin.plans.zeroInheritGlobal")}
               value={turnsPerMinute}
               onChange={setTurnsPerMinute}
             />
             <label className="claw-toggle-inline">
-              <Switch value={isDefault} label="Default plan" isLabelHidden changeAction={setIsDefault} />
+              <Switch value={isDefault} label={t("admin.plans.defaultPlan")} isLabelHidden changeAction={setIsDefault} />
               <Text size="sm" color="secondary">
-                Default plan (used by anyone without an assigned plan)
+                {t("admin.plans.defaultPlanHint")}
               </Text>
             </label>
             <div className="claw-row">
               <Button
-                label="Save changes"
+                label={t("admin.common.saveChanges")}
                 variant="primary"
                 icon={<Icon icon="check" size="sm" />}
                 size="sm"
@@ -2021,13 +2058,13 @@ function PlanCard({
                       is_default: isDefault,
                     });
                     setEditing(false);
-                    toast({ body: "Plan saved", type: "info", autoHideDuration: 2500 });
+                    toast({ body: t("admin.plans.planSavedToast"), type: "info", autoHideDuration: 2500 });
                     await reload();
                   })
                 }
               />
               <Button
-                label="Cancel"
+                label={t("admin.common.cancel")}
                 variant="ghost"
                 size="sm"
                 clickAction={() => {
@@ -2052,6 +2089,7 @@ function AddPlanForm({
   reload: () => Promise<void>;
   onClose: () => void;
 }) {
+  const t = useT();
   const [name, setName] = useState("");
   const [rank, setRank] = useState("0");
   const [maxChatCost, setMaxChatCost] = useState<ModelCost>("medium");
@@ -2069,67 +2107,67 @@ function AddPlanForm({
         <div className="claw-info-box">
           <Icon icon={Plus} size="sm" color="secondary" />
           <Text size="sm" color="secondary">
-            Adding a new usage-tier plan
+            {t("admin.plans.addingPlanInfo")}
           </Text>
         </div>
         <div className="claw-row claw-row-2col">
-          <TextInput label="Name" placeholder="e.g. Pro" value={name} onChange={setName} />
+          <TextInput label={t("admin.providers.name")} placeholder="e.g. Pro" value={name} onChange={setName} />
           <TextInput
-            label="Rank"
-            description="Higher = more premium; orders the ladder."
+            label={t("admin.plans.rank")}
+            description={t("admin.plans.rankDesc")}
             value={rank}
             onChange={setRank}
           />
         </div>
         <div className="claw-row">
           <Text size="sm" color="secondary">
-            Max chat cost
+            {t("admin.plans.maxChatCost")}
           </Text>
           <CostSegmented value={maxChatCost} onChange={setMaxChatCost} />
         </div>
         <label className="claw-toggle-inline">
-          <Switch value={allowImage} label="Allow image generation" isLabelHidden changeAction={setAllowImage} />
+          <Switch value={allowImage} label={t("admin.plans.allowImageGen")} isLabelHidden changeAction={setAllowImage} />
           <Text size="sm" color="secondary">
-            Allow image generation
+            {t("admin.plans.allowImageGen")}
           </Text>
         </label>
         {allowImage && (
           <div className="claw-row">
             <Text size="sm" color="secondary">
-              Max image cost
+              {t("admin.plans.maxImageCost")}
             </Text>
             <CostSegmented value={maxImageCost} onChange={setMaxImageCost} />
           </div>
         )}
         <div className="claw-row claw-row-2col">
           <TextInput
-            label="Messages per day"
-            description="0 = unlimited"
+            label={t("admin.plans.messagesPerDay")}
+            description={t("admin.plans.zeroUnlimited")}
             value={messagesPerDay}
             onChange={setMessagesPerDay}
           />
           <TextInput
-            label="Images per day"
-            description="0 = unlimited"
+            label={t("admin.plans.imagesPerDay")}
+            description={t("admin.plans.zeroUnlimited")}
             value={imagesPerDay}
             onChange={setImagesPerDay}
           />
         </div>
         <TextInput
-          label="Turns per minute"
-          description="0 = inherit the global rate limit"
+          label={t("admin.plans.turnsPerMinute")}
+          description={t("admin.plans.zeroInheritGlobal")}
           value={turnsPerMinute}
           onChange={setTurnsPerMinute}
         />
         <label className="claw-toggle-inline">
-          <Switch value={isDefault} label="Default plan" isLabelHidden changeAction={setIsDefault} />
+          <Switch value={isDefault} label={t("admin.plans.defaultPlan")} isLabelHidden changeAction={setIsDefault} />
           <Text size="sm" color="secondary">
-            Default plan (used by anyone without an assigned plan)
+            {t("admin.plans.defaultPlanHint")}
           </Text>
         </label>
         <div className="claw-row">
           <Button
-            label="Create plan"
+            label={t("admin.plans.createPlan")}
             variant="primary"
             icon={<Icon icon={Plus} size="sm" />}
             size="sm"
@@ -2148,13 +2186,13 @@ function AddPlanForm({
                   is_default: isDefault,
                 };
                 await api.adminCreatePlan(body);
-                toast({ body: `${name.trim()} added`, type: "info", autoHideDuration: 2500 });
+                toast({ body: t("admin.providers.addedToast", { name: name.trim() }), type: "info", autoHideDuration: 2500 });
                 onClose();
                 await reload();
               })
             }
           />
-          <Button label="Cancel" variant="ghost" size="sm" clickAction={onClose} />
+          <Button label={t("admin.common.cancel")} variant="ghost" size="sm" clickAction={onClose} />
         </div>
       </div>
     </Card>
@@ -2168,21 +2206,22 @@ function PlanPicker({
   plans,
   value,
   onChange,
-  label = "Plan",
+  label,
 }: {
   plans: PlanInfo[];
   value: string | null;
   onChange: (id: string | null) => void;
   label?: string;
 }) {
+  const t = useT();
   return (
     <div className="claw-field-group">
       <Text size="sm" color="secondary">
-        {label}
+        {label ?? t("admin.plans.planLabel")}
       </Text>
       <div className="claw-row">
         <Button
-          label="Default plan"
+          label={t("admin.plans.defaultPlan")}
           size="sm"
           variant={value === null ? "primary" : "secondary"}
           clickAction={() => onChange(null)}
@@ -2209,8 +2248,24 @@ const ACTION_VARIANT: Record<string, "error" | "warning" | "neutral"> = {
   monitor: "neutral",
 };
 
+// Reused wherever a rule's raw action/severity enum value is shown to the
+// admin, so the same word isn't duplicated as both a state value and its
+// translated label (mirrors the COST_LABEL pattern for model cost tiers).
+const ACTION_LABEL_KEY: Record<string, string> = {
+  block: "admin.guardrails.actionBlock",
+  mask: "admin.guardrails.actionMask",
+  monitor: "admin.guardrails.actionMonitor",
+};
+const SEVERITY_LABEL_KEY: Record<string, string> = {
+  low: "admin.guardrails.severityLow",
+  medium: "admin.guardrails.severityMedium",
+  high: "admin.guardrails.severityHigh",
+  critical: "admin.guardrails.severityCritical",
+};
+
 // Runs sample text through the live policy so admins can prove the rules fire.
 function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promise<void> }) {
+  const t = useT();
   const [text, setText] = useState("");
   const [result, setResult] = useState<GuardrailTestResult | null>(null);
 
@@ -2224,13 +2279,13 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
     <Card padding={2} variant="muted">
       <div className="claw-panel">
         <div>
-          <Text weight="semibold">Test guardrails</Text>
+          <Text weight="semibold">{t("admin.guardrails.testTitle")}</Text>
           <Text size="sm" color="secondary" as="p">
-            Paste sample text to see exactly what the current rules would mask or block.
+            {t("admin.guardrails.testDesc")}
           </Text>
         </div>
         <TextArea
-          label="Sample text"
+          label={t("admin.guardrails.sampleText")}
           isLabelHidden
           placeholder="e.g. My card is 4111 1111 1111 1111 and email jane@acme.com"
           value={text}
@@ -2239,7 +2294,7 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
         />
         <div className="claw-row">
           <Button
-            label="Run test"
+            label={t("admin.guardrails.runTest")}
             variant="primary"
             size="sm"
             isDisabled={!text.trim()}
@@ -2251,7 +2306,7 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
           />
           {result && (
             <Button
-              label="Clear"
+              label={t("admin.guardrails.clear")}
               variant="ghost"
               size="sm"
               clickAction={() => {
@@ -2265,15 +2320,19 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
           <div className="claw-panel">
             <div className="claw-row">
               <Text size="sm" color="secondary">
-                Result
+                {t("admin.guardrails.result")}
               </Text>
               {result.action ? (
                 <Badge
                   variant={(ACTION_TONE[result.action] ?? "neutral") as "error" | "warning" | "neutral"}
-                  label={result.monitor_only ? `${result.action} (monitor-only)` : result.action}
+                  label={
+                    result.monitor_only
+                      ? t("admin.guardrails.actionMonitorOnly", { action: t(ACTION_LABEL_KEY[result.action] ?? result.action) })
+                      : t(ACTION_LABEL_KEY[result.action] ?? result.action)
+                  }
                 />
               ) : (
-                <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label="no match" />
+                <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label={t("admin.guardrails.noMatch")} />
               )}
               {result.matched_rules.map((m) => (
                 <Badge key={m.name} variant="neutral" label={`${m.name} · ${m.scope}`} />
@@ -2283,7 +2342,7 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
               <div className="claw-info-box">
                 <Icon icon={Info} size="sm" color="secondary" />
                 <Text size="sm" color="secondary">
-                  Output would be sent as: <code>{result.masked}</code>
+                  {t("admin.guardrails.outputWouldBeSentAs")} <code>{result.masked}</code>
                 </Text>
               </div>
             )}
@@ -2291,7 +2350,7 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
               <div className="claw-info-box is-warning">
                 <Icon icon={Info} size="sm" color="warning" />
                 <Text size="sm" color="secondary">
-                  This content would be blocked before reaching the model or the user.
+                  {t("admin.guardrails.blockedWarning")}
                 </Text>
               </div>
             )}
@@ -2303,6 +2362,7 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
 }
 
 function GuardrailsPanel() {
+  const t = useT();
   const [rules, setRules] = useState<GuardrailRule[]>([]);
   const [monitorOnly, setMonitorOnly] = useState(false);
   const [exempt, setExempt] = useState<string[]>([]);
@@ -2338,20 +2398,18 @@ function GuardrailsPanel() {
       <Card padding={2} variant="muted">
         <div className="claw-row claw-row-between">
           <div>
-            <Text weight="semibold">Enforcement mode</Text>
+            <Text weight="semibold">{t("admin.guardrails.enforcementMode")}</Text>
             <Text size="sm" color="secondary" as="p">
-              {monitorOnly
-                ? "Monitor-only: matches are logged for audit but never masked or blocked."
-                : "Enforcing: rules mask or block matching content across all users."}
+              {monitorOnly ? t("admin.guardrails.monitorOnlyDesc") : t("admin.guardrails.enforcingDesc")}
             </Text>
           </div>
           <label className="claw-toggle">
             <Text size="sm" color="secondary">
-              Enforce
+              {t("admin.guardrails.enforce")}
             </Text>
             <Switch
               value={!monitorOnly}
-              label="Enforce guardrails"
+              label={t("admin.guardrails.enforceGuardrails")}
               isLabelHidden
               changeAction={(checked) =>
                 guard(async () => {
@@ -2367,19 +2425,19 @@ function GuardrailsPanel() {
       <Card padding={2} variant="muted">
         <div className="claw-panel">
           <div>
-            <Text weight="semibold">Tools exempt from argument masking</Text>
+            <Text weight="semibold">{t("admin.guardrails.exemptToolsTitle")}</Text>
             <Text size="sm" color="secondary" as="p">
-              Matches (e.g. an email address) are still logged for audit, but never masked or blocked
-              in these tools' arguments — so email/calendar connectors receive the real recipient
-              instead of <code>[REDACTED_EMAIL]</code>. Use tool-name globs like{" "}
-              <code>mcp_outlook_*</code> or <code>mcp_*_send_*</code>. Input and output masking are
-              unaffected.
+              {t("admin.guardrails.exemptToolsDesc1")}{" "}
+              <code>[REDACTED_EMAIL]</code>
+              {t("admin.guardrails.exemptToolsDesc2")}{" "}
+              <code>mcp_outlook_*</code> {t("admin.guardrails.exemptToolsDesc3")}{" "}
+              <code>mcp_*_send_*</code>. {t("admin.guardrails.exemptToolsDesc4")}
             </Text>
           </div>
           <div className="claw-chip-list">
             {exempt.length === 0 ? (
               <Text size="sm" color="secondary">
-                No exemptions — every tool's arguments are masked.
+                {t("admin.guardrails.noExemptions")}
               </Text>
             ) : (
               exempt.map((g) => (
@@ -2387,7 +2445,7 @@ function GuardrailsPanel() {
                   <code>{g}</code>
                   <button
                     type="button"
-                    aria-label={`Remove ${g}`}
+                    aria-label={t("admin.guardrails.removeExemption", { name: g })}
                     className="claw-chip-x"
                     onClick={() => saveExempt(exempt.filter((x) => x !== g))}
                   >
@@ -2399,14 +2457,14 @@ function GuardrailsPanel() {
           </div>
           <div className="claw-row">
             <TextInput
-              label="Add exemption"
+              label={t("admin.guardrails.addExemption")}
               isLabelHidden
               placeholder="mcp_outlook_*"
               value={newExempt}
               onChange={setNewExempt}
             />
             <Button
-              label="Add"
+              label={t("admin.guardrails.add")}
               size="sm"
               variant="secondary"
               icon={<Icon icon={Plus} size="sm" />}
@@ -2423,12 +2481,11 @@ function GuardrailsPanel() {
 
       <div className="claw-row claw-row-between">
         <Text color="secondary">
-          Rules are checked in order against input, output, and tool arguments. Built-in rules can be
-          toggled and have their action or severity changed; their name and pattern are fixed.
+          {t("admin.guardrails.rulesIntro")}
         </Text>
         {!adding && (
           <Button
-            label="Add rule"
+            label={t("admin.guardrails.addRule")}
             icon={<Icon icon={Plus} size="sm" />}
             size="sm"
             clickAction={() => setAdding(true)}
@@ -2440,37 +2497,37 @@ function GuardrailsPanel() {
       {adding && (
         <Card padding={2}>
           <div className="claw-panel">
-            <TextInput label="Rule name" value={name} onChange={setName} />
+            <TextInput label={t("admin.guardrails.ruleName")} value={name} onChange={setName} />
             <div className="claw-row">
               <Text size="sm" color="secondary">
-                Match type
+                {t("admin.guardrails.matchType")}
               </Text>
               <Button
-                label="Keyword"
+                label={t("admin.guardrails.keyword")}
                 size="sm"
                 variant={kind === "keyword" ? "primary" : "secondary"}
                 clickAction={() => setKind("keyword")}
               />
               <Button
-                label="Regex"
+                label={t("admin.guardrails.regex")}
                 size="sm"
                 variant={kind === "regex" ? "primary" : "secondary"}
                 clickAction={() => setKind("regex")}
               />
             </div>
             <TextInput
-              label={kind === "keyword" ? "Keyword / phrase" : "Regular expression"}
+              label={kind === "keyword" ? t("admin.guardrails.keywordPhrase") : t("admin.guardrails.regularExpression")}
               value={pattern}
               onChange={setPattern}
             />
             <div className="claw-row">
               <Text size="sm" color="secondary">
-                Action
+                {t("admin.guardrails.action")}
               </Text>
               {(["block", "mask", "monitor"] as const).map((a) => (
                 <Button
                   key={a}
-                  label={a}
+                  label={t(ACTION_LABEL_KEY[a])}
                   size="sm"
                   variant={action === a ? "primary" : "secondary"}
                   clickAction={() => setAction(a)}
@@ -2479,7 +2536,7 @@ function GuardrailsPanel() {
             </div>
             <div className="claw-row">
               <Button
-                label="Create rule"
+                label={t("admin.guardrails.createRule")}
                 variant="primary"
                 icon={<Icon icon="check" size="sm" />}
                 isDisabled={!name.trim() || !pattern.trim()}
@@ -2493,7 +2550,7 @@ function GuardrailsPanel() {
                   })
                 }
               />
-              <Button label="Cancel" variant="ghost" clickAction={() => setAdding(false)} />
+              <Button label={t("admin.common.cancel")} variant="ghost" clickAction={() => setAdding(false)} />
             </div>
           </div>
         </Card>
@@ -2515,6 +2572,7 @@ function RuleCard({
   reload: () => Promise<void>;
   guard: (fn: () => Promise<void>) => Promise<void>;
 }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(rule.name);
   const [pattern, setPattern] = useState(rule.pattern);
@@ -2527,9 +2585,9 @@ function RuleCard({
         <div>
           <div className="claw-row">
             <Text weight="semibold">{rule.name}</Text>
-            <Badge variant={ACTION_VARIANT[rule.action] ?? "neutral"} label={rule.action} />
-            <Badge variant="neutral" label={rule.severity} />
-            {rule.is_builtin && <Badge variant="neutral" label="built-in" />}
+            <Badge variant={ACTION_VARIANT[rule.action] ?? "neutral"} label={t(ACTION_LABEL_KEY[rule.action] ?? rule.action)} />
+            <Badge variant="neutral" label={t(SEVERITY_LABEL_KEY[rule.severity] ?? rule.severity)} />
+            {rule.is_builtin && <Badge variant="neutral" label={t("admin.guardrails.builtIn")} />}
           </div>
           <Text size="sm" color="secondary" as="p" className="claw-rule-pattern">
             {rule.pattern}
@@ -2538,7 +2596,7 @@ function RuleCard({
         <div className="claw-row">
           <Switch
             value={rule.enabled}
-            label={`Enable ${rule.name}`}
+            label={t("admin.providers.enableName", { name: rule.name })}
             isLabelHidden
             changeAction={(checked) =>
               guard(async () => {
@@ -2548,7 +2606,7 @@ function RuleCard({
             }
           />
           <Button
-            label="Edit"
+            label={t("admin.common.edit")}
             icon={<Icon icon={Pencil} size="sm" />}
             size="sm"
             variant="ghost"
@@ -2562,7 +2620,7 @@ function RuleCard({
           />
           {!rule.is_builtin && (
             <Button
-              label="Delete"
+              label={t("admin.common.delete")}
               icon={<Icon icon={Trash2} size="sm" />}
               size="sm"
               variant="destructive"
@@ -2581,25 +2639,25 @@ function RuleCard({
         <Card padding={2} variant="muted">
           <div className="claw-panel">
             <TextInput
-              label="Name"
+              label={t("admin.providers.name")}
               value={name}
               onChange={setName}
               isDisabled={rule.is_builtin}
             />
             <TextInput
-              label={rule.is_builtin ? "Pattern (built-in — read-only)" : "Pattern (regex)"}
+              label={rule.is_builtin ? t("admin.guardrails.patternBuiltinReadonly") : t("admin.guardrails.patternRegex")}
               value={pattern}
               onChange={setPattern}
               isDisabled={rule.is_builtin}
             />
             <div className="claw-row">
               <Text size="sm" color="secondary">
-                Action
+                {t("admin.guardrails.action")}
               </Text>
               {(["block", "mask", "monitor"] as const).map((a) => (
                 <Button
                   key={a}
-                  label={a}
+                  label={t(ACTION_LABEL_KEY[a])}
                   size="sm"
                   variant={action === a ? "primary" : "secondary"}
                   clickAction={() => setAction(a)}
@@ -2608,12 +2666,12 @@ function RuleCard({
             </div>
             <div className="claw-row">
               <Text size="sm" color="secondary">
-                Severity
+                {t("admin.guardrails.severity")}
               </Text>
               {(["low", "medium", "high", "critical"] as const).map((s) => (
                 <Button
                   key={s}
-                  label={s}
+                  label={t(SEVERITY_LABEL_KEY[s])}
                   size="sm"
                   variant={severity === s ? "primary" : "secondary"}
                   clickAction={() => setSeverity(s)}
@@ -2622,7 +2680,7 @@ function RuleCard({
             </div>
             <div className="claw-row">
               <Button
-                label="Save changes"
+                label={t("admin.common.saveChanges")}
                 variant="primary"
                 icon={<Icon icon="check" size="sm" />}
                 size="sm"
@@ -2639,7 +2697,7 @@ function RuleCard({
                   })
                 }
               />
-              <Button label="Cancel" variant="ghost" size="sm" clickAction={() => setEditing(false)} />
+              <Button label={t("admin.common.cancel")} variant="ghost" size="sm" clickAction={() => setEditing(false)} />
             </div>
           </div>
         </Card>
@@ -2651,6 +2709,7 @@ function RuleCard({
 // ---------------------------------------------------------------- OAuth apps
 
 function OAuthAppsPanel() {
+  const t = useT();
   const [apps, setApps] = useState<OAuthAppsInfo | null>(null);
   const { error, guard } = useAsyncError();
 
@@ -2660,16 +2719,11 @@ function OAuthAppsPanel() {
   }, [guard, reload]);
 
   if (error) return <ErrorText>{error}</ErrorText>;
-  if (!apps) return <Text color="secondary">Loading…</Text>;
+  if (!apps) return <Text color="secondary">{t("admin.common.loading")}</Text>;
 
   return (
     <div className="claw-panel">
-      <Text color="secondary">
-        Register a Google and/or Microsoft OAuth app once here. It powers both social sign-in
-        (login and register) and one-click connectors like Gmail, Google Sheets, Outlook, Calendar,
-        and OneDrive — no keys in .env. Add both redirect URIs below to the provider's app so both
-        flows work.
-      </Text>
+      <Text color="secondary">{t("admin.oauth.intro")}</Text>
       <OAuthAppCard
         provider="google"
         label="Google"
@@ -2700,43 +2754,49 @@ const OAUTH_GUIDE: Record<
   "google" | "microsoft",
   {
     consoleUrl: string;
-    consoleLabel: string;
-    steps: string[];
-    scopes: { label: string; items: string[] }[];
+    consoleLabelKey: string;
+    stepKeys: string[];
+    scopes: { labelKey: string; items: string[] }[];
   }
 > = {
   google: {
     consoleUrl: "https://console.cloud.google.com/apis/credentials",
-    consoleLabel: "Open Google Cloud Console",
-    steps: [
-      "APIs & Services → Library → enable each connector's API (Gmail API, Google Sheets API, …). This is separate from adding scopes below — skipping it makes every call fail with 403 even though the connector shows “connected”.",
-      "APIs & Services → Credentials → Create credentials → OAuth client ID.",
-      "Application type: Web application.",
-      "Add BOTH redirect URIs below under “Authorized redirect URIs”.",
-      "OAuth consent screen: add the scopes below; add yourself as a Test user while unpublished.",
-      "Copy the Client ID and Client secret into the fields below, then Save.",
+    consoleLabelKey: "admin.oauth.google.consoleLabel",
+    stepKeys: [
+      "admin.oauth.google.step1",
+      "admin.oauth.google.step2",
+      "admin.oauth.google.step3",
+      "admin.oauth.google.step4",
+      "admin.oauth.google.step5",
+      "admin.oauth.google.step6",
     ],
     scopes: [
-      { label: "Sign-in", items: ["openid", "email", "profile"] },
-      { label: "Gmail connector", items: ["https://www.googleapis.com/auth/gmail.modify"] },
-      { label: "Google Sheets connector", items: ["https://www.googleapis.com/auth/spreadsheets"] },
+      { labelKey: "admin.oauth.scopes.signIn", items: ["openid", "email", "profile"] },
+      {
+        labelKey: "admin.oauth.scopes.gmail",
+        items: ["https://www.googleapis.com/auth/gmail.modify"],
+      },
+      {
+        labelKey: "admin.oauth.scopes.sheets",
+        items: ["https://www.googleapis.com/auth/spreadsheets"],
+      },
     ],
   },
   microsoft: {
     consoleUrl:
       "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
-    consoleLabel: "Open Microsoft Entra admin center",
-    steps: [
-      "App registrations → New registration (multi-tenant → keep Tenant = common).",
-      "Authentication → Add a platform → Web: add BOTH redirect URIs below.",
-      "Certificates & secrets → New client secret → copy the Value.",
-      "API permissions → Microsoft Graph → Delegated: add the scopes below, then Grant admin consent.",
-      "Copy the Application (client) ID, secret, and Tenant ID into the fields below, then Save.",
+    consoleLabelKey: "admin.oauth.microsoft.consoleLabel",
+    stepKeys: [
+      "admin.oauth.microsoft.step1",
+      "admin.oauth.microsoft.step2",
+      "admin.oauth.microsoft.step3",
+      "admin.oauth.microsoft.step4",
+      "admin.oauth.microsoft.step5",
     ],
     scopes: [
-      { label: "Sign-in", items: ["openid", "email", "profile"] },
+      { labelKey: "admin.oauth.scopes.signIn", items: ["openid", "email", "profile"] },
       {
-        label: "Connectors (Microsoft Graph, delegated)",
+        labelKey: "admin.oauth.scopes.msConnectors",
         items: [
           "offline_access",
           "User.Read",
@@ -2751,20 +2811,21 @@ const OAUTH_GUIDE: Record<
 };
 
 function OAuthQuickStart({ provider }: { provider: "google" | "microsoft" }) {
+  const t = useT();
   const guide = OAUTH_GUIDE[provider];
   return (
     <details className="claw-guide">
-      <summary>Quick start guide</summary>
+      <summary>{t("admin.oauth.quickStart")}</summary>
       <div className="claw-guide-body">
         <ol className="claw-telegram-steps">
-          {guide.steps.map((step, i) => (
-            <li key={i}>{step}</li>
+          {guide.stepKeys.map((key, i) => (
+            <li key={i}>{t(key)}</li>
           ))}
         </ol>
         {guide.scopes.map((group) => (
-          <div key={group.label} className="claw-setup-field">
+          <div key={group.labelKey} className="claw-setup-field">
             <Text size="sm" color="secondary">
-              {group.label} scopes:
+              {t("admin.oauth.scopesFor", { label: t(group.labelKey) })}
             </Text>
             <div className="claw-scope-chips">
               {group.items.map((scope) => (
@@ -2775,7 +2836,7 @@ function OAuthQuickStart({ provider }: { provider: "google" | "microsoft" }) {
         ))}
         <div className="claw-row">
           <Button
-            label={guide.consoleLabel}
+            label={t(guide.consoleLabelKey)}
             icon={<Icon icon={ExternalLink} size="sm" />}
             variant="secondary"
             size="sm"
@@ -2808,6 +2869,7 @@ function OAuthAppCard({
   guard: (fn: () => Promise<void>) => Promise<void>;
   withTenant?: boolean;
 }) {
+  const t = useT();
   const [clientId, setClientId] = useState(app.client_id);
   const [clientSecret, setClientSecret] = useState("");
   const [tenant, setTenant] = useState(app.tenant);
@@ -2819,42 +2881,50 @@ function OAuthAppCard({
         <div className="claw-row">
           <Text weight="semibold">{label}</Text>
           {app.has_secret ? (
-            <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label="Configured" />
+            <Badge
+              variant="success"
+              icon={<Icon icon="check" size="xsm" />}
+              label={t("admin.oauth.configured")}
+            />
           ) : (
-            <Badge variant="neutral" label="Not configured" />
+            <Badge variant="neutral" label={t("admin.oauth.notConfigured")} />
           )}
         </div>
         <OAuthQuickStart provider={provider} />
         <div className="claw-setup-field">
           <Text size="sm" color="secondary">
-            Redirect URIs — add BOTH to your {label} app's authorized redirect URIs:
+            {t("admin.oauth.redirectUrisDesc", { label })}
           </Text>
           <Text size="sm" color="secondary" as="p">
-            Sign-in (login / register):
+            {t("admin.oauth.signInRedirect")}
           </Text>
           <Text type="code">{loginRedirectUri}</Text>
           <Text size="sm" color="secondary" as="p">
-            Connectors:
+            {t("admin.oauth.connectorsRedirect")}
           </Text>
           <Text type="code">{redirectUri}</Text>
         </div>
-        <TextInput label="Client ID" value={clientId} onChange={setClientId} />
+        <TextInput label={t("admin.oauth.clientId")} value={clientId} onChange={setClientId} />
         <TextInput
-          label={app.has_secret ? "Client secret (leave blank to keep current)" : "Client secret"}
+          label={
+            app.has_secret
+              ? t("admin.oauth.clientSecretKeepCurrent")
+              : t("admin.oauth.clientSecret")
+          }
           type="password"
           value={clientSecret}
           onChange={setClientSecret}
         />
         {withTenant && (
           <TextInput
-            label="Tenant (optional — default: common)"
+            label={t("admin.oauth.tenant")}
             value={tenant}
             onChange={setTenant}
           />
         )}
         <div className="claw-row">
           <Button
-            label="Save"
+            label={t("admin.oauth.save")}
             variant="primary"
             icon={<Icon icon="check" size="sm" />}
             clickAction={() =>
@@ -2865,7 +2935,11 @@ function OAuthAppCard({
                   tenant: tenant.trim(),
                 });
                 setClientSecret("");
-                toast({ body: `${label} OAuth saved`, type: "info", autoHideDuration: 2500 });
+                toast({
+                  body: t("admin.oauth.savedToast", { label }),
+                  type: "info",
+                  autoHideDuration: 2500,
+                });
                 await onSaved();
               })
             }
@@ -2878,19 +2952,24 @@ function OAuthAppCard({
 
 // ---------------------------------------------------------------- Telegram
 
-function telegramStatusBadge(cfg: TelegramAdminConfig) {
-  if (!cfg.has_token) return <Badge variant="neutral" label="Not configured" />;
-  if (!cfg.running) return <Badge variant="neutral" label="Configured (disabled)" />;
+function telegramStatusBadge(cfg: TelegramAdminConfig, t: (key: string, params?: Record<string, string>) => string) {
+  if (!cfg.has_token) return <Badge variant="neutral" label={t("admin.oauth.notConfigured")} />;
+  if (!cfg.running) return <Badge variant="neutral" label={t("admin.telegram.configuredDisabled")} />;
   return (
     <Badge
       variant="success"
       icon={<Icon icon="check" size="xsm" />}
-      label={cfg.bot_username ? `Connected · @${cfg.bot_username}` : "Connected"}
+      label={
+        cfg.bot_username
+          ? t("admin.telegram.connectedAs", { username: cfg.bot_username })
+          : t("admin.telegram.connected")
+      }
     />
   );
 }
 
 function TelegramConfigPanel() {
+  const t = useT();
   const [cfg, setCfg] = useState<TelegramAdminConfig | null>(null);
   const [token, setToken] = useState("");
   const [enabled, setEnabled] = useState(true);
@@ -2910,34 +2989,30 @@ function TelegramConfigPanel() {
   }, [guard, reload]);
 
   if (error) return <ErrorText>{error}</ErrorText>;
-  if (!cfg) return <Text color="secondary">Loading…</Text>;
+  if (!cfg) return <Text color="secondary">{t("admin.common.loading")}</Text>;
 
   return (
     <div className="claw-panel">
-      <Text color="secondary">
-        Connect a Telegram bot so users can chat with Claw from Telegram once they link their
-        account in Settings → Telegram. Saving here connects immediately — no server restart needed.
-      </Text>
+      <Text color="secondary">{t("admin.telegram.intro")}</Text>
       {cfg.source === "env" && (
         <Text size="sm" color="secondary">
-          Currently running from the CLAW_TELEGRAM_BOT_TOKEN environment variable. Saving below
-          switches to database-managed configuration.
+          {t("admin.telegram.envSourceNote")}
         </Text>
       )}
       <Card padding={2} variant="muted">
-        <Text weight="semibold">4 steps to get a bot token</Text>
+        <Text weight="semibold">{t("admin.telegram.stepsTitle")}</Text>
         <ol className="claw-telegram-steps">
           <li>
-            Open @BotFather in Telegram and send <Text type="code">/newbot</Text>.
+            {t("admin.telegram.step1")} <Text type="code">/newbot</Text>.
           </li>
-          <li>Follow the prompts to name the bot and choose a username.</li>
-          <li>Copy the token BotFather gives you.</li>
-          <li>Paste it below and click Save.</li>
+          <li>{t("admin.telegram.step2")}</li>
+          <li>{t("admin.telegram.step3")}</li>
+          <li>{t("admin.telegram.step4")}</li>
         </ol>
       </Card>
       <div className="claw-row">
         <Button
-          label="Open @BotFather in Telegram"
+          label={t("admin.telegram.openBotFather")}
           icon={<Icon icon={ExternalLink} size="sm" />}
           variant="secondary"
           href="https://t.me/BotFather"
@@ -2948,25 +3023,25 @@ function TelegramConfigPanel() {
       <Card padding={2}>
         <div className="claw-panel">
           <div className="claw-row">
-            <Text weight="semibold">Bot</Text>
-            {telegramStatusBadge(cfg)}
+            <Text weight="semibold">{t("admin.telegram.bot")}</Text>
+            {telegramStatusBadge(cfg, t)}
           </div>
           <TextInput
-            label={cfg.has_token ? "Bot token (leave blank to keep current)" : "Bot token"}
+            label={cfg.has_token ? t("admin.telegram.botTokenKeepCurrent") : t("admin.telegram.botToken")}
             type="password"
             value={token}
             onChange={setToken}
             placeholder="123456:ABC-DEF..."
           />
           <label className="claw-kb-visibility">
-            <Switch value={enabled} changeAction={setEnabled} label="Enabled" />
+            <Switch value={enabled} changeAction={setEnabled} label={t("admin.telegram.enabled")} />
             <Text size="sm" color="secondary">
-              {enabled ? "Bot is active" : "Bot is paused"}
+              {enabled ? t("admin.telegram.botActive") : t("admin.telegram.botPaused")}
             </Text>
           </label>
           <div className="claw-row">
             <Button
-              label="Save"
+              label={t("admin.oauth.save")}
               variant="primary"
               icon={<Icon icon="check" size="sm" />}
               clickAction={() =>
@@ -2975,7 +3050,7 @@ function TelegramConfigPanel() {
                   setToken("");
                   setCfg(res);
                   setEnabled(res.enabled);
-                  toast({ body: "Telegram settings saved", type: "info", autoHideDuration: 2500 });
+                  toast({ body: t("admin.telegram.savedToast"), type: "info", autoHideDuration: 2500 });
                 })
               }
             />
@@ -2995,10 +3070,10 @@ const SMTP_PRESETS: Record<string, { host: string; port: number; security: "tls"
   "Gmail": { host: "smtp.gmail.com", port: 587, security: "tls" },
 };
 
-const LOGO_SLOT_META: { slot: BrandingLogoSlot; title: string; hint: string }[] = [
-  { slot: "login", title: "Login page", hint: "Shown on the sign-in screen. Recommended ~ 220×48 px." },
-  { slot: "chat", title: "Chat landing", hint: "Shown above the greeting on an empty chat. Recommended ~ 220×48 px." },
-  { slot: "sidebar", title: "Sidebar menu", hint: "Shown at the top of the left menu. A square mark works best in the collapsed rail." },
+const LOGO_SLOT_META: { slot: BrandingLogoSlot; titleKey: string; hintKey: string }[] = [
+  { slot: "login", titleKey: "admin.preferences.logo.loginTitle", hintKey: "admin.preferences.logo.loginHint" },
+  { slot: "chat", titleKey: "admin.preferences.logo.chatTitle", hintKey: "admin.preferences.logo.chatHint" },
+  { slot: "sidebar", titleKey: "admin.preferences.logo.sidebarTitle", hintKey: "admin.preferences.logo.sidebarHint" },
 ];
 
 function LogoUploadRow({
@@ -3006,10 +3081,12 @@ function LogoUploadRow({
   filename,
   onChange,
 }: {
-  meta: { slot: BrandingLogoSlot; title: string; hint: string };
+  meta: { slot: BrandingLogoSlot; titleKey: string; hintKey: string };
   filename: string | null;
   onChange: (next: AdminBranding) => void;
 }) {
+  const t = useT();
+  const title = t(meta.titleKey);
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const { error, guard } = useAsyncError();
@@ -3022,7 +3099,7 @@ function LogoUploadRow({
       try {
         const next = await api.adminUploadBrandingLogo(meta.slot, file);
         onChange(next);
-        toast({ body: `${meta.title} logo updated`, type: "info", autoHideDuration: 2500 });
+        toast({ body: t("admin.preferences.logo.updatedToast", { title }), type: "info", autoHideDuration: 2500 });
       } finally {
         setBusy(false);
         if (inputRef.current) inputRef.current.value = "";
@@ -3036,7 +3113,7 @@ function LogoUploadRow({
       try {
         const next = await api.adminDeleteBrandingLogo(meta.slot);
         onChange(next);
-        toast({ body: `${meta.title} logo reset to default`, type: "info", autoHideDuration: 2500 });
+        toast({ body: t("admin.preferences.logo.resetToast", { title }), type: "info", autoHideDuration: 2500 });
       } finally {
         setBusy(false);
       }
@@ -3050,13 +3127,13 @@ function LogoUploadRow({
           <img
             // Cache-bust on the stored filename so a replace shows immediately.
             src={filename ? `/api/branding/assets/${meta.slot}?v=${encodeURIComponent(filename)}` : "/logo-softnix.png"}
-            alt={`${meta.title} logo`}
+            alt={t("admin.preferences.logo.altText", { title })}
           />
         </div>
         <div className="claw-branding-logo-body">
-          <Text weight="semibold">{meta.title}</Text>
-          <Text size="sm" color="secondary">{meta.hint}</Text>
-          <Text size="sm" color="secondary">PNG, JPG, or WebP · up to 1 MB.</Text>
+          <Text weight="semibold">{title}</Text>
+          <Text size="sm" color="secondary">{t(meta.hintKey)}</Text>
+          <Text size="sm" color="secondary">{t("admin.preferences.logo.fileHint")}</Text>
           {error && <ErrorText>{error}</ErrorText>}
           <div className="claw-branding-logo-actions">
             <input
@@ -3067,7 +3144,7 @@ function LogoUploadRow({
               onChange={(e) => pick(e.target.files?.[0])}
             />
             <Button
-              label={filename ? "Replace" : "Upload"}
+              label={filename ? t("admin.preferences.logo.replace") : t("admin.preferences.logo.upload")}
               variant="secondary"
               size="sm"
               icon={<Icon icon={Upload} size="sm" />}
@@ -3076,7 +3153,7 @@ function LogoUploadRow({
             />
             {filename && (
               <Button
-                label="Reset to default"
+                label={t("admin.preferences.logo.resetToDefault")}
                 variant="ghost"
                 size="sm"
                 isDisabled={busy}
@@ -3091,6 +3168,7 @@ function LogoUploadRow({
 }
 
 function PreferencesPanel() {
+  const t = useT();
   const { refresh } = useBranding();
   const [cfg, setCfg] = useState<AdminBranding | null>(null);
   const [language, setLanguage] = useState<BrandingLanguage>("en");
@@ -3113,7 +3191,7 @@ function PreferencesPanel() {
   }, [guard, reload]);
 
   if (error && !cfg) return <ErrorText>{error}</ErrorText>;
-  if (!cfg) return <Text color="secondary">Loading…</Text>;
+  if (!cfg) return <Text color="secondary">{t("admin.common.loading")}</Text>;
 
   const dirty = language !== cfg.language || fontSize !== cfg.font_size || chatBg !== cfg.chat_background;
 
@@ -3124,7 +3202,7 @@ function PreferencesPanel() {
         const next = await api.adminSetBranding({ language, font_size: fontSize, chat_background: chatBg });
         setCfg((prev) => (prev ? { ...prev, ...next } : next));
         await refresh(); // apply live (font size / chat bg / language) without a reload
-        toast({ body: "Preferences saved", type: "info", autoHideDuration: 2500 });
+        toast({ body: t("admin.preferences.savedToast"), type: "info", autoHideDuration: 2500 });
       } finally {
         setSaving(false);
       }
@@ -3140,12 +3218,9 @@ function PreferencesPanel() {
 
   return (
     <div className="claw-panel">
-      <Text color="secondary">
-        Global branding &amp; appearance for everyone in this workspace. These apply to all users; individual
-        users can't override them.
-      </Text>
+      <Text color="secondary">{t("admin.preferences.intro")}</Text>
 
-      <Text weight="semibold">Logos</Text>
+      <Text weight="semibold">{t("admin.preferences.logosTitle")}</Text>
       {LOGO_SLOT_META.map((m) => (
         <LogoUploadRow
           key={m.slot}
@@ -3158,37 +3233,37 @@ function PreferencesPanel() {
       <Card padding={2}>
         <div className="claw-panel">
           <div>
-            <Text weight="semibold">Language</Text>
+            <Text weight="semibold">{t("admin.preferences.language")}</Text>
             <Text size="sm" color="secondary">
-              Applies to key interface surfaces and the AI's replies. English is the default.
+              {t("admin.preferences.languageDesc")}
             </Text>
-            <SegmentedControl value={language} onChange={(v) => setLanguage(v as BrandingLanguage)} label="Language">
-              <SegmentedControlItem value="en" label="English" />
-              <SegmentedControlItem value="th" label="ไทย (Thai)" />
+            <SegmentedControl value={language} onChange={(v) => setLanguage(v as BrandingLanguage)} label={t("admin.preferences.language")}>
+              <SegmentedControlItem value="en" label={t("admin.preferences.languageEnglish")} />
+              <SegmentedControlItem value="th" label={t("admin.preferences.languageThai")} />
             </SegmentedControl>
           </div>
           <div>
-            <Text weight="semibold">Font size</Text>
-            <SegmentedControl value={fontSize} onChange={(v) => setFontSize(v as BrandingFontSize)} label="Font size">
-              <SegmentedControlItem value="small" label="Small" />
-              <SegmentedControlItem value="medium" label="Medium" />
-              <SegmentedControlItem value="large" label="Large" />
+            <Text weight="semibold">{t("admin.preferences.fontSize")}</Text>
+            <SegmentedControl value={fontSize} onChange={(v) => setFontSize(v as BrandingFontSize)} label={t("admin.preferences.fontSize")}>
+              <SegmentedControlItem value="small" label={t("admin.preferences.fontSmall")} />
+              <SegmentedControlItem value="medium" label={t("admin.preferences.fontMedium")} />
+              <SegmentedControlItem value="large" label={t("admin.preferences.fontLarge")} />
             </SegmentedControl>
           </div>
           <div>
-            <Text weight="semibold">Chat background</Text>
+            <Text weight="semibold">{t("admin.preferences.chatBackground")}</Text>
             <Text size="sm" color="secondary">
-              Solid, Dots, or Grid — a subtle brand accent glow is always present in the corner.
+              {t("admin.preferences.chatBackgroundDesc")}
             </Text>
-            <SegmentedControl value={chatBg} onChange={(v) => setChatBg(v as BrandingChatBackground)} label="Chat background">
-              <SegmentedControlItem value="solid" label="Solid" />
-              <SegmentedControlItem value="dots" label="Dots" />
-              <SegmentedControlItem value="grid" label="Grid" />
+            <SegmentedControl value={chatBg} onChange={(v) => setChatBg(v as BrandingChatBackground)} label={t("admin.preferences.chatBackground")}>
+              <SegmentedControlItem value="solid" label={t("admin.preferences.bgSolid")} />
+              <SegmentedControlItem value="dots" label={t("admin.preferences.bgDots")} />
+              <SegmentedControlItem value="grid" label={t("admin.preferences.bgGrid")} />
             </SegmentedControl>
           </div>
           {error && <ErrorText>{error}</ErrorText>}
           <div>
-            <Button label="Save preferences" isDisabled={!dirty || saving} clickAction={save} />
+            <Button label={t("admin.preferences.savePreferences")} isDisabled={!dirty || saving} clickAction={save} />
           </div>
         </div>
       </Card>
@@ -3197,6 +3272,7 @@ function PreferencesPanel() {
 }
 
 function EmailConfigPanel() {
+  const t = useT();
   const [cfg, setCfg] = useState<SmtpAdminConfig | null>(null);
   const [provider, setProvider] = useState("");
   const [host, setHost] = useState("");
@@ -3231,7 +3307,7 @@ function EmailConfigPanel() {
   }, [guard, reload]);
 
   if (error) return <ErrorText>{error}</ErrorText>;
-  if (!cfg) return <Text color="secondary">Loading…</Text>;
+  if (!cfg) return <Text color="secondary">{t("admin.common.loading")}</Text>;
 
   const currentBody = () => ({
     provider,
@@ -3247,14 +3323,10 @@ function EmailConfigPanel() {
 
   return (
     <div className="claw-panel">
-      <Text color="secondary">
-        Configure SMTP so PrivateClaw can send transactional email — currently used only for the
-        imported-user activation link (registration invite / account-ready emails), separate from
-        any chat channel configuration.
-      </Text>
+      <Text color="secondary">{t("admin.email.intro")}</Text>
       <Card padding={2}>
         <div className="claw-panel">
-          <Text weight="semibold">Provider</Text>
+          <Text weight="semibold">{t("admin.email.provider")}</Text>
           <select
             className="claw-token-filter"
             value={provider}
@@ -3269,7 +3341,7 @@ function EmailConfigPanel() {
               }
             }}
           >
-            <option value="">Custom</option>
+            <option value="">{t("admin.email.custom")}</option>
             {Object.keys(SMTP_PRESETS).map((name) => (
               <option key={name} value={name}>
                 {name}
@@ -3278,19 +3350,19 @@ function EmailConfigPanel() {
           </select>
 
           <Text weight="semibold" size="sm">
-            Connection
+            {t("admin.email.connection")}
           </Text>
-          <TextInput label="SMTP host" value={host} onChange={setHost} placeholder="smtp.office365.com" />
-          <TextInput label="Port" value={port} onChange={setPort} placeholder="587" />
-          <TextInput label="Username" value={username} onChange={setUsername} placeholder="notification@company.com" />
+          <TextInput label={t("admin.email.smtpHost")} value={host} onChange={setHost} placeholder="smtp.office365.com" />
+          <TextInput label={t("admin.email.port")} value={port} onChange={setPort} placeholder="587" />
+          <TextInput label={t("admin.email.username")} value={username} onChange={setUsername} placeholder="notification@company.com" />
           <TextInput
-            label="From address"
+            label={t("admin.email.fromAddress")}
             value={fromAddress}
             onChange={setFromAddress}
             placeholder="notification@company.com"
           />
           <PasswordField
-            label={cfg.has_password ? "Password (leave blank to keep existing)" : "Password"}
+            label={cfg.has_password ? t("admin.email.passwordKeepExisting") : t("admin.email.password")}
             value={password}
             onChange={setPassword}
           />
@@ -3298,23 +3370,23 @@ function EmailConfigPanel() {
           <SegmentedControl
             value={security}
             onChange={(v) => setSecurity(v as "tls" | "ssl")}
-            label="Security"
+            label={t("admin.email.security")}
             size="sm"
           >
-            <SegmentedControlItem value="tls" label="Use STARTTLS" />
-            <SegmentedControlItem value="ssl" label="Use SSL (SMTPS)" />
+            <SegmentedControlItem value="tls" label={t("admin.email.useStartTls")} />
+            <SegmentedControlItem value="ssl" label={t("admin.email.useSsl")} />
           </SegmentedControl>
 
           <label className="claw-kb-visibility">
-            <Switch value={enabled} changeAction={setEnabled} label="Enabled" />
+            <Switch value={enabled} changeAction={setEnabled} label={t("admin.telegram.enabled")} />
             <Text size="sm" color="secondary">
-              {enabled ? "Email sending is active" : "Email sending is paused"}
+              {enabled ? t("admin.email.sendingActive") : t("admin.email.sendingPaused")}
             </Text>
           </label>
 
           <div className="claw-row">
             <Button
-              label="Save"
+              label={t("admin.oauth.save")}
               variant="primary"
               icon={<Icon icon="check" size="sm" />}
               clickAction={() =>
@@ -3322,7 +3394,7 @@ function EmailConfigPanel() {
                   const res = await api.adminSetEmailConfig(currentBody());
                   setCfg(res);
                   setPassword("");
-                  toast({ body: "Email Notification settings saved", type: "info", autoHideDuration: 2500 });
+                  toast({ body: t("admin.email.savedToast"), type: "info", autoHideDuration: 2500 });
                 })
               }
             />
@@ -3331,13 +3403,12 @@ function EmailConfigPanel() {
       </Card>
 
       <Card padding={2} variant="muted">
-        <Text weight="semibold">Test Send Mail</Text>
+        <Text weight="semibold">{t("admin.email.testSendTitle")}</Text>
         <Text size="sm" color="secondary">
-          Sends using the form values above (unsaved changes included) — save first if you want the
-          test to reflect what's actually stored.
+          {t("admin.email.testSendDesc")}
         </Text>
         <TextInput
-          label="Recipient email"
+          label={t("admin.email.recipientEmail")}
           type="email"
           value={testRecipient}
           onChange={setTestRecipient}
@@ -3346,7 +3417,7 @@ function EmailConfigPanel() {
         {testResult && (testResult.ok ? <Text size="sm">{testResult.message}</Text> : <ErrorText>{testResult.message}</ErrorText>)}
         <div className="claw-row">
           <Button
-            label={testBusy ? "Sending…" : "Test Send Mail"}
+            label={testBusy ? t("admin.email.sending") : t("admin.email.testSendButton")}
             variant="secondary"
             isDisabled={testBusy || !testRecipient}
             clickAction={async () => {
@@ -3354,7 +3425,7 @@ function EmailConfigPanel() {
               setTestResult(null);
               try {
                 await api.adminTestEmailConfig({ ...currentBody(), recipient: testRecipient });
-                setTestResult({ ok: true, message: "Test email sent." });
+                setTestResult({ ok: true, message: t("admin.email.testSentMessage") });
               } catch (e) {
                 setTestResult({ ok: false, message: String(e).replace(/^Error:\s*/, "") });
               } finally {
@@ -3375,6 +3446,7 @@ const AUDIT_PAGE = 50;
 // One audit event: a compact clickable header (kind · who · preview · time)
 // that expands to the full, pretty-printed payload.
 function AuditEventRow({ event: e }: { event: AuditRow }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   return (
     <div className="claw-audit-item">
@@ -3396,8 +3468,8 @@ function AuditEventRow({ event: e }: { event: AuditRow }) {
       {open && (
         <div className="claw-audit-detail">
           <div className="claw-audit-detail-meta">
-            <span>Actor: {e.user_label}</span>
-            {e.session_id && <span>Session: {e.session_id}</span>}
+            <span>{t("admin.audit.actor", { user: e.user_label })}</span>
+            {e.session_id && <span>{t("admin.audit.session", { session: e.session_id })}</span>}
           </div>
           <pre className="claw-audit-json">{JSON.stringify(e.payload, null, 2)}</pre>
         </div>
@@ -3407,6 +3479,7 @@ function AuditEventRow({ event: e }: { event: AuditRow }) {
 }
 
 function AuditPanel() {
+  const t = useT();
   const [events, setEvents] = useState<AuditRow[]>([]);
   const [kinds, setKinds] = useState<string[]>([]);
   const [filter, setFilter] = useState<string>("");
@@ -3417,7 +3490,7 @@ function AuditPanel() {
 
   // First page — refetched when the kind filter or (debounced) search changes.
   useEffect(() => {
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       void guard(async () => {
         const r = await api.adminAudit({
           kind: filter || undefined,
@@ -3429,7 +3502,7 @@ function AuditPanel() {
         setHasMore(r.has_more);
       });
     }, search ? 300 : 0);
-    return () => clearTimeout(t);
+    return () => clearTimeout(timer);
   }, [guard, filter, search]);
 
   const loadMore = () =>
@@ -3453,14 +3526,14 @@ function AuditPanel() {
   return (
     <div className="claw-panel">
       <TextInput
-        label="Search events"
+        label={t("admin.audit.searchEvents")}
         value={search}
-        placeholder="Filter by tool name, rule, payload text…"
+        placeholder={t("admin.audit.searchPlaceholder")}
         onChange={setSearch}
       />
       <div className="claw-row">
         <Button
-          label="All"
+          label={t("admin.audit.all")}
           size="sm"
           variant={filter === "" ? "primary" : "secondary"}
           clickAction={() => setFilter("")}
@@ -3478,8 +3551,8 @@ function AuditPanel() {
       {error && <ErrorText>{error}</ErrorText>}
       {events.length === 0 ? (
         <EmptyState
-          title="No events"
-          description={search ? "No events match your search." : "Audit events appear here as the system runs."}
+          title={t("admin.audit.noEvents")}
+          description={search ? t("admin.audit.noEventsMatch") : t("admin.audit.noEventsYet")}
         />
       ) : (
         <>
@@ -3491,7 +3564,7 @@ function AuditPanel() {
           {hasMore && (
             <div className="claw-row">
               <Button
-                label={busy ? "Loading…" : "Load more"}
+                label={busy ? t("admin.common.loading") : t("admin.audit.loadMore")}
                 variant="secondary"
                 size="sm"
                 isDisabled={busy}
@@ -3522,6 +3595,7 @@ function GroupPicker({
   onChange: (id: string | null) => void;
   onCreate: (name: string) => Promise<GroupInfo>;
 }) {
+  const t = useT();
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const create = () =>
@@ -3533,11 +3607,11 @@ function GroupPicker({
   return (
     <div className="claw-field-group">
       <Text size="sm" color="secondary">
-        Group
+        {t("admin.users.group")}
       </Text>
       <div className="claw-row">
         <Button
-          label="No group"
+          label={t("admin.users.noGroup")}
           size="sm"
           variant={value === null ? "primary" : "secondary"}
           clickAction={() => onChange(null)}
@@ -3554,19 +3628,19 @@ function GroupPicker({
         {adding ? (
           <>
             <TextInput
-              label="New group name"
+              label={t("admin.users.newGroupName")}
               isLabelHidden
-              placeholder="e.g. Engineering"
+              placeholder={t("admin.users.newGroupPlaceholder")}
               value={name}
               onChange={setName}
               onEnter={create}
             />
-            <Button label="Add" size="sm" variant="primary" isDisabled={!name.trim()} clickAction={create} />
-            <Button label="Cancel" size="sm" variant="ghost" clickAction={() => { setName(""); setAdding(false); }} />
+            <Button label={t("admin.users.add")} size="sm" variant="primary" isDisabled={!name.trim()} clickAction={create} />
+            <Button label={t("admin.common.cancel")} size="sm" variant="ghost" clickAction={() => { setName(""); setAdding(false); }} />
           </>
         ) : (
           <Button
-            label="New group"
+            label={t("admin.users.newGroup")}
             icon={<Icon icon={Plus} size="xsm" />}
             size="sm"
             variant="ghost"
@@ -3591,6 +3665,7 @@ function GroupsManager({
   reload: () => Promise<void>;
   guard: (fn: () => Promise<void>) => Promise<void>;
 }) {
+  const t = useT();
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const toast = useToast();
@@ -3607,15 +3682,14 @@ function GroupsManager({
     <Card padding={2} variant="muted">
       <div className="claw-panel">
         <div>
-          <Text weight="semibold">Groups</Text>
+          <Text weight="semibold">{t("admin.users.groupsTitle")}</Text>
           <Text size="sm" color="secondary" as="p">
-            Organize users for easier management. New sign-ups join the default group. Groups don't
-            affect permissions.
+            {t("admin.users.groupsDesc")}
           </Text>
         </div>
         {groups.length === 0 && (
           <Text size="sm" color="secondary">
-            No groups yet.
+            {t("admin.users.noGroupsYet")}
           </Text>
         )}
         {groups.map((g) => (
@@ -3625,10 +3699,10 @@ function GroupsManager({
                 <Icon icon={Users} size="sm" color="secondary" />
                 <Text>{g.name}</Text>
                 <Text size="sm" color="secondary">
-                  {g.user_count} {g.user_count === 1 ? "user" : "users"}
+                  {t("admin.users.memberCount", { count: String(g.user_count), plural: g.user_count === 1 ? "" : "s" })}
                 </Text>
                 {g.is_default && (
-                  <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label="default sign-up" />
+                  <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label={t("admin.users.defaultSignUp")} />
                 )}
                 {g.plan_name && (
                   <Badge variant="neutral" icon={<Icon icon={Gauge} size="xsm" />} label={g.plan_name} />
@@ -3636,7 +3710,7 @@ function GroupsManager({
               </div>
               <div className="claw-row">
                 <Button
-                  label={g.is_default ? "Default sign-up group" : "Set as default"}
+                  label={g.is_default ? t("admin.users.defaultSignUpGroup") : t("admin.users.setAsDefault")}
                   size="sm"
                   variant={g.is_default ? "secondary" : "ghost"}
                   clickAction={() =>
@@ -3647,7 +3721,7 @@ function GroupsManager({
                   }
                 />
                 <IconButton
-                  label="Delete group"
+                  label={t("admin.users.deleteGroup")}
                   icon={<Icon icon={Trash2} size="sm" />}
                   size="sm"
                   variant="ghost"
@@ -3655,13 +3729,13 @@ function GroupsManager({
                     guard(async () => {
                       if (
                         !window.confirm(
-                          `Delete group “${g.name}”? Its ${g.user_count} member(s) become ungrouped. The users themselves are not deleted.`,
+                          t("admin.users.deleteGroupConfirm", { name: g.name, count: String(g.user_count) }),
                         )
                       ) {
                         return;
                       }
                       await api.adminDeleteGroup(g.id);
-                      toast({ body: `Group “${g.name}” deleted`, type: "info", autoHideDuration: 2500 });
+                      toast({ body: t("admin.users.groupDeletedToast", { name: g.name }), type: "info", autoHideDuration: 2500 });
                       await reload();
                     })
                   }
@@ -3674,7 +3748,7 @@ function GroupsManager({
               <PlanPicker
                 plans={plans}
                 value={g.plan_id}
-                label="Default plan for group"
+                label={t("admin.plans.defaultPlanForGroup")}
                 onChange={(planId) =>
                   void guard(async () => {
                     await api.adminUpdateGroup(g.id, { plan_id: planId });
@@ -3688,19 +3762,19 @@ function GroupsManager({
         {adding ? (
           <div className="claw-row">
             <TextInput
-              label="Group name"
+              label={t("admin.users.groupName")}
               isLabelHidden
-              placeholder="e.g. Engineering"
+              placeholder={t("admin.users.newGroupPlaceholder")}
               value={name}
               onChange={setName}
               onEnter={() => name.trim() && addGroup()}
             />
-            <Button label="Create" size="sm" variant="primary" isDisabled={!name.trim()} clickAction={addGroup} />
-            <Button label="Cancel" size="sm" variant="ghost" clickAction={() => { setName(""); setAdding(false); }} />
+            <Button label={t("admin.users.create")} size="sm" variant="primary" isDisabled={!name.trim()} clickAction={addGroup} />
+            <Button label={t("admin.common.cancel")} size="sm" variant="ghost" clickAction={() => { setName(""); setAdding(false); }} />
           </div>
         ) : (
           <Button
-            label="Add group"
+            label={t("admin.users.addGroup")}
             icon={<Icon icon={Plus} size="sm" />}
             size="sm"
             variant="secondary"
@@ -3720,21 +3794,21 @@ const IMPORT_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 // Target fields a column can map to. Each field can be claimed by at most one
 // column (picking a field elsewhere clears it from its previous column).
-const IMPORT_FIELD_OPTIONS: { value: string; label: string }[] = [
-  { value: "skip", label: "Skip" },
-  { value: "email", label: "Email" },
-  { value: "full_name", label: "Full Name" },
-  { value: "first_name", label: "First Name" },
-  { value: "last_name", label: "Last Name" },
+const IMPORT_FIELD_OPTIONS: { value: string; labelKey: string }[] = [
+  { value: "skip", labelKey: "admin.users.import.field.skip" },
+  { value: "email", labelKey: "admin.users.import.field.email" },
+  { value: "full_name", labelKey: "admin.users.import.field.fullName" },
+  { value: "first_name", labelKey: "admin.users.import.field.firstName" },
+  { value: "last_name", labelKey: "admin.users.import.field.lastName" },
 ];
 
-const IMPORT_STATUS_LABEL: Record<string, string> = {
-  created: "imported",
-  duplicate_in_file: "duplicate in file",
-  already_exists: "already exists",
-  invalid_email: "invalid email",
-  missing_email: "missing email",
-  error: "error",
+const IMPORT_STATUS_LABEL_KEY: Record<string, string> = {
+  created: "admin.users.import.status.created",
+  duplicate_in_file: "admin.users.import.status.duplicateInFile",
+  already_exists: "admin.users.import.status.alreadyExists",
+  invalid_email: "admin.users.import.status.invalidEmail",
+  missing_email: "admin.users.import.status.missingEmail",
+  error: "admin.users.import.status.error",
 };
 
 // Bulk user import — upload -> map columns -> confirm -> results. Stateless:
@@ -3756,6 +3830,7 @@ function UserImportDialog({
   onCreateGroup: (name: string) => Promise<GroupInfo>;
   onImported: () => void;
 }) {
+  const t = useT();
   const [step, setStep] = useState<ImportStep>("upload");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -3900,8 +3975,8 @@ function UserImportDialog({
       <Layout
         header={
           <DialogHeader
-            title="Import users"
-            subtitle="From a CSV or Excel file"
+            title={t("admin.users.import.title")}
+            subtitle={t("admin.users.import.subtitle")}
             onOpenChange={(open: boolean) => (open ? undefined : close())}
           />
         }
@@ -3911,11 +3986,7 @@ function UserImportDialog({
               {error && <ErrorText>{error}</ErrorText>}
               {step === "upload" && (
                 <>
-                  <Text color="secondary">
-                    Upload a CSV or .xlsx file with one row per user. You'll map columns to fields
-                    next — no password is set here; each imported person sets their own the first
-                    time they try to log in.
-                  </Text>
+                  <Text color="secondary">{t("admin.users.import.uploadDesc")}</Text>
                   <input
                     ref={fileRef}
                     type="file"
@@ -3924,7 +3995,7 @@ function UserImportDialog({
                     onChange={(e) => void onPick(e.target.files)}
                   />
                   <Button
-                    label={busy ? "Uploading…" : "Choose file"}
+                    label={busy ? t("admin.users.import.uploading") : t("admin.users.import.chooseFile")}
                     icon={<Icon icon={Upload} size="sm" />}
                     isDisabled={busy}
                     clickAction={() => fileRef.current?.click()}
@@ -3933,11 +4004,11 @@ function UserImportDialog({
               )}
               {step === "map" && parsed && (
                 <>
-                  <Text weight="semibold">Map columns ({parsed.row_count} rows)</Text>
+                  <Text weight="semibold">{t("admin.users.import.mapColumns", { count: String(parsed.row_count) })}</Text>
                   <div className="claw-import-map-grid">
                     {parsed.columns.map((col, i) => (
                       <div key={i} className="claw-import-map-row">
-                        <Text size="sm">{col || `Column ${i + 1}`}</Text>
+                        <Text size="sm">{col || t("admin.users.import.columnN", { n: String(i + 1) })}</Text>
                         <select
                           className="claw-token-filter"
                           value={fieldByCol[i] ?? "skip"}
@@ -3945,37 +4016,37 @@ function UserImportDialog({
                         >
                           {IMPORT_FIELD_OPTIONS.map((o) => (
                             <option key={o.value} value={o.value}>
-                              {o.label}
+                              {t(o.labelKey)}
                             </option>
                           ))}
                         </select>
                       </div>
                     ))}
                   </div>
-                  {!mapping && <ErrorText>Map a column to Email to continue.</ErrorText>}
+                  {!mapping && <ErrorText>{t("admin.users.import.mapEmailRequired")}</ErrorText>}
                   {summary && (
                     <div className="claw-row">
-                      <Badge variant="success" label={`${summary.valid} will import`} />
+                      <Badge variant="success" label={t("admin.users.import.willImport", { count: String(summary.valid) })} />
                       {summary.dup > 0 && (
-                        <Badge variant="neutral" label={`${summary.dup} duplicate in file`} />
+                        <Badge variant="neutral" label={t("admin.users.import.duplicateInFileCount", { count: String(summary.dup) })} />
                       )}
                       {summary.missing > 0 && (
-                        <Badge variant="neutral" label={`${summary.missing} missing email`} />
+                        <Badge variant="neutral" label={t("admin.users.import.missingEmailCount", { count: String(summary.missing) })} />
                       )}
                       {summary.invalid > 0 && (
-                        <Badge variant="neutral" label={`${summary.invalid} invalid email`} />
+                        <Badge variant="neutral" label={t("admin.users.import.invalidEmailCount", { count: String(summary.invalid) })} />
                       )}
                     </div>
                   )}
                   <Text weight="semibold" size="sm">
-                    Preview
+                    {t("admin.users.import.preview")}
                   </Text>
                   <div className="claw-import-preview-table">
                     <table>
                       <thead>
                         <tr>
-                          <th>Email</th>
-                          <th>Display name</th>
+                          <th>{t("admin.users.import.emailHeader")}</th>
+                          <th>{t("admin.users.import.displayNameHeader")}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3992,23 +4063,22 @@ function UserImportDialog({
               )}
               {step === "confirm" && summary && (
                 <>
-                  <Text weight="semibold">Confirm import</Text>
+                  <Text weight="semibold">{t("admin.users.import.confirmTitle")}</Text>
                   <Text color="secondary">
-                    {summary.valid} users will be created. Duplicates, invalid, and missing emails
-                    are skipped.
+                    {t("admin.users.import.confirmDesc", { count: String(summary.valid) })}
                   </Text>
                   <GroupPicker groups={groups} value={groupId} onChange={setGroupId} onCreate={onCreateGroup} />
                 </>
               )}
               {step === "results" && result && (
                 <>
-                  <Text weight="semibold">Import complete</Text>
+                  <Text weight="semibold">{t("admin.users.import.completeTitle")}</Text>
                   <div className="claw-row">
-                    <Badge variant="success" label={`${result.created} ${IMPORT_STATUS_LABEL.created}`} />
-                    {Object.entries(IMPORT_STATUS_LABEL).map(([status, label]) => {
+                    <Badge variant="success" label={t("admin.users.import.createdCount", { count: String(result.created) })} />
+                    {Object.entries(IMPORT_STATUS_LABEL_KEY).map(([status, labelKey]) => {
                       if (status === "created") return null; // already shown above, success-colored
                       const n = result.results.filter((r) => r.status === status).length;
-                      return n > 0 ? <Badge key={status} variant="neutral" label={`${n} ${label}`} /> : null;
+                      return n > 0 ? <Badge key={status} variant="neutral" label={`${n} ${t(labelKey)}`} /> : null;
                     })}
                   </div>
                   {(() => {
@@ -4023,20 +4093,20 @@ function UserImportDialog({
                     return (
                       <>
                         <Text weight="semibold" size="sm">
-                          Skipped / errored rows
+                          {t("admin.users.import.skippedRows")}
                         </Text>
                         {problems.length > shown.length && (
                           <Text size="sm" color="secondary">
-                            Showing first {shown.length} of {problems.length}.
+                            {t("admin.users.import.showingFirstOf", { shown: String(shown.length), total: String(problems.length) })}
                           </Text>
                         )}
                         <div className="claw-import-preview-table">
                           <table>
                             <thead>
                               <tr>
-                                <th>File row</th>
-                                <th>Email</th>
-                                <th>Status</th>
+                                <th>{t("admin.users.import.fileRowHeader")}</th>
+                                <th>{t("admin.users.import.emailHeader")}</th>
+                                <th>{t("admin.users.import.statusHeader")}</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -4047,7 +4117,7 @@ function UserImportDialog({
                                 <tr key={r.row_index}>
                                   <td>{r.row_index + 2}</td>
                                   <td>{r.email || "—"}</td>
-                                  <td>{IMPORT_STATUS_LABEL[r.status] ?? r.status}</td>
+                                  <td>{t(IMPORT_STATUS_LABEL_KEY[r.status] ?? "") || r.status}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -4065,21 +4135,21 @@ function UserImportDialog({
           <LayoutFooter hasDivider>
             {step === "map" && (
               <>
-                <Button label="Cancel" variant="ghost" clickAction={close} />
-                <Button label="Next" isDisabled={!mapping} clickAction={() => setStep("confirm")} />
+                <Button label={t("admin.common.cancel")} variant="ghost" clickAction={close} />
+                <Button label={t("admin.users.import.next")} isDisabled={!mapping} clickAction={() => setStep("confirm")} />
               </>
             )}
             {step === "confirm" && (
               <>
-                <Button label="Back" variant="ghost" clickAction={() => setStep("map")} />
+                <Button label={t("admin.users.import.back")} variant="ghost" clickAction={() => setStep("map")} />
                 <Button
-                  label={busy ? "Importing…" : `Import ${summary?.valid ?? 0} users`}
+                  label={busy ? t("admin.users.import.importing") : t("admin.users.import.importNUsers", { count: String(summary?.valid ?? 0) })}
                   isDisabled={busy}
                   clickAction={commit}
                 />
               </>
             )}
-            {step === "results" && <Button label="Done" clickAction={done} />}
+            {step === "results" && <Button label={t("admin.users.import.done")} clickAction={done} />}
           </LayoutFooter>
         }
       />
@@ -4088,6 +4158,7 @@ function UserImportDialog({
 }
 
 function UsersPanel({ selfId }: { selfId: string }) {
+  const t = useT();
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [groups, setGroups] = useState<GroupInfo[]>([]);
   const [plans, setPlans] = useState<PlanInfo[]>([]);
@@ -4203,8 +4274,8 @@ function UsersPanel({ selfId }: { selfId: string }) {
   // each.
   const applyBulkGroup = () => {
     if (bulkTarget === undefined || selectedIds.size === 0) return;
-    const targetName = bulkTarget === null ? "No group" : groups.find((g) => g.id === bulkTarget)?.name || "group";
-    if (!window.confirm(`Move ${selectedIds.size} user(s) to "${targetName}"?`)) return;
+    const targetName = bulkTarget === null ? t("admin.users.noGroup") : groups.find((g) => g.id === bulkTarget)?.name || t("admin.users.group");
+    if (!window.confirm(t("admin.users.moveConfirm", { count: String(selectedIds.size), target: targetName }))) return;
     void guard(async () => {
       setBulkApplying(true);
       const ids = Array.from(selectedIds);
@@ -4222,8 +4293,8 @@ function UsersPanel({ selfId }: { selfId: string }) {
       toast({
         body:
           failed === 0
-            ? `${ids.length} user(s) moved to "${targetName}"`
-            : `${ids.length - failed} moved, ${failed} failed`,
+            ? t("admin.users.movedToast", { count: String(ids.length), target: targetName })
+            : t("admin.users.movedPartialToast", { moved: String(ids.length - failed), failed: String(failed) }),
         type: failed === 0 ? "info" : "error",
         autoHideDuration: failed === 0 ? 2500 : 4000,
       });
@@ -4235,27 +4306,25 @@ function UsersPanel({ selfId }: { selfId: string }) {
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
         <div className="claw-panel">
-          <Text color="secondary">
-            Manage everyone with access to this Softnix PrivateClaw deployment.
-          </Text>
+          <Text color="secondary">{t("admin.users.intro")}</Text>
           <div className="claw-row">
-            <Badge variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={`${users.length} users`} />
-            <Badge variant="neutral" icon={<Icon icon={Shield} size="xsm" />} label={`${admins} admins`} />
+            <Badge variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={t("admin.users.usersCount", { count: String(users.length) })} />
+            <Badge variant="neutral" icon={<Icon icon={Shield} size="xsm" />} label={t("admin.users.adminsCount", { count: String(admins) })} />
             {suspended > 0 && (
-              <Badge variant="neutral" icon={<Icon icon={Ban} size="xsm" />} label={`${suspended} suspended`} />
+              <Badge variant="neutral" icon={<Icon icon={Ban} size="xsm" />} label={t("admin.users.suspendedCount", { count: String(suspended) })} />
             )}
           </div>
         </div>
         <div className="claw-row">
           <Button
-            label="Manage groups"
+            label={t("admin.users.manageGroups")}
             icon={<Icon icon={Users} size="sm" />}
             size="sm"
             variant={managingGroups ? "secondary" : "ghost"}
             clickAction={() => setManagingGroups((m) => !m)}
           />
           <Button
-            label="Import"
+            label={t("admin.users.import")}
             icon={<Icon icon={Upload} size="sm" />}
             size="sm"
             variant="secondary"
@@ -4263,7 +4332,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
           />
           {!creating && (
             <Button
-              label="Add user"
+              label={t("admin.users.addUser")}
               icon={<Icon icon={Plus} size="sm" />}
               size="sm"
               clickAction={() => setCreating(true)}
@@ -4280,7 +4349,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
         onCreateGroup={createGroup}
         onImported={() => {
           void reloadAll();
-          toast({ body: "Users imported", type: "info", autoHideDuration: 3000 });
+          toast({ body: t("admin.users.importedToast"), type: "info", autoHideDuration: 3000 });
         }}
       />
 
@@ -4288,10 +4357,10 @@ function UsersPanel({ selfId }: { selfId: string }) {
 
       {users.length > USERS_PAGE / 2 && (
         <TextInput
-          label="Search users"
+          label={t("admin.users.searchUsers")}
           isLabelHidden
           startIcon={<Icon icon={Search} size="sm" color="secondary" />}
-          placeholder="Search by name or email…"
+          placeholder={t("admin.users.searchPlaceholder")}
           value={query}
           onChange={setQuery}
           hasClear
@@ -4302,10 +4371,10 @@ function UsersPanel({ selfId }: { selfId: string }) {
       {groups.length > 0 && (
         <div className="claw-row">
           <Text size="sm" color="secondary">
-            Group
+            {t("admin.users.group")}
           </Text>
           <Button
-            label="All"
+            label={t("admin.audit.all")}
             size="sm"
             variant={groupFilter === "all" ? "primary" : "secondary"}
             clickAction={() => setGroupFilter("all")}
@@ -4321,7 +4390,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
           ))}
           {ungrouped > 0 && (
             <Button
-              label={`No group (${ungrouped})`}
+              label={t("admin.users.noGroupCount", { count: String(ungrouped) })}
               size="sm"
               variant={groupFilter === "none" ? "primary" : "secondary"}
               clickAction={() => setGroupFilter("none")}
@@ -4333,25 +4402,25 @@ function UsersPanel({ selfId }: { selfId: string }) {
       {creating && (
         <Card padding={2}>
           <div className="claw-panel">
-            <TextInput label="Full name" placeholder="Jane Doe" value={displayName} onChange={setDisplayName} />
-            <TextInput label="Email" type="email" placeholder="jane@company.com" value={email} onChange={setEmail} />
+            <TextInput label={t("admin.users.fullName")} placeholder="Jane Doe" value={displayName} onChange={setDisplayName} />
+            <TextInput label={t("admin.users.email")} type="email" placeholder="jane@company.com" value={email} onChange={setEmail} />
             <PasswordField
-              label="Password"
-              description="At least 8 characters."
+              label={t("admin.users.password")}
+              description={t("admin.users.passwordHint")}
               value={password}
               onChange={setPassword}
             />
             <GroupPicker groups={groups} value={newGroupId} onChange={setNewGroupId} onCreate={createGroup} />
             {plans.length > 0 && <PlanPicker plans={plans} value={newPlanId} onChange={setNewPlanId} />}
             <label className="claw-toggle-inline">
-              <Switch value={isAdmin} label="Make administrator" isLabelHidden changeAction={setIsAdmin} />
+              <Switch value={isAdmin} label={t("admin.users.makeAdmin")} isLabelHidden changeAction={setIsAdmin} />
               <Text size="sm" color="secondary">
-                Administrator (full access to this console)
+                {t("admin.users.adminHint")}
               </Text>
             </label>
             <div className="claw-row">
               <Button
-                label="Create user"
+                label={t("admin.users.createUser")}
                 variant="primary"
                 icon={<Icon icon={Plus} size="sm" />}
                 isDisabled={!email.trim() || password.length < 8}
@@ -4367,13 +4436,13 @@ function UsersPanel({ selfId }: { selfId: string }) {
                       newGroupId,
                     );
                     if (newPlanId) await api.adminUpdateUser(created.id, { plan_id: newPlanId });
-                    toast({ body: `${displayName.trim() || email.trim()} added`, type: "info", autoHideDuration: 2500 });
+                    toast({ body: t("admin.providers.addedToast", { name: displayName.trim() || email.trim() }), type: "info", autoHideDuration: 2500 });
                     resetForm();
                     await reloadAll();
                   })
                 }
               />
-              <Button label="Cancel" variant="ghost" clickAction={resetForm} />
+              <Button label={t("admin.common.cancel")} variant="ghost" clickAction={resetForm} />
             </div>
           </div>
         </Card>
@@ -4381,9 +4450,9 @@ function UsersPanel({ selfId }: { selfId: string }) {
 
       {filtered.length === 0 ? (
         <EmptyState
-          title="No users match"
+          title={t("admin.users.noMatchTitle")}
           description={
-            groupFilter !== "all" ? "No users in this group match your search." : "Try a different name or email."
+            groupFilter !== "all" ? t("admin.users.noMatchInGroup") : t("admin.users.noMatchTryDifferent")
           }
         />
       ) : (
@@ -4395,21 +4464,21 @@ function UsersPanel({ selfId }: { selfId: string }) {
                   value={
                     shownSelectedCount === 0 ? false : shownSelectedCount === shown.length ? true : "indeterminate"
                   }
-                  label="Select all loaded users"
+                  label={t("admin.users.selectAllLoaded")}
                   isLabelHidden
                   onChange={toggleSelectAllShown}
                 />
                 <Text size="sm" color="secondary">
-                  {selectedIds.size > 0 ? `${selectedIds.size} selected` : "Select all"}
+                  {selectedIds.size > 0 ? t("admin.users.selectedCount", { count: String(selectedIds.size) }) : t("admin.users.selectAll")}
                 </Text>
               </label>
               {selectedIds.size > 0 && (
                 <div className="claw-row">
                   <Text size="sm" color="secondary">
-                    Move to
+                    {t("admin.users.moveTo")}
                   </Text>
                   <Button
-                    label="No group"
+                    label={t("admin.users.noGroup")}
                     size="sm"
                     variant={bulkTarget === null ? "primary" : "secondary"}
                     clickAction={() => setBulkTarget(null)}
@@ -4424,7 +4493,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
                     />
                   ))}
                   <Button
-                    label={`Apply (${selectedIds.size})`}
+                    label={t("admin.users.apply", { count: String(selectedIds.size) })}
                     size="sm"
                     variant="primary"
                     isLoading={bulkApplying}
@@ -4432,7 +4501,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
                     clickAction={applyBulkGroup}
                   />
                   <Button
-                    label="Clear"
+                    label={t("admin.users.clear")}
                     size="sm"
                     variant="ghost"
                     isDisabled={bulkApplying}
@@ -4465,7 +4534,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
           {filtered.length > shown.length && (
             <div className="claw-row">
               <Button
-                label={`Load more (${filtered.length - shown.length})`}
+                label={t("admin.users.loadMoreCount", { count: String(filtered.length - shown.length) })}
                 variant="secondary"
                 size="sm"
                 clickAction={() => setVisible((v) => v + USERS_PAGE)}
@@ -4481,16 +4550,17 @@ function UsersPanel({ selfId }: { selfId: string }) {
 // How an account was created — informational badge in the Users list. Brand
 // logos for OAuth providers reuse the login page's assets; other methods get a
 // plain lucide glyph.
-const SIGNUP_METHOD_META: Record<string, { label: string; icon: IconType; logo?: string }> = {
-  password: { label: "Password", icon: Mail },
-  google: { label: "Google", icon: Mail, logo: "/oauth-providers/google-g.png" },
-  microsoft: { label: "Microsoft", icon: Mail, logo: "/oauth-providers/microsoft.png" },
-  admin_created: { label: "Added by admin", icon: UserPlus },
-  dev_token: { label: "Dev token", icon: Terminal },
-  imported: { label: "Imported", icon: Upload },
+const SIGNUP_METHOD_META: Record<string, { labelKey: string; icon: IconType; logo?: string }> = {
+  password: { labelKey: "admin.users.signup.password", icon: Mail },
+  google: { labelKey: "admin.users.signup.google", icon: Mail, logo: "/oauth-providers/google-g.png" },
+  microsoft: { labelKey: "admin.users.signup.microsoft", icon: Mail, logo: "/oauth-providers/microsoft.png" },
+  admin_created: { labelKey: "admin.users.signup.addedByAdmin", icon: UserPlus },
+  dev_token: { labelKey: "admin.users.signup.devToken", icon: Terminal },
+  imported: { labelKey: "admin.users.signup.imported", icon: Upload },
 };
 
 function SignupMethodBadge({ method }: { method: string }) {
+  const t = useT();
   const meta = SIGNUP_METHOD_META[method] ?? SIGNUP_METHOD_META.password;
   return (
     <Badge
@@ -4502,7 +4572,7 @@ function SignupMethodBadge({ method }: { method: string }) {
           <Icon icon={meta.icon} size="xsm" />
         )
       }
-      label={meta.label}
+      label={t(meta.labelKey)}
     />
   );
 }
@@ -4539,6 +4609,7 @@ function UserRow({
   selected?: boolean;
   onToggleSelect?: () => void;
 }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [displayName, setDisplayName] = useState(u.display_name);
   const [newPassword, setNewPassword] = useState("");
@@ -4554,7 +4625,7 @@ function UserRow({
         {selectable && (
           <CheckboxInput
             value={selected}
-            label={`Select ${label}`}
+            label={t("admin.users.selectUser", { name: label })}
             isLabelHidden
             onChange={() => onToggleSelect?.()}
           />
@@ -4566,9 +4637,9 @@ function UserRow({
           <div className="claw-user-name-line">
             <span className="claw-user-name">{label}</span>
             {u.is_admin && (
-              <Badge variant="purple" icon={<Icon icon={Shield} size="xsm" />} label="admin" />
+              <Badge variant="purple" icon={<Icon icon={Shield} size="xsm" />} label={t("admin.users.adminBadge")} />
             )}
-            {isSelf && <Badge variant="neutral" label="you" />}
+            {isSelf && <Badge variant="neutral" label={t("admin.users.you")} />}
             <SignupMethodBadge method={u.signup_method} />
             {u.group_name && (
               <Badge variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={u.group_name} />
@@ -4577,21 +4648,25 @@ function UserRow({
               <Badge variant="neutral" icon={<Icon icon={Gauge} size="xsm" />} label={u.plan_name} />
             )}
             {!u.is_active && (
-              <Badge variant="error" icon={<Icon icon={ShieldOff} size="xsm" />} label="suspended" />
+              <Badge variant="error" icon={<Icon icon={ShieldOff} size="xsm" />} label={t("admin.users.suspendedBadge")} />
             )}
           </div>
           <span className="claw-user-meta">
-            {u.email} · {u.sessions} sessions · joined {new Date(u.created_at).toLocaleDateString()}
+            {t("admin.users.metaLine", {
+              email: u.email,
+              sessions: String(u.sessions),
+              date: new Date(u.created_at).toLocaleDateString(),
+            })}
           </span>
         </div>
         <div className="claw-user-actions">
           <label className="claw-toggle">
             <Text size="sm" color="secondary">
-              Admin
+              {t("admin.users.adminToggle")}
             </Text>
             <Switch
               value={u.is_admin}
-              label={`Admin ${u.email}`}
+              label={t("admin.users.adminToggleFor", { email: u.email })}
               isLabelHidden
               isDisabled={isSelf}
               changeAction={(checked) =>
@@ -4604,11 +4679,11 @@ function UserRow({
           </label>
           <label className="claw-toggle">
             <Text size="sm" color="secondary">
-              Active
+              {t("admin.users.activeToggle")}
             </Text>
             <Switch
               value={u.is_active}
-              label={`Active ${u.email}`}
+              label={t("admin.users.activeToggleFor", { email: u.email })}
               isLabelHidden
               isDisabled={isSelf}
               changeAction={(checked) =>
@@ -4621,20 +4696,20 @@ function UserRow({
           </label>
           {u.signup_method === "imported" && !u.has_password && (
             <IconButton
-              label="Resend activation email"
+              label={t("admin.users.resendActivation")}
               icon={<Icon icon={Mail} size="sm" />}
               size="sm"
               variant="ghost"
               clickAction={() =>
                 guard(async () => {
                   await api.adminResendActivation(u.id);
-                  toast({ body: `Activation email sent to ${u.email}`, type: "info", autoHideDuration: 2500 });
+                  toast({ body: t("admin.users.activationSentToast", { email: u.email }), type: "info", autoHideDuration: 2500 });
                 })
               }
             />
           )}
           <IconButton
-            label={editing ? "Close editor" : "Edit user"}
+            label={editing ? t("admin.users.closeEditor") : t("admin.users.editUser")}
             icon={<Icon icon={Pencil} size="sm" />}
             size="sm"
             variant="ghost"
@@ -4648,7 +4723,7 @@ function UserRow({
           />
           <span className="claw-user-delete">
             <IconButton
-              label="Delete user"
+              label={t("admin.users.deleteUser")}
               icon={<Icon icon={Trash2} size="sm" />}
               size="sm"
               variant="ghost"
@@ -4656,14 +4731,12 @@ function UserRow({
               clickAction={() =>
                 guard(async () => {
                   if (
-                    !window.confirm(
-                      `Delete ${label}? This removes their chats, memory, and settings. This cannot be undone.`,
-                    )
+                    !window.confirm(t("admin.users.deleteUserConfirm", { name: label }))
                   ) {
                     return;
                   }
                   await api.adminDeleteUser(u.id);
-                  toast({ body: `${label} deleted`, type: "info", autoHideDuration: 2500 });
+                  toast({ body: t("admin.users.userDeletedToast", { name: label }), type: "info", autoHideDuration: 2500 });
                   await reload();
                 })
               }
@@ -4674,10 +4747,10 @@ function UserRow({
 
       {editing && (
         <div className="claw-user-edit">
-          <TextInput label="Display name" value={displayName} onChange={setDisplayName} />
+          <TextInput label={t("admin.users.displayName")} value={displayName} onChange={setDisplayName} />
           <PasswordField
-            label="Reset password"
-            description="At least 8 characters. Leave blank to keep the current password."
+            label={t("admin.users.resetPassword")}
+            description={t("admin.users.resetPasswordHint")}
             value={newPassword}
             onChange={setNewPassword}
           />
@@ -4685,7 +4758,7 @@ function UserRow({
           {plans.length > 0 && <PlanPicker plans={plans} value={planId} onChange={setPlanId} />}
           <div className="claw-row">
             <Button
-              label="Save changes"
+              label={t("admin.common.saveChanges")}
               variant="primary"
               icon={<Icon icon="check" size="sm" />}
               size="sm"
@@ -4700,12 +4773,12 @@ function UserRow({
                   });
                   setEditing(false);
                   setNewPassword("");
-                  toast({ body: "User updated", type: "info", autoHideDuration: 2500 });
+                  toast({ body: t("admin.users.userUpdatedToast"), type: "info", autoHideDuration: 2500 });
                   await reload();
                 })
               }
             />
-            <Button label="Cancel" variant="ghost" size="sm" clickAction={() => setEditing(false)} />
+            <Button label={t("admin.common.cancel")} variant="ghost" size="sm" clickAction={() => setEditing(false)} />
           </div>
         </div>
       )}

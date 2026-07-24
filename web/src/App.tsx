@@ -778,11 +778,15 @@ export default function App() {
   // Selecting anything in the drawer should close it on mobile.
   const closeDrawer = () => setNavOpen(false);
   const showAdmin = user.is_admin && !isPhone; // aggressive: no admin console on phones
-  const currentTitle = adminSection
-    ? ADMIN_SECTIONS.find((s) => s.key === adminSection)?.label
-    : settingsSection
-      ? SETTINGS_SECTIONS.find((s) => s.key === settingsSection)?.label
-      : "Chat";
+  const settingsSectionMeta = settingsSection
+    ? SETTINGS_SECTIONS.find((s) => s.key === settingsSection)
+    : undefined;
+  const adminSectionMeta = adminSection ? ADMIN_SECTIONS.find((s) => s.key === adminSection) : undefined;
+  const currentTitle = adminSectionMeta
+    ? t(adminSectionMeta.labelKey)
+    : settingsSectionMeta
+      ? t(settingsSectionMeta.labelKey)
+      : t("nav.chat");
 
   return (
     <div className={`claw-app${isMobile && navOpen ? " claw-app--nav-open" : ""}`}>
@@ -815,7 +819,7 @@ export default function App() {
                 {SETTINGS_SECTIONS.map((s) => (
                   <SideNavItem
                     key={s.key}
-                    label={s.label}
+                    label={t(s.labelKey)}
                     icon={s.icon}
                     isSelected={settingsSection === s.key}
                     onClick={() => {
@@ -837,7 +841,7 @@ export default function App() {
                     {ADMIN_SECTIONS.map((s) => (
                       <SideNavItem
                         key={s.key}
-                        label={s.label}
+                        label={t(s.labelKey)}
                         icon={s.icon}
                         isSelected={adminSection === s.key}
                         onClick={() => {
