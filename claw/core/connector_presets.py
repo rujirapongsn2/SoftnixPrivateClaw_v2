@@ -9,10 +9,13 @@ Connection method mirrors the reference project (softnix-agenticclaw):
   ``python -m claw.integrations.<name>_mcp_server``. The server reads its
   configuration (tokens, api base, …) from environment variables; non-secret
   settings default inside the server module.
-* Remote integrations (Composio, Softnix ONE) connect to a hosted MCP endpoint
-  over streamable HTTP. Their auth travels as an HTTP header, expressed as an
-  env var prefixed ``HEADER_`` (e.g. ``HEADER_Authorization``); the connector
-  manager turns those into request headers instead of process env.
+* Remote integrations (Composio, Softnix ONE, Alpha Vantage) connect to a
+  hosted MCP endpoint over streamable HTTP. Auth travels either as an HTTP
+  header, expressed as an env var prefixed ``HEADER_`` (e.g.
+  ``HEADER_Authorization``), or as a URL query parameter, prefixed ``QUERY_``
+  (e.g. ``QUERY_apikey``) for endpoints that expect the key in the querystring
+  instead. The connector manager turns those into request headers / an
+  appended query string instead of process env.
 
 Each preset carries a ``setup`` type and human-friendly ``fields`` so the web UI
 can render a guided form (labels/help/secret) instead of exposing raw MCP config:
@@ -30,7 +33,7 @@ from dataclasses import asdict, dataclass, field
 class FieldSpec:
     """A single user-entered value in a guided connector setup form."""
 
-    key: str  # env var name stored on the connector (HEADER_* → request header)
+    key: str  # env var name stored on the connector (HEADER_* → header, QUERY_* → URL query param)
     label: str  # human-friendly field label
     help: str = ""  # short hint / "where to get this"
     secret: bool = True  # render as a password input
@@ -203,6 +206,28 @@ _PRESETS: tuple[ConnectorPreset, ...] = (
             ),
         ),
         docs="https://app.tavily.com/",
+    ),
+    ConnectorPreset(
+        key="alpha-vantage",
+        name="alpha-vantage",
+        label="Alpha Vantage",
+        description="Real-time and historical stock, forex, crypto, and economic-indicator data.",
+        transport="http",
+        category="Finance",
+        setup="api_key",
+        url="https://mcp.alphavantage.co/mcp",
+        fields=(
+            FieldSpec(
+                key="QUERY_apikey",
+                label="API key",
+                help=(
+                    'Free & instant, no card needed: go to alphavantage.co/support/#api-key, '
+                    'pick what describes you, enter your email, then click "GET FREE API KEY".'
+                ),
+                placeholder="demo",
+            ),
+        ),
+        docs="https://www.alphavantage.co/documentation/",
     ),
     ConnectorPreset(
         key="composio",

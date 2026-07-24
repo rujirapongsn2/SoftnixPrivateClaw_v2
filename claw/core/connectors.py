@@ -13,6 +13,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 from loguru import logger
@@ -26,6 +27,12 @@ from claw.tools.registry import ToolRegistry
 # connectors instead of being passed as process env — this is how remote MCP
 # endpoints (Composio, Softnix ONE, …) carry their bearer/api-key auth.
 _HEADER_ENV_PREFIX = "HEADER_"
+
+# Same idea for endpoints that expect auth as a URL query parameter instead of
+# a header (e.g. Alpha Vantage's `?apikey=`) — kept out of the stored `url`
+# itself so the secret stays in the encrypted `env` column, not the plaintext
+# url column, and is appended to the request URL only at connect time.
+_QUERY_ENV_PREFIX = "QUERY_"
 
 # Defaults, overridable per-instance via ConnectorSettings (claw/config.py) —
 # module constants only so direct construction (tests, scratch scripts)
@@ -71,6 +78,19 @@ _ERROR_RETRY_COOLDOWN_SECONDS = 60
 # timeout_ms directly (defense in depth, not the primary validation).
 _MIN_TIMEOUT_MS = 1000
 _MAX_TIMEOUT_MS = 120_000
+
+
+def _redact_secrets(text: str, connector) -> str:
+    """Strip a connector's secret env values out of a freeform error string
+    before it's logged or returned via the API. For an http connector using
+    QUERY_* auth, the secret is embedded in the request URL itself, so an
+    underlying httpx/mcp exception's message (e.g. on a bad/rate-limited key)
+    includes the raw URL, secret and all — this scrubs any such value
+    (header or query) wherever it appears in the message, not just the URL."""
+    for value in (connector.env or {}).values():
+        if value and len(value) >= 4:
+            text = text.replace(value, "***")
+    return text
 
 
 class McpToolProxy(Tool):
@@ -298,7 +318,8 @@ class ConnectorManager:
             message = f"failed connecting (within {timeout}s budget)"
             return connector, None, None, {"status": "error", "error": message}
         except Exception as exc:
-            return connector, None, None, {"status": "error", "error": str(exc)[:300]}
+            message = _redact_secrets(str(exc), connector)[:300]
+            return connector, None, None, {"status": "error", "error": message}
 
     async def _connect_and_list(self, stack: AsyncExitStack, connector) -> tuple[Any, Any]:
         session = await self._connect(stack, connector)
@@ -311,14 +332,34 @@ class ConnectorManager:
         if connector.transport == "http":
             from mcp.client.streamable_http import streamablehttp_client
 
-            # Split env into HTTP headers (HEADER_*) and everything else.
+            # Split env into HTTP headers (HEADER_*), URL query params
+            # (QUERY_*), and everything else.
             headers = {
                 key[len(_HEADER_ENV_PREFIX):]: value
                 for key, value in (connector.env or {}).items()
                 if key.startswith(_HEADER_ENV_PREFIX) and value
             }
+            # An empty string is a deliberate "clear this param" override, not
+            # "not set" — distinct from the key being absent entirely — so it
+            # isn't filtered out here the way headers are; it's handled below.
+            query_overrides = {
+                key[len(_QUERY_ENV_PREFIX):]: value
+                for key, value in (connector.env or {}).items()
+                if key.startswith(_QUERY_ENV_PREFIX)
+            }
+            url = connector.url
+            if query_overrides:
+                parts = urlsplit(url)
+                # Rebuild from the parsed pairs (not a dict) so a duplicate
+                # query key already in the stored URL that no override
+                # touches is preserved as-is instead of being collapsed to
+                # its last value.
+                existing = parse_qsl(parts.query, keep_blank_values=True)
+                merged = [(k, v) for k, v in existing if k not in query_overrides]
+                merged.extend((k, v) for k, v in query_overrides.items() if v)
+                url = urlunsplit(parts._replace(query=urlencode(merged)))
             read, write, _ = await stack.enter_async_context(
-                streamablehttp_client(connector.url, headers=headers or None)
+                streamablehttp_client(url, headers=headers or None)
             )
         else:
             from mcp import StdioServerParameters

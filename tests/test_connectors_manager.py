@@ -6,7 +6,9 @@ these tests guard against). Also covers that a previously-errored connector
 is retried on the next sync rather than staying cached as permanently broken."""
 
 import asyncio
+from contextlib import AsyncExitStack
 from datetime import timedelta
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 import pytest
@@ -342,6 +344,100 @@ async def test_invalidate_overrides_error_cooldown(db_factory, monkeypatch):
     await mgr.sync_tools(user.id, registry)
     assert (await mgr.status(user.id))["flaky"]["status"] == "connected"
     assert flaky.attempts == 2
+
+
+async def test_connect_error_redacts_query_secret_from_message(db_factory, monkeypatch):
+    """A QUERY_* secret (e.g. Alpha Vantage's ?apikey=) is embedded in the
+    request URL itself, so an underlying connect exception's message can
+    contain it verbatim. That message is both logged (claw.log) and returned
+    through GET /api/connectors' runtime.error field, so it must never
+    reach either place with the raw secret still in it."""
+    users = UserStore(db_factory)
+    user = await users.create(email="leak@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        user.id,
+        "av",
+        transport="http",
+        url="https://mcp.alphavantage.co/mcp",
+        env={"QUERY_apikey": "SUPERSECRETKEY123"},
+        enabled=True,
+    )
+
+    async def raises_with_url_in_message(self, stack, connector):
+        raise RuntimeError(
+            "connect failed for https://mcp.alphavantage.co/mcp?apikey=SUPERSECRETKEY123"
+        )
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", raises_with_url_in_message)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    status = await mgr.status(user.id)
+    assert "SUPERSECRETKEY123" not in status["av"]["error"]
+    assert "***" in status["av"]["error"]
+
+
+async def test_query_env_preserves_duplicate_keys_and_clears_on_empty_string(db_factory, monkeypatch):
+    """QUERY_* overrides must not collapse a duplicate query key already in
+    the stored URL that no override touches, and an explicit empty-string
+    QUERY_* value must clear/blank an existing param instead of being
+    silently ignored and leaving the stale value in place."""
+    users = UserStore(db_factory)
+    user = await users.create(email="query@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    connector = await store.upsert(
+        user.id,
+        "av",
+        transport="http",
+        url="https://mcp.alphavantage.co/mcp?foo=1&foo=2&stale=old",
+        env={"QUERY_apikey": "secret123", "QUERY_stale": ""},
+        enabled=True,
+    )
+
+    captured: dict = {}
+
+    class FakeReadWriteContext:
+        async def __aenter__(self):
+            return ("read", "write", None)
+
+        async def __aexit__(self, *a):
+            return False
+
+    def fake_streamablehttp_client(url, headers=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        return FakeReadWriteContext()
+
+    class FakeSession:
+        def __init__(self, read, write):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def initialize(self):
+            pass
+
+    monkeypatch.setattr(
+        "mcp.client.streamable_http.streamablehttp_client", fake_streamablehttp_client
+    )
+    monkeypatch.setattr("mcp.ClientSession", FakeSession)
+
+    mgr = ConnectorManager(store)
+    async with AsyncExitStack() as stack:
+        await mgr._connect(stack, connector)
+
+    parts = urlsplit(captured["url"])
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    assert ("foo", "1") in pairs and ("foo", "2") in pairs
+    assert not any(k == "stale" for k, _ in pairs)
+    assert ("apikey", "secret123") in pairs
 
 
 async def test_tool_call_times_out_instead_of_hanging_the_turn_forever():

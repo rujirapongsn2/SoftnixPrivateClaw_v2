@@ -994,7 +994,15 @@ function ConnectorsPanel() {
   const installedByName = new Map(connectors.map((c) => [c.name.toLowerCase(), c]));
 
   // Group presets into ordered categories for the catalog grid.
-  const categoryOrder = ["Productivity", "Communication", "Search", "Automation", "Softnix", "Other"];
+  const categoryOrder = [
+    "Productivity",
+    "Communication",
+    "Search",
+    "Finance",
+    "Automation",
+    "Softnix",
+    "Other",
+  ];
   const grouped = new Map<string, ConnectorPreset[]>();
   for (const p of presets) {
     const cat = p.category || "Other";
@@ -1070,7 +1078,7 @@ function ConnectorsPanel() {
           />
         )}
         <TextArea
-          label="Environment variables (KEY=value, or Header-Name: value for an HTTP header — one per line)"
+          label="Environment variables (KEY=value, or Header-Name: value for an HTTP header, or QUERY_name=value for a URL query param — one per line)"
           value={formatEnvText(editing.env)}
           onChange={(v) => setEditing({ ...editing, env: parseEnvText(v) })}
           rows={3}
