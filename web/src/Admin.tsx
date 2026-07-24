@@ -2666,8 +2666,9 @@ function OAuthAppsPanel() {
     <div className="claw-panel">
       <Text color="secondary">
         Register a Google and/or Microsoft OAuth app once here. It powers both social sign-in
-        (login and register) and one-click connectors like Gmail, Outlook, Calendar, and OneDrive —
-        no keys in .env. Add both redirect URIs below to the provider's app so both flows work.
+        (login and register) and one-click connectors like Gmail, Google Sheets, Outlook, Calendar,
+        and OneDrive — no keys in .env. Add both redirect URIs below to the provider's app so both
+        flows work.
       </Text>
       <OAuthAppCard
         provider="google"
@@ -2708,6 +2709,7 @@ const OAUTH_GUIDE: Record<
     consoleUrl: "https://console.cloud.google.com/apis/credentials",
     consoleLabel: "Open Google Cloud Console",
     steps: [
+      "APIs & Services → Library → enable each connector's API (Gmail API, Google Sheets API, …). This is separate from adding scopes below — skipping it makes every call fail with 403 even though the connector shows “connected”.",
       "APIs & Services → Credentials → Create credentials → OAuth client ID.",
       "Application type: Web application.",
       "Add BOTH redirect URIs below under “Authorized redirect URIs”.",
@@ -2717,6 +2719,7 @@ const OAUTH_GUIDE: Record<
     scopes: [
       { label: "Sign-in", items: ["openid", "email", "profile"] },
       { label: "Gmail connector", items: ["https://www.googleapis.com/auth/gmail.modify"] },
+      { label: "Google Sheets connector", items: ["https://www.googleapis.com/auth/spreadsheets"] },
     ],
   },
   microsoft: {

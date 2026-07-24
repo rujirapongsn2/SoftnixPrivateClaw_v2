@@ -13,6 +13,19 @@ def test_unknown_preset_is_none():
     assert get_preset("nope") is None
 
 
+def test_google_sheets_preset_is_oauth_and_reuses_google_provider():
+    preset = get_preset("google-sheets")
+    assert preset is not None
+    assert preset.transport == "stdio"
+    assert preset.setup == "oauth"
+    # Same oauth_provider as the existing Gmail preset — reuses the one
+    # Control-Plane-registered Google OAuth app, no separate app needed.
+    assert preset.oauth_provider == "google"
+    assert "https://www.googleapis.com/auth/spreadsheets" in preset.oauth_scopes
+    assert preset.env_prefix == "GOOGLE_SHEETS"
+    assert preset.command == "python -m claw.integrations.google_sheets_mcp_server"
+
+
 async def _register(c, email="a@x.io"):
     r = await c.post("/api/auth/register", json={"email": email, "password": "password123"})
     return r.json()["access_token"]
