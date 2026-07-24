@@ -425,6 +425,967 @@ output formats (plain text, markdown, JSON) by building a plain dict/list from t
 above and letting the caller decide the serialization.
 """
 
+_FINANCIAL_STATEMENT_CONTENT = r"""
+Analyze a company's income statement, balance sheet, and cash flow statement:
+compute year-over-year (YoY) and quarter-over-quarter (QoQ) changes, financial
+ratios, and run 10 built-in anomaly-detection rules (AR surge, cash flow
+divergence, inventory buildup, margin shifts, excessive leverage/goodwill,
+weak liquidity, AP anomalies), then produce a readable report.
+
+## Output Language
+Write the final report in Thai (ภาษาไทย) by default. Only use a different
+language if the user has explicitly asked for one (in this request or earlier
+in the conversation). Numbers, financial terms, and the underlying script's
+CLI flags/JSON keys stay as-is — translate the surrounding narrative and
+section headings, not the data itself.
+
+## Setup (once per workspace)
+This skill ships with a complete, dependency-free (stdlib-only) analysis
+script rather than reimplementing ~700 lines of ratio/anomaly logic from
+scratch on every use — more reliable and far cheaper in tokens. Before first
+use in a workspace, check whether it already exists:
+
+```bash
+test -f /workspace/.claw_skills/financial-statement-analyzer/analyze_financials.py && echo present
+```
+
+If missing, create the directory and use `write_file` to save the script
+below verbatim to
+`/workspace/.claw_skills/financial-statement-analyzer/analyze_financials.py`.
+Do this once per workspace; every later analysis just calls the existing file
+via `exec`.
+
+```python
+#!/usr/bin/env python3
+'''
+Financial Statement Analyzer
+Computes YoY/QoQ changes, financial ratios, and anomaly detection.
+'''
+
+import argparse
+import json
+import re
+import sys
+from collections import OrderedDict
+
+
+SAMPLE_DATA = {
+    "company": "Acme Corp",
+    "currency": "USD",
+    "unit": "thousands",
+    "periods": [
+        "2023Q1", "2023Q2", "2023Q3", "2023Q4",
+        "2024Q1", "2024Q2", "2024Q3", "2024Q4"
+    ],
+    "income_statement": {
+        "revenue":         [5000, 5200, 4800, 6000, 5500, 5800, 5100, 6500],
+        "cost_of_revenue": [3000, 3100, 2900, 3500, 3400, 3600, 3200, 4100],
+        "operating_income": [800,  850,  750, 1000,  780,  820,  700,  900],
+        "net_income":       [600,  650,  560,  780,  580,  620,  520,  680]
+    },
+    "balance_sheet": {
+        "accounts_receivable":    [2000, 2100, 2200, 2300, 2800, 3200, 3600, 4200],
+        "inventory":              [1000, 1050, 1100, 1200, 1100, 1150, 1200, 1300],
+        "total_current_assets":   [5000, 5200, 5400, 5800, 6000, 6500, 7000, 7500],
+        "goodwill":               [ 500,  500,  500,  500,  500,  500,  500,  500],
+        "total_assets":           [15000,15500,16000,16500,17000,17500,18000,18500],
+        "accounts_payable":       [1500, 1600, 1550, 1700, 1650, 1750, 1700, 1800],
+        "total_current_liabilities":[4000,4200,4100,4500,4300,4600,4500,4900],
+        "total_liabilities":      [8000, 8200, 8400, 8600, 8800, 9000, 9200, 9500],
+        "total_equity":           [7000, 7300, 7600, 7900, 8200, 8500, 8800, 9000]
+    },
+    "cash_flow": {
+        "operating_cash_flow": [ 700,  750,  620,  850,  300,  280,  250,  200],
+        "investing_cash_flow": [-200, -180, -250, -300, -400, -350, -300, -280],
+        "financing_cash_flow": [-100,  -50,  -80, -120,  200,  150,  100,   50],
+        "capex":               [ 180,  160,  230,  280,  380,  330,  280,  260]
+    }
+}
+
+DEFAULT_THRESHOLDS = {
+    "ar_threshold": 0.20,
+    "inv_threshold": 0.15,
+    "ocf_ratio": 0.50,
+    "margin_threshold": 0.05,
+    "net_margin_threshold": 0.03,
+    "debt_ceiling": 0.70,
+    "current_floor": 1.00,
+    "goodwill_ceiling": 0.30,
+    "neg_ocf_periods": 2,
+    "ap_threshold": 0.20,
+}
+
+
+def safe_div(a, b):
+    if b is None or a is None:
+        return None
+    if b == 0:
+        return None
+    return a / b
+
+
+def pct_change(new, old):
+    if old is None or new is None:
+        return None
+    if old == 0:
+        if new == 0:
+            return 0.0
+        return None
+    return (new - old) / abs(old)
+
+
+def get_values(data, section, key):
+    sec = data.get(section, {})
+    return sec.get(key)
+
+
+def detect_period_type(periods):
+    for p in periods:
+        if re.search(r"[Qq]\d", str(p)):
+            return "quarterly"
+    return "annual"
+
+
+def parse_period(p):
+    p = str(p).strip()
+    m = re.match(r"(\d{4})[Qq](\d)", p)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m2 = re.match(r"(\d{4})", p)
+    if m2:
+        return int(m2.group(1)), 0
+    return None, None
+
+
+def build_yoy_map(periods):
+    idx = {}
+    for i, p in enumerate(periods):
+        year, q = parse_period(p)
+        if year is not None:
+            idx[(year, q)] = i
+
+    yoy_pairs = []
+    for i, p in enumerate(periods):
+        year, q = parse_period(p)
+        if year is None:
+            yoy_pairs.append(None)
+            continue
+        prev_key = (year - 1, q)
+        if prev_key in idx:
+            yoy_pairs.append(idx[prev_key])
+        else:
+            yoy_pairs.append(None)
+    return yoy_pairs
+
+
+def compute_changes(values, periods, yoy_map):
+    n = len(values)
+    yoy = []
+    qoq = []
+    for i in range(n):
+        if yoy_map[i] is not None:
+            yoy.append(pct_change(values[i], values[yoy_map[i]]))
+        else:
+            yoy.append(None)
+
+        if i > 0:
+            qoq.append(pct_change(values[i], values[i - 1]))
+        else:
+            qoq.append(None)
+    return yoy, qoq
+
+
+def compute_all_changes(data, periods, yoy_map):
+    result = {}
+    for section in ("income_statement", "balance_sheet", "cash_flow"):
+        sec = data.get(section, {})
+        for key, vals in sec.items():
+            if not isinstance(vals, list):
+                continue
+            yoy, qoq = compute_changes(vals, periods, yoy_map)
+            result[key] = {"yoy": yoy, "qoq": qoq}
+    return result
+
+
+def compute_ratios(data, periods):
+    n = len(periods)
+    ratios = []
+    for i in range(n):
+        r = OrderedDict()
+        rev = _val(data, "income_statement", "revenue", i)
+        cogs = _val(data, "income_statement", "cost_of_revenue", i)
+        oi = _val(data, "income_statement", "operating_income", i)
+        ni = _val(data, "income_statement", "net_income", i)
+        ar = _val(data, "balance_sheet", "accounts_receivable", i)
+        inv = _val(data, "balance_sheet", "inventory", i)
+        tca = _val(data, "balance_sheet", "total_current_assets", i)
+        gw = _val(data, "balance_sheet", "goodwill", i)
+        ta = _val(data, "balance_sheet", "total_assets", i)
+        ap = _val(data, "balance_sheet", "accounts_payable", i)
+        tcl = _val(data, "balance_sheet", "total_current_liabilities", i)
+        tl = _val(data, "balance_sheet", "total_liabilities", i)
+        te = _val(data, "balance_sheet", "total_equity", i)
+        ocf = _val(data, "cash_flow", "operating_cash_flow", i)
+        capex = _val(data, "cash_flow", "capex", i)
+
+        gp = (rev - cogs) if (rev is not None and cogs is not None) else None
+        r["gross_margin"] = safe_div(gp, rev)
+        r["operating_margin"] = safe_div(oi, rev)
+        r["net_margin"] = safe_div(ni, rev)
+        r["debt_ratio"] = safe_div(tl, ta)
+        r["current_ratio"] = safe_div(tca, tcl)
+        r["goodwill_ratio"] = safe_div(gw, ta)
+        r["ar_to_revenue"] = safe_div(ar, rev)
+        r["inventory_to_revenue"] = safe_div(inv, rev)
+        r["ocf_to_ni"] = safe_div(ocf, ni) if ni and ni != 0 else None
+        r["roe"] = safe_div(ni, te)
+
+        fcf = None
+        if ocf is not None and capex is not None:
+            fcf = ocf - capex
+        r["free_cash_flow"] = fcf
+
+        dso = None
+        if ar is not None and rev is not None and rev != 0:
+            dso = (ar / rev) * 90 if detect_period_type(periods) == "quarterly" else (ar / rev) * 365
+        r["dso"] = dso
+
+        dio = None
+        if inv is not None and cogs is not None and cogs != 0:
+            dio = (inv / cogs) * 90 if detect_period_type(periods) == "quarterly" else (inv / cogs) * 365
+        r["dio"] = dio
+
+        dpo = None
+        if ap is not None and cogs is not None and cogs != 0:
+            dpo = (ap / cogs) * 90 if detect_period_type(periods) == "quarterly" else (ap / cogs) * 365
+        r["dpo"] = dpo
+
+        ratios.append(r)
+    return ratios
+
+
+def _val(data, section, key, idx):
+    vals = get_values(data, section, key)
+    if vals is None or idx >= len(vals):
+        return None
+    v = vals[idx]
+    return v if v is not None else None
+
+
+def detect_anomalies(data, periods, changes, ratios, thresholds):
+    alerts = []
+    n = len(periods)
+
+    rev_yoy = changes.get("revenue", {}).get("yoy", [])
+    ar_yoy = changes.get("accounts_receivable", {}).get("yoy", [])
+    if rev_yoy and ar_yoy:
+        for i in range(n):
+            if ar_yoy[i] is not None and rev_yoy[i] is not None:
+                gap = ar_yoy[i] - rev_yoy[i]
+                if gap > thresholds["ar_threshold"]:
+                    alerts.append({
+                        "rule": "AR Surge",
+                        "period": periods[i],
+                        "severity": "high" if gap > thresholds["ar_threshold"] * 2 else "medium",
+                        "detail": (
+                            f"AR growth {ar_yoy[i]*100:.1f}% far outpaces revenue growth "
+                            f"{rev_yoy[i]*100:.1f}%, gap {gap*100:.1f}pp (threshold "
+                            f"{thresholds['ar_threshold']*100:.0f}pp)"
+                        ),
+                        "implication": "Possible aggressive revenue recognition or collection difficulties"
+                    })
+
+    for i in range(n):
+        ni = _val(data, "income_statement", "net_income", i)
+        ocf = _val(data, "cash_flow", "operating_cash_flow", i)
+        if ni is not None and ocf is not None and ni != 0:
+            ratio = ocf / ni if ni > 0 else None
+            if ni > 0 and ocf < 0:
+                alerts.append({
+                    "rule": "Cash Flow Divergence",
+                    "period": periods[i],
+                    "severity": "high",
+                    "detail": f"Net income {ni:,.0f} is positive but operating cash flow {ocf:,.0f} is negative",
+                    "implication": "Low earnings quality; profits may contain significant accruals"
+                })
+            elif ratio is not None and ratio < thresholds["ocf_ratio"]:
+                alerts.append({
+                    "rule": "Cash Flow Divergence",
+                    "period": periods[i],
+                    "severity": "medium",
+                    "detail": (
+                        f"OCF/Net Income = {ratio:.2f}, below threshold {thresholds['ocf_ratio']:.2f}"
+                    ),
+                    "implication": "Profit-to-cash conversion efficiency is low"
+                })
+
+    inv_yoy = changes.get("inventory", {}).get("yoy", [])
+    if rev_yoy and inv_yoy:
+        for i in range(n):
+            if inv_yoy[i] is not None and rev_yoy[i] is not None:
+                gap = inv_yoy[i] - rev_yoy[i]
+                if gap > thresholds["inv_threshold"]:
+                    alerts.append({
+                        "rule": "Inventory Buildup",
+                        "period": periods[i],
+                        "severity": "medium",
+                        "detail": (
+                            f"Inventory growth {inv_yoy[i]*100:.1f}% exceeds revenue growth "
+                            f"{rev_yoy[i]*100:.1f}%, gap {gap*100:.1f}pp"
+                        ),
+                        "implication": "Potential product obsolescence or write-down risk"
+                    })
+
+    for i in range(n):
+        if i < 1:
+            continue
+        gm_now = ratios[i].get("gross_margin")
+        gm_prev = ratios[i - 1].get("gross_margin")
+        if gm_now is not None and gm_prev is not None:
+            delta = gm_now - gm_prev
+            if abs(delta) > thresholds["margin_threshold"]:
+                direction = "up" if delta > 0 else "down"
+                alerts.append({
+                    "rule": "Gross Margin Shift",
+                    "period": periods[i],
+                    "severity": "medium",
+                    "detail": (
+                        f"Gross margin {direction} {abs(delta)*100:.1f}pp QoQ "
+                        f"({gm_prev*100:.1f}% -> {gm_now*100:.1f}%)"
+                    ),
+                    "implication": "Significant change in pricing power or cost structure"
+                })
+
+    for i in range(n):
+        if i < 1:
+            continue
+        nm_now = ratios[i].get("net_margin")
+        nm_prev = ratios[i - 1].get("net_margin")
+        if nm_now is not None and nm_prev is not None:
+            delta = nm_now - nm_prev
+            if abs(delta) > thresholds["net_margin_threshold"]:
+                direction = "up" if delta > 0 else "down"
+                alerts.append({
+                    "rule": "Net Margin Shift",
+                    "period": periods[i],
+                    "severity": "medium",
+                    "detail": (
+                        f"Net margin {direction} {abs(delta)*100:.1f}pp QoQ "
+                        f"({nm_prev*100:.1f}% -> {nm_now*100:.1f}%)"
+                    ),
+                    "implication": "Abnormal expense control or non-recurring items"
+                })
+
+    streak = 0
+    for i in range(n):
+        ocf = _val(data, "cash_flow", "operating_cash_flow", i)
+        if ocf is not None and ocf < 0:
+            streak += 1
+            if streak >= thresholds["neg_ocf_periods"]:
+                alerts.append({
+                    "rule": "Persistent Negative OCF",
+                    "period": periods[i],
+                    "severity": "high" if streak >= 3 else "medium",
+                    "detail": f"Operating cash flow has been negative for {streak} consecutive periods",
+                    "implication": "Insufficient organic cash generation; reliant on external financing"
+                })
+        else:
+            streak = 0
+
+    for i in range(n):
+        gw_ratio = ratios[i].get("goodwill_ratio")
+        if gw_ratio is not None and gw_ratio > thresholds["goodwill_ceiling"]:
+            alerts.append({
+                "rule": "Excessive Goodwill",
+                "period": periods[i],
+                "severity": "medium",
+                "detail": f"Goodwill/Total Assets = {gw_ratio*100:.1f}% (ceiling {thresholds['goodwill_ceiling']*100:.0f}%)",
+                "implication": "Impairment risk if acquired entities underperform"
+            })
+
+    for i in range(n):
+        dr = ratios[i].get("debt_ratio")
+        if dr is not None and dr > thresholds["debt_ceiling"]:
+            alerts.append({
+                "rule": "High Leverage",
+                "period": periods[i],
+                "severity": "medium",
+                "detail": f"Debt-to-asset ratio {dr*100:.1f}% (ceiling {thresholds['debt_ceiling']*100:.0f}%)",
+                "implication": "Elevated financial leverage; higher debt repayment pressure"
+            })
+
+    for i in range(n):
+        cr = ratios[i].get("current_ratio")
+        if cr is not None and cr < thresholds["current_floor"]:
+            alerts.append({
+                "rule": "Low Current Ratio",
+                "period": periods[i],
+                "severity": "medium" if cr > 0.7 else "high",
+                "detail": f"Current ratio {cr:.2f} (floor {thresholds['current_floor']:.2f})",
+                "implication": "Weak short-term liquidity; potential liquidity risk"
+            })
+
+    cogs_yoy = changes.get("cost_of_revenue", {}).get("yoy", [])
+    ap_yoy = changes.get("accounts_payable", {}).get("yoy", [])
+    if cogs_yoy and ap_yoy:
+        for i in range(n):
+            if ap_yoy[i] is not None and cogs_yoy[i] is not None:
+                gap = abs(ap_yoy[i] - cogs_yoy[i])
+                if gap > thresholds["ap_threshold"]:
+                    if ap_yoy[i] > cogs_yoy[i]:
+                        msg = "AP growing much faster than COGS — may be stretching payment terms to ease cash pressure"
+                    else:
+                        msg = "AP growing much slower than COGS — suppliers may be demanding shorter payment terms"
+                    alerts.append({
+                        "rule": "AP Anomaly",
+                        "period": periods[i],
+                        "severity": "low",
+                        "detail": (
+                            f"AP growth {ap_yoy[i]*100:.1f}% vs COGS growth {cogs_yoy[i]*100:.1f}%, "
+                            f"gap {gap*100:.1f}pp"
+                        ),
+                        "implication": msg
+                    })
+
+    return alerts
+
+
+def fmt_pct(v):
+    if v is None:
+        return "N/A"
+    return f"{v * 100:+.1f}%"
+
+
+def fmt_ratio(v, decimals=2):
+    if v is None:
+        return "N/A"
+    return f"{v:.{decimals}f}"
+
+
+def fmt_num(v):
+    if v is None:
+        return "N/A"
+    return f"{v:,.0f}"
+
+
+def format_text_report(data, periods, changes, ratios, alerts):
+    lines = []
+    company = data.get("company", "Unknown Company")
+    unit = data.get("unit", "")
+    currency = data.get("currency", "")
+    unit_label = f"({currency} {unit})" if currency or unit else ""
+
+    lines.append(f"{'='*60}")
+    lines.append(f"  Financial Statement Analysis Report — {company}")
+    lines.append(f"  Period: {periods[0]} ~ {periods[-1]} {unit_label}")
+    lines.append(f"{'='*60}")
+    lines.append("")
+
+    lines.append("[1. Key Metrics at a Glance (Latest Period)]")
+    lines.append("")
+    latest = ratios[-1]
+    prev = ratios[-2] if len(ratios) > 1 else {}
+    metrics = [
+        ("Gross Margin", "gross_margin"),
+        ("Operating Margin", "operating_margin"),
+        ("Net Margin", "net_margin"),
+        ("Debt Ratio", "debt_ratio"),
+        ("Current Ratio", "current_ratio"),
+        ("Goodwill Ratio", "goodwill_ratio"),
+        ("AR/Revenue", "ar_to_revenue"),
+        ("OCF/Net Income", "ocf_to_ni"),
+        ("ROE", "roe"),
+    ]
+    lines.append(f"  {'Metric':<18} {'Current':>10} {'Prior':>10} {'Change':>10}")
+    lines.append(f"  {'-'*18} {'-'*10} {'-'*10} {'-'*10}")
+    for label, key in metrics:
+        curr_v = latest.get(key)
+        prev_v = prev.get(key) if prev else None
+        delta = None
+        if curr_v is not None and prev_v is not None:
+            delta = curr_v - prev_v
+        c_str = fmt_ratio(curr_v) if key == "current_ratio" else (fmt_pct(curr_v).replace("+", "") if curr_v is not None else "N/A")
+        p_str = fmt_ratio(prev_v) if key == "current_ratio" else (fmt_pct(prev_v).replace("+", "") if prev_v is not None else "N/A")
+        d_str = fmt_pct(delta) if delta is not None else "N/A"
+        if key == "current_ratio":
+            c_str = fmt_ratio(curr_v)
+            p_str = fmt_ratio(prev_v)
+            d_str = fmt_ratio(delta) if delta is not None else "N/A"
+        lines.append(f"  {label:<18} {c_str:>10} {p_str:>10} {d_str:>10}")
+
+    lines.append("")
+    lines.append(f"  Days Sales Outstanding (DSO): {fmt_ratio(latest.get('dso'), 0)} days")
+    lines.append(f"  Days Inventory Outstanding (DIO): {fmt_ratio(latest.get('dio'), 0)} days")
+    lines.append(f"  Days Payable Outstanding (DPO): {fmt_ratio(latest.get('dpo'), 0)} days")
+    fcf = latest.get("free_cash_flow")
+    lines.append(f"  Free Cash Flow (FCF):   {fmt_num(fcf)}")
+    lines.append("")
+
+    lines.append("[2. Year-over-Year Changes (YoY)]")
+    lines.append("")
+    yoy_keys = [
+        ("Revenue", "revenue"), ("Cost of Revenue", "cost_of_revenue"),
+        ("Operating Income", "operating_income"), ("Net Income", "net_income"),
+        ("Accounts Receivable", "accounts_receivable"), ("Inventory", "inventory"),
+        ("Total Assets", "total_assets"), ("Total Liabilities", "total_liabilities"),
+        ("Operating Cash Flow", "operating_cash_flow"),
+    ]
+    header = f"  {'Line Item':<20}"
+    for p in periods:
+        header += f" {p:>9}"
+    lines.append(header)
+    lines.append(f"  {'-'*20}" + f" {'-'*9}" * len(periods))
+    for label, key in yoy_keys:
+        ch = changes.get(key, {}).get("yoy", [])
+        if not ch:
+            continue
+        row = f"  {label:<20}"
+        for v in ch:
+            row += f" {fmt_pct(v):>9}"
+        lines.append(row)
+    lines.append("")
+
+    lines.append("[3. Quarter-over-Quarter Changes (QoQ)]")
+    lines.append("")
+    header = f"  {'Line Item':<20}"
+    for p in periods:
+        header += f" {p:>9}"
+    lines.append(header)
+    lines.append(f"  {'-'*20}" + f" {'-'*9}" * len(periods))
+    for label, key in yoy_keys:
+        ch = changes.get(key, {}).get("qoq", [])
+        if not ch:
+            continue
+        row = f"  {label:<20}"
+        for v in ch:
+            row += f" {fmt_pct(v):>9}"
+        lines.append(row)
+    lines.append("")
+
+    lines.append("[4. Anomaly Detection Results]")
+    lines.append("")
+    if not alerts:
+        lines.append("  No anomalies detected.")
+    else:
+        severity_order = {"high": 0, "medium": 1, "low": 2}
+        sorted_alerts = sorted(alerts, key=lambda a: (severity_order.get(a["severity"], 9), a["period"]))
+        severity_labels = {"high": "High", "medium": "Medium", "low": "Low"}
+        for idx, a in enumerate(sorted_alerts, 1):
+            sev = severity_labels.get(a["severity"], a["severity"])
+            lines.append(f"  [{sev} risk] {a['rule']} | {a['period']}")
+            lines.append(f"    Detail: {a['detail']}")
+            lines.append(f"    Implication: {a['implication']}")
+            lines.append("")
+    lines.append("")
+
+    lines.append("[5. Cross-Statement Analysis Highlights]")
+    lines.append("")
+    rev_vals = get_values(data, "income_statement", "revenue")
+    ar_vals = get_values(data, "balance_sheet", "accounts_receivable")
+    ni_vals = get_values(data, "income_statement", "net_income")
+    ocf_vals = get_values(data, "cash_flow", "operating_cash_flow")
+
+    if rev_vals and ar_vals and len(rev_vals) >= 2:
+        rev_growth = pct_change(rev_vals[-1], rev_vals[-2])
+        ar_growth = pct_change(ar_vals[-1], ar_vals[-2])
+        if rev_growth is not None and ar_growth is not None:
+            if ar_growth > rev_growth + 0.1:
+                lines.append("  - Income Statement -> Balance Sheet: AR growth notably outpaces revenue growth; revenue growth quality warrants attention")
+            else:
+                lines.append("  - Income Statement -> Balance Sheet: AR and revenue growth are broadly in line; revenue growth quality looks reasonable")
+
+    if ni_vals and ocf_vals:
+        total_ni = sum(v for v in ni_vals if v is not None)
+        total_ocf = sum(v for v in ocf_vals if v is not None)
+        if total_ni > 0:
+            overall_ratio = total_ocf / total_ni
+            if overall_ratio < 0.6:
+                lines.append(f"  - Income Statement -> Cash Flow Statement: cumulative OCF/Net Income = {overall_ratio:.2f}, cash content of earnings is low")
+            else:
+                lines.append(f"  - Income Statement -> Cash Flow Statement: cumulative OCF/Net Income = {overall_ratio:.2f}, cash content of earnings is reasonable")
+
+    inv_cf = get_values(data, "cash_flow", "investing_cash_flow")
+    capex_vals = get_values(data, "cash_flow", "capex")
+    if inv_cf and capex_vals:
+        latest_inv = inv_cf[-1] if inv_cf[-1] is not None else 0
+        latest_capex = capex_vals[-1] if capex_vals[-1] is not None else 0
+        if latest_inv is not None and latest_capex is not None:
+            lines.append(
+                f"  - Balance Sheet -> Cash Flow Statement: investing cash flow {fmt_num(latest_inv)}, "
+                f"capex {fmt_num(latest_capex)}"
+            )
+
+    lines.append("")
+    lines.append(f"{'='*60}")
+    lines.append("  Report complete")
+    lines.append(f"{'='*60}")
+    return "\n".join(lines)
+
+
+def build_json_report(data, periods, changes, ratios, alerts):
+    return OrderedDict([
+        ("company", data.get("company", "")),
+        ("report_range", f"{periods[0]} ~ {periods[-1]}"),
+        ("periods", periods),
+        ("ratios", [dict(r) for r in ratios]),
+        ("changes", {k: dict(v) for k, v in changes.items()}),
+        ("anomalies", alerts),
+        ("summary", {
+            "total_anomalies": len(alerts),
+            "high_severity": sum(1 for a in alerts if a["severity"] == "high"),
+            "medium_severity": sum(1 for a in alerts if a["severity"] == "medium"),
+            "low_severity": sum(1 for a in alerts if a["severity"] == "low"),
+        })
+    ])
+
+
+def validate_data(data):
+    errors = []
+    periods = data.get("periods")
+    if not periods or not isinstance(periods, list):
+        errors.append("missing 'periods' field or wrong format")
+        return errors
+
+    n = len(periods)
+    for section in ("income_statement", "balance_sheet", "cash_flow"):
+        sec = data.get(section, {})
+        for key, vals in sec.items():
+            if isinstance(vals, list) and len(vals) != n:
+                errors.append(
+                    f"{section}.{key} has length {len(vals)}, expected {n} (must match periods)"
+                )
+    return errors
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Financial statement analyzer — YoY/QoQ trends + anomaly detection",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+               "  %(prog)s data.json\n"
+               "  %(prog)s data.json --json\n"
+               "  %(prog)s data.json -o report.json\n"
+               "  %(prog)s --sample > sample.json\n"
+    )
+    parser.add_argument("input", nargs="?", help="path to the input JSON file")
+    parser.add_argument("-j", "--json", action="store_true", help="output in JSON format")
+    parser.add_argument("-o", "--output", help="output file path")
+    parser.add_argument("-s", "--sample", action="store_true", help="print sample data to stdout")
+
+    parser.add_argument("--ar-threshold", type=float, default=DEFAULT_THRESHOLDS["ar_threshold"],
+                        help=f"AR anomaly threshold (default {DEFAULT_THRESHOLDS['ar_threshold']})")
+    parser.add_argument("--inv-threshold", type=float, default=DEFAULT_THRESHOLDS["inv_threshold"],
+                        help=f"inventory anomaly threshold (default {DEFAULT_THRESHOLDS['inv_threshold']})")
+    parser.add_argument("--ocf-ratio", type=float, default=DEFAULT_THRESHOLDS["ocf_ratio"],
+                        help=f"cash flow / profit divergence threshold (default {DEFAULT_THRESHOLDS['ocf_ratio']})")
+    parser.add_argument("--margin-threshold", type=float, default=DEFAULT_THRESHOLDS["margin_threshold"],
+                        help=f"gross margin shift threshold (default {DEFAULT_THRESHOLDS['margin_threshold']})")
+    parser.add_argument("--debt-ceiling", type=float, default=DEFAULT_THRESHOLDS["debt_ceiling"],
+                        help=f"debt-to-asset ratio warning level (default {DEFAULT_THRESHOLDS['debt_ceiling']})")
+    parser.add_argument("--current-floor", type=float, default=DEFAULT_THRESHOLDS["current_floor"],
+                        help=f"current ratio warning level (default {DEFAULT_THRESHOLDS['current_floor']})")
+    parser.add_argument("--goodwill-ceiling", type=float, default=DEFAULT_THRESHOLDS["goodwill_ceiling"],
+                        help=f"goodwill-to-asset ratio warning level (default {DEFAULT_THRESHOLDS['goodwill_ceiling']})")
+
+    args = parser.parse_args()
+
+    if args.sample:
+        json.dump(SAMPLE_DATA, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return
+
+    if not args.input:
+        parser.error("provide an input JSON file path, or use --sample to generate sample data")
+
+    try:
+        with open(args.input, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: file '{args.input}' not found", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: failed to parse JSON — {e}", file=sys.stderr)
+        sys.exit(1)
+
+    errors = validate_data(data)
+    if errors:
+        print("Data validation failed:", file=sys.stderr)
+        for err in errors:
+            print(f"  - {err}", file=sys.stderr)
+        sys.exit(1)
+
+    periods = data["periods"]
+    yoy_map = build_yoy_map(periods)
+
+    thresholds = {
+        "ar_threshold": args.ar_threshold,
+        "inv_threshold": args.inv_threshold,
+        "ocf_ratio": args.ocf_ratio,
+        "margin_threshold": args.margin_threshold,
+        "net_margin_threshold": DEFAULT_THRESHOLDS["net_margin_threshold"],
+        "debt_ceiling": args.debt_ceiling,
+        "current_floor": args.current_floor,
+        "goodwill_ceiling": args.goodwill_ceiling,
+        "neg_ocf_periods": DEFAULT_THRESHOLDS["neg_ocf_periods"],
+        "ap_threshold": DEFAULT_THRESHOLDS["ap_threshold"],
+    }
+
+    changes = compute_all_changes(data, periods, yoy_map)
+    ratios = compute_ratios(data, periods)
+    alerts = detect_anomalies(data, periods, changes, ratios, thresholds)
+
+    if args.json or (args.output and args.output.endswith(".json")):
+        report = build_json_report(data, periods, changes, ratios, alerts)
+        output_text = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    else:
+        output_text = format_text_report(data, periods, changes, ratios, alerts) + "\n"
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output_text)
+        print(f"Report exported to {args.output}", file=sys.stderr)
+    else:
+        sys.stdout.write(output_text)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Input Data Format
+
+```json
+{
+  "company": "Acme Corp",
+  "currency": "USD",
+  "unit": "thousands",
+  "periods": ["2023Q1","2023Q2","2023Q3","2023Q4","2024Q1","2024Q2","2024Q3","2024Q4"],
+  "income_statement": {
+    "revenue": [5000, 5200, 4800, 6000, 5500, 5800, 5100, 6500],
+    "cost_of_revenue": [3000, 3100, 2900, 3500, 3400, 3600, 3200, 4100],
+    "operating_income": [800, 850, 750, 1000, 780, 820, 700, 900],
+    "net_income": [600, 650, 560, 780, 580, 620, 520, 680]
+  },
+  "balance_sheet": {
+    "accounts_receivable": [2000, 2100, 2200, 2300, 2800, 3200, 3600, 4200],
+    "inventory": [1000, 1050, 1100, 1200, 1100, 1150, 1200, 1300],
+    "total_current_assets": [5000, 5200, 5400, 5800, 6000, 6500, 7000, 7500],
+    "goodwill": [500, 500, 500, 500, 500, 500, 500, 500],
+    "total_assets": [15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500],
+    "accounts_payable": [1500, 1600, 1550, 1700, 1650, 1750, 1700, 1800],
+    "total_current_liabilities": [4000, 4200, 4100, 4500, 4300, 4600, 4500, 4900],
+    "total_liabilities": [8000, 8200, 8400, 8600, 8800, 9000, 9200, 9500],
+    "total_equity": [7000, 7300, 7600, 7900, 8200, 8500, 8800, 9000]
+  },
+  "cash_flow": {
+    "operating_cash_flow": [700, 750, 620, 850, 300, 280, 250, 200],
+    "investing_cash_flow": [-200, -180, -250, -300, -400, -350, -300, -280],
+    "financing_cash_flow": [-100, -50, -80, -120, 200, 150, 100, 50],
+    "capex": [180, 160, 230, 280, 380, 330, 280, 260]
+  }
+}
+```
+
+`periods` supports quarterly (`2024Q1`) and annual (`2024`) format, auto-detected.
+All arrays must match the length of `periods`. Missing fields are skipped
+gracefully (no errors thrown). `unit` is a display label only.
+
+## Quick Start
+
+```bash
+python3 /workspace/.claw_skills/financial-statement-analyzer/analyze_financials.py data.json
+python3 /workspace/.claw_skills/financial-statement-analyzer/analyze_financials.py data.json --json
+python3 /workspace/.claw_skills/financial-statement-analyzer/analyze_financials.py data.json -o report.json
+python3 /workspace/.claw_skills/financial-statement-analyzer/analyze_financials.py --sample > sample_data.json
+```
+
+Key flags: `--json` (JSON output instead of text), `-o/--output <path>` (write
+to a file), `--ar-threshold`/`--inv-threshold`/`--ocf-ratio`/`--margin-threshold`/
+`--debt-ceiling`/`--current-floor`/`--goodwill-ceiling` (tune anomaly
+sensitivity, all default to the values baked into the script).
+
+## Anomaly Detection Rules
+
+| Rule | Trigger | Risk Implication |
+|---|---|---|
+| AR Surge | AR growth − revenue growth > threshold | Aggressive revenue recognition or collection difficulties |
+| Cash Flow Divergence | OCF / Net Income < threshold | Low earnings quality; profits may contain significant accruals |
+| Inventory Buildup | Inventory growth − revenue growth > threshold | Product obsolescence or write-down risk |
+| Gross Margin Shift | Gross margin change > threshold | Change in pricing power or cost structure |
+| Net Margin Shift | Net margin change > threshold | Abnormal expense control or non-recurring items |
+| Persistent Negative OCF | OCF < 0 for 2+ consecutive periods | Insufficient organic cash generation |
+| Excessive Goodwill | Goodwill / Total Assets > threshold | Impairment risk if acquisitions underperform |
+| High Leverage | Liabilities / Assets > threshold | Elevated debt repayment pressure |
+| Low Current Ratio | Current Assets / Current Liabilities < threshold | Weak short-term liquidity |
+| AP Anomaly | AP growth deviates sharply from COGS growth | Supply chain stress or working-capital strain |
+
+## LLM Interpretation Guide
+
+When a user provides financial data (PDF/image/table/text):
+1. **Data Extraction** — convert it into the JSON format above and save it to
+   `/workspace/data.json` (or similar).
+2. **Run Analysis** — invoke the script above via `exec` for the quantitative
+   numbers (don't recompute ratios/YoY/QoQ by hand — trust the script's output).
+3. **Comprehensive Interpretation** — combine the script's output with the
+   framework below into the final report.
+
+### Cross-Statement Analysis Framework
+- **Income Statement → Balance Sheet**: is revenue growth driven by
+  receivables? Is net income converting into retained earnings?
+- **Income Statement → Cash Flow Statement**: does net income track operating
+  cash flow? Are D&A add-backs reasonable?
+- **Balance Sheet → Cash Flow Statement**: what's funding asset expansion?
+  Is investing activity consistent with capex?
+
+### Contextual Judgment for Anomaly Signals
+An anomaly is a signal to investigate, not a verdict — interpret it against
+industry/business context: an AR surge can be normal year-end seasonality for
+B2B; high leverage is typical for utilities/real estate; negative short-term
+cash flow can be reasonable for high-growth SaaS.
+
+### Recommended Output Format
+```
+## Financial Statement Analysis Report — [Company Name]
+
+### Key Metrics at a Glance
+(summary table of key indicators)
+
+### YoY/QoQ Change Highlights
+(top 3-5 most significant changes with interpretation)
+
+### Anomaly Signals
+(each detected anomaly explained with severity and possible causes)
+
+### Cross-Statement Analysis
+(cross-statement logical validation conclusions)
+
+### Summary & Recommendations
+(1-2 paragraph overall assessment)
+```
+"""
+
+_LEGAL_RISK_CONTENT = """\
+You are a legal risk assessment assistant for an in-house legal team. You help
+evaluate, classify, and document legal risks using a structured framework based
+on severity and likelihood.
+
+**Important**: you assist with legal workflows but do not provide legal advice.
+Every assessment must be reviewed by qualified legal professionals before it is
+relied on. The framework below is a starting point — treat organization-specific
+thresholds (financial percentages, escalation names) as illustrative defaults to
+confirm with the user, not fixed rules.
+
+## Output Language
+Write the final assessment, memo, or risk register entry in Thai (ภาษาไทย) by
+default. Only use a different language if the user has explicitly asked for
+one (in this request or earlier in the conversation). Keep standard legal/risk
+terms of art (e.g. proper names, statute/regulation titles, defined contract
+terms) in their original language where a Thai translation would be ambiguous.
+
+## Risk Assessment Framework
+
+**Severity** (impact if the risk materializes), 1-5:
+1. Negligible — no material financial/operational/reputational impact.
+2. Low — minor exposure (< 1% of relevant value); no public attention.
+3. Moderate — material exposure (1-5% of value); noticeable disruption; limited public attention possible.
+4. High — substantial exposure (5-25% of value); significant disruption; likely public attention and regulatory scrutiny.
+5. Critical — major exposure (> 25% of value); fundamental business disruption; regulatory action likely; possible personal liability for officers/directors.
+
+**Likelihood** (probability it materializes), 1-5:
+1. Remote — would require exceptional circumstances, no precedent.
+2. Unlikely — possible but not expected, limited precedent.
+3. Possible — some precedent, foreseeable triggering events.
+4. Likely — clear precedent, triggering events common in similar situations.
+5. Almost Certain — strong precedent/pattern, triggering events present or imminent.
+
+**Risk Score = Severity x Likelihood** (1-25):
+| Score | Level | Color |
+|---|---|---|
+| 1-4 | Low Risk | GREEN |
+| 5-9 | Medium Risk | YELLOW |
+| 10-15 | High Risk | ORANGE |
+| 16-25 | Critical Risk | RED |
+
+## Risk Classification Levels
+
+**GREEN — Low (1-4)**: standard business risk. Accept, document in the risk
+register, monitor periodically (quarterly/annually), no escalation needed.
+E.g. minor deviation from standard vendor terms, routine NDA with a known
+counterparty, a routine compliance task with a clear owner/deadline.
+
+**YELLOW — Medium (5-9)**: warrants attention but not immediate action.
+Mitigate (negotiate/add controls), monitor at regular intervals (monthly or
+on trigger events), document fully in the risk register, assign an owner,
+brief stakeholders, and define what would elevate it to ORANGE.
+E.g. a below-standard-but-negotiable liability cap, a vendor processing data
+in a jurisdiction without a clear adequacy determination, a broader-than-preferred
+but market-standard IP clause.
+
+**ORANGE — High (10-15)**: significant issue with meaningful probability.
+Escalate to senior counsel/head of legal, brief business leadership, build a
+specific mitigation plan with a contingency for if it materializes, consider
+outside counsel, review weekly or at milestones, write a full risk memo.
+E.g. uncapped indemnification in a material area, threatened litigation from
+a significant counterparty, a colorable IP infringement allegation, a
+regulatory inquiry/audit request.
+
+**RED — Critical (16-25)**: likely or certain to materialize, could
+fundamentally impact the business. Escalate immediately to General
+Counsel/C-suite/Board as appropriate, engage outside counsel now, stand up a
+response team, consider insurer notification, preserve evidence (litigation
+hold) if proceedings are possible, review daily until resolved, make any
+required regulatory notifications.
+E.g. active litigation with significant exposure, a data breach affecting
+regulated personal data, a regulatory enforcement action or government
+investigation, a material breach of contract by or against the organization.
+
+## Risk Assessment Memo
+
+Produce this structure for any formal assessment (mark privileged if
+applicable):
+1. Risk Description
+2. Background and Context
+3. Risk Analysis — Severity [1-5, label] with rationale; Likelihood [1-5,
+   label] with rationale; Risk Score and color
+4. Contributing Factors
+5. Mitigating Factors
+6. Mitigation Options (table: option / effectiveness / cost-effort / recommended?)
+7. Recommended Approach
+8. Residual Risk (expected level after mitigation)
+9. Monitoring Plan (cadence, trigger events for re-assessment)
+10. Next Steps (action — owner — deadline)
+
+## Risk Register Entry
+
+For portfolio tracking, capture: Risk ID, Date Identified, Description,
+Category (Contract / Regulatory / Litigation / IP / Data Privacy /
+Employment / Corporate / Other), Severity, Likelihood, Risk Score, Risk
+Level, Owner, Mitigations, Status (Open / Mitigated / Accepted / Closed),
+Review Date, Notes.
+
+## When to Escalate to Outside Counsel
+
+**Mandatory**: active litigation, a government/regulator investigation,
+potential criminal exposure, anything touching securities disclosures/filings,
+any matter requiring board notification or approval.
+
+**Strongly recommended**: novel/first-impression legal issues, unfamiliar or
+conflicting jurisdictions, exposure beyond the organization's risk tolerance,
+specialized expertise not available in-house (antitrust, FCPA, patent
+prosecution, etc.), new regulation requiring a compliance program, M&A
+due diligence/deal structuring/regulatory approvals.
+
+**Consider**: significant contract interpretation disputes, employment
+claims (discrimination, harassment, wrongful termination, whistleblower),
+a potential data breach with notification obligations, IP disputes over
+material products, insurance coverage disputes.
+
+When recommending engagement, note the factors the user should weigh in
+selecting counsel: subject-matter expertise, jurisdiction experience,
+industry familiarity, conflict clearance, fee arrangement, and any existing
+panel-firm relationship.
+"""
+
 _BUILTIN_SKILLS: tuple[BuiltinSkill, ...] = (
     BuiltinSkill(
         name="skill-creator",
@@ -552,6 +1513,72 @@ _BUILTIN_SKILLS: tuple[BuiltinSkill, ...] = (
         summary=(
             "Create and edit Word documents including RFQ letters, supplier evaluation reports, "
             "SOPs, and contract templates with professional formatting."
+        ),
+    ),
+    BuiltinSkill(
+        name="legal-risk-assessment",
+        description=(
+            "Assess and classify legal risks using a severity x likelihood framework with "
+            "escalation criteria. Use when evaluating contract risk, assessing deal exposure, "
+            "classifying issues by severity, or deciding whether a matter needs senior counsel "
+            "or outside legal review."
+        ),
+        content=_LEGAL_RISK_CONTENT,
+        capabilities=(
+            (
+                "Risk Scoring",
+                "severity x likelihood matrix (1-5 each) producing a 1-25 score mapped to GREEN/YELLOW/ORANGE/RED risk levels",
+            ),
+            (
+                "Escalation Criteria",
+                "clear thresholds for when a matter needs senior counsel, outside counsel, or board/executive attention",
+            ),
+            (
+                "Risk Assessment Memo",
+                "structured 10-section memo — description, severity/likelihood rationale, mitigation options, residual risk, monitoring plan",
+            ),
+            (
+                "Risk Register Tracking",
+                "standardized fields (category, owner, status, review date) for ongoing risk portfolio tracking",
+            ),
+        ),
+        summary=(
+            "Classify legal risks by severity and likelihood, decide whether to escalate to "
+            "senior or outside counsel, and produce a structured risk assessment memo or risk "
+            "register entry. Not a substitute for review by qualified legal professionals."
+        ),
+    ),
+    BuiltinSkill(
+        name="financial-statement-analyzer",
+        description=(
+            "Analyzes income statement, balance sheet, and cash flow statement data to generate "
+            "YoY/QoQ trend analysis and flag anomalies like AR surges or cash flow divergence. "
+            "Use when asked to analyze financials, compare YoY/QoQ, detect red flags, or assess "
+            "earnings quality."
+        ),
+        content=_FINANCIAL_STATEMENT_CONTENT,
+        capabilities=(
+            (
+                "YoY Analysis",
+                "compare same-period data (e.g. 2024Q1 vs 2023Q1) to identify trend changes",
+            ),
+            (
+                "QoQ Analysis",
+                "compare consecutive periods (e.g. 2024Q2 vs 2024Q1) to capture short-term fluctuations",
+            ),
+            (
+                "Financial Ratios",
+                "gross margin, net margin, debt-to-asset ratio, current ratio, DSO, and more",
+            ),
+            (
+                "Anomaly Detection",
+                "10 built-in rules with automatic scanning, risk severity levels, and explanations",
+            ),
+        ),
+        summary=(
+            "Compute YoY/QoQ trends and financial ratios from income statement, balance sheet, "
+            "and cash flow data, then run 10 anomaly detection rules (AR surge, cash flow "
+            "divergence, inventory buildup, and more) to flag earnings-quality red flags."
         ),
     ),
 )

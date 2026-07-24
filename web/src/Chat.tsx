@@ -2,6 +2,8 @@ import {
   ChatComposer,
   ChatComposerInput,
   type ChatComposerInputHandle,
+  type ChatComposerToken,
+  type ChatComposerTrigger,
   ChatLayout,
   ChatMessage,
   ChatMessageBubble,
@@ -9,6 +11,7 @@ import {
   ChatMessageMetadata,
   ChatToolCalls,
 } from "@astryxdesign/core/Chat";
+import { createStaticSource, type SearchableItem } from "@astryxdesign/core/Typeahead";
 import { Markdown } from "@astryxdesign/core/Markdown";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
@@ -51,7 +54,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
 import { ExecutionPanel } from "./ExecutionPanel";
 import {
@@ -891,42 +894,101 @@ export function Chat({
     [emitComposerInput],
   );
 
+  // Shared chip builder: the submitted value is always "@name " (the agent's
+  // mention cue) regardless of whether the chip was inserted via the "+" menu
+  // or the "/" trigger below — both are just two entry points to the same token.
+  const mentionToken = useCallback(
+    (name: string, icon: typeof BookOpen): ChatComposerToken => ({
+      value: `@${name} `,
+      render: () => (
+        <span className="claw-mention-chip">
+          <Icon icon={icon} size="xsm" />
+          <span className="claw-mention-chip-label">{name}</span>
+          <button
+            type="button"
+            className="claw-mention-chip-remove"
+            aria-label={`Remove ${name}`}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              removeMentionChip(e.currentTarget);
+            }}
+          >
+            <Icon icon={X} size="xsm" />
+          </button>
+        </span>
+      ),
+    }),
+    [removeMentionChip],
+  );
+
   const insertMention = useCallback(
     (name: string, icon: typeof BookOpen) => {
       const handle = composerHandleRef.current;
       if (handle) {
         handle.focus();
-        // Insert as a styled chip (not raw "@name " text) — the submitted value
-        // stays "@name " under the hood so the agent still sees the same mention
-        // cue, but the composer shows a compact pill with a remove (×) control
-        // in case the user changes their mind.
-        handle.insertToken({
-          value: `@${name} `,
-          render: () => (
-            <span className="claw-mention-chip">
-              <Icon icon={icon} size="xsm" />
-              <span className="claw-mention-chip-label">{name}</span>
-              <button
-                type="button"
-                className="claw-mention-chip-remove"
-                aria-label={`Remove ${name}`}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  removeMentionChip(e.currentTarget);
-                }}
-              >
-                <Icon icon={X} size="xsm" />
-              </button>
-            </span>
-          ),
-        });
+        // Insert as a styled chip (not raw "@name " text) so the composer shows
+        // a compact pill with a remove (×) control in case the user changes
+        // their mind.
+        handle.insertToken(mentionToken(name, icon));
         emitComposerInput();
       }
       setPlusOpen(false);
       setPlusView("root");
     },
-    [emitComposerInput, removeMentionChip],
+    [emitComposerInput, mentionToken],
+  );
+
+  // Same skills/connectors/knowledge as the "+" menu, exposed as a "/" trigger
+  // inside the composer too — a faster, keyboard-only path for users coming
+  // from other AI agent tools that expect "/" to bring up a command menu.
+  type SlashMentionItem = SearchableItem<{ icon: typeof BookOpen; kind: string }>;
+
+  const slashItems = useMemo<SlashMentionItem[]>(
+    () => [
+      ...skills.map((s) => ({
+        id: `skill:${s.id}`,
+        label: s.name,
+        auxiliaryData: { icon: BookOpen, kind: "Skill" },
+      })),
+      ...connectors.map((c) => ({
+        id: `connector:${c.id}`,
+        label: c.name,
+        auxiliaryData: { icon: Plug, kind: "Connector" },
+      })),
+      ...knowledge.map((k) => ({
+        id: `knowledge:${k.id}`,
+        label: k.name,
+        auxiliaryData: { icon: Library, kind: "Knowledge" },
+      })),
+    ],
+    [skills, connectors, knowledge],
+  );
+
+  const composerTriggers = useMemo<ChatComposerTrigger[]>(
+    () => [
+      {
+        character: "/",
+        searchSource: createStaticSource(slashItems),
+        menuLabel: "Skills, connectors & knowledge",
+        emptySearchResultsText: "No skills, connectors, or knowledge bases match",
+        renderItem: (item) => {
+          const data = (item as SlashMentionItem).auxiliaryData;
+          return (
+            <span className="claw-slash-item">
+              <Icon icon={data?.icon ?? Sparkles} size="sm" color="secondary" />
+              <span className="claw-slash-item-label">{item.label}</span>
+              <span className="claw-slash-item-kind">{data?.kind}</span>
+            </span>
+          );
+        },
+        onSelect: (item) => {
+          const data = (item as SlashMentionItem).auxiliaryData;
+          return mentionToken(item.label, data?.icon ?? Sparkles);
+        },
+      },
+    ],
+    [slashItems, mentionToken],
   );
 
   // Jump from the "+" menu straight to the matching Settings section — keeps
@@ -1467,7 +1529,9 @@ export function Chat({
                     : t("chat.composerPlaceholder")
               }
               isDisabled={imageMode && imageBusy}
-              input={<ChatComposerInput handleRef={composerHandleRef} />}
+              input={
+                <ChatComposerInput handleRef={composerHandleRef} triggers={composerTriggers} />
+              }
               footerActions={
                 imageMode ? (
                   <div className="claw-composer-actions">

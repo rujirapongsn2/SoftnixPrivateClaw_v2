@@ -1848,6 +1848,30 @@ html[data-chat-bg="grid"] .claw-chat {
   border-radius: 10px;
   padding: 1px 7px;
 }
+/* "/" composer trigger menu item: same look as the "+" menu's rows (an icon,
+   a name, a right-aligned tag) so the two entry points to the same
+   skill/connector/knowledge mention feel like one feature, not two. */
+.claw-slash-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.claw-slash-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claw-slash-item-kind {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  background: var(--color-surface-2, #f2f3f5);
+  border-radius: 10px;
+  padding: 1px 7px;
+}
 /* "Manage in Settings" footer link: same layout as a list item, but muted so
    it reads as a navigational aside rather than another selectable entry. */
 .claw-plus-manage {

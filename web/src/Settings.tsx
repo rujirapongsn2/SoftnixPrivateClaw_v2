@@ -29,6 +29,7 @@ import {
   Globe,
   HeartPulse,
   Library,
+  LineChart,
   Link as LinkIcon,
   Lock,
   Maximize2,
@@ -37,6 +38,7 @@ import {
   Plug,
   Presentation,
   Plus,
+  Scale,
   Send,
   Sparkles,
   Trash2,
@@ -305,6 +307,8 @@ const BUILTIN_SKILL_ICONS: Record<string, IconType> = {
   xlsx: FileSpreadsheet,
   pdf: FileType,
   docx: FileText,
+  "legal-risk-assessment": Scale,
+  "financial-statement-analyzer": LineChart,
 };
 
 function builtinSkillIcon(name: string): IconType {
