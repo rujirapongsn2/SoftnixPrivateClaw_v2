@@ -26,7 +26,19 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # Which supervisor is actually managing this install?
 mode() {
-  if have systemctl && systemctl list-unit-files 2>/dev/null | grep -q "^${SYSTEMD_UNIT}.service"; then
+  # Under `set -o pipefail`, piping list-unit-files straight into `grep -q`
+  # is a trap: -q exits (and closes its end of the pipe) the instant it
+  # finds a match, and if systemctl still has more lines queued to write at
+  # that moment it gets SIGPIPE and dies with 141 — which pipefail then
+  # reports as the pipeline's exit status even though grep itself matched,
+  # so a systemd install can be misdetected as `nohup`. Capture the output
+  # into a variable first (fully drained, no early-exit reader) and grep
+  # that instead, so there's no pipe left to race.
+  local unit_files=""
+  if have systemctl; then
+    unit_files="$(systemctl list-unit-files 2>/dev/null || true)"
+  fi
+  if [[ -n "$unit_files" ]] && grep -q "^${SYSTEMD_UNIT}.service" <<<"$unit_files"; then
     echo systemd
   elif [[ "$(uname -s)" == "Darwin" ]] && [[ -f "$LAUNCHD_DAEMON_PLIST" ]]; then
     echo launchd-daemon
