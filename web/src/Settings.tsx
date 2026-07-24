@@ -653,6 +653,7 @@ function MemoryPanel() {
 const PRESET_LOGO: Record<string, string> = {
   github: "/connectors/github.png",
   gmail: "/connectors/gmail.png",
+  "google-sheets": "/connectors/google-sheets.png",
   outlook: "/connectors/outlook.png",
   "outlook-calendar": "/connectors/outlook-calendar.png",
   onedrive: "/connectors/onedrive.png",
