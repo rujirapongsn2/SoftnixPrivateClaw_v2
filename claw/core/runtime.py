@@ -35,6 +35,7 @@ from claw.core.memory import MemoryService
 from claw.browser.broker import BrowserBrokerStore
 from claw.browser.manager import BrowserManager
 from claw.core.connectors import ConnectorManager
+from claw.core.connector_presets import list_presets
 from claw.core.subagent import SubagentManager
 from claw.core.scheduler import SchedulerService
 from claw.db.stores import (
@@ -231,6 +232,7 @@ class ClawAgent:
         persona: str = "",
         skills_summary: str = "",
         knowledge_summary: str = "",
+        connectors_summary: str = "",
         plan_context: str = "",
     ) -> str:
         runtime = f"{platform.system()} {platform.machine()}, Python {platform.python_version()}"
@@ -268,6 +270,8 @@ class ClawAgent:
             parts.append(skills_summary)
         if knowledge_summary:
             parts.append(knowledge_summary)
+        if connectors_summary:
+            parts.append(connectors_summary)
         return "\n\n---\n\n".join(parts)
 
 
@@ -705,6 +709,30 @@ class AgentRuntime:
                         "(optionally with `knowledge_base` to target one) and answer from the "
                         "returned passages, citing the source.\n\n" + lines
                     )
+            # Tell the agent which integrations exist but aren't connected yet,
+            # so it points the user at Settings -> Connectors instead of
+            # improvising a workaround with the generic browser/web-fetch tools
+            # (e.g. asking them to make a private Google Sheet public).
+            connectors_summary = ""
+            if self.connectors is not None:
+                try:
+                    connected_rows = await self.connectors.store.enabled_for_user(user_id)
+                except Exception:
+                    connected_rows = []
+                connected_names = {c.name for c in connected_rows}
+                not_connected = [p for p in list_presets() if p["name"] not in connected_names]
+                if not_connected:
+                    lines = "\n".join(f"- {p['label']}: {p['description']}" for p in not_connected)
+                    connectors_summary = (
+                        "# Available but not-yet-connected integrations\n\n"
+                        "These integrations exist but the user has not connected them yet, so "
+                        "no tool for them is available this turn. If a request needs one (e.g. a "
+                        "Google Sheets/Drive URL needs the Google Sheets connector, a repo needs "
+                        "GitHub), tell the user to connect it under Settings -> Connectors — do "
+                        "not try to work around it with the browser or web-fetch tools, and do "
+                        "not ask the user to make private content public or export/download it "
+                        "instead.\n\n" + lines
+                    )
             runtime_ctx = build_runtime_context(channel, locale)
             model_content, storage_text = build_user_content(content, media, agent.workspace)
             if isinstance(model_content, str):
@@ -727,6 +755,7 @@ class AgentRuntime:
                     memory_context,
                     skills_summary=skills_summary,
                     knowledge_summary=knowledge_summary,
+                    connectors_summary=connectors_summary,
                     # Pin the session's working plan into the (never-trimmed)
                     # system prompt so the agent keeps the thread across a long
                     # conversation and updates it via the update_plan tool.
