@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from claw.api import connector_shared as connectors
 from claw.api import llm_shared as llm
 from claw.api.deps import AppState, current_user, get_state, require_admin
 from claw.core.scheduler import compute_next_run
@@ -78,8 +79,12 @@ async def upsert_skill(
     if get_builtin_skill(name.strip()) is not None:
         raise HTTPException(status_code=400, detail="that name is reserved by a built-in skill")
     if body.connector_id is not None:
+        # A skill may link either the caller's own connector or an
+        # admin-global one ("Pre-built Connectors") — the latter has no
+        # owner_id == user.id row, so it's invisible to list_for_user alone.
         owned = await state.connectors.list_for_user(user.id)
-        if not any(c.id == body.connector_id for c in owned):
+        global_ones = await state.connectors.list_for_global()
+        if not any(c.id == body.connector_id for c in (*owned, *global_ones)):
             raise HTTPException(status_code=404, detail="connector not found")
     skill = await state.skills.upsert(
         user.id,
@@ -126,43 +131,14 @@ async def update_memory(
 
 
 # ---------------------------------------------------------------- connectors
-
-class ConnectorBody(BaseModel):
-    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_\-]+$")
-    description: str = Field(default="", max_length=2000)
-    transport: str = Field(default="stdio", pattern=r"^(stdio|http)$")
-    command: str = ""
-    url: str = ""
-    env: dict[str, str] = Field(default_factory=dict)
-    # Per-connector connect/tool-call timeout override, in milliseconds. None =
-    # use the instance-wide default (claw/config.py's ConnectorSettings).
-    timeout_ms: int | None = Field(default=None, ge=1000, le=120000)
-    enabled: bool = True
-
-
-def _connector_json(c, status: dict | None = None) -> dict:
-    return {
-        "id": c.id,
-        "name": c.name,
-        "description": c.description or "",
-        "transport": c.transport,
-        "command": c.command,
-        "url": c.url,
-        "env": c.env or {},
-        "timeout_ms": c.timeout_ms,
-        "enabled": c.enabled,
-        "runtime": status or {"status": "not_connected"},
-    }
+# Personal connectors (owner_id=<uid>). The identical admin-global "Pre-built
+# Connectors" routes (owner_id=None) live in claw/api/admin.py and call the
+# same shared handlers — see claw/api/connector_shared.py.
 
 
 @router.get("/connectors")
 async def list_connectors(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
-    # Warm-connect enabled connectors so their runtime status is live here (the
-    # composer menu only shows "connected" ones) instead of only after a chat turn.
-    if state.runtime is not None:
-        await state.runtime.warm_connectors(user.id)
-    statuses = await state.connectors_mgr.status(user.id)
-    return [_connector_json(c, statuses.get(c.name)) for c in await state.connectors.list_for_user(user.id)]
+    return await connectors.list_connectors(state, owner_id=user.id)
 
 
 @router.get("/connectors/presets")
@@ -170,6 +146,23 @@ async def connector_presets(user: User = Depends(current_user)) -> list:
     from claw.core.connector_presets import list_presets
 
     return list_presets()
+
+
+@router.get("/connectors/global")
+async def list_global_connectors(
+    user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> list:
+    """Read-only, redacted view of admin-global connectors ("Provided by your
+    organization") — for Settings > Connectors' transparency panel and for
+    skill authors who need the exact mcp_{connector}_{tool} names. Never
+    includes command/url/env: unlike connector_row's callers (always the
+    owner), the caller here is never the owner of a global connector."""
+    await state.connectors_mgr.sync_global()
+    statuses = await state.connectors_mgr.status_global()
+    return [
+        connectors.connector_global_summary(c, statuses.get(c.name))
+        for c in await state.connectors.list_for_global()
+    ]
 
 
 @router.get("/groups")
@@ -183,57 +176,20 @@ async def list_groups(user: User = Depends(current_user), state: AppState = Depe
 @router.put("/connectors/{name}")
 async def upsert_connector(
     name: str,
-    body: ConnectorBody,
+    body: connectors.ConnectorBody,
     user: User = Depends(require_operator),
     state: AppState = Depends(get_state),
 ) -> dict:
-    if body.transport == "stdio" and not body.command.strip():
-        raise HTTPException(status_code=422, detail="stdio connector requires a command")
-    if body.transport == "http" and not body.url.strip():
-        raise HTTPException(status_code=422, detail="http connector requires a url")
-    if body.transport == "stdio" and not user.is_admin:
-        from claw.core.connector_presets import is_allowed_stdio_command
-
-        # A stdio connector's command is a real subprocess spawned unsandboxed
-        # on the host (see ConnectorManager._connect) — never let a non-admin
-        # supply their own; only the fixed, developer-authored preset commands
-        # (GitHub/Notion/OneDrive/Gmail/Outlook/Outlook Calendar/Tavily) are
-        # permitted. Everything else (http connectors, and stdio for admins)
-        # is unaffected.
-        if not is_allowed_stdio_command(body.command):
-            raise HTTPException(
-                status_code=403,
-                detail="custom stdio (local command) connectors require an administrator",
-            )
-    # Full-replace PUT, like the other upsert_* routes in this file (e.g.
-    # upsert_skill) — every ConnectorBody field is always forwarded, so a
-    # caller that omits a field gets that field's Pydantic default written
-    # through (e.g. omitting "description" clears it to ""), not "leave
-    # untouched". The shipped frontend always sends every field on every
-    # save; a different/future API caller must do the same.
-    row = await state.connectors.upsert(
-        user.id,
-        name.strip(),
-        description=body.description,
-        transport=body.transport,
-        command=body.command,
-        url=body.url,
-        env=body.env,
-        timeout_ms=body.timeout_ms,
-        enabled=body.enabled,
+    return await connectors.upsert_connector(
+        state, name, body, owner_id=user.id, allow_arbitrary_stdio=user.is_admin
     )
-    await state.connectors_mgr.invalidate(user.id)
-    return _connector_json(row)
 
 
 @router.delete("/connectors/{connector_id}")
 async def delete_connector(
     connector_id: str, user: User = Depends(require_operator), state: AppState = Depends(get_state)
 ) -> dict:
-    if not await state.connectors.delete(user.id, connector_id):
-        raise HTTPException(status_code=404, detail="connector not found")
-    await state.connectors_mgr.invalidate(user.id)
-    return {"deleted": True}
+    return await connectors.delete_connector(state, connector_id, owner_id=user.id)
 
 
 # ---------------------------------------------------------------- schedules

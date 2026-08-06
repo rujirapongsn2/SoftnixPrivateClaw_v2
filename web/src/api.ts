@@ -133,6 +133,17 @@ export interface ConnectorInfo {
   runtime: { status: string; tools?: number; tool_names?: string[]; error?: string };
 }
 
+// Redacted view of an admin-global connector — never carries command/url/env,
+// since the viewer (any regular user) is never that connector's owner.
+export interface ConnectorGlobalSummary {
+  id: string;
+  name: string;
+  description: string;
+  transport: "stdio" | "http";
+  enabled: boolean;
+  runtime: { status: string; tools?: number; tool_names?: string[]; error?: string };
+}
+
 export interface FieldSpec {
   key: string;
   label: string;
@@ -827,6 +838,9 @@ export const api = {
   // One-click OAuth: returns the provider authorize URL for the browser to visit.
   connectorOAuthStart: (presetKey: string) =>
     request<{ url: string }>(`/api/connectors/oauth/${encodeURIComponent(presetKey)}/start`),
+  // Admin-global connectors ("Provided by your organization") — read-only,
+  // redacted (no command/url/env), for Settings' transparency panel.
+  listGlobalConnectors: () => request<ConnectorGlobalSummary[]>("/api/connectors/global"),
 
   // Knowledge bases (OKF): uploaded documents the agent can search to answer from.
   listKnowledge: () => request<KnowledgeBase[]>("/api/knowledge"),
@@ -1165,6 +1179,19 @@ function makeLlmApi(base: string): LlmApi {
 
 export const ADMIN_LLM_API: LlmApi = makeLlmApi("/api/admin");
 export const USER_LLM_API: LlmApi = makeLlmApi("/api/my");
+
+// Admin-global "Pre-built Connectors" — same shape as personal connectors
+// (ConnectorInfo, full detail since the admin IS the owner of these rows),
+// just scoped to /api/admin instead of /api/connectors.
+export const ADMIN_CONNECTOR_API = {
+  list: () => request<ConnectorInfo[]>("/api/admin/connectors"),
+  save: (c: Omit<ConnectorInfo, "id" | "runtime">) =>
+    request<ConnectorInfo>(`/api/admin/connectors/${encodeURIComponent(c.name)}`, {
+      method: "PUT",
+      body: JSON.stringify(c),
+    }),
+  remove: (id: string) => request(`/api/admin/connectors/${id}`, { method: "DELETE" }),
+};
 
 export function openChatSocket(sessionId: string): WebSocket {
   const proto = location.protocol === "https:" ? "wss" : "ws";

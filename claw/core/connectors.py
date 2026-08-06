@@ -1,8 +1,17 @@
-"""Per-user MCP connector manager.
+"""Per-user MCP connector manager, plus a shared pool for admin-global ones.
 
 Connects to the user's enabled MCP servers (stdio or streamable HTTP) and
 registers their tools as `mcp_{connector}_{tool}` in the agent's registry.
 Connections are cached per user and rebuilt only when the config changes.
+
+Admin-global connectors (Control Plane "Pre-built Connectors", owner_id NULL —
+see ConnectorStore.enabled_accessible) are different: unlike a per-user
+connector, which is cheap to hold open only while that one user is active,
+a global connector is shared by every user, so this manager keeps exactly ONE
+live session per global connector for the whole process (see
+_GlobalConnections/sync_global) instead of one per user. Each user's registry
+still gets that tool registered (via sync_tools), it's just backed by the
+shared session rather than a per-user connection.
 """
 
 import asyncio
@@ -12,7 +21,7 @@ import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -103,8 +112,20 @@ class McpToolProxy(Tool):
         schema: dict,
         *,
         tool_call_timeout_seconds: float = _TOOL_CALL_TIMEOUT_SECONDS,
+        session_ref: Callable[[], Any] | None = None,
     ):
+        # `session_ref`, when given, is looked up fresh on every call instead
+        # of using the captured `session` — used only for global-connector
+        # proxies (see sync_global). A global connector's session can be torn
+        # down and replaced (admin edit, error-retry reconnect) while a proxy
+        # built from the OLD session is still registered in some other user's
+        # registry (it's only re-registered on that user's next sync_tools);
+        # without this indirection, that stale proxy would call_tool() against
+        # a permanently-closed session instead of transparently picking up the
+        # new one. `session_ref` closes over the shared, in-place-mutated
+        # _GlobalConnections state, so it always reflects the current session.
         self._session = session
+        self._session_ref = session_ref
         self._remote_name = tool_name
         self._tool_call_timeout_seconds = tool_call_timeout_seconds
         self.name = f"mcp_{connector}_{tool_name}"
@@ -112,8 +133,11 @@ class McpToolProxy(Tool):
         self.parameters = schema or {"type": "object", "properties": {}}
 
     async def execute(self, **kwargs: Any) -> str:
+        session = self._session_ref() if self._session_ref is not None else self._session
+        if session is None:
+            return f"Error: {self.name} is not currently connected (reconnecting) — try again shortly"
         try:
-            result = await self._session.call_tool(
+            result = await session.call_tool(
                 self._remote_name, kwargs, read_timeout_seconds=timedelta(seconds=self._tool_call_timeout_seconds)
             )
         except McpError as exc:
@@ -146,6 +170,46 @@ class _UserConnections:
     errored_monotonic: float | None = None
 
 
+@dataclass
+class _GlobalConnections:
+    """Process-wide (not per-user) pool for admin-global connectors.
+
+    One live session per global connector, shared by every user — see the
+    module docstring. `proxies` holds the already-constructed McpToolProxy
+    instances (bound to the shared session); sync_tools registers the SAME
+    proxy instance into each user's registry rather than building a new one,
+    since a proxy is stateless besides its session reference.
+
+    Reconnects are scoped to ONE connector at a time: `stacks`, `signatures`,
+    and `errored_monotonic` are all keyed by connector name, each with its
+    own AsyncExitStack, so editing, fixing, or removing connector A never
+    tears down or reconnects connector B's already-live session — a single
+    misconfigured or slow pre-built connector no longer causes a momentary
+    disruption for every OTHER pre-built connector's users too (see
+    sync_global). `signature`, by contrast, stays a single aggregate over
+    every enabled global connector: sync_tools (per user) only needs a cheap
+    "did anything about the global set change at all" signal to decide
+    whether to re-derive its own tool registration — it doesn't need, and
+    shouldn't have to know, which specific connector changed.
+    """
+
+    signature: tuple = ()
+    stacks: dict[str, AsyncExitStack] = field(default_factory=dict)
+    signatures: dict[str, tuple] = field(default_factory=dict)
+    sessions: dict[str, Any] = field(default_factory=dict)
+    proxies: dict[str, list["McpToolProxy"]] = field(default_factory=dict)
+    statuses: dict[str, dict] = field(default_factory=dict)
+    errored_monotonic: dict[str, float] = field(default_factory=dict)
+    # True once sync_global has completed at least one full pass. Guards the
+    # lock-busy bypass in sync_global: skipping the refresh when the lock is
+    # contended is safe once the pool has been populated at least once (the
+    # losing caller just proceeds on the still-valid, self-healing cached
+    # snapshot), but NOT before that — otherwise two callers racing to
+    # populate a still-empty pool for the very first time could both bail
+    # out, serving zero global connectors for that call.
+    synced_once: bool = False
+
+
 class ConnectorManager:
     def __init__(
         self,
@@ -162,6 +226,8 @@ class ConnectorManager:
         # Serialize sync_tools per user: it is now driven both by chat turns and
         # by the connectors listing endpoint (composer menu), which can overlap.
         self._locks: dict[str, asyncio.Lock] = {}
+        self._global = _GlobalConnections()
+        self._global_lock = asyncio.Lock()
 
     def _lock(self, user_id: str) -> asyncio.Lock:
         lock = self._locks.get(user_id)
@@ -183,22 +249,61 @@ class ConnectorManager:
     async def status(self, user_id: str) -> dict[str, dict]:
         return dict(self._users.get(user_id, _UserConnections()).statuses)
 
-    async def resolve_tool_names(self, user_id: str, connector_id: str) -> list[str] | None:
+    async def resolve_tool_names(
+        self,
+        user_id: str,
+        connector_id: str,
+        *,
+        owned: list | None = None,
+        global_connectors: list | None = None,
+    ) -> list[str] | None:
         """The tool names a connector is CURRENTLY registered under
         (`mcp_{connector.name}_{tool}`), looked up by the connector's stable
         id rather than its (renameable) name — so a skill linked to this id
         stays correct across a rename or delete+recreate. Requires
         sync_tools() to have already run for this user in this process
         (i.e. call this after sync_tools, not before). None if the connector
-        doesn't belong to this user, or isn't currently connected."""
-        connectors = await self.store.list_for_user(user_id)
-        connector = next((c for c in connectors if c.id == connector_id), None)
-        if connector is None:
+        doesn't belong to this user (and isn't an admin-global one this user
+        can reach), or isn't currently connected.
+
+        `owned`/`global_connectors`, if given, are used instead of querying
+        the store again — a caller resolving several skills in the same turn
+        (see AgentRuntime) should fetch each list once and pass it to every
+        call rather than repeating the same two queries per skill."""
+        if owned is None:
+            owned = await self.store.list_for_user(user_id)
+        connector = next((c for c in owned if c.id == connector_id), None)
+        if connector is not None:
+            state = self._users.get(user_id)
+            if state is None:
+                return None
+            status = state.statuses.get(connector.name)
+            if status is None or status.get("status") != "connected":
+                return None
+            return status.get("tool_names")
+
+        # Not one of this user's own — maybe an admin-global connector this
+        # user can reach. A global connector never lands in _UserConnections
+        # .statuses (only .tool_names — see sync_tools), so its live status
+        # comes from the shared pool instead.
+        if global_connectors is None:
+            global_connectors = await self.store.list_for_global()
+        global_connector = next((c for c in global_connectors if c.id == connector_id), None)
+        if global_connector is None:
             return None
-        state = self._users.get(user_id)
-        if state is None:
+        # Shadowed out (mirrors sync_tools' own-vs-global tie-break) if this
+        # user owns an ENABLED connector of the same name — must match
+        # sync_tools' own_names (enabled_for_user) exactly. Comparing against
+        # every owned connector regardless of `enabled` used to report a
+        # global connector as shadowed (returning None) whenever the user
+        # merely owned a *disabled* same-name connector, even though
+        # sync_tools doesn't count a disabled connector when deciding
+        # whether to register the global one — so the tool was actually live
+        # in the registry while this method claimed it wasn't.
+        enabled_own_names = {c.name for c in owned if c.enabled}
+        if global_connector.name in enabled_own_names:
             return None
-        status = state.statuses.get(connector.name)
+        status = self._global.statuses.get(global_connector.name)
         if status is None or status.get("status") != "connected":
             return None
         return status.get("tool_names")
@@ -219,10 +324,32 @@ class ConnectorManager:
         short-circuit on the cached (error) state, exactly as for an unchanged
         all-healthy config, keeping turns and page loads fast. A config change
         (signature) or an explicit invalidate() still forces an immediate
-        rebuild regardless of the cooldown."""
+        rebuild regardless of the cooldown.
+
+        Also merges in the admin-global connectors this user can reach (see
+        ConnectorStore.enabled_accessible): sync_global() first refreshes the
+        shared pool, then any global connector not shadowed by one of this
+        user's own (by name) gets its already-built tool proxies registered
+        into this user's registry — bound to the shared session, never
+        entered into this user's own stack, since a global connector's
+        lifecycle belongs to the shared pool, not this user."""
+        await self.sync_global()
         async with self._lock(user_id):
             connectors = await self.store.enabled_for_user(user_id)
-            signature = tuple(sorted((c.id, c.updated_at.isoformat()) for c in connectors))
+            own_names = {c.name for c in connectors}
+            global_state = self._global
+            effective_global = tuple(
+                sorted(
+                    name
+                    for name, status in global_state.statuses.items()
+                    if status.get("status") == "connected" and name not in own_names
+                )
+            )
+            signature = (
+                tuple(sorted((c.id, c.updated_at.isoformat()) for c in connectors)),
+                global_state.signature,
+                effective_global,
+            )
             state = self._users.get(user_id)
             had_error = state is not None and any(s.get("status") == "error" for s in state.statuses.values())
             within_error_cooldown = (
@@ -234,8 +361,34 @@ class ConnectorManager:
                 return
 
             await self._close_user(user_id, registry)
+            # _close_user can genuinely await real I/O (tearing down MCP
+            # sessions), which yields to the event loop — a concurrent
+            # sync_global() (another user's turn, or an admin editing one
+            # global connector) could reconnect one or more connectors in
+            # that window. self._global is mutated in place (never swapped to
+            # a new object — see _GlobalConnections), so `global_state`
+            # still refers to the live, current object either way; but its
+            # .statuses/.proxies entries for whichever connector(s) just
+            # changed need re-reading now, after the only await between here
+            # and where they're used, so effective_global/signature reflect
+            # the latest state rather than the snapshot taken before the await.
+            global_state = self._global
+            effective_global = tuple(
+                sorted(
+                    name
+                    for name, status in global_state.statuses.items()
+                    if status.get("status") == "connected" and name not in own_names
+                )
+            )
+            signature = (signature[0], global_state.signature, effective_global)
             state = _UserConnections(signature=signature, stack=AsyncExitStack())
             self._users[user_id] = state
+
+            for name in effective_global:
+                for proxy in global_state.proxies.get(name, []):
+                    registry.register(proxy)
+                    state.tool_names.append(proxy.name)
+
             if not connectors:
                 return
 
@@ -413,3 +566,198 @@ class ConnectorManager:
         state = self._users.get(user_id)
         if state is not None:
             state.signature = ()
+
+    async def status_global(self) -> dict[str, dict]:
+        return dict(self._global.statuses)
+
+    async def sync_global(self) -> None:
+        """Ensure the shared pool reflects the admin-global connectors.
+
+        Same signature-diff / error-retry-cooldown shape as sync_tools, but
+        scoped to ConnectorStore.enabled_for_global() and keyed process-wide
+        (self._global), not per user — see the module docstring for why a
+        global connector gets exactly one live session for the whole process
+        instead of one per user.
+
+        Reconnects are scoped per connector (see _GlobalConnections):
+        editing, fixing, or removing one global connector only tears down
+        and rebuilds THAT connector's own session — every other global
+        connector's already-live session, and every user currently reaching
+        it, is left completely undisturbed. Only the aggregate `signature`
+        is recomputed unconditionally on every call (cheap, no I/O); it
+        exists solely so sync_tools can detect "something about the global
+        set changed" without needing to know which connector.
+
+        Called at the top of every user's sync_tools(), i.e. on every chat
+        turn and /connectors listing — so if a rebuild (or a hung connect) is
+        already in progress, every OTHER concurrent turn/listing would
+        otherwise queue up waiting on the same lock instead of proceeding
+        with the still-valid cached self._global it already has. Since this
+        method only ever refreshes an already-cached, self-healing snapshot
+        (sync_tools re-checks the signature next call regardless), it's safe
+        to skip the refresh entirely rather than block when the lock is
+        already held — the caller just proceeds with whatever self._global
+        currently is, UNLESS the pool has never completed a first sync yet
+        (self._global.synced_once), in which case it waits instead of
+        risking every early caller bailing out on a still-completely-empty
+        pool."""
+        if self._global_lock.locked() and self._global.synced_once:
+            return
+        async with self._global_lock:
+            connectors = await self.store.enabled_for_global()
+            state = self._global
+            current_names = {c.name for c in connectors}
+
+            # A connector no longer enabled (disabled or deleted) loses its
+            # session entirely — closing only ITS stack, never another's.
+            for stale_name in [n for n in state.stacks if n not in current_names]:
+                await self._close_one_global(state, stale_name)
+
+            to_reconnect = []
+            for connector in connectors:
+                connector_signature = (connector.id, connector.updated_at.isoformat())
+                had_error = state.statuses.get(connector.name, {}).get("status") == "error"
+                errored_at = state.errored_monotonic.get(connector.name)
+                within_error_cooldown = (
+                    had_error
+                    and errored_at is not None
+                    and (time.monotonic() - errored_at) < self.error_retry_cooldown_seconds
+                )
+                if state.signatures.get(connector.name) == connector_signature and (
+                    not had_error or within_error_cooldown
+                ):
+                    continue  # unchanged and healthy (or still cooling down) — leave it running
+                await self._close_one_global(state, connector.name)
+                to_reconnect.append(connector)
+
+            if to_reconnect:
+                stacks = {c.name: AsyncExitStack() for c in to_reconnect}
+                for c in to_reconnect:
+                    state.stacks[c.name] = stacks[c.name]
+                    state.signatures[c.name] = (c.id, c.updated_at.isoformat())
+                    await stacks[c.name].__aenter__()
+                # Connect the connectors that actually changed concurrently, not
+                # one at a time — same rationale as sync_tools' own gather over a
+                # user's connectors: N broken/hanging ones should cost one
+                # timeout period total, not N of them, while still only ever
+                # touching the sessions that actually need to change.
+                results = await asyncio.gather(
+                    *(self._connect_one(stacks[c.name], c) for c in to_reconnect)
+                )
+                for connector, session, listed, error in results:
+                    if error is not None:
+                        state.statuses[connector.name] = error
+                        state.errored_monotonic[connector.name] = time.monotonic()
+                        logger.warning("MCP global connector {} {}", connector.name, error["error"])
+                        continue
+                    state.errored_monotonic.pop(connector.name, None)
+                    proxies = [
+                        McpToolProxy(
+                            session,
+                            connector.name,
+                            tool.name,
+                            tool.description or "",
+                            tool.inputSchema or {},
+                            tool_call_timeout_seconds=self._effective_timeout_seconds(
+                                connector, self.tool_call_timeout_seconds
+                            ),
+                            # See McpToolProxy.__init__: makes an already-
+                            # registered (possibly stale) proxy in some other
+                            # user's registry transparently follow this
+                            # connector's session if it's later torn down and
+                            # rebuilt, instead of erroring against a dead one.
+                            session_ref=(lambda name=connector.name: state.sessions.get(name)),
+                        )
+                        for tool in listed.tools
+                    ]
+                    state.sessions[connector.name] = session
+                    state.proxies[connector.name] = proxies
+                    state.statuses[connector.name] = {
+                        "status": "connected",
+                        "tools": len(proxies),
+                        "tool_names": [p.name for p in proxies],
+                    }
+                    logger.info(
+                        "MCP global connector {} connected with {} tools", connector.name, len(proxies)
+                    )
+
+            state.signature = tuple(sorted((c.id, c.updated_at.isoformat()) for c in connectors))
+            state.synced_once = True
+
+    async def _close_one_global(self, state: "_GlobalConnections", name: str) -> None:
+        """Tear down exactly ONE global connector's own session/stack and
+        clear its bookkeeping — never touches any other connector's stack,
+        session, or status. Does NOT touch any user's registry/tool_names;
+        those are unregistered when each user's own sync_tools next runs and
+        notices the aggregate global signature changed (see sync_tools),
+        same as how a per-user connector's removal is only reflected in the
+        registry on that user's next sync."""
+        stack = state.stacks.pop(name, None)
+        state.sessions.pop(name, None)
+        state.proxies.pop(name, None)
+        state.statuses.pop(name, None)
+        state.signatures.pop(name, None)
+        state.errored_monotonic.pop(name, None)
+        if stack is None:
+            return
+        try:
+            await stack.aclose()
+        except asyncio.CancelledError:
+            # See _connect_one/_close_user for why this cross-task anyio
+            # hazard needs an explicit uncancel() instead of propagating.
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            logger.debug("Global MCP stack close for {} cancelled across tasks; ignored", name)
+        except Exception:
+            logger.debug("Global MCP stack close for {} raised; ignored", name)
+
+    async def close_global(self, name: str, connector_id: str | None = None) -> None:
+        """Immediately tear down one global connector's live session, rather
+        than waiting for sync_global's own "no longer enabled" cleanup to
+        notice it's gone on some future call — that cleanup can be skipped
+        entirely if the call loses the `_global_lock` race (see sync_global),
+        which would leave a just-deleted connector's session/proxies (and any
+        already-registered user proxies) live and callable for longer than
+        expected. Used by delete_connector.
+
+        Bounded lock wait: `_global_lock` is also held for the full duration
+        of sync_global's own reconnect pass, which can take up to a
+        connector's own (unrelated) connect timeout. Blocking the caller (an
+        admin's DELETE request) for that long just to get an immediate close
+        would be worse than the problem this method fixes, so on contention
+        this gives up quickly and falls back to the same lazy, self-healing
+        cleanup sync_global already does on its own next call.
+
+        `connector_id`, when given, guards against a narrow race: if this
+        call is delayed (lock contention) long enough that the connector
+        `name` referred to has since been deleted AND a new, different
+        connector recreated under the same name, closing unconditionally by
+        name alone would tear down that unrelated newer connector's session
+        instead of a no-op. Only close if the name's currently-tracked
+        signature still belongs to the id this call was meant for."""
+        try:
+            await asyncio.wait_for(self._global_lock.acquire(), timeout=0.5)
+        except TimeoutError:
+            return
+        try:
+            if connector_id is not None:
+                current = self._global.signatures.get(name)
+                if current is not None and current[0] != connector_id:
+                    return
+            await self._close_one_global(self._global, name)
+        finally:
+            self._global_lock.release()
+
+    async def invalidate_global(self, name: str | None = None) -> None:
+        """Force a global connector to reconnect on its next sync_global,
+        bypassing the error-retry cooldown too. Scoped to `name` alone by
+        default use (an admin editing/deleting one connector) so it never
+        disturbs any other connector's already-live session; pass no name
+        only for an explicit "reconnect every global connector now"."""
+        if name is None:
+            self._global.signatures.clear()
+            self._global.errored_monotonic.clear()
+        else:
+            self._global.signatures.pop(name, None)
+            self._global.errored_monotonic.pop(name, None)

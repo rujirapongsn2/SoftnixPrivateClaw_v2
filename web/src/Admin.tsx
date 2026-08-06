@@ -36,6 +36,7 @@ import {
   Moon,
   Palette,
   Pencil,
+  Plug,
   Plus,
   Router,
   ScrollText,
@@ -58,6 +59,14 @@ import {
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
+import {
+  ConnectorBrandTile,
+  ConnectorToolNames,
+  formatEnvText,
+  parseEnvText,
+  presetAuthHint,
+  slugifyConnectorName,
+} from "./Settings";
 import { useBranding, useT } from "./branding";
 import {
   ActivityPoint,
@@ -69,6 +78,8 @@ import {
   AdminOverview,
   AdminUser,
   AuditRow,
+  type ConnectorInfo,
+  type ConnectorPreset,
   GroupInfo,
   GuardrailRule,
   GuardrailTestResult,
@@ -91,6 +102,7 @@ import {
   type UserImportMapping,
   type UserImportParseResult,
   api,
+  ADMIN_CONNECTOR_API,
   ADMIN_LLM_API,
   type LlmApi,
 } from "./api";
@@ -98,6 +110,7 @@ import {
 export type AdminSection =
   | "overview"
   | "providers"
+  | "connectors"
   | "plans"
   | "guardrails"
   | "oauth"
@@ -122,6 +135,7 @@ export const COST_LABEL: Record<ModelCost, string> = {
 export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconType | IconName }[] = [
   { key: "overview", labelKey: "admin.nav.overview", icon: LayoutDashboard },
   { key: "providers", labelKey: "admin.nav.providers", icon: Cpu },
+  { key: "connectors", labelKey: "admin.nav.connectors", icon: Plug },
   { key: "plans", labelKey: "admin.nav.plans", icon: Gauge },
   { key: "guardrails", labelKey: "admin.nav.guardrails", icon: ShieldCheck },
   { key: "oauth", labelKey: "admin.nav.oauth", icon: KeyRound },
@@ -151,6 +165,7 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
       <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
         {section === "overview" && <OverviewPanel />}
         {section === "providers" && <ProvidersPanel llmApi={ADMIN_LLM_API} scope="admin" />}
+        {section === "connectors" && <PrebuiltConnectorsPanel />}
         {section === "plans" && <PlansPanel />}
         {section === "guardrails" && <GuardrailsPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
@@ -972,6 +987,12 @@ function ModelUsageChart({ data }: { data: ModelUsagePoint[] }) {
 // carries LiteLLM's model-id prefix + example, and whether a base URL is
 // required (only self-hosted / OpenAI-compatible servers need a custom one —
 // LiteLLM already knows the hosted endpoints).
+interface ProviderBaseOption {
+  key: string;
+  labelKey: string;
+  apiBase: string;
+}
+
 interface ProviderPreset {
   key: string;
   name: string;
@@ -981,6 +1002,9 @@ interface ProviderPreset {
   needsBase: boolean;
   prefix: string;
   example: string;
+  /** Presets with more than one valid endpoint (e.g. Z.AI's General API vs.
+   * GLM Coding Plan) offer a picker instead of a single fixed apiBase. */
+  baseOptions?: ProviderBaseOption[];
 }
 
 const PROVIDER_PRESETS: ProviderPreset[] = [
@@ -991,7 +1015,20 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
   { key: "openrouter", name: "OpenRouter", subtitle: "Any model", icon: Router, apiBase: "https://openrouter.ai/api/v1", needsBase: false, prefix: "openrouter/", example: "openrouter/anthropic/claude-sonnet-5" },
   { key: "compatible", name: "OpenAI-compatible", subtitle: "vLLM, Ollama, LM Studio", icon: Server, apiBase: "", needsBase: true, prefix: "openai/", example: "openai/your-model" },
   { key: "moonshot", name: "Kimi", subtitle: "Moonshot AI", icon: Moon, apiBase: "https://api.moonshot.ai/v1", needsBase: false, prefix: "moonshot/", example: "moonshot/kimi-k2" },
-  { key: "zai", name: "Z.AI", subtitle: "Zhipu GLM", icon: Zap, apiBase: "https://api.z.ai/api/paas/v4", needsBase: false, prefix: "zai/", example: "zai/glm-4.6" },
+  {
+    key: "zai",
+    name: "Z.AI",
+    subtitle: "Zhipu GLM",
+    icon: Zap,
+    apiBase: "https://api.z.ai/api/paas/v4",
+    needsBase: false,
+    prefix: "zai/",
+    example: "zai/glm-4.6",
+    baseOptions: [
+      { key: "general", labelKey: "admin.providers.zaiGeneral", apiBase: "https://api.z.ai/api/paas/v4" },
+      { key: "coding", labelKey: "admin.providers.zaiCoding", apiBase: "https://api.z.ai/api/coding/paas/v4" },
+    ],
+  },
   { key: "dashscope", name: "Qwen", subtitle: "Alibaba Cloud", icon: Cloud, apiBase: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", needsBase: false, prefix: "dashscope/", example: "dashscope/qwen3-max" },
 ];
 
@@ -1229,6 +1266,30 @@ function AddProviderForm({
             <Divider />
             <TextInput label={t("admin.providers.displayName")} placeholder={preset.name} value={name} onChange={setName} />
 
+            {(() => {
+              const matchedBaseOption = preset.baseOptions?.find((o) => o.apiBase === apiBase);
+              // Only render the picker while apiBase still matches one of the preset's
+              // known endpoints — once the base URL override below is hand-edited away
+              // from either option, fall through to the plain text field instead of
+              // showing a stale/incorrect segment as "selected" (which, per
+              // SegmentedControl's click-when-already-selected-is-a-no-op behavior,
+              // the user couldn't fix by clicking it again).
+              return matchedBaseOption ? (
+                <SegmentedControl
+                  value={matchedBaseOption.key}
+                  onChange={(v) => {
+                    const opt = preset.baseOptions!.find((o) => o.key === v);
+                    if (opt) setApiBase(opt.apiBase);
+                  }}
+                  label={t("admin.providers.zaiEndpoint")}
+                >
+                  {preset.baseOptions!.map((o) => (
+                    <SegmentedControlItem key={o.key} value={o.key} label={t(o.labelKey)} />
+                  ))}
+                </SegmentedControl>
+              ) : null;
+            })()}
+
             {preset.needsBase ? (
               <TextInput
                 label={t("admin.providers.baseUrl")}
@@ -1327,6 +1388,14 @@ function ProviderCard({
   const toast = useToast();
 
   const logo = provider.models.length > 0 ? logoForModelId(provider.models[0].model_id) : null;
+  // model_prefix is a free-text field, not a stored link back to the preset that
+  // created this provider — so also require apiBase to exactly match one of the
+  // preset's known endpoints before showing its picker. Without this, an unrelated
+  // provider whose prefix happens to equal "zai" (or a zai provider whose base URL
+  // was hand-edited to something else) would show/let the picker silently
+  // overwrite a base URL it has no business touching.
+  const matchedPreset = PROVIDER_PRESETS.find((p) => p.prefix.replace(/\/$/, "") === provider.model_prefix);
+  const matchedBaseOption = matchedPreset?.baseOptions?.find((o) => o.apiBase === apiBase);
 
   return (
     <Card padding={2} variant={provider.enabled ? "default" : "muted"}>
@@ -1395,6 +1464,20 @@ function ProviderCard({
         <Card padding={2} variant="muted">
           <div className="claw-panel">
             <TextInput label={t("admin.providers.name")} value={name} onChange={setName} />
+            {matchedBaseOption && (
+              <SegmentedControl
+                value={matchedBaseOption.key}
+                onChange={(v) => {
+                  const opt = matchedPreset!.baseOptions!.find((o) => o.key === v);
+                  if (opt) setApiBase(opt.apiBase);
+                }}
+                label={t("admin.providers.zaiEndpoint")}
+              >
+                {matchedPreset!.baseOptions!.map((o) => (
+                  <SegmentedControlItem key={o.key} value={o.key} label={t(o.labelKey)} />
+                ))}
+              </SegmentedControl>
+            )}
             <TextInput label={t("admin.providers.apiBaseUrl")} value={apiBase} onChange={setApiBase} />
             <TextInput
               label={provider.has_key ? t("admin.providers.apiKeyKeepCurrent") : t("admin.providers.apiKey")}
@@ -1800,6 +1883,431 @@ function AddModelForm({
         </div>
       </div>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------- Pre-built Connectors
+
+// Admin-provisioned MCP connectors, shared by every user automatically (no
+// per-user setup) — see claw/api/connector_shared.py and
+// claw/core/connectors.py's shared pool. Structurally mirrors
+// Settings.tsx::ConnectorsPanel (preset catalog + custom editor) but always
+// admin-scoped (arbitrary stdio commands allowed, no OAuth presets — an
+// OAuth token is a personal mailbox/account and can't be shared) and talks
+// to ADMIN_CONNECTOR_API instead of the personal /api/connectors routes.
+const CONNECTOR_CATEGORY_ORDER = ["Productivity", "Communication", "Search", "Finance", "Automation", "Softnix", "Other"];
+
+function AdminGuidedFields({
+  preset,
+  installed,
+  onCancel,
+  onSaved,
+  onManage,
+}: {
+  preset: ConnectorPreset;
+  installed?: ConnectorInfo;
+  onCancel: () => void;
+  onSaved: () => Promise<void>;
+  onManage: (c: ConnectorInfo) => void;
+}) {
+  const t = useT();
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [url, setUrl] = useState(preset.url);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setError("");
+    setBusy(true);
+    try {
+      const env: Record<string, string> = {};
+      for (const f of preset.fields) {
+        const raw = (values[f.key] ?? "").trim();
+        if (!raw) {
+          if (!f.optional) throw new Error(t("settings.connectors.fieldRequired", { label: f.label }));
+          continue;
+        }
+        env[f.key] = f.prefix && !raw.startsWith(f.prefix) ? f.prefix + raw : raw;
+      }
+      const effectiveUrl = preset.url_configurable ? url.trim() || preset.url : preset.url;
+      if (preset.url_configurable && !effectiveUrl) throw new Error(t("settings.connectors.mcpUrlRequired"));
+      await ADMIN_CONNECTOR_API.save({
+        name: preset.name,
+        description: preset.description ?? "",
+        transport: preset.transport,
+        command: preset.command,
+        url: effectiveUrl,
+        env,
+        timeout_ms: null,
+        enabled: true,
+      });
+      await onSaved();
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="claw-panel claw-setup">
+      <div className="claw-setup-header">
+        <ConnectorBrandTile presetKey={preset.key} />
+        <div>
+          <Text type="display-3">{preset.label}</Text>
+          <Text color="secondary" as="p">
+            {preset.description}
+          </Text>
+        </div>
+      </div>
+      {preset.url_configurable && (
+        <div className="claw-setup-field">
+          <TextInput
+            label={t("settings.connectors.mcpUrlLabel")}
+            type="text"
+            value={url}
+            placeholder={preset.url}
+            onChange={setUrl}
+          />
+        </div>
+      )}
+      {preset.fields.map((f) => (
+        <div key={f.key} className="claw-setup-field">
+          <TextInput
+            label={f.optional ? t("settings.connectors.fieldOptional", { label: f.label }) : f.label}
+            type={f.secret ? "password" : "text"}
+            value={values[f.key] ?? ""}
+            placeholder={f.placeholder}
+            onChange={(v) => setValues((prev) => ({ ...prev, [f.key]: v }))}
+          />
+          {f.help && (
+            <Text size="sm" color="secondary" as="p" className="claw-setup-help">
+              {f.help}
+            </Text>
+          )}
+        </div>
+      ))}
+      {error && <ErrorText>{error}</ErrorText>}
+      <div className="claw-row">
+        <Button
+          label={busy ? t("settings.connectors.saving") : t("settings.connectors.addConnector")}
+          icon={<Icon icon="check" size="sm" />}
+          isDisabled={busy}
+          clickAction={save}
+        />
+        {installed && (
+          <Button label={t("settings.connectors.manage")} variant="secondary" clickAction={() => onManage(installed)} />
+        )}
+        <Button label={t("admin.common.cancel")} variant="ghost" clickAction={onCancel} />
+      </div>
+    </div>
+  );
+}
+
+function PrebuiltConnectorsPanel() {
+  const t = useT();
+  const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
+  const [presets, setPresets] = useState<ConnectorPreset[]>([]);
+  const [editing, setEditing] = useState<Partial<ConnectorInfo> | null>(null);
+  const [setupPreset, setSetupPreset] = useState<ConnectorPreset | null>(null);
+  const { error, guard } = useAsyncError();
+  const [timeoutText, setTimeoutText] = useState("");
+  const [timeoutTextFor, setTimeoutTextFor] = useState<string | null>(null);
+  const editingKey = editing ? (editing.id ?? "__new__") : null;
+  if (editingKey !== timeoutTextFor) {
+    setTimeoutTextFor(editingKey);
+    setTimeoutText(editing?.timeout_ms != null ? String(editing.timeout_ms) : "");
+  }
+
+  const reload = useCallback(() => ADMIN_CONNECTOR_API.list().then(setConnectors), []);
+  useEffect(() => {
+    void reload();
+    // OAuth presets are excluded here — an OAuth token is bound to one
+    // personal account/mailbox and can't be meaningfully shared org-wide, so
+    // they stay a per-user-only setup (Settings.tsx keeps the full catalog).
+    api
+      .connectorPresets()
+      .then((ps) => setPresets(ps.filter((p) => p.setup !== "oauth")))
+      .catch(() => setPresets([]));
+  }, [reload]);
+
+  const installedByName = new Map(connectors.map((c) => [c.name.toLowerCase(), c]));
+
+  const grouped = new Map<string, ConnectorPreset[]>();
+  for (const p of presets) {
+    const cat = p.category || "Other";
+    (grouped.get(cat) ?? grouped.set(cat, []).get(cat)!).push(p);
+  }
+  const categories = [...grouped.keys()].sort(
+    (a, b) => (CONNECTOR_CATEGORY_ORDER.indexOf(a) + 1 || 99) - (CONNECTOR_CATEGORY_ORDER.indexOf(b) + 1 || 99),
+  );
+
+  if (editing) {
+    const transport = editing.transport ?? "stdio";
+    return (
+      <div className="claw-panel">
+        <TextInput
+          label={t("settings.connectors.nameLabel")}
+          value={editing.name ?? ""}
+          onChange={(v) => setEditing({ ...editing, name: slugifyConnectorName(v) })}
+          isDisabled={!!editing.id}
+        />
+        <TextArea
+          label={t("settings.connectors.descOptional")}
+          value={editing.description ?? ""}
+          onChange={(v) => setEditing({ ...editing, description: v })}
+          rows={2}
+        />
+        <div className="claw-row">
+          <Button
+            label={t("settings.connectors.transportStdio")}
+            size="sm"
+            variant={transport === "stdio" ? "primary" : "secondary"}
+            clickAction={() => setEditing({ ...editing, transport: "stdio" })}
+          />
+          <Button
+            label={t("settings.connectors.transportHttp")}
+            size="sm"
+            variant={transport === "http" ? "primary" : "secondary"}
+            clickAction={() => setEditing({ ...editing, transport: "http" })}
+          />
+        </div>
+        {transport === "stdio" ? (
+          <TextInput
+            label={t("settings.connectors.commandLabel")}
+            value={editing.command ?? ""}
+            onChange={(v) => setEditing({ ...editing, command: v })}
+          />
+        ) : (
+          <TextInput
+            label={t("settings.connectors.urlLabel")}
+            value={editing.url ?? ""}
+            onChange={(v) => setEditing({ ...editing, url: v })}
+          />
+        )}
+        <TextArea
+          label={t("settings.connectors.envLabel")}
+          value={formatEnvText(editing.env)}
+          onChange={(v) => setEditing({ ...editing, env: parseEnvText(v) })}
+          rows={3}
+        />
+        <TextInput
+          label={t("settings.connectors.timeoutLabel")}
+          placeholder={t("settings.connectors.timeoutPlaceholder")}
+          description={t("settings.connectors.timeoutDesc")}
+          value={timeoutText}
+          onChange={(v) => {
+            setTimeoutText(v);
+            if (v.trim() === "") {
+              setEditing({ ...editing, timeout_ms: null });
+              return;
+            }
+            const parsed = parseInt(v, 10);
+            if (Number.isNaN(parsed)) return;
+            setEditing({ ...editing, timeout_ms: parsed });
+          }}
+        />
+        <Switch
+          value={editing.enabled ?? true}
+          label={t("settings.connectors.enableServer")}
+          changeAction={(checked) => setEditing({ ...editing, enabled: checked })}
+        />
+        {error && <ErrorText>{error}</ErrorText>}
+        <div className="claw-row">
+          <Button
+            label={t("settings.connectors.saveConnector")}
+            icon={<Icon icon="check" size="sm" />}
+            clickAction={() =>
+              guard(async () => {
+                await ADMIN_CONNECTOR_API.save({
+                  name: (editing.name ?? "").trim(),
+                  description: editing.description ?? "",
+                  transport,
+                  command: editing.command ?? "",
+                  url: editing.url ?? "",
+                  env: editing.env ?? {},
+                  timeout_ms:
+                    editing.timeout_ms != null
+                      ? Math.max(1000, Math.min(120000, editing.timeout_ms))
+                      : null,
+                  enabled: editing.enabled ?? true,
+                });
+                setEditing(null);
+                await reload();
+              })
+            }
+          />
+          <Button label={t("admin.common.cancel")} variant="ghost" clickAction={() => setEditing(null)} />
+        </div>
+      </div>
+    );
+  }
+
+  if (setupPreset) {
+    return (
+      <AdminGuidedFields
+        preset={setupPreset}
+        installed={installedByName.get(setupPreset.name.toLowerCase())}
+        onCancel={() => setSetupPreset(null)}
+        onSaved={async () => {
+          setSetupPreset(null);
+          await reload();
+        }}
+        onManage={(c) => {
+          setSetupPreset(null);
+          setEditing(c);
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="claw-panel">
+      <div className="claw-row claw-row-between">
+        <Text color="secondary">{t("admin.connectors.intro")}</Text>
+        <Button
+          label={t("settings.connectors.addCustom")}
+          icon={<Icon icon={Plus} size="sm" />}
+          size="sm"
+          variant="secondary"
+          clickAction={() => setEditing({ transport: "stdio", enabled: true })}
+        />
+      </div>
+      {error && <ErrorText>{error}</ErrorText>}
+
+      {categories.map((cat) => (
+        <div key={cat} className="claw-connector-category">
+          <Text type="label" color="secondary" className="claw-connector-cat-title">
+            {cat}
+          </Text>
+          <Divider />
+          <div className="claw-connector-grid">
+            {(grouped.get(cat) ?? []).map((p) => {
+              const installed = installedByName.get(p.name.toLowerCase());
+              return (
+                <Card key={p.key} padding={2} className="claw-connector-card">
+                  <ConnectorBrandTile presetKey={p.key} />
+                  <div className="claw-connector-body">
+                    <Text weight="semibold" className="claw-connector-name">
+                      {p.label}
+                    </Text>
+                    <Text size="sm" color="secondary" as="p" className="claw-connector-desc">
+                      {p.description}
+                    </Text>
+                    <div className="claw-connector-meta">
+                      {installed?.runtime.status === "connected" ? (
+                        <Badge
+                          variant="success"
+                          icon={<Icon icon="check" size="xsm" />}
+                          label={t("settings.connectors.toolsCount", { count: String(installed.runtime.tools ?? 0) })}
+                        />
+                      ) : installed?.runtime.status === "error" ? (
+                        <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.error")} />
+                      ) : (
+                        (() => {
+                          const hint = presetAuthHint(p, t);
+                          return hint ? <span className="claw-connector-auth">{hint}</span> : null;
+                        })()
+                      )}
+                    </div>
+                  </div>
+                  <div className="claw-connector-actions">
+                    {installed ? (
+                      <Button
+                        label={t("settings.connectors.manage")}
+                        size="sm"
+                        variant="secondary"
+                        clickAction={() => setEditing(installed)}
+                      />
+                    ) : (
+                      <Button
+                        label={t("settings.connectors.add")}
+                        size="sm"
+                        variant="primary"
+                        clickAction={() => setSetupPreset(p)}
+                      />
+                    )}
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      {connectors.length > 0 && (
+        <div className="claw-connector-category">
+          <Text type="label" color="secondary" className="claw-connector-cat-title">
+            {t("admin.connectors.provisioned")}
+          </Text>
+          <Divider />
+          {connectors.map((c) => (
+            <Card key={c.id} padding={2}>
+              <div className="claw-row claw-row-between">
+                <div>
+                  <div className="claw-row">
+                    <Text weight="semibold">{c.name}</Text>
+                    <Badge variant="neutral" label={c.transport} />
+                    {c.runtime.status === "connected" && (
+                      <Badge
+                        variant="success"
+                        icon={<Icon icon="check" size="xsm" />}
+                        label={t("settings.connectors.toolsCount", { count: String(c.runtime.tools) })}
+                      />
+                    )}
+                    {c.runtime.status === "error" && (
+                      <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.error")} />
+                    )}
+                  </div>
+                  <Text size="sm" color="secondary" as="p">
+                    {c.transport === "stdio" ? c.command : c.url}
+                  </Text>
+                  {(c.runtime.tool_names?.length ?? 0) > 0 && <ConnectorToolNames names={c.runtime.tool_names!} />}
+                  {c.runtime.error && (
+                    <Text size="sm" color="secondary" as="p">
+                      {c.runtime.error}
+                    </Text>
+                  )}
+                </div>
+                <div className="claw-row">
+                  <Switch
+                    value={c.enabled}
+                    label={t("admin.connectors.enableName", { name: c.name })}
+                    isLabelHidden
+                    changeAction={(checked) =>
+                      guard(async () => {
+                        await ADMIN_CONNECTOR_API.save({ ...c, enabled: checked });
+                        setEditing((prev) => (prev?.id === c.id ? { ...prev, enabled: checked } : prev));
+                        await reload();
+                      })
+                    }
+                  />
+                  <Button
+                    label={t("admin.common.edit")}
+                    icon={<Icon icon={Pencil} size="sm" />}
+                    size="sm"
+                    variant="ghost"
+                    clickAction={() => setEditing(c)}
+                  />
+                  <Button
+                    label={t("admin.common.delete")}
+                    icon={<Icon icon={Trash2} size="sm" />}
+                    size="sm"
+                    variant="destructive"
+                    clickAction={() =>
+                      guard(async () => {
+                        await ADMIN_CONNECTOR_API.remove(c.id);
+                        setEditing((prev) => (prev?.id === c.id ? null : prev));
+                        await reload();
+                      })
+                    }
+                  />
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

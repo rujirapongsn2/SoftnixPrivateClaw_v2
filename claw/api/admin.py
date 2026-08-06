@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
+from claw.api import connector_shared as connectors
 from claw.api import llm_shared as llm
 from claw.api.auth import _is_pending_imported_account, _send_activation_email
 from claw.api.branding_shared import ChatBackground, FontSize, Language
@@ -1034,6 +1035,39 @@ async def delete_model(
     model_pk: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
 ) -> dict:
     return await llm.delete_model(state, model_pk, owner_id=None)
+
+
+# ---------------------------------------------------------------- Pre-built Connectors
+# Admin-global MCP connectors (owner_id=None), shared by every user with no
+# per-user setup. The identical personal-connector routes (owner_id=<uid>)
+# live in claw/api/manage.py and call the same shared handlers — see
+# claw/api/connector_shared.py. Unlike personal connectors, arbitrary stdio
+# (local command) connectors are always allowed here — reached only via
+# require_admin, so there's no non-admin caller to restrict.
+
+
+@router.get("/connectors")
+async def list_admin_connectors(
+    admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> list:
+    return await connectors.list_connectors(state, owner_id=None)
+
+
+@router.put("/connectors/{name}")
+async def upsert_admin_connector(
+    name: str,
+    body: connectors.ConnectorBody,
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    return await connectors.upsert_connector(state, name, body, owner_id=None, allow_arbitrary_stdio=True)
+
+
+@router.delete("/connectors/{connector_id}")
+async def delete_admin_connector(
+    connector_id: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    return await connectors.delete_connector(state, connector_id, owner_id=None)
 
 
 # ---------------------------------------------------------------- guardrails

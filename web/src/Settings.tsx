@@ -56,6 +56,7 @@ import {
   BrandingChatBackground,
   BrandingFontSize,
   BrandingLanguage,
+  ConnectorGlobalSummary,
   ConnectorInfo,
   ConnectorPreset,
   KnowledgeBase,
@@ -418,6 +419,7 @@ function SkillsPanel() {
   const t = useT();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
+  const [globalConnectors, setGlobalConnectors] = useState<ConnectorGlobalSummary[]>([]);
   const [editing, setEditing] = useState<Partial<SkillInfo> | null>(null);
   const [viewingDetail, setViewingDetail] = useState<SkillInfo | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -427,7 +429,21 @@ function SkillsPanel() {
   useEffect(() => {
     void reload();
     void api.listConnectors().then(setConnectors);
+    // Admin-global ("Pre-built") connectors are picked from a separate
+    // endpoint since they have no owner_id row of this user's own — a skill
+    // can link to either kind, so both lists feed the picker below.
+    void api.listGlobalConnectors().then(setGlobalConnectors).catch(() => setGlobalConnectors([]));
   }, [reload]);
+
+  // A user's own ENABLED connector shadows a global one of the same name
+  // (mirrors the backend's own-vs-global tie-break, which only shadows with
+  // enabled connectors — see claw/core/connectors.py's sync_tools own_names,
+  // built from enabled_for_user), so it shouldn't also be offered here as a
+  // separate, dead-ended pick. A disabled same-named connector must NOT
+  // shadow here, or the global one would be wrongly hidden from the picker
+  // even though it's actually live and usable.
+  const ownNames = new Set(connectors.filter((c) => c.enabled).map((c) => c.name));
+  const pickableGlobalConnectors = globalConnectors.filter((c) => !ownNames.has(c.name));
 
   if (editing) {
     const readOnly = !!editing.builtin;
@@ -457,7 +473,7 @@ function SkillsPanel() {
           rows={10}
           isDisabled={readOnly}
         />
-        {!readOnly && connectors.length > 0 && (
+        {!readOnly && (connectors.length > 0 || pickableGlobalConnectors.length > 0) && (
           <div className="claw-field-group">
             <Text size="sm" color="secondary">
               {t("settings.skills.linkedConnector")}
@@ -476,6 +492,15 @@ function SkillsPanel() {
                 <Button
                   key={c.id}
                   label={c.name}
+                  size="sm"
+                  variant={editing.connector_id === c.id ? "primary" : "secondary"}
+                  clickAction={() => setEditing({ ...editing, connector_id: c.id })}
+                />
+              ))}
+              {pickableGlobalConnectors.map((c) => (
+                <Button
+                  key={c.id}
+                  label={`${c.name} (${t("settings.skills.globalConnectorBadge")})`}
                   size="sm"
                   variant={editing.connector_id === c.id ? "primary" : "secondary"}
                   clickAction={() => setEditing({ ...editing, connector_id: c.id })}
@@ -692,13 +717,13 @@ const PRESET_LOGO: Record<string, string> = {
 
 // A short auth-method chip on the catalog card, so users know what setup to
 // expect (one-click sign-in vs. pasting a key) before they open the form.
-function presetAuthHint(p: ConnectorPreset, t: (key: string) => string): string | null {
+export function presetAuthHint(p: ConnectorPreset, t: (key: string) => string): string | null {
   if (p.setup === "oauth") return t("settings.connectors.authHint.oauth");
   if (p.setup === "api_key" || p.setup === "token") return t("settings.connectors.authHint.apiKey");
   return null;
 }
 
-function ConnectorBrandTile({ presetKey }: { presetKey: string }) {
+export function ConnectorBrandTile({ presetKey }: { presetKey: string }) {
   const logo = PRESET_LOGO[presetKey];
   return (
     <div className="claw-connector-tile">
@@ -889,7 +914,7 @@ function GuidedSetup({
 // then fails to match the HEADER_ prefix and so is never actually sent.
 const HEADER_ENV_PREFIX = "HEADER_";
 
-function parseEnvText(text: string): Record<string, string> {
+export function parseEnvText(text: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const raw of text.split("\n")) {
     const line = raw.trim();
@@ -923,7 +948,7 @@ function parseEnvText(text: string): Record<string, string> {
   return env;
 }
 
-function formatEnvText(env: Record<string, string> | undefined): string {
+export function formatEnvText(env: Record<string, string> | undefined): string {
   return Object.entries(env ?? {})
     .map(([k, v]) => {
       if (k.startsWith(HEADER_ENV_PREFIX)) {
@@ -948,7 +973,7 @@ function formatEnvText(env: Record<string, string> | undefined): string {
 // The exact mcp_{connector}_{tool} names a skill must reference — collapsed
 // by default since a connector like an all-in-one CRM can expose 80+ tools,
 // which would otherwise dwarf the rest of the connector card.
-function ConnectorToolNames({ names }: { names: string[] }) {
+export function ConnectorToolNames({ names }: { names: string[] }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
   return (
@@ -979,7 +1004,7 @@ function ConnectorToolNames({ names }: { names: string[] }) {
 // Connector names must match the backend's `^[a-z0-9_-]+$` (max 64 chars) —
 // sanitize as the user types instead of letting a friendly name like
 // "Softnix KB Intelligence" reach the API and bounce back as a raw 422.
-function slugifyConnectorName(raw: string): string {
+export function slugifyConnectorName(raw: string): string {
   return raw
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, "-")
@@ -992,6 +1017,7 @@ function ConnectorsPanel() {
   const t = useT();
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
+  const [globalConnectors, setGlobalConnectors] = useState<ConnectorGlobalSummary[]>([]);
   const [editing, setEditing] = useState<Partial<ConnectorInfo> | null>(null);
   const [setupPreset, setSetupPreset] = useState<ConnectorPreset | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -1027,6 +1053,7 @@ function ConnectorsPanel() {
     void reload();
     api.connectorPresets().then(setPresets).catch(() => setPresets([]));
     void api.me().then((me) => setIsAdmin(me.is_admin));
+    api.listGlobalConnectors().then(setGlobalConnectors).catch(() => setGlobalConnectors([]));
   }, [reload]);
 
   const installedByName = new Map(connectors.map((c) => [c.name.toLowerCase(), c]));
@@ -1376,6 +1403,42 @@ function ConnectorsPanel() {
                   />
                 </div>
               </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {globalConnectors.length > 0 && (
+        <div className="claw-connector-category">
+          <Text type="label" color="secondary" className="claw-connector-cat-title">
+            {t("settings.connectors.globalTitle")}
+          </Text>
+          <Divider />
+          <Text size="sm" color="secondary" as="p">
+            {t("settings.connectors.globalDesc")}
+          </Text>
+          {globalConnectors.map((c) => (
+            <Card key={c.id} padding={2}>
+              <div className="claw-row">
+                <Text weight="semibold">{c.name}</Text>
+                <Badge variant="neutral" label={c.transport} />
+                {c.runtime.status === "connected" && (
+                  <Badge
+                    variant="success"
+                    icon={<Icon icon="check" size="xsm" />}
+                    label={t("settings.connectors.toolsCount", { count: String(c.runtime.tools ?? 0) })}
+                  />
+                )}
+                {c.runtime.status === "error" && (
+                  <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.error")} />
+                )}
+              </div>
+              {c.description && (
+                <Text size="sm" color="secondary" as="p">
+                  {c.description}
+                </Text>
+              )}
+              {(c.runtime.tool_names?.length ?? 0) > 0 && <ConnectorToolNames names={c.runtime.tool_names!} />}
             </Card>
           ))}
         </div>

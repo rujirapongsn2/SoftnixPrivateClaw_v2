@@ -222,13 +222,33 @@ class Skill(Base):
 
 
 class McpConnector(Base):
-    """MCP server config per user; tools register as mcp_{name}_{tool}."""
+    """MCP server config; tools register as mcp_{name}_{tool}.
+
+    Ownership scope: ``owner_id`` NULL means an admin-global connector (Control
+    Plane "Pre-built Connectors", provisioned once and shared by every user). A
+    non-null ``owner_id`` is a private connector owned by that user — visible
+    and usable only by them. Mirrors ``LLMProvider.owner_id``: names are unique
+    per owner, plus a partial unique index enforces global-name uniqueness
+    among the NULL-owner rows (Postgres treats NULLs as distinct, so the
+    composite index alone wouldn't keep global names unique).
+    """
 
     __tablename__ = "mcp_connectors"
-    __table_args__ = (Index("ix_connectors_user_name", "user_id", "name", unique=True),)
+    __table_args__ = (
+        Index("ix_connectors_owner_name", "owner_id", "name", unique=True),
+        Index(
+            "ix_connectors_global_name",
+            "name",
+            unique=True,
+            postgresql_where=text("owner_id IS NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    # NULL = admin-global (Pre-built Connectors); set = private to this user.
+    owner_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(64))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     transport: Mapped[str] = mapped_column(String(16), default="stdio")  # stdio|http
@@ -349,7 +369,8 @@ class LLMProvider(Base):
     private "bring your own key" provider owned by that user — visible and usable
     only by them. Names are unique per owner (a partial unique index enforces
     global-name uniqueness among the NULL-owner rows, since Postgres treats NULLs
-    as distinct), mirroring the (user_id, name) pattern on Skill/McpConnector.
+    as distinct), mirroring the (user_id, name) pattern on Skill. McpConnector's
+    owner_id follows this same shape (see McpConnector's docstring).
     """
 
     __tablename__ = "llm_providers"

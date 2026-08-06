@@ -256,7 +256,7 @@ async def test_connector_store_crud(db_factory, stores):
     assert row.enabled is False
     assert (await connectors.enabled_for_user(user.id)) == []
 
-    assert await connectors.delete(user.id, row.id) is True
+    assert await connectors.delete(user.id, row.id) == "tavily"
     assert await connectors.list_for_user(user.id) == []
 
 

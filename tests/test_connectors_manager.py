@@ -7,7 +7,7 @@ is retried on the next sync rather than staying cached as permanently broken."""
 
 import asyncio
 from contextlib import AsyncExitStack
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlsplit
 
 import httpx
@@ -528,6 +528,255 @@ async def test_resolve_tool_names_survives_connector_rename(db_factory, monkeypa
     assert names == ["mcp_softnix-kb-v2_search_knowledge"]
 
 
+class _FakeTool:
+    def __init__(self, name):
+        self.name = name
+        self.description = "desc"
+        self.inputSchema = {}
+
+
+class _FakeListed:
+    def __init__(self, tool_names):
+        self.tools = [_FakeTool(n) for n in tool_names]
+
+
+async def test_global_connector_shared_across_users_one_connect_call(db_factory, monkeypatch):
+    """A single admin-global connector (owner_id NULL) must be connected
+    exactly once for the whole process — not once per user — and both users'
+    registries get the shared tool without either configuring anything."""
+    users = UserStore(db_factory)
+    user_a = await users.create(email="global-a@x.io", password_hash="h")
+    user_b = await users.create(email="global-b@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        None, "search", transport="http", url="https://example.invalid/mcp", enabled=True
+    )
+
+    connect_calls = 0
+
+    class FakeSession:
+        async def list_tools(self):
+            return _FakeListed(["web_search"])
+
+    async def fake_connect_and_list(self, stack, connector):
+        nonlocal connect_calls
+        connect_calls += 1
+        session = FakeSession()
+        return session, await session.list_tools()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    registry_a = ToolRegistry()
+    registry_b = ToolRegistry()
+
+    await mgr.sync_tools(user_a.id, registry_a)
+    await mgr.sync_tools(user_b.id, registry_b)
+
+    assert connect_calls == 1
+    assert registry_a.get("mcp_search_web_search") is not None
+    assert registry_b.get("mcp_search_web_search") is not None
+    assert (await mgr.status_global())["search"]["status"] == "connected"
+
+
+async def test_users_own_connector_shadows_same_name_global_connector(db_factory, monkeypatch):
+    """On a name collision between a global connector and a user's own private
+    one, the user's own must win — mirroring LLMConfigStore.resolve()'s
+    owner-vs-global tie-break — and the OTHER (non-colliding) user must still
+    get the global one.
+
+    Uses monkeypatched store methods rather than real overlapping-name rows:
+    the partial-unique global-name index (postgresql_where) is Postgres-only
+    — SQLAlchemy silently drops that clause on SQLite, so the index becomes a
+    FULL unique constraint on `name` there, and the very row combination this
+    test needs (a private + a global connector sharing a name) can't be
+    inserted into the SQLite test DB, even though it's valid on Postgres in
+    production. This is a pre-existing gap shared with LLMProvider's identical
+    index shape, not something introduced here."""
+    users = UserStore(db_factory)
+    owner = await users.create(email="shadow-owner@x.io", password_hash="h")
+    other = await users.create(email="shadow-other@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+
+    now = datetime.now(timezone.utc)
+    global_row = McpConnector(
+        id="global1", owner_id=None, name="search", transport="http",
+        url="https://global.invalid/mcp", enabled=True, updated_at=now,
+    )
+    private_row = McpConnector(
+        id="private1", owner_id=owner.id, name="search", transport="http",
+        url="https://private.invalid/mcp", enabled=True, updated_at=now,
+    )
+
+    async def fake_enabled_for_global(self):
+        return [global_row]
+
+    async def fake_enabled_for_user(self, owner_id):
+        return [private_row] if owner_id == owner.id else []
+
+    monkeypatch.setattr(ConnectorStore, "enabled_for_global", fake_enabled_for_global)
+    monkeypatch.setattr(ConnectorStore, "enabled_for_user", fake_enabled_for_user)
+
+    class FakeSession:
+        pass
+
+    async def fake_connect_and_list(self, stack, connector):
+        session = FakeSession()
+        # Distinguish the two "search" rows by which tool they expose.
+        tool = "private_search" if connector.url == "https://private.invalid/mcp" else "web_search"
+        return session, _FakeListed([tool])
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    registry_owner = ToolRegistry()
+    registry_other = ToolRegistry()
+
+    await mgr.sync_tools(owner.id, registry_owner)
+    await mgr.sync_tools(other.id, registry_other)
+
+    # Owner gets their OWN "search" connector's tool, not the global one.
+    assert registry_owner.get("mcp_search_private_search") is not None
+    assert registry_owner.get("mcp_search_web_search") is None
+    # The other user, with no name collision, gets the global one.
+    assert registry_other.get("mcp_search_web_search") is not None
+
+
+async def test_resolve_tool_names_not_shadowed_by_a_disabled_own_connector(db_factory, monkeypatch):
+    """A DISABLED private connector of the same name as a global one must NOT
+    shadow the global connector for resolve_tool_names — sync_tools' own-vs-
+    global tie-break only counts ENABLED own connectors (enabled_for_user), so
+    a disabled same-name connector leaves the global one registered as normal.
+    resolve_tool_names must agree, or a skill linked to that global connector
+    would see its tools as unavailable (None) even though they're live in the
+    registry — the exact mismatch this test guards against."""
+    users = UserStore(db_factory)
+    owner = await users.create(email="shadow-disabled@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+
+    now = datetime.now(timezone.utc)
+    global_row = McpConnector(
+        id="global-disabled-shadow", owner_id=None, name="search", transport="http",
+        url="https://global.invalid/mcp", enabled=True, updated_at=now,
+    )
+    disabled_private_row = McpConnector(
+        id="private-disabled-shadow", owner_id=owner.id, name="search", transport="http",
+        url="https://private.invalid/mcp", enabled=False, updated_at=now,
+    )
+
+    async def fake_enabled_for_global(self):
+        return [global_row]
+
+    async def fake_enabled_for_user(self, owner_id):
+        return []  # the private "search" connector is disabled, so excluded
+
+    async def fake_list_for_user(self, owner_id):
+        return [disabled_private_row]  # but list_for_user returns it regardless
+
+    async def fake_list_for_global(self):
+        return [global_row]
+
+    monkeypatch.setattr(ConnectorStore, "enabled_for_global", fake_enabled_for_global)
+    monkeypatch.setattr(ConnectorStore, "enabled_for_user", fake_enabled_for_user)
+    monkeypatch.setattr(ConnectorStore, "list_for_user", fake_list_for_user)
+    monkeypatch.setattr(ConnectorStore, "list_for_global", fake_list_for_global)
+
+    class FakeSession:
+        pass
+
+    async def fake_connect_and_list(self, stack, connector):
+        return FakeSession(), _FakeListed(["web_search"])
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(owner.id, registry)
+
+    # The global connector's tool IS actually registered for this user...
+    assert registry.get("mcp_search_web_search") is not None
+    # ...so resolve_tool_names must report it too, not None.
+    assert await mgr.resolve_tool_names(owner.id, "global-disabled-shadow") == ["mcp_search_web_search"]
+
+
+async def test_global_connector_invalidate_propagates_to_users_on_next_sync(db_factory, monkeypatch):
+    """A global connector's config change (e.g. an admin editing its API key
+    or URL via PUT /admin/connectors, which bumps updated_at and then calls
+    invalidate_global()) must be picked up by every user's NEXT sync_tools —
+    not stay stuck on a stale signature or, worse, a stale registered proxy
+    bound to a now-closed session."""
+    users = UserStore(db_factory)
+    user = await users.create(email="global-invalidate@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        None, "search", transport="http", url="https://example.invalid/mcp", enabled=True
+    )
+
+    tool_name = "web_search_v1"
+
+    async def fake_connect_and_list(self, stack, connector):
+        return FakeSession(), _FakeListed([tool_name])
+
+    class FakeSession:
+        pass
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+    assert registry.get("mcp_search_web_search_v1") is not None
+
+    tool_name = "web_search_v2"
+    # Mirrors the admin PUT route: a real field change (bumps updated_at) then
+    # invalidate_global(name) as a cooldown-bypass safety net, scoped to just
+    # this one connector (see test below for why that scoping matters).
+    await store.upsert(None, "search", url="https://example.invalid/mcp/v2", enabled=True)
+    await mgr.invalidate_global("search")
+    await mgr.sync_tools(user.id, registry)
+
+    assert registry.get("mcp_search_web_search_v1") is None
+    assert registry.get("mcp_search_web_search_v2") is not None
+
+
+async def test_editing_one_global_connector_does_not_reconnect_others(db_factory, monkeypatch):
+    """Editing (or fixing/removing) one admin-global connector must not tear
+    down or reconnect any OTHER global connector's already-live session —
+    otherwise every user of every OTHER pre-built connector would see a
+    momentary disruption any time an admin touches an unrelated one. Counts
+    actual connect attempts per connector name to prove "beta" is never
+    reconnected when only "alpha"'s config changes."""
+    store = ConnectorStore(db_factory)
+    await store.upsert(None, "alpha", transport="http", url="https://a.invalid/mcp", enabled=True)
+    await store.upsert(None, "beta", transport="http", url="https://b.invalid/mcp", enabled=True)
+
+    connect_calls: list[str] = []
+
+    async def fake_connect_and_list(self, stack, connector):
+        connect_calls.append(connector.name)
+        return _FakeSession(), _FakeListed([f"{connector.name}_tool"])
+
+    class _FakeSession:
+        pass
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    await mgr.sync_global()
+    assert sorted(connect_calls) == ["alpha", "beta"]
+
+    connect_calls.clear()
+    # Admin edits only "alpha" (bumps updated_at) and invalidates just that one.
+    await store.upsert(None, "alpha", url="https://a.invalid/mcp/v2", enabled=True)
+    await mgr.invalidate_global("alpha")
+    await mgr.sync_global()
+
+    assert connect_calls == ["alpha"]
+    statuses = await mgr.status_global()
+    assert statuses["alpha"]["status"] == "connected"
+    assert statuses["beta"]["status"] == "connected"
+
+
 async def test_resolve_tool_names_none_for_unknown_or_disconnected(db_factory):
     users = UserStore(db_factory)
     user = await users.create(email="noconn@x.io", password_hash="h")
@@ -553,3 +802,195 @@ async def test_tool_call_returns_normally_when_within_the_timeout():
     result = await proxy.execute(query="x")
 
     assert result == "the answer"
+
+
+async def test_proxy_session_ref_follows_a_replaced_session_instead_of_going_stale():
+    """A global connector's already-registered McpToolProxy must keep working
+    after its session is torn down and replaced (admin edit, error-retry
+    reconnect) — session_ref is looked up fresh on every call instead of
+    using whatever session object was captured at construction time."""
+
+    class FakeContentItem:
+        text = "ok"
+
+    class FakeResult:
+        content = [FakeContentItem()]
+        isError = False
+
+    class FakeSession:
+        async def call_tool(self, name, kwargs, read_timeout_seconds=None):
+            return FakeResult()
+
+    current: dict[str, object | None] = {"session": None}
+    proxy = McpToolProxy(
+        None, "search", "web_search", "desc", {}, session_ref=lambda: current["session"]
+    )
+
+    # No live session yet (e.g. between a teardown and its reconnect) — a
+    # friendly error, not an AttributeError on None.
+    result = await proxy.execute(query="x")
+    assert "not currently connected" in result
+
+    # The connector reconnects — the SAME proxy object (as if still
+    # registered in some other user's registry from before the reconnect)
+    # must now use the new session without being rebuilt or re-registered.
+    current["session"] = FakeSession()
+    result = await proxy.execute(query="x")
+    assert result == "ok"
+
+
+async def test_close_global_tears_down_immediately_without_waiting_for_sync(db_factory, monkeypatch):
+    """Deleting a global connector must stop it being live/callable right
+    away, not merely "eventually, on some future sync_global call that
+    might itself be skipped under lock contention"."""
+    store = ConnectorStore(db_factory)
+    connector = await store.upsert(
+        None, "search", transport="http", url="https://example.invalid/mcp", enabled=True
+    )
+
+    class FakeSession:
+        async def list_tools(self):
+            return _FakeListed(["web_search"])
+
+    async def fake_connect_and_list(self, stack, c):
+        session = FakeSession()
+        return session, await session.list_tools()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    await mgr.sync_global()
+    assert (await mgr.status_global())["search"]["status"] == "connected"
+
+    await mgr.close_global(connector.name, connector.id)
+
+    assert (await mgr.status_global()) == {}
+    assert mgr._global.sessions == {}
+    assert mgr._global.proxies == {}
+
+
+async def test_close_global_does_not_tear_down_a_recreated_connector_with_a_different_id(
+    db_factory, monkeypatch
+):
+    """A close_global(name, id) call for a connector that was deleted must
+    not tear down a DIFFERENT, newer connector that was later recreated
+    under the same name — even though it's keyed by name, it must check the
+    id it was meant for before closing anything."""
+    store = ConnectorStore(db_factory)
+    old = await store.upsert(
+        None, "search", transport="http", url="https://old.invalid/mcp", enabled=True
+    )
+
+    class FakeSession:
+        async def list_tools(self):
+            return _FakeListed(["web_search"])
+
+    async def fake_connect_and_list(self, stack, c):
+        session = FakeSession()
+        return session, await session.list_tools()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    await mgr.sync_global()
+
+    # Simulate: "old" was deleted and a brand-new connector was recreated
+    # under the same name (different id) before the original close_global
+    # call for "old" got a chance to run.
+    await store.delete(None, old.id)
+    new = await store.upsert(
+        None, "search", transport="http", url="https://new.invalid/mcp", enabled=True
+    )
+    await mgr.sync_global()
+    assert (await mgr.status_global())["search"]["status"] == "connected"
+
+    # The stale close_global for the OLD id must be a no-op now.
+    await mgr.close_global("search", old.id)
+
+    assert (await mgr.status_global())["search"]["status"] == "connected"
+    assert mgr._global.signatures["search"][0] == new.id
+
+
+async def test_close_global_gives_up_quickly_under_lock_contention(db_factory, monkeypatch):
+    """close_global must not block an admin's delete request for as long as
+    an unrelated, slow sync_global reconnect — it should give up quickly and
+    let sync_global's own lazy cleanup handle it instead."""
+    store = ConnectorStore(db_factory)
+    connector = await store.upsert(
+        None, "search", transport="http", url="https://example.invalid/mcp", enabled=True
+    )
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_connect_and_list(self, stack, c):
+        started.set()
+        await release.wait()
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", slow_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    holder = asyncio.ensure_future(mgr.sync_global())
+    await started.wait()  # sync_global now holds _global_lock, mid-connect
+
+    loop = asyncio.get_event_loop()
+    before = loop.time()
+    await mgr.close_global(connector.name, connector.id)
+    elapsed = loop.time() - before
+
+    assert elapsed < 2.0  # bounded by close_global's own 0.5s acquire timeout
+
+    release.set()
+    await holder
+
+
+async def test_two_concurrent_first_syncs_both_see_the_result_instead_of_one_bailing_empty(
+    db_factory, monkeypatch
+):
+    """Before the very first sync_global ever completes, a second caller
+    racing the lock must wait for it rather than bailing out on a
+    still-completely-empty pool (the lock-busy bypass is only safe once the
+    pool has been populated at least once)."""
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        None, "search", transport="http", url="https://example.invalid/mcp", enabled=True
+    )
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class FakeSession:
+        async def list_tools(self):
+            return _FakeListed(["web_search"])
+
+    async def slow_connect_and_list(self, stack, c):
+        started.set()
+        await release.wait()
+        session = FakeSession()
+        return session, await session.list_tools()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", slow_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    first = asyncio.ensure_future(mgr.sync_global())
+    await started.wait()  # first call is now mid-connect, holding the lock
+
+    second_done = asyncio.Event()
+
+    async def run_second():
+        await mgr.sync_global()
+        second_done.set()
+
+    second = asyncio.ensure_future(run_second())
+    await asyncio.sleep(0.01)  # give second a chance to run and hit the lock check
+    # Before the fix ("if locked: return" with no synced_once guard), second
+    # would bail out and finish here, well before first's connect completes,
+    # having contributed nothing to a still-completely-empty pool.
+    assert not second_done.is_set()
+
+    release.set()
+    await first
+    await second
+
+    assert (await mgr.status_global())["search"]["status"] == "connected"

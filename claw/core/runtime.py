@@ -680,11 +680,20 @@ class AgentRuntime:
             # recreating the connector never leaves the skill's instructions
             # pointing at a stale/nonexistent tool name.
             tool_names_by_skill: dict[str, list[str]] = {}
-            if self.connectors is not None:
+            if self.connectors is not None and any(getattr(s, "connector_id", None) for s in enabled_skills):
+                # Fetch each list once for the whole turn instead of once per
+                # linked skill — resolve_tool_names would otherwise re-query
+                # both the user's own connectors and the global ones on every
+                # call, which scales with skill count, not with anything that
+                # actually changed.
+                owned = await self.connectors.store.list_for_user(user_id)
+                global_connectors = await self.connectors.store.list_for_global()
                 for s in enabled_skills:
                     connector_id = getattr(s, "connector_id", None)
                     if connector_id:
-                        names = await self.connectors.resolve_tool_names(user_id, connector_id)
+                        names = await self.connectors.resolve_tool_names(
+                            user_id, connector_id, owned=owned, global_connectors=global_connectors
+                        )
                         if names:
                             tool_names_by_skill[s.name] = names
             skills_summary = build_skills_summary(enabled_skills, tool_names_by_skill)
@@ -716,7 +725,7 @@ class AgentRuntime:
             connectors_summary = ""
             if self.connectors is not None:
                 try:
-                    connected_rows = await self.connectors.store.enabled_for_user(user_id)
+                    connected_rows = await self.connectors.store.enabled_accessible(user_id)
                 except Exception:
                     connected_rows = []
                 connected_names = {c.name for c in connected_rows}

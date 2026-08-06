@@ -480,29 +480,68 @@ class ConnectorStore:
             row.env = self.secret_box.decrypt_map(row.env)
         return row
 
-    async def list_for_user(self, user_id: str) -> list[McpConnector]:
+    async def list_for_user(self, owner_id: str) -> list[McpConnector]:
         async with self.factory() as db:
             rows = await db.scalars(
-                select(McpConnector).where(McpConnector.user_id == user_id).order_by(McpConnector.name)
+                select(McpConnector).where(McpConnector.owner_id == owner_id).order_by(McpConnector.name)
             )
             return [self._decrypt(r) for r in rows]
 
-    async def enabled_for_user(self, user_id: str) -> list[McpConnector]:
+    async def enabled_for_user(self, owner_id: str) -> list[McpConnector]:
         async with self.factory() as db:
             rows = await db.scalars(
                 select(McpConnector)
-                .where(McpConnector.user_id == user_id, McpConnector.enabled.is_(True))
+                .where(McpConnector.owner_id == owner_id, McpConnector.enabled.is_(True))
                 .order_by(McpConnector.name)
             )
             return [self._decrypt(r) for r in rows]
 
-    async def upsert(self, user_id: str, name: str, **fields: Any) -> McpConnector:
+    async def list_for_global(self) -> list[McpConnector]:
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(McpConnector).where(McpConnector.owner_id.is_(None)).order_by(McpConnector.name)
+            )
+            return [self._decrypt(r) for r in rows]
+
+    async def enabled_for_global(self) -> list[McpConnector]:
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(McpConnector)
+                .where(McpConnector.owner_id.is_(None), McpConnector.enabled.is_(True))
+                .order_by(McpConnector.name)
+            )
+            return [self._decrypt(r) for r in rows]
+
+    async def enabled_accessible(self, user_id: str) -> list[McpConnector]:
+        """Enabled connectors this user can call: their own plus admin-global ones.
+
+        A global connector is excluded if its ``name`` collides with one of the
+        user's own — the user's own always wins, mirroring
+        ``LLMConfigStore.resolve()``'s owner-vs-global tie-break.
+        """
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(McpConnector)
+                .where(
+                    or_(McpConnector.owner_id == user_id, McpConnector.owner_id.is_(None)),
+                    McpConnector.enabled.is_(True),
+                )
+                # Prefer the caller's own connector (owner_id NOT NULL) on a name tie.
+                .order_by(McpConnector.owner_id.is_(None))
+            )
+            all_rows = [self._decrypt(r) for r in rows]
+        own_names = {r.name for r in all_rows if r.owner_id == user_id}
+        result = [r for r in all_rows if r.owner_id == user_id or r.name not in own_names]
+        result.sort(key=lambda r: r.name)
+        return result
+
+    async def upsert(self, owner_id: str | None, name: str, **fields: Any) -> McpConnector:
         async with self.factory() as db:
             row = await db.scalar(
-                select(McpConnector).where(McpConnector.user_id == user_id, McpConnector.name == name)
+                select(McpConnector).where(McpConnector.owner_id == owner_id, McpConnector.name == name)
             )
             if row is None:
-                row = McpConnector(user_id=user_id, name=name)
+                row = McpConnector(owner_id=owner_id, name=name)
                 db.add(row)
             # `description`/`timeout_ms` are the only nullable columns, so only
             # those two support `key in fields` (caller explicitly passed
@@ -527,14 +566,18 @@ class ConnectorStore:
             self._decrypt(row)  # return plaintext env to the caller
             return row
 
-    async def delete(self, user_id: str, connector_id: str) -> bool:
+    async def delete(self, owner_id: str | None, connector_id: str) -> str | None:
+        """Returns the deleted connector's name (so a global-scope caller can
+        immediately tear down its live session — see ConnectorManager.
+        close_global), or None if not found / not owned by `owner_id`."""
         async with self.factory() as db:
             row = await db.get(McpConnector, connector_id)
-            if row is None or row.user_id != user_id:
-                return False
+            if row is None or row.owner_id != owner_id:
+                return None
+            name = row.name
             await db.delete(row)
             await db.commit()
-            return True
+            return name
 
 
 class ScheduleStore:
@@ -781,10 +824,10 @@ class UserStore:
                 await db.execute(
                     LLMProvider.__table__.delete().where(LLMProvider.owner_id == user_id)
                 )
-            for model in (
-                ChatSession, Memory, Skill, McpConnector, Schedule,
-                UsageRecord, UsageDaily, Feedback,
-            ):
+            # Private (non-shared) connectors are likewise owned via owner_id —
+            # an admin-global connector (owner_id NULL) is never touched here.
+            await db.execute(McpConnector.__table__.delete().where(McpConnector.owner_id == user_id))
+            for model in (ChatSession, Memory, Skill, Schedule, UsageRecord, UsageDaily, Feedback):
                 await db.execute(model.__table__.delete().where(model.user_id == user_id))
             await db.delete(user)
             await db.commit()

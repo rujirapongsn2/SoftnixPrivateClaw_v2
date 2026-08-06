@@ -298,6 +298,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.skills.linkedConnector": "Linked connector (optional)",
     "settings.skills.linkedConnectorDesc":
       "If this skill calls a connector's tools, link it here instead of writing the tool's exact name in the instructions above — Claw resolves the current tool names for you, so it keeps working even if the connector is later renamed.",
+    "settings.skills.globalConnectorBadge": "shared",
     "settings.skills.none": "None",
     "settings.skills.save": "Save skill",
     "settings.skills.back": "Back",
@@ -367,6 +368,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.add": "Add",
     "settings.connectors.yourConnectors": "Your connectors",
     "settings.connectors.optionsFor": "{label} options",
+    "settings.connectors.globalTitle": "Provided by your organization",
+    "settings.connectors.globalDesc":
+      "Your administrator has set these up — they're already available to you as tools, no setup needed.",
 
     "settings.schedules.name": "Name",
     "settings.schedules.prompt": "Prompt to send to Claw",
@@ -488,6 +492,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.common.saveChanges": "Save changes",
     "admin.nav.overview": "Overview",
     "admin.nav.providers": "Providers",
+    "admin.nav.connectors": "Pre-built Connectors",
     "admin.nav.plans": "Plans",
     "admin.nav.guardrails": "Guardrails",
     "admin.nav.oauth": "OAuth apps",
@@ -605,6 +610,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.noProvidersAdminDesc": "Add a provider to let users choose models in chat.",
     "admin.providers.chooseProvider": "Choose a provider",
     "admin.providers.displayName": "Display name",
+    "admin.providers.zaiEndpoint": "API endpoint",
+    "admin.providers.zaiGeneral": "General API",
+    "admin.providers.zaiCoding": "GLM Coding Plan",
     "admin.providers.baseUrl": "Base URL",
     "admin.providers.baseUrlDesc": "Required for OpenAI-compatible servers, e.g. http://localhost:8000/v1",
     "admin.providers.hideBaseUrlOverride": "Hide — override base URL",
@@ -654,6 +662,11 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.remove": "Remove",
     "admin.providers.addingModelInfo": "Adding a new model to this provider",
     "admin.providers.modelAddedToast": "Model added",
+
+    "admin.connectors.intro":
+      "Provision an MCP connector once and it's automatically available to every user — no per-user setup. Best for shared, org-wide integrations (search, internal services); identity-bound ones like email or calendar stay per-user in Settings.",
+    "admin.connectors.provisioned": "Provisioned connectors",
+    "admin.connectors.enableName": "Enable {name}",
 
     "admin.plans.intro": "Usage-tier plans set the highest-cost chat and image models a user can pick, plus daily message / image quotas and a per-minute turn rate. Assign a plan to a group or an individual user; anyone without one falls back to the default plan.",
     "admin.plans.addPlan": "Add plan",
@@ -1158,6 +1171,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.skills.linkedConnector": "ตัวเชื่อมต่อที่เชื่อมโยง (ไม่บังคับ)",
     "settings.skills.linkedConnectorDesc":
       "หากสกิลนี้เรียกใช้เครื่องมือของตัวเชื่อมต่อ ให้เชื่อมโยงที่นี่แทนการพิมพ์ชื่อเครื่องมือตรง ๆ ในคำแนะนำด้านบน — Claw จะจับคู่ชื่อเครื่องมือปัจจุบันให้เอง ทำให้ยังใช้งานได้แม้ตัวเชื่อมต่อจะถูกเปลี่ยนชื่อภายหลัง",
+    "settings.skills.globalConnectorBadge": "ใช้ร่วมกัน",
     "settings.skills.none": "ไม่มี",
     "settings.skills.save": "บันทึกสกิล",
     "settings.skills.back": "ย้อนกลับ",
@@ -1226,6 +1240,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.add": "เพิ่ม",
     "settings.connectors.yourConnectors": "ตัวเชื่อมต่อของคุณ",
     "settings.connectors.optionsFor": "ตัวเลือกของ {label}",
+    "settings.connectors.globalTitle": "จัดเตรียมโดยองค์กรของคุณ",
+    "settings.connectors.globalDesc": "ผู้ดูแลระบบได้ตั้งค่าสิ่งเหล่านี้ไว้แล้ว — พร้อมใช้งานเป็นเครื่องมือให้คุณทันทีโดยไม่ต้องตั้งค่าเพิ่ม",
 
     "settings.schedules.name": "ชื่อ",
     "settings.schedules.prompt": "ข้อความที่จะส่งให้ Claw",
@@ -1347,6 +1363,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.common.saveChanges": "บันทึกการเปลี่ยนแปลง",
     "admin.nav.overview": "ภาพรวม",
     "admin.nav.providers": "ผู้ให้บริการ",
+    "admin.nav.connectors": "ตัวเชื่อมต่อสำเร็จรูป",
     "admin.nav.plans": "แพ็กเกจ",
     "admin.nav.guardrails": "การ์ดเรล",
     "admin.nav.oauth": "แอป OAuth",
@@ -1464,6 +1481,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.noProvidersAdminDesc": "เพิ่มผู้ให้บริการเพื่อให้ผู้ใช้เลือกโมเดลในแชทได้",
     "admin.providers.chooseProvider": "เลือกผู้ให้บริการ",
     "admin.providers.displayName": "ชื่อที่แสดง",
+    "admin.providers.zaiEndpoint": "Endpoint API",
+    "admin.providers.zaiGeneral": "General API",
+    "admin.providers.zaiCoding": "GLM Coding Plan",
     "admin.providers.baseUrl": "Base URL",
     "admin.providers.baseUrlDesc": "จำเป็นสำหรับเซิร์ฟเวอร์ที่รองรับ OpenAI-compatible เช่น http://localhost:8000/v1",
     "admin.providers.hideBaseUrlOverride": "ซ่อน — กำหนด Base URL เอง",
@@ -1513,6 +1533,11 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.remove": "ลบออก",
     "admin.providers.addingModelInfo": "กำลังเพิ่มโมเดลใหม่ให้ผู้ให้บริการนี้",
     "admin.providers.modelAddedToast": "เพิ่มโมเดลแล้ว",
+
+    "admin.connectors.intro":
+      "กำหนดค่าตัวเชื่อมต่อ MCP ครั้งเดียว แล้วผู้ใช้ทุกคนจะใช้งานได้ทันทีโดยไม่ต้องตั้งค่าเอง — เหมาะกับบริการที่ใช้ร่วมกันทั้งองค์กร (ค้นหา, บริการภายใน) ส่วนตัวเชื่อมต่อที่ผูกกับตัวบุคคล เช่น อีเมลหรือปฏิทิน ยังคงต้องตั้งค่าแยกรายบุคคลในหน้าตั้งค่า",
+    "admin.connectors.provisioned": "ตัวเชื่อมต่อที่กำหนดค่าแล้ว",
+    "admin.connectors.enableName": "เปิดใช้งาน {name}",
 
     "admin.plans.intro": "แพ็กเกจระดับการใช้งานกำหนดต้นทุนสูงสุดของโมเดลแชทและรูปภาพที่ผู้ใช้เลือกได้ รวมถึงโควตาข้อความ/รูปภาพรายวันและอัตราเทิร์นต่อนาที กำหนดแพ็กเกจให้กลุ่มหรือผู้ใช้รายบุคคลได้ ผู้ที่ไม่มีแพ็กเกจจะใช้แพ็กเกจเริ่มต้นแทน",
     "admin.plans.addPlan": "เพิ่มแพ็กเกจ",
