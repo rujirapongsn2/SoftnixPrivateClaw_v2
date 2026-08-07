@@ -146,6 +146,17 @@ export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconTy
   { key: "users", labelKey: "admin.nav.users", icon: Users },
 ];
 
+// The Control Plane sidebar groups the sections above into collapsible
+// clusters (see App.tsx's Control Plane render) so the nav stays scannable
+// as more sections get added — "overview" and "preferences" are left out
+// here and rendered standalone instead, since a single-item group is just
+// an extra click for no organizational benefit.
+export const ADMIN_SECTION_GROUPS: { labelKey: string; icon: IconType | IconName; sections: AdminSection[] }[] = [
+  { labelKey: "admin.navGroup.aiConfig", icon: Cpu, sections: ["providers", "connectors", "guardrails"] },
+  { labelKey: "admin.navGroup.integrations", icon: Globe, sections: ["oauth", "telegram", "email"] },
+  { labelKey: "admin.navGroup.accounts", icon: Users, sections: ["plans", "users", "audit"] },
+];
+
 export function AdminPanel({ section, selfId }: { section: AdminSection; selfId: string }) {
   const t = useT();
   const meta = ADMIN_SECTIONS.find((s) => s.key === section);

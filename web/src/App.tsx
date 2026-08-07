@@ -14,7 +14,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { useToast } from "@astryxdesign/core/Toast";
 import { AlarmClock, ChevronDown, Loader2, LogOut, Menu, MessageCircle, MessageSquare, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
+import { ADMIN_SECTION_GROUPS, ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
@@ -838,20 +838,67 @@ export default function App() {
                     icon={Shield}
                     collapsible={{ defaultIsCollapsed: true }}
                   >
-                    {ADMIN_SECTIONS.map((s) => (
-                      <SideNavItem
-                        key={s.key}
-                        label={t(s.labelKey)}
-                        icon={s.icon}
-                        isSelected={adminSection === s.key}
-                        onClick={() => {
-                          setAdminSection(s.key);
-                          setSettingsSection(null);
-                          setActive(null);
-                          closeDrawer();
-                        }}
-                      />
-                    ))}
+                    {(() => {
+                      const selectAdminSection = (key: AdminSection) => {
+                        setAdminSection(key);
+                        setSettingsSection(null);
+                        setActive(null);
+                        closeDrawer();
+                      };
+                      // "overview" leads standalone (it's the landing view, not
+                      // a config category); everything else is either grouped
+                      // (ADMIN_SECTION_GROUPS) or, for the few sections no
+                      // group claims (currently just "preferences"), rendered
+                      // standalone after the groups.
+                      const grouped = new Set(ADMIN_SECTION_GROUPS.flatMap((g) => g.sections));
+                      const overview = ADMIN_SECTIONS.find((s) => s.key === "overview");
+                      const ungrouped = ADMIN_SECTIONS.filter(
+                        (s) => s.key !== "overview" && !grouped.has(s.key),
+                      );
+                      return (
+                        <>
+                          {overview && (
+                            <SideNavItem
+                              label={t(overview.labelKey)}
+                              icon={overview.icon}
+                              isSelected={adminSection === overview.key}
+                              onClick={() => selectAdminSection(overview.key)}
+                            />
+                          )}
+                          {ADMIN_SECTION_GROUPS.map((group) => (
+                            <SideNavItem
+                              key={group.labelKey}
+                              label={t(group.labelKey)}
+                              icon={group.icon}
+                              collapsible={{ defaultIsCollapsed: true }}
+                            >
+                              {group.sections.map((key) => {
+                                const s = ADMIN_SECTIONS.find((sec) => sec.key === key);
+                                if (!s) return null;
+                                return (
+                                  <SideNavItem
+                                    key={s.key}
+                                    label={t(s.labelKey)}
+                                    icon={s.icon}
+                                    isSelected={adminSection === s.key}
+                                    onClick={() => selectAdminSection(s.key)}
+                                  />
+                                );
+                              })}
+                            </SideNavItem>
+                          ))}
+                          {ungrouped.map((s) => (
+                            <SideNavItem
+                              key={s.key}
+                              label={t(s.labelKey)}
+                              icon={s.icon}
+                              isSelected={adminSection === s.key}
+                              onClick={() => selectAdminSection(s.key)}
+                            />
+                          ))}
+                        </>
+                      );
+                    })()}
                   </SideNavItem>
                 </div>
               )}

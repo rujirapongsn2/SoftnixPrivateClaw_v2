@@ -501,6 +501,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.nav.preferences": "Preferences",
     "admin.nav.audit": "Audit logs",
     "admin.nav.users": "Users",
+    "admin.navGroup.aiConfig": "AI Configuration",
+    "admin.navGroup.integrations": "Integrations",
+    "admin.navGroup.accounts": "Accounts & Billing",
 
     "admin.overview.stat.users": "Users",
     "admin.overview.stat.activeUsers": "Active users",
@@ -1372,6 +1375,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.nav.preferences": "การตั้งค่าทั่วไป",
     "admin.nav.audit": "บันทึกการตรวจสอบ",
     "admin.nav.users": "ผู้ใช้งาน",
+    "admin.navGroup.aiConfig": "การตั้งค่า AI",
+    "admin.navGroup.integrations": "การเชื่อมต่อระบบภายนอก",
+    "admin.navGroup.accounts": "บัญชีและแพ็กเกจ",
 
     "admin.overview.stat.users": "ผู้ใช้งาน",
     "admin.overview.stat.activeUsers": "ผู้ใช้งานที่ใช้งานอยู่",
