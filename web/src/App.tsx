@@ -870,6 +870,7 @@ export default function App() {
                               key={group.labelKey}
                               label={t(group.labelKey)}
                               icon={group.icon}
+                              isSelected={adminSection !== null && group.sections.includes(adminSection)}
                               collapsible={{ defaultIsCollapsed: true }}
                             >
                               {group.sections.map((key) => {
