@@ -172,6 +172,32 @@ class LiteLLMProvider(LLMProvider):
         litellm.suppress_debug_info = True
         litellm.drop_params = True
 
+    def _effective_credentials(
+        self, api_key: str | None, api_base: str | None
+    ) -> tuple[str | None, str | None]:
+        """Resolve the (api_key, api_base) pair to send for one call.
+
+        A per-call ``api_base`` means the caller (AgentRuntime, from an
+        admin-configured or BYOK DB provider row) is targeting a *specific*
+        endpoint — commonly a self-hosted/local OpenAI-compatible server with
+        no authentication at all. In that case the operator's env-configured
+        default key (``self.api_key``, e.g. an Anthropic key for the default
+        model) must never be sent to it: that would leak an unrelated secret
+        to a third-party endpoint and can outright break local servers that
+        reject an unexpected Authorization header. So when ``api_base`` is
+        set and no ``api_key`` came with it, use a placeholder instead of
+        falling back to the environment key — most OpenAI-compatible clients
+        require *some* non-empty key to build the Authorization header even
+        when the server itself doesn't check it.
+
+        Only when the call has no per-call ``api_base`` (i.e. it's using this
+        instance's own default endpoint) does the env-configured key/base
+        apply as before.
+        """
+        if api_base:
+            return api_key or "sk-local", api_base
+        return api_key or self.api_key, self.api_base
+
     # -- message preparation ------------------------------------------------
 
     @staticmethod
@@ -253,9 +279,7 @@ class LiteLLMProvider(LLMProvider):
             "stream_options": {"include_usage": True},
         }
         apply_model_overrides(model, kwargs)
-        # Per-call creds (admin-configured provider) win over instance defaults.
-        effective_key = api_key or self.api_key
-        effective_base = api_base or self.api_base
+        effective_key, effective_base = self._effective_credentials(api_key, api_base)
         if effective_key:
             kwargs["api_key"] = effective_key
         if effective_base:
@@ -407,8 +431,7 @@ class LiteLLMProvider(LLMProvider):
         """
         import base64
 
-        effective_key = api_key or self.api_key
-        effective_base = api_base or self.api_base
+        effective_key, effective_base = self._effective_credentials(api_key, api_base)
         try:
             if mode == "images_endpoint":
                 results = await self._image_via_images_endpoint(

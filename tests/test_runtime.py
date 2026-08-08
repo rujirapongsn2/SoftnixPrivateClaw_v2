@@ -8,7 +8,7 @@ import pytest
 from claw.config import SandboxSettings, Settings
 from claw.core.bus import EventBus
 from claw.core.memory import MemoryService
-from claw.core.runtime import AgentRuntime
+from claw.core.runtime import AgentRuntime, TurnFailed
 from claw.providers.base import ProviderError
 from tests.conftest import FakeProvider, text_turn
 
@@ -84,6 +84,42 @@ async def test_provider_error_does_not_poison_history(stores, tmp_path):
     assert result  # localized error message returned
     history = await stores["messages"].recent(session.id)
     # Only the user message is persisted — no assistant error text.
+    assert [m["role"] for m in history] == ["user"]
+
+
+async def test_unhandled_exception_raises_turn_failed(stores, tmp_path):
+    """A non-ProviderError exception must raise TurnFailed (not return a
+    plain string) so callers that branch on success/failure by return value
+    (SchedulerService, HeartbeatService) see a real failure — a truthy
+    "friendly error" string previously made a failed scheduled run look ok."""
+
+    class BoomProvider(FakeProvider):
+        async def stream_chat(self, *args, **kwargs):
+            raise RuntimeError("boom")
+            yield  # pragma: no cover
+
+    runtime = make_runtime(stores, BoomProvider([]), tmp_path)
+    user = await stores["users"].get_or_create_by_email("boom@x.y")
+    session = await stores["sessions"].create(user.id)
+
+    received = []
+
+    async def listen():
+        async with runtime.bus.subscribe(session.id) as queue:
+            while True:
+                event = await queue.get()
+                received.append(event.to_dict())
+                if event.to_dict()["type"] in ("turn_completed", "turn_error"):
+                    return
+
+    listener = asyncio.create_task(listen())
+    await asyncio.sleep(0)
+    with pytest.raises(TurnFailed):
+        await runtime.handle_message(user.id, session.id, "hello")
+    await asyncio.wait_for(listener, 2)
+
+    assert received[-1]["type"] == "turn_error"
+    history = await stores["messages"].recent(session.id)
     assert [m["role"] for m in history] == ["user"]
 
 

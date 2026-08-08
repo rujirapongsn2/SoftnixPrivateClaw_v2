@@ -713,6 +713,14 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
     for pending in state.runtime.pending_confirmations(session_id):
         await websocket.send_text(json.dumps(pending.to_dict(), ensure_ascii=False))
     turns: set[asyncio.Task] = set()
+
+    def _turn_done(task: asyncio.Task) -> None:
+        turns.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            # A TurnError was already published to the bus and logged with a
+            # full traceback inside handle_message; retrieving it here only
+            # prevents asyncio's "exception was never retrieved" warning.
+            pass
     try:
         while True:
             raw = await websocket.receive_text()
@@ -768,7 +776,7 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
                 )
             )
             turns.add(turn)
-            turn.add_done_callback(turns.discard)
+            turn.add_done_callback(_turn_done)
     except WebSocketDisconnect:
         pass
     finally:

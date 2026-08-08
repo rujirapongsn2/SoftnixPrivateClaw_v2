@@ -12,7 +12,7 @@ from loguru import logger
 
 from claw.channels.base import Channel
 from claw.channels.link import LinkCodeService
-from claw.core.runtime import AgentRuntime
+from claw.core.runtime import AgentRuntime, TurnFailed
 from claw.db.stores import SessionStore, UserStore
 
 _API = "https://api.telegram.org"
@@ -147,13 +147,18 @@ class TelegramChannel(Channel):
 
         title = f"Telegram · {chat.get('title') or from_user.get('username') or chat_id}"
         session_id = await self.resolve_session_id(user.id, str(chat_id), title)
-        reply = await self.runtime.handle_message(
-            user_id=user.id,
-            session_id=session_id,
-            content=text,
-            channel=self.name,
-            locale=from_user.get("language_code", "en")[:2],
-        )
+        try:
+            reply = await self.runtime.handle_message(
+                user_id=user.id,
+                session_id=session_id,
+                content=text,
+                channel=self.name,
+                locale=from_user.get("language_code", "en")[:2],
+            )
+        except TurnFailed as exc:
+            # A TurnError was already published to the bus; this channel has
+            # no WebSocket to receive it, so relay the same message here.
+            reply = exc.message
         if reply:
             await self.transport.send_message(chat_id, reply)
         return reply

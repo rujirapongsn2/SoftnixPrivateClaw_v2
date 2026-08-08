@@ -75,6 +75,21 @@ _STORED_TOOL_RESULT_CAP = 4000
 _CONFIRM_TIMEOUT_SECONDS = 600
 
 
+class TurnFailed(Exception):
+    """Raised when a turn hits an unexpected (non-ProviderError) exception.
+
+    A TurnError event has already been published to the bus by the time this
+    is raised, so WebSocket/Telegram callers don't need it — it exists so
+    callers that branch on success/failure by return value (SchedulerService,
+    HeartbeatService) see a real failure instead of a truthy "ok" string.
+    Carries the already-localized, user-facing message.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 class ClawAgent:
     """Per-user agent: workspace, tools, and loop. Cheap to keep resident."""
 
@@ -585,269 +600,275 @@ class AgentRuntime:
 
         async with self._session_lock(session_id):
             self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
-            session = await self.sessions.get(session_id)
-            after_seq = session.last_consolidated_seq if session else 0
+            try:
+                session = await self.sessions.get(session_id)
+                after_seq = session.last_consolidated_seq if session else 0
 
-            # Resolve the effective model for this turn: explicit request → sticky
-            # per-chat choice → admin default → env default. Persist an explicit
-            # choice onto the session so it sticks for the whole conversation.
-            # The plan's chat cost ceiling gates which admin-global model this
-            # turn may use; resolve() returns None for a disallowed one, so a
-            # user can't reach a pricier model than their tier by passing its
-            # id. The fallback picks the best model the plan DOES allow.
-            plan_chat_cost = plan["max_chat_cost"] if plan else None
-            effective_model: str | None = None
-            model_key: str | None = None
-            model_base: str | None = None
-            if self.llm_config is not None:
-                requested = model or (session.model if session else None)
-                if requested:
-                    resolved = await self.llm_config.resolve(
-                        requested, user_id, max_cost=plan_chat_cost
-                    )
-                    if resolved is not None:
-                        effective_model = resolved["model_id"]
-                        model_key = resolved["api_key"] or None
-                        model_base = resolved["api_base"] or None
-                if effective_model is None:
-                    effective_model = await self.llm_config.default_model_for(plan_chat_cost)
-                # A plan cost ceiling is in effect but no admin-global model
-                # satisfies it. Distinguish two cases before rejecting:
-                #   1. Admin-global models DO exist but the plan allows none of
-                #      them → genuine cost-ceiling gating; reject so the user
-                #      can't reach a pricier tier than their plan permits.
-                #   2. No admin-global model is configured at all → the
-                #      operator's env-configured default is the sole out-of-box
-                #      model and their deliberate baseline. Let it through
-                #      (model=None → claw/core/loop.py resolves the env default),
-                #      the same spirit as BYOK models bypassing the ceiling —
-                #      there is no lineup to gate. Otherwise a fresh install with
-                #      only CLAW_LLM__MODEL set would be unusable for every
-                #      non-admin on the default plan.
-                # (No ceiling in effect, i.e. plan_chat_cost is None, always kept
-                # the env-default fallback and is unchanged.)
-                if effective_model is None and plan_chat_cost is not None:
-                    any_global = await self.llm_config.default_model_for(None)
-                    if any_global is not None:
+                # Resolve the effective model for this turn: explicit request → sticky
+                # per-chat choice → admin default → env default. Persist an explicit
+                # choice onto the session so it sticks for the whole conversation.
+                # The plan's chat cost ceiling gates which admin-global model this
+                # turn may use; resolve() returns None for a disallowed one, so a
+                # user can't reach a pricier model than their tier by passing its
+                # id. The fallback picks the best model the plan DOES allow.
+                plan_chat_cost = plan["max_chat_cost"] if plan else None
+                effective_model: str | None = None
+                model_key: str | None = None
+                model_base: str | None = None
+                if self.llm_config is not None:
+                    requested = model or (session.model if session else None)
+                    if requested:
+                        resolved = await self.llm_config.resolve(
+                            requested, user_id, max_cost=plan_chat_cost
+                        )
+                        if resolved is not None:
+                            effective_model = resolved["model_id"]
+                            model_key = resolved["api_key"] or None
+                            model_base = resolved["api_base"] or None
+                    if effective_model is None:
+                        effective_model = await self.llm_config.default_model_for(plan_chat_cost)
+                    # A plan cost ceiling is in effect but no admin-global model
+                    # satisfies it. Distinguish two cases before rejecting:
+                    #   1. Admin-global models DO exist but the plan allows none of
+                    #      them → genuine cost-ceiling gating; reject so the user
+                    #      can't reach a pricier tier than their plan permits.
+                    #   2. No admin-global model is configured at all → the
+                    #      operator's env-configured default is the sole out-of-box
+                    #      model and their deliberate baseline. Let it through
+                    #      (model=None → claw/core/loop.py resolves the env default),
+                    #      the same spirit as BYOK models bypassing the ceiling —
+                    #      there is no lineup to gate. Otherwise a fresh install with
+                    #      only CLAW_LLM__MODEL set would be unusable for every
+                    #      non-admin on the default plan.
+                    # (No ceiling in effect, i.e. plan_chat_cost is None, always kept
+                    # the env-default fallback and is unchanged.)
+                    if effective_model is None and plan_chat_cost is not None:
+                        any_global = await self.llm_config.default_model_for(None)
+                        if any_global is not None:
+                            await self.audit.log(
+                                "quota",
+                                {"event": "no_model_for_plan", "plan": plan["name"] if plan else None,
+                                 "max_chat_cost": plan_chat_cost},
+                                user_id=user_id,
+                                session_id=session_id,
+                            )
+                            msg = t("error.no_model_for_plan", locale)
+                            self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
+                            return msg
+                    # About to fall through to the operator's env-configured default
+                    # (effective_model is None, no DB model available). If that env
+                    # default has no usable credentials either (no api_key and no
+                    # api_base — a local keyless endpoint would still set api_base),
+                    # there is genuinely no model to call: surface a clear setup
+                    # message to the operator instead of letting loop.py hit a raw,
+                    # confusing provider auth error.
+                    if effective_model is None and not (
+                        self.settings.llm.api_key or self.settings.llm.api_base
+                    ):
                         await self.audit.log(
                             "quota",
-                            {"event": "no_model_for_plan", "plan": plan["name"] if plan else None,
-                             "max_chat_cost": plan_chat_cost},
+                            {"event": "no_model_configured"},
                             user_id=user_id,
                             session_id=session_id,
                         )
-                        msg = t("error.no_model_for_plan", locale)
+                        msg = t("error.no_model_configured", locale)
                         self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
                         return msg
-                # About to fall through to the operator's env-configured default
-                # (effective_model is None, no DB model available). If that env
-                # default has no usable credentials either (no api_key and no
-                # api_base — a local keyless endpoint would still set api_base),
-                # there is genuinely no model to call: surface a clear setup
-                # message to the operator instead of letting loop.py hit a raw,
-                # confusing provider auth error.
-                if effective_model is None and not (
-                    self.settings.llm.api_key or self.settings.llm.api_base
-                ):
-                    await self.audit.log(
-                        "quota",
-                        {"event": "no_model_configured"},
-                        user_id=user_id,
-                        session_id=session_id,
-                    )
-                    msg = t("error.no_model_configured", locale)
-                    self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
-                    return msg
-                if model and session is not None and session.model != model:
-                    self._spawn_background(self.sessions.set_model(session_id, model))
-            history = await self.messages.recent(session_id, after_seq=after_seq)
-            memory_context = await self.memory.build_context(user_id)
-            # Sync connectors BEFORE building the skills summary below — a
-            # skill linked to a connector needs that connector's live tool
-            # names, which only exist after this call has run.
-            if self.connectors is not None:
-                try:
-                    await self.connectors.sync_tools(user_id, agent.tools)
-                except Exception:
-                    logger.exception("Connector sync failed for {}", user_id)
-            # Built-in skills are always offered; user skills are merged in.
-            enabled_skills = list(builtin_skills())
-            if self.skills is not None:
-                enabled_skills += await self.skills.enabled_for_user(user_id)
-            # For any user skill linked to a connector, resolve that
-            # connector's CURRENT registered tool names (mcp_{name}_{tool})
-            # live — never hardcoded in the skill's own text, so renaming or
-            # recreating the connector never leaves the skill's instructions
-            # pointing at a stale/nonexistent tool name.
-            tool_names_by_skill: dict[str, list[str]] = {}
-            if self.connectors is not None and any(getattr(s, "connector_id", None) for s in enabled_skills):
-                # Fetch each list once for the whole turn instead of once per
-                # linked skill — resolve_tool_names would otherwise re-query
-                # both the user's own connectors and the global ones on every
-                # call, which scales with skill count, not with anything that
-                # actually changed.
-                owned = await self.connectors.store.list_for_user(user_id)
-                global_connectors = await self.connectors.store.list_for_global()
-                for s in enabled_skills:
-                    connector_id = getattr(s, "connector_id", None)
-                    if connector_id:
-                        names = await self.connectors.resolve_tool_names(
-                            user_id, connector_id, owned=owned, global_connectors=global_connectors
+                    if model and session is not None and session.model != model:
+                        self._spawn_background(self.sessions.set_model(session_id, model))
+                history = await self.messages.recent(session_id, after_seq=after_seq)
+                memory_context = await self.memory.build_context(user_id)
+                # Sync connectors BEFORE building the skills summary below — a
+                # skill linked to a connector needs that connector's live tool
+                # names, which only exist after this call has run.
+                if self.connectors is not None:
+                    try:
+                        await self.connectors.sync_tools(user_id, agent.tools)
+                    except Exception:
+                        logger.exception("Connector sync failed for {}", user_id)
+                # Built-in skills are always offered; user skills are merged in.
+                enabled_skills = list(builtin_skills())
+                if self.skills is not None:
+                    enabled_skills += await self.skills.enabled_for_user(user_id)
+                # For any user skill linked to a connector, resolve that
+                # connector's CURRENT registered tool names (mcp_{name}_{tool})
+                # live — never hardcoded in the skill's own text, so renaming or
+                # recreating the connector never leaves the skill's instructions
+                # pointing at a stale/nonexistent tool name.
+                tool_names_by_skill: dict[str, list[str]] = {}
+                if self.connectors is not None and any(getattr(s, "connector_id", None) for s in enabled_skills):
+                    # Fetch each list once for the whole turn instead of once per
+                    # linked skill — resolve_tool_names would otherwise re-query
+                    # both the user's own connectors and the global ones on every
+                    # call, which scales with skill count, not with anything that
+                    # actually changed.
+                    owned = await self.connectors.store.list_for_user(user_id)
+                    global_connectors = await self.connectors.store.list_for_global()
+                    for s in enabled_skills:
+                        connector_id = getattr(s, "connector_id", None)
+                        if connector_id:
+                            names = await self.connectors.resolve_tool_names(
+                                user_id, connector_id, owned=owned, global_connectors=global_connectors
+                            )
+                            if names:
+                                tool_names_by_skill[s.name] = names
+                skills_summary = build_skills_summary(enabled_skills, tool_names_by_skill)
+                # Tell the agent which knowledge bases exist so it knows to reach for
+                # the search_knowledge tool when a question may be answered by them.
+                knowledge_summary = ""
+                if self.knowledge is not None:
+                    try:
+                        bases = await self.knowledge.list_accessible(user_id)
+                    except Exception:
+                        bases = []
+                    usable = [b for b in bases if b["docs"] > 0]
+                    if usable:
+                        lines = "\n".join(
+                            f"- {b['name']}" + (f": {b['description']}" if b["description"] else "")
+                            for b in usable
                         )
-                        if names:
-                            tool_names_by_skill[s.name] = names
-            skills_summary = build_skills_summary(enabled_skills, tool_names_by_skill)
-            # Tell the agent which knowledge bases exist so it knows to reach for
-            # the search_knowledge tool when a question may be answered by them.
-            knowledge_summary = ""
-            if self.knowledge is not None:
-                try:
-                    bases = await self.knowledge.list_accessible(user_id)
-                except Exception:
-                    bases = []
-                usable = [b for b in bases if b["docs"] > 0]
-                if usable:
-                    lines = "\n".join(
-                        f"- {b['name']}" + (f": {b['description']}" if b["description"] else "")
-                        for b in usable
-                    )
-                    knowledge_summary = (
-                        "# Knowledge bases\n\n"
-                        "The user has uploaded documents into these knowledge bases. When a "
-                        "question may be answered by them, call the `search_knowledge` tool "
-                        "(optionally with `knowledge_base` to target one) and answer from the "
-                        "returned passages, citing the source.\n\n" + lines
-                    )
-            # Tell the agent which integrations exist but aren't connected yet,
-            # so it points the user at Settings -> Connectors instead of
-            # improvising a workaround with the generic browser/web-fetch tools
-            # (e.g. asking them to make a private Google Sheet public).
-            connectors_summary = ""
-            if self.connectors is not None:
-                try:
-                    connected_rows = await self.connectors.store.enabled_accessible(user_id)
-                except Exception:
-                    connected_rows = []
-                connected_names = {c.name for c in connected_rows}
-                not_connected = [p for p in list_presets() if p["name"] not in connected_names]
-                if not_connected:
-                    lines = "\n".join(f"- {p['label']}: {p['description']}" for p in not_connected)
-                    connectors_summary = (
-                        "# Available but not-yet-connected integrations\n\n"
-                        "These integrations exist but the user has not connected them yet, so "
-                        "no tool for them is available this turn. If a request needs one (e.g. a "
-                        "Google Sheets/Drive URL needs the Google Sheets connector, a repo needs "
-                        "GitHub), tell the user to connect it under Settings -> Connectors — do "
-                        "not try to work around it with the browser or web-fetch tools, and do "
-                        "not ask the user to make private content public or export/download it "
-                        "instead.\n\n" + lines
-                    )
-            runtime_ctx = build_runtime_context(channel, locale)
-            model_content, storage_text = build_user_content(content, media, agent.workspace)
-            if isinstance(model_content, str):
-                user_message = {"role": "user", "content": f"{runtime_ctx}\n\n{model_content}"}
-            else:
-                # Multimodal: prepend the runtime context as a leading text block.
-                user_message = {
-                    "role": "user",
-                    "content": [{"type": "text", "text": runtime_ctx}, *model_content],
-                }
-            stored_content = storage_text  # text + attachment names (never base64)
-            # Persist the user message NOW (not at turn end) so it's durable the
-            # instant the turn starts. Otherwise switching away mid-turn and back
-            # would show an empty transcript — listMessages had nothing yet.
-            # history was already loaded above, so this doesn't duplicate the
-            # prompt's user turn.
-            await self.messages.append(session_id, [{"role": "user", "content": stored_content}])
-            prompt_messages = self.assembler.assemble(
-                agent.system_prompt(
-                    memory_context,
-                    skills_summary=skills_summary,
-                    knowledge_summary=knowledge_summary,
-                    connectors_summary=connectors_summary,
-                    # Pin the session's working plan into the (never-trimmed)
-                    # system prompt so the agent keeps the thread across a long
-                    # conversation and updates it via the update_plan tool.
-                    plan_context=render_plan(session.plan if session else None),
-                ),
-                history,
-                user_message,
-            )
-
-            async def _confirm(t_id: str, tool: str, args_preview: str) -> bool:
-                return await self.request_confirmation(session_id, t_id, tool, args_preview)
-
-            # Expose the active session to session-scoped tools (update_plan) for
-            # the duration of the turn; reset after so it never leaks to another.
-            _session_token = current_session_id.set(session_id)
-            try:
-                outcome = await agent.loop.run_turn(
-                    turn_id, prompt_messages, lambda ev: self.bus.publish(session_id, ev),
-                    model=effective_model, api_key=model_key, api_base=model_base,
-                    permission_mode=permission_mode, confirm=_confirm,
-                )
-            except ProviderError as exc:
-                detail = str(exc)
-                if is_no_tool_support_error(detail):
-                    # Retrying gets the identical rejection every time (the
-                    # selected model can never handle a tool-calling
-                    # request) — tell the user to switch models instead of
-                    # error.llm's generic "please try again".
-                    message = t("error.llm_no_tool_support", locale)
+                        knowledge_summary = (
+                            "# Knowledge bases\n\n"
+                            "The user has uploaded documents into these knowledge bases. When a "
+                            "question may be answered by them, call the `search_knowledge` tool "
+                            "(optionally with `knowledge_base` to target one) and answer from the "
+                            "returned passages, citing the source.\n\n" + lines
+                        )
+                # Tell the agent which integrations exist but aren't connected yet,
+                # so it points the user at Settings -> Connectors instead of
+                # improvising a workaround with the generic browser/web-fetch tools
+                # (e.g. asking them to make a private Google Sheet public).
+                connectors_summary = ""
+                if self.connectors is not None:
+                    try:
+                        connected_rows = await self.connectors.store.enabled_accessible(user_id)
+                    except Exception:
+                        connected_rows = []
+                    connected_names = {c.name for c in connected_rows}
+                    not_connected = [p for p in list_presets() if p["name"] not in connected_names]
+                    if not_connected:
+                        lines = "\n".join(f"- {p['label']}: {p['description']}" for p in not_connected)
+                        connectors_summary = (
+                            "# Available but not-yet-connected integrations\n\n"
+                            "These integrations exist but the user has not connected them yet, so "
+                            "no tool for them is available this turn. If a request needs one (e.g. a "
+                            "Google Sheets/Drive URL needs the Google Sheets connector, a repo needs "
+                            "GitHub), tell the user to connect it under Settings -> Connectors — do "
+                            "not try to work around it with the browser or web-fetch tools, and do "
+                            "not ask the user to make private content public or export/download it "
+                            "instead.\n\n" + lines
+                        )
+                runtime_ctx = build_runtime_context(channel, locale)
+                model_content, storage_text = build_user_content(content, media, agent.workspace)
+                if isinstance(model_content, str):
+                    user_message = {"role": "user", "content": f"{runtime_ctx}\n\n{model_content}"}
                 else:
-                    reason = t(classify_error_reason(detail), locale)
-                    message = t("error.llm", locale, reason=reason)
-                self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
-                # The user message is already persisted (above); never persist the
-                # error text, so a bad provider response can't poison future
-                # context (legacy #1303).
-                return message
-            finally:
-                current_session_id.reset(_session_token)
+                    # Multimodal: prepend the runtime context as a leading text block.
+                    user_message = {
+                        "role": "user",
+                        "content": [{"type": "text", "text": runtime_ctx}, *model_content],
+                    }
+                stored_content = storage_text  # text + attachment names (never base64)
+                # Persist the user message NOW (not at turn end) so it's durable the
+                # instant the turn starts. Otherwise switching away mid-turn and back
+                # would show an empty transcript — listMessages had nothing yet.
+                # history was already loaded above, so this doesn't duplicate the
+                # prompt's user turn.
+                await self.messages.append(session_id, [{"role": "user", "content": stored_content}])
+                prompt_messages = self.assembler.assemble(
+                    agent.system_prompt(
+                        memory_context,
+                        skills_summary=skills_summary,
+                        knowledge_summary=knowledge_summary,
+                        connectors_summary=connectors_summary,
+                        # Pin the session's working plan into the (never-trimmed)
+                        # system prompt so the agent keeps the thread across a long
+                        # conversation and updates it via the update_plan tool.
+                        plan_context=render_plan(session.plan if session else None),
+                    ),
+                    history,
+                    user_message,
+                )
 
-            final = outcome.final_content
-            if outcome.reached_max_iterations and not final:
-                final = t("error.max_iterations", locale)
+                async def _confirm(t_id: str, tool: str, args_preview: str) -> bool:
+                    return await self.request_confirmation(session_id, t_id, tool, args_preview)
 
-            # Enforce policy on the model's final output before it leaves the system.
-            if self.policy is not None and final:
-                out_decision = self.policy.enforce(final, scope="output")
-                if out_decision.matched_rules:
-                    await self.audit.log(
-                        "policy",
-                        {"scope": "output", "action": out_decision.action, "rules": out_decision.matched_rules},
-                        user_id=user_id,
-                        session_id=session_id,
+                # Expose the active session to session-scoped tools (update_plan) for
+                # the duration of the turn; reset after so it never leaks to another.
+                _session_token = current_session_id.set(session_id)
+                try:
+                    outcome = await agent.loop.run_turn(
+                        turn_id, prompt_messages, lambda ev: self.bus.publish(session_id, ev),
+                        model=effective_model, api_key=model_key, api_base=model_base,
+                        permission_mode=permission_mode, confirm=_confirm,
                     )
-                if out_decision.blocked:
-                    final = out_decision.message or "Response withheld by the control policy."
-                elif out_decision.masked:
-                    final = out_decision.text
+                except ProviderError as exc:
+                    detail = str(exc)
+                    if is_no_tool_support_error(detail):
+                        # Retrying gets the identical rejection every time (the
+                        # selected model can never handle a tool-calling
+                        # request) — tell the user to switch models instead of
+                        # error.llm's generic "please try again".
+                        message = t("error.llm_no_tool_support", locale)
+                    else:
+                        reason = t(classify_error_reason(detail), locale)
+                        message = t("error.llm", locale, reason=reason)
+                    self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
+                    # The user message is already persisted (above); never persist the
+                    # error text, so a bad provider response can't poison future
+                    # context (legacy #1303).
+                    return message
+                finally:
+                    current_session_id.reset(_session_token)
 
-            # User message was already persisted at turn start; store only the
-            # new assistant/tool messages this turn produced.
-            to_store = []
-            for msg in outcome.new_messages:
-                entry = dict(msg)
-                if entry.get("role") == "tool" and len(entry.get("content") or "") > _STORED_TOOL_RESULT_CAP:
-                    entry["content"] = entry["content"][:_STORED_TOOL_RESULT_CAP] + "\n... (truncated)"
-                to_store.append(entry)
-            # Attach artifacts to the final assistant message so they survive a
-            # reload (rendered as openable file chips in the UI).
-            if outcome.artifacts and to_store:
-                for entry in reversed(to_store):
-                    if entry.get("role") == "assistant" and not entry.get("tool_calls"):
-                        entry["meta"] = {**(entry.get("meta") or {}), "artifacts": outcome.artifacts}
-                        break
-            if to_store:
-                await self.messages.append(session_id, to_store)
+                final = outcome.final_content
+                if outcome.reached_max_iterations and not final:
+                    final = t("error.max_iterations", locale)
 
-            self.bus.publish(
-                session_id,
-                TurnCompleted(
-                    turn_id=turn_id, content=final or "", usage=outcome.usage, artifacts=outcome.artifacts
-                ),
-            )
+                # Enforce policy on the model's final output before it leaves the system.
+                if self.policy is not None and final:
+                    out_decision = self.policy.enforce(final, scope="output")
+                    if out_decision.matched_rules:
+                        await self.audit.log(
+                            "policy",
+                            {"scope": "output", "action": out_decision.action, "rules": out_decision.matched_rules},
+                            user_id=user_id,
+                            session_id=session_id,
+                        )
+                    if out_decision.blocked:
+                        final = out_decision.message or "Response withheld by the control policy."
+                    elif out_decision.masked:
+                        final = out_decision.text
+
+                # User message was already persisted at turn start; store only the
+                # new assistant/tool messages this turn produced.
+                to_store = []
+                for msg in outcome.new_messages:
+                    entry = dict(msg)
+                    if entry.get("role") == "tool" and len(entry.get("content") or "") > _STORED_TOOL_RESULT_CAP:
+                        entry["content"] = entry["content"][:_STORED_TOOL_RESULT_CAP] + "\n... (truncated)"
+                    to_store.append(entry)
+                # Attach artifacts to the final assistant message so they survive a
+                # reload (rendered as openable file chips in the UI).
+                if outcome.artifacts and to_store:
+                    for entry in reversed(to_store):
+                        if entry.get("role") == "assistant" and not entry.get("tool_calls"):
+                            entry["meta"] = {**(entry.get("meta") or {}), "artifacts": outcome.artifacts}
+                            break
+                if to_store:
+                    await self.messages.append(session_id, to_store)
+
+                self.bus.publish(
+                    session_id,
+                    TurnCompleted(
+                        turn_id=turn_id, content=final or "", usage=outcome.usage, artifacts=outcome.artifacts
+                    ),
+                )
+            except Exception as exc:
+                logger.exception("Unhandled turn failure for session {}", session_id)
+                message = t("error.llm", locale, reason=t("reason.internal", locale))
+                self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
+                raise TurnFailed(message) from exc
 
         if self.usage is not None:
             self._spawn_background(
