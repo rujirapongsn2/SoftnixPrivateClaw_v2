@@ -102,6 +102,7 @@ DEFAULT_TOOL_ARGS_EXEMPT: tuple[str, ...] = (
     "mcp_outlook-calendar_*",
     "mcp_gmail_*",
     "mcp_google-sheets_*",
+    "mcp_hubspot_*",
 )
 
 

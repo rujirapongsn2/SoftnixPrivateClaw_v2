@@ -203,6 +203,28 @@ _PRESETS: tuple[ConnectorPreset, ...] = (
         docs="https://learn.microsoft.com/graph/",
     ),
     ConnectorPreset(
+        key="hubspot",
+        name="hubspot",
+        label="HubSpot",
+        description="CRM contacts, companies, deals, and notes.",
+        transport="stdio",
+        category="CRM",
+        setup="api_key",
+        command=_server("hubspot_mcp_server"),
+        fields=(
+            FieldSpec(
+                key="HUBSPOT_TOKEN",
+                label="Private App access token",
+                help=(
+                    "Settings -> Integrations -> Private Apps in HubSpot, create an app with "
+                    "CRM scopes, then copy its access token."
+                ),
+                placeholder="pat-na1-…",
+            ),
+        ),
+        docs="https://developers.hubspot.com/docs/api/private-apps",
+    ),
+    ConnectorPreset(
         key="tavily",
         name="tavily",
         label="Tavily Search",

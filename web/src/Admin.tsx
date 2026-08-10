@@ -1906,7 +1906,7 @@ function AddModelForm({
 // admin-scoped (arbitrary stdio commands allowed, no OAuth presets — an
 // OAuth token is a personal mailbox/account and can't be shared) and talks
 // to ADMIN_CONNECTOR_API instead of the personal /api/connectors routes.
-const CONNECTOR_CATEGORY_ORDER = ["Productivity", "Communication", "Search", "Finance", "Automation", "Softnix", "Other"];
+const CONNECTOR_CATEGORY_ORDER = ["Productivity", "Communication", "CRM", "Search", "Finance", "Automation", "Softnix", "Other"];
 
 function AdminGuidedFields({
   preset,

@@ -26,6 +26,17 @@ def test_google_sheets_preset_is_oauth_and_reuses_google_provider():
     assert preset.command == "python -m claw.integrations.google_sheets_mcp_server"
 
 
+def test_hubspot_preset_is_api_key_setup_in_crm_category():
+    preset = get_preset("hubspot")
+    assert preset is not None
+    assert preset.transport == "stdio"
+    assert preset.setup == "api_key"
+    assert preset.category == "CRM"
+    assert preset.command == "python -m claw.integrations.hubspot_mcp_server"
+    field_keys = {f.key for f in preset.fields}
+    assert "HUBSPOT_TOKEN" in field_keys
+
+
 async def _register(c, email="a@x.io"):
     r = await c.post("/api/auth/register", json={"email": email, "password": "password123"})
     return r.json()["access_token"]

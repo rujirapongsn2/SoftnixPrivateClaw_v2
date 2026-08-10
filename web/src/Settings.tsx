@@ -1062,6 +1062,7 @@ function ConnectorsPanel() {
   const categoryOrder = [
     "Productivity",
     "Communication",
+    "CRM",
     "Search",
     "Finance",
     "Automation",
