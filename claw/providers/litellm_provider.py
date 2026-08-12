@@ -51,6 +51,46 @@ def _short_id() -> str:
     return "".join(secrets.choice(_ALNUM) for _ in range(9))
 
 
+# Placeholder key _effective_credentials() substitutes for keyless local
+# servers (see its docstring). Shared so callers that must reject it (e.g.
+# _cloudflare_chat, which always needs a real bearer token) don't duplicate
+# the literal and risk drifting out of sync with it.
+_LOCAL_KEY_PLACEHOLDER = "sk-local"
+
+
+# ---- Cloudflare AI (Workers AI / AI Gateway) --------------------------------
+# Cloudflare's /accounts/{id}/ai/run endpoint doesn't speak the wire format
+# LiteLLM/OpenAI clients expect: the request nests messages under `input`, the
+# response wraps an OpenAI-shaped completion in a `{success, result, errors}`
+# envelope, and `input.stream=true` doesn't actually stream (confirmed live
+# against the real API with a throwaway diagnostic script, since removed: it
+# returns HTTP 200 with an empty `result: {}`). So models under this prefix bypass
+# litellm.acompletion entirely; see LiteLLMProvider._cloudflare_chat.
+_CLOUDFLARE_PREFIX = "cloudflare/"
+
+
+def _parse_cloudflare_base(api_base: str) -> tuple[str, str]:
+    """Split the configured base URL from an optional ``?gateway=<id>`` query
+    param. There's no dedicated "gateway id" column on the provider row, so
+    the admin encodes it directly in the base URL; it defaults to "default"
+    (Cloudflare's own example value) when omitted."""
+    from urllib.parse import parse_qs, urlsplit, urlunsplit
+
+    parts = urlsplit(api_base)
+    gateway_id = (parse_qs(parts.query).get("gateway") or ["default"])[0] or "default"
+    url = urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+    return url, gateway_id
+
+
+def _cloudflare_error_detail(data: dict[str, Any]) -> str:
+    errors = data.get("errors")
+    if isinstance(errors, list) and errors:
+        first = errors[0]
+        if isinstance(first, dict) and first.get("message"):
+            return str(first["message"])
+    return "Cloudflare AI request failed"
+
+
 _MIME_EXT = {"jpeg": "jpg", "jpg": "jpg", "png": "png", "webp": "webp", "gif": "gif"}
 
 
@@ -195,7 +235,7 @@ class LiteLLMProvider(LLMProvider):
         apply as before.
         """
         if api_base:
-            return api_key or "sk-local", api_base
+            return api_key or _LOCAL_KEY_PLACEHOLDER, api_base
         return api_key or self.api_key, self.api_base
 
     # -- message preparation ------------------------------------------------
@@ -264,9 +304,16 @@ class LiteLLMProvider(LLMProvider):
         api_key: str | None = None,
         api_base: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
+        model = model or self.default_model
+        if model.startswith(_CLOUDFLARE_PREFIX):
+            async for event in self._cloudflare_chat(
+                messages, tools, model, max_tokens, temperature, api_key, api_base
+            ):
+                yield event
+            return
+
         from litellm import acompletion
 
-        model = model or self.default_model
         if supports_prompt_caching(model):
             messages, tools = self._apply_cache_control(messages, tools)
 
@@ -401,6 +448,84 @@ class LiteLLMProvider(LLMProvider):
             usage=usage,
         )
 
+    async def _cloudflare_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        api_key: str | None,
+        api_base: str | None,
+    ) -> AsyncIterator[ProviderEvent]:
+        import httpx
+
+        effective_key, effective_base = self._effective_credentials(api_key, api_base)
+        if not effective_base:
+            raise ProviderError(
+                "Cloudflare provider needs a base URL: "
+                "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run"
+            )
+        if not effective_key or effective_key == _LOCAL_KEY_PLACEHOLDER:
+            # Cloudflare always requires a real bearer token — sending the
+            # keyless-local-server placeholder would silently 401.
+            raise ProviderError("Cloudflare provider needs an API key (Cloudflare API token)")
+        url, gateway_id = _parse_cloudflare_base(effective_base)
+        real_model = model[len(_CLOUDFLARE_PREFIX):]
+        body: dict[str, Any] = {
+            "model": real_model,
+            "input": {
+                "messages": self._sanitize(messages),
+                "max_tokens": max(1, max_tokens),
+                "temperature": temperature,
+            },
+        }
+        if tools:
+            body["input"]["tools"] = tools
+        headers = {
+            "Authorization": f"Bearer {effective_key or ''}",
+            "cf-aig-gateway-id": gateway_id,
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(url, headers=headers, json=body)
+                data = resp.json()
+        except Exception as exc:
+            logger.warning("Cloudflare AI request failed for {}: {}", model, exc)
+            raise ProviderError(str(exc)) from exc
+
+        if resp.status_code >= 400 or not data.get("success", False):
+            raise ProviderError(_cloudflare_error_detail(data))
+
+        result = data.get("result") or {}
+        raw_tool_calls = result.get("tool_calls") or []
+        tool_calls = [
+            ToolCall(id=_short_id(), name=tc["name"], arguments=tc.get("arguments") or {})
+            for tc in raw_tool_calls
+            if isinstance(tc, dict) and tc.get("name")
+        ]
+        content = result.get("response")
+        if not content and not tool_calls:
+            choices = result.get("choices") or []
+            if choices:
+                content = ((choices[0] or {}).get("message") or {}).get("content")
+        usage_raw = result.get("usage") or {}
+        usage = {
+            "prompt_tokens": int(usage_raw.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage_raw.get("completion_tokens") or 0),
+        }
+        # No real streaming support (see module docstring above) — the whole
+        # answer arrives at once, so it's emitted as a single delta.
+        if content and not tool_calls:
+            yield TextDelta(text=content)
+        yield ChatResult(
+            content=content if not tool_calls else None,
+            tool_calls=tool_calls,
+            finish_reason="tool_calls" if tool_calls else "stop",
+            usage=usage,
+        )
+
     # -- image generation (separate path, never touches the agent loop) -----
 
     async def generate_image(
@@ -430,6 +555,12 @@ class LiteLLMProvider(LLMProvider):
         EventBus. Raises ProviderError on any failure or if no image comes back.
         """
         import base64
+
+        if model.startswith(_CLOUDFLARE_PREFIX):
+            # Cloudflare's image models return a raw binary/base64 response
+            # shape, not either of the two paths below — unsupported for now
+            # rather than silently routed through the wrong dispatcher.
+            raise ProviderError("Cloudflare AI image generation is not supported yet")
 
         effective_key, effective_base = self._effective_credentials(api_key, api_base)
         try:

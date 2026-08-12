@@ -1,4 +1,4 @@
-from claw.providers.litellm_provider import LiteLLMProvider
+from claw.providers.litellm_provider import _LOCAL_KEY_PLACEHOLDER, LiteLLMProvider
 
 
 def test_no_env_key_leak_to_keyless_custom_provider():
@@ -6,7 +6,7 @@ def test_no_env_key_leak_to_keyless_custom_provider():
     the operator's global env key — it gets the local placeholder instead."""
     provider = LiteLLMProvider(api_key="sk-env-global-secret", api_base="")
     key, base = provider._effective_credentials(None, "http://localhost:8000/v1")
-    assert key == "sk-local"
+    assert key == _LOCAL_KEY_PLACEHOLDER
     assert base == "http://localhost:8000/v1"
 
 

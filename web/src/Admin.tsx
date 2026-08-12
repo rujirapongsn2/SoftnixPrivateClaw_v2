@@ -22,6 +22,7 @@ import {
   ChevronDown,
   ChevronRight,
   Cloud,
+  CloudCog,
   Coins,
   Cpu,
   Diamond,
@@ -1016,6 +1017,15 @@ interface ProviderPreset {
   /** Presets with more than one valid endpoint (e.g. Z.AI's General API vs.
    * GLM Coding Plan) offer a picker instead of a single fixed apiBase. */
   baseOptions?: ProviderBaseOption[];
+  /** Overrides the generic "OpenAI-compatible server" placeholder/description
+   * shown for `needsBase` presets whose base URL isn't an OpenAI-compatible
+   * endpoint (e.g. Cloudflare's own REST endpoint shape). */
+  basePlaceholder?: string;
+  baseDescKey?: string;
+  /** `needsBase` presets default to an "API key optional" label/flow, aimed
+   * at keyless local servers. Set this for `needsBase` presets that are a
+   * real external API and always require a key (e.g. Cloudflare). */
+  requiresApiKey?: boolean;
 }
 
 const PROVIDER_PRESETS: ProviderPreset[] = [
@@ -1041,6 +1051,19 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
   },
   { key: "dashscope", name: "Qwen", subtitle: "Alibaba Cloud", icon: Cloud, apiBase: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", needsBase: false, prefix: "dashscope/", example: "dashscope/qwen3-max" },
+  {
+    key: "cloudflare",
+    name: "Cloudflare AI",
+    subtitle: "Workers AI + AI Gateway",
+    icon: CloudCog,
+    apiBase: "",
+    needsBase: true,
+    prefix: "cloudflare/",
+    example: "cloudflare/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    basePlaceholder: "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run",
+    baseDescKey: "admin.providers.cloudflareBaseHint",
+    requiresApiKey: true,
+  },
 ];
 
 // Brand logos via github.com/TypingMind/model-icons (MIT) — see
@@ -1102,7 +1125,7 @@ const LITELLM_PREFIXES = new Set([
   "openai", "anthropic", "gemini", "vertex_ai", "openrouter", "azure", "bedrock",
   "cohere", "mistral", "groq", "ollama", "deepseek", "xai", "together_ai",
   "fireworks_ai", "perplexity", "cerebras", "replicate", "huggingface", "watsonx",
-  "moonshot", "zai", "dashscope",
+  "moonshot", "zai", "dashscope", "cloudflare",
 ]);
 
 function modelPrefixWarning(t: (key: string) => string, modelId: string): string | null {
@@ -1245,6 +1268,7 @@ function AddProviderForm({
   const pick = (p: ProviderPreset) => {
     setPreset(p);
     setName(p.name);
+    setApiKey("");
     setApiBase(p.apiBase);
     setShowAdvanced(false);
   };
@@ -1304,8 +1328,8 @@ function AddProviderForm({
             {preset.needsBase ? (
               <TextInput
                 label={t("admin.providers.baseUrl")}
-                description={t("admin.providers.baseUrlDesc")}
-                placeholder="http://localhost:8000/v1"
+                description={t(preset.baseDescKey ?? "admin.providers.baseUrlDesc")}
+                placeholder={preset.basePlaceholder ?? "http://localhost:8000/v1"}
                 value={apiBase}
                 onChange={setApiBase}
               />
@@ -1331,7 +1355,11 @@ function AddProviderForm({
             )}
 
             <TextInput
-              label={preset.needsBase ? t("admin.providers.apiKeyOptionalLocal") : t("admin.providers.apiKey")}
+              label={
+                preset.needsBase && !preset.requiresApiKey
+                  ? t("admin.providers.apiKeyOptionalLocal")
+                  : t("admin.providers.apiKey")
+              }
               type="password"
               value={apiKey}
               onChange={setApiKey}
@@ -1352,7 +1380,11 @@ function AddProviderForm({
                 label={t("admin.providers.createProvider")}
                 variant="primary"
                 icon={<Icon icon="check" size="sm" />}
-                isDisabled={!name.trim() || (preset.needsBase && !apiBase.trim())}
+                isDisabled={
+                  !name.trim() ||
+                  (preset.needsBase && !apiBase.trim()) ||
+                  (preset.requiresApiKey && !apiKey.trim())
+                }
                 clickAction={() =>
                   guard(async () => {
                     await llmApi.createProvider({
