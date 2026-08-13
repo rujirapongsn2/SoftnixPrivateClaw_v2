@@ -7,13 +7,18 @@ import { neutralTheme } from "@astryxdesign/theme-neutral/built";
 // matching ChatGPT's Latin look while guaranteeing correct Thai shaping,
 // notably in Safari where the OS's system-ui Thai substitution mis-renders
 // inside a contenteditable.
+// OA-aligned font stack: ClawThai (Thai block only) first, then the platform UI
+// font. FT Kunst Grotesk is proprietary — system-ui (SF Pro / Segoe UI Variable)
+// is the closest free match. `system-ui` stays FIRST: putting the literal
+// "Segoe UI" ahead of it pins Windows to the legacy static face instead of
+// Segoe UI Variable, which system-ui resolves to.
 const FONT_FALLBACKS = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 
 export const clawTheme = defineTheme({
   name: "claw",
   extends: neutralTheme,
   typography: {
-    // 16px body — matches ChatGPT's own body size.
+    // 16px body — matches OA/Kumo base size (1rem at 100% root).
     scale: { base: 16, ratio: 1.2 },
     body: {
       family: "ClawThai",
@@ -28,9 +33,7 @@ export const clawTheme = defineTheme({
     },
   },
   tokens: {
-    // Default leading from the type scale is tuned for Latin (~1.43–1.5).
-    // Thai vowel/tone marks need more vertical room to stay legible without
-    // crowding the line above — 1.65 matches ChatGPT's Thai rendering.
+    // Thai vowel/tone marks need more vertical room — 1.65 matches OA's Thai rendering.
     "--text-body-leading": "1.65",
     "--size-element-sm": "30px",
     "--size-element-md": "34px",

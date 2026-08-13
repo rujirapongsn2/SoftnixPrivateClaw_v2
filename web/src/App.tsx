@@ -500,6 +500,7 @@ function Auth({
                     ? "Send recovery email"
                     : "Reset password"
         }
+        variant="primary"
         isDisabled={
           busy ||
           (mode === "forgot-password"

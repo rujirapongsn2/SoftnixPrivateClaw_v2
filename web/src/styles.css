@@ -16,6 +16,189 @@
   unicode-range: U+0E00-0E7F, U+200C-200D, U+25CC;
 }
 
+/* ================================================================
+ * OA Theme Overlay — เปลี่ยน design tokens ของ PrivateClaw
+ * ให้เข้าใกล้ Softnix OA (Cloudflare Kumo)
+ *
+ * แนวทาง: "Never rename CSS vars, only change values" — ทำงานที่ชั้น token
+ * เป็นหลัก แล้วค่อยแตะ component เท่าที่ token ทำแทนไม่ได้
+ *
+ * ทำไมไม่ต้องใช้ !important: ทุก rule ของ Astryx อยู่ใน cascade layer
+ * (@layer reset / astryx-base / astryx-theme) ส่วนไฟล์นี้ไม่ได้อยู่ใน layer
+ * — unlayered normal declaration ชนะ layered ทั้งหมดเสมอ การใส่ !important
+ * จะกลับกลายเป็นโทษ เพราะไปทับ state (hover/disabled) ของ design system ด้วย
+ * ================================================================ */
+:root,
+[data-astryx-theme="neutral"],
+[data-astryx-theme="claw"],
+html {
+  /* ── Brand accent — OA blue (#2786c2) ──
+     --color-accent คือ token จริงของ Astryx (ใช้ 22 จุดใน astryx.css);
+     ที่เหลือเป็น custom var ที่โค้ดของ PrivateClaw เองอ้างถึง */
+  --color-accent: #2786c2;
+  --color-accent-muted: #e2eef9;
+  --color-on-accent: #ffffff;
+  --color-primary: #2786c2;
+  /* จงใจไม่ override --color-info / --color-accent-purple แม้เป็นสีของ neutral
+     theme: ทั้งคู่เป็นสี "หมวดหมู่" ไม่ใช่สีแบรนด์ — STACK_PALETTE ใน
+     Admin.tsx และแถบ prompt/completion พึ่ง var() fallback ของตัวเองเพื่อให้
+     แต่ละ series สีต่างกัน ถ้าตั้งเป็น #2786c2 กราฟจะกลายเป็นสีเดียวทั้งหมด */
+
+  /* Surfaces — OA warm off-white */
+  --color-background-surface: #ffffff;
+  --color-background-card: #ffffff;
+  --color-background-popover: #ffffff;
+  --color-background-body: #faf8f4;
+  --color-background-muted: #f3f1ea;
+  /* ต้องโปร่งแสง (ค่าเดิมของ theme คือ rgba(5,54,89,0.1)) เพราะ astryx.css ใช้
+     token นี้เป็นชั้น composite — `linear-gradient(var(--color-neutral), …)`
+     ซ้อนใต้ overlay-hover/pressed ถ้าใส่สีทึบ ปุ่ม secondary หรือพื้น hover ที่
+     วางบน sidenav (#e8e3d5) จะกลายเป็นแผ่นเทาตายตัวแทนที่จะ tint ตามพื้นหลัง */
+  --color-neutral: rgba(120, 100, 60, 0.1); /* ≈ #f2f0ec บนพื้นขาว */
+  --color-skeleton: #eeece8;
+  --color-surface: #ffffff;
+  --color-surface-1: #ffffff;
+  --color-surface-2: #f3f1ea;
+  --color-surface-3: #ebe8df;
+  --color-surface-secondary: #ebe8df;
+  --color-surface-subtle: #f3f1ea;
+
+  /* Backgrounds — OA warm palette.
+     ค่าเหล่านี้ตั้งใจให้ห่างจากขาวมากพอที่ตาจะแยกออก: ชุดเดิม (#fcfcfb เทียบ
+     #ffffff) ต่างกัน 3 หน่วย RGB ซึ่งมองไม่เห็น ทำให้ทั้งแอปดู "ขาวหมด" และ
+     การเปลี่ยน CI ไม่มีผลที่สังเกตได้ */
+  --color-background: #faf8f4;
+  --color-background-base: #faf8f4;
+  --color-background-wash: #faf8f4;
+  --color-background-section: #f3f1ea;
+  --color-background-blue: #e2eef9;
+
+  /* Borders — OA warm */
+  --color-border: #e8e7e4;
+  --color-border-emphasized: #d8d6d1;
+  --color-border-subtle: #e8e7e4;
+
+  /* Overlays — warm-neutral ink แทน pure black ของ neutral theme */
+  --color-overlay: rgba(28, 26, 24, 0.5);
+  --color-overlay-hover: rgba(28, 26, 24, 0.05);
+  --color-overlay-pressed: rgba(28, 26, 24, 0.09);
+
+  /* Text — OA warm neutrals.
+     --color-text-accent ใช้ #1a5a8a ไม่ใช่ #2786c2 เพราะ brand blue บนพื้นขาว
+     ได้ contrast ~3.4:1 (ต่ำกว่า WCAG AA 4.5:1 สำหรับ body text) */
+  --color-text-primary: #1c1a18;
+  --color-text-secondary: #6b6760;
+  --color-text-disabled: #a8a49c;
+  --color-text-accent: #1a5a8a;
+  --color-text-blue: #2786c2;
+  --color-text-error: #c0392b;
+
+  /* Icons */
+  --color-icon-primary: #1c1a18;
+  --color-icon-secondary: #6b6760;
+  --color-icon-accent: #2786c2;
+  --color-icon-disabled: #a8a49c;
+
+
+  /* Font — OA stack: ClawThai for Thai, system-ui (SF Pro) for Latin */
+  --font-family-body: "ClawThai", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-family-heading: "ClawThai", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-family-code: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  /* Selection — OA blue tint */
+  --color-selection-bg: #e2eef9;
+  --color-selection-text: #1a5a8a;
+}
+
+/* Global selection + link color */
+::selection {
+  background: var(--color-selection-bg, #e2eef9);
+  color: var(--color-selection-text, #1a5a8a);
+}
+/* :not(.astryx-button) — Button ที่ส่ง href มาจะ render เป็น <a> โดยยังคง class
+   `astryx-button <variant>` ไว้ ถ้าไม่กันไว้ ป้ายปุ่มจะโดนย้อมสีลิงก์ทับสีของ
+   variant (และปุ่ม primary + href จะกลายเป็นน้ำเงินบนน้ำเงิน มองไม่เห็น) */
+a:not(.astryx-button) { color: var(--color-accent, #2786c2); }
+a:not(.astryx-button):hover { color: var(--color-text-accent, #1a5a8a); }
+
+/* Explicit base styles — ensure OA palette applies even outside @scope */
+body {
+  background: var(--color-background-wash, #faf8f4);
+  color: var(--color-text-primary, #1c1a18);
+  font-family: var(--font-family-body, "ClawThai", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+}
+
+/* OA component shapes — เฉพาะสิ่งที่ token ทำแทนไม่ได้ (radius/เงา/เส้น)
+   สีทั้งหมดปล่อยให้ token ด้านบนจัดการ เพื่อให้ hover/disabled ยังทำงาน */
+
+/* ── Astryx Text Input — OA: no border, 8px radius, ring แทนเส้นขอบ ──
+   :not([data-status]) สำคัญ: TextInput สะท้อน status เป็น data-status และแสดง
+   error/warning ผ่าน border-color + shadow ถ้าเรา set `border: none` แบบ
+   unlayered ทับไปหมด ช่องที่ validation ไม่ผ่านจะหน้าตาเหมือนช่องปกติทุกประการ */
+[data-astryx-theme] .astryx-text-input:not([data-status]) {
+  border: none;
+  border-radius: 8px;
+  background: var(--color-background-surface, #ffffff);
+  box-shadow: 0 0 0 1px var(--color-border, #e8e7e4);
+  padding: 4px 12px;
+  transition: box-shadow 0.15s ease;
+}
+[data-astryx-theme] .astryx-text-input:not([data-status]):focus-within {
+  box-shadow: 0 0 0 2px var(--color-accent, #2786c2);
+}
+
+/* ── Astryx Button — OA: 8px radius ──
+   ห้ามใส่ padding ที่นี่: Button ไม่ได้สะท้อน isIconOnly เป็น data attribute
+   จึงเจาะจงยกเว้นไม่ได้ และกฎ unlayered จะไปทับ `padding-inline: 0` ของ
+   icon-only ทำให้ IconButton ทุกตัว (~21 จุด รวมปุ่มใน sidenav ที่หุบและปุ่ม
+   ใน composer) กว้างเกินจนล้นราง — ปล่อยให้ design system คุม padding เอง */
+[data-astryx-theme] .astryx-button {
+  border-radius: 8px;
+  font-weight: 500;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+/* ── Astryx Field Label — OA: warm subtle text ── */
+[data-astryx-theme] .astryx-field-label {
+  color: var(--color-text-secondary, #6b6760);
+  font-weight: 500;
+  letter-spacing: normal;
+}
+
+/* ── Card — OA layered shadow + 12px radius ──
+   จงใจไม่ใช้ [class*="card"]: มันจับ astryx-selectable-card /
+   astryx-clickable-card / astryx-top-nav-mega-menu-featured-card ไปด้วย
+   และจำกัดที่ [data-variant="default"] เพราะ Card variant="muted" (19 จุดใน
+   Admin/Settings) ตั้งใจให้จมลงไป — ถ้าย้อมขาว + ใส่เงาให้ด้วย ลำดับชั้นของ
+   card ซ้อน card จะแบนกลายเป็นกล่องขาวเหมือนกันหมด */
+[data-astryx-theme] .astryx-card[data-variant="default"] {
+  border-radius: 12px;
+  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+  background: var(--color-background-card, #ffffff);
+}
+
+/* ── Focus ring — OA subtle ring ── */
+[data-astryx-theme] *:focus-visible {
+  outline: 2px solid var(--color-accent, #2786c2);
+  outline-offset: 2px;
+}
+
+/* ── Scrollbar — OA subtle ── */
+[data-astryx-theme] ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+[data-astryx-theme] ::-webkit-scrollbar-thumb {
+  background: var(--color-border, #e8e7e4);
+  border-radius: 4px;
+}
+[data-astryx-theme] ::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-secondary, #6b6760);
+}
+[data-astryx-theme] ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 html, body, #root {
   height: 100%;
   margin: 0;
@@ -119,7 +302,7 @@ html[data-font-size="large"] {
   /* dvh tracks iOS Safari's shrinking/expanding toolbar so the composer isn't
      hidden behind it; 100vh above is the fallback for browsers without dvh. */
   height: 100dvh;
-  background: var(--color-background-wash, #faf9f5);
+  background: var(--color-background-wash, #faf8f4);
 }
 .claw-main {
   flex: 1;
@@ -137,7 +320,7 @@ html[data-font-size="large"] {
   flex-shrink: 0;
   padding: 8px 12px;
   padding-top: max(8px, env(safe-area-inset-top));
-  border-bottom: 1px solid var(--color-border-subtle, #e9ebee);
+  border-bottom: 1px solid var(--color-border-subtle, #e8e7e4);
   background: var(--color-background-base, #fff);
 }
 .claw-topbar > *:nth-child(2) {
@@ -149,10 +332,15 @@ html[data-font-size="large"] {
 }
 
 /* Soft drop shadow along the sidebar's trailing edge, separating it from the
-   (slightly off-white) main content without a hard border line. */
+   (slightly off-white) main content without a hard border line. Uses its own
+   literal instead of the shared --color-surface-2 token (reused in ~25 other
+   rules) because --color-surface-2 is nearly indistinguishable from
+   --color-background-wash (contrast ~1.07:1) — the boundary would otherwise
+   depend entirely on the box-shadow rendering. */
 .claw-sidenav {
   position: relative;
   z-index: 1;
+  background: #e8e3d5;
   box-shadow: 1px 0 0 rgba(0, 0, 0, 0.06), 6px 0 16px -8px rgba(0, 0, 0, 0.12);
 }
 
@@ -170,7 +358,7 @@ html[data-font-size="large"] {
 .claw-nav-admin {
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px solid var(--color-border-subtle, #e9ebee);
+  border-top: 1px solid var(--color-border-subtle, #e8e7e4);
 }
 .claw-nav-admin svg {
   color: #b45309;
@@ -296,11 +484,11 @@ html[data-font-size="large"] {
   border-radius: 8px;
   font: inherit;
   font-size: 13px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   cursor: pointer;
 }
 .claw-recents-more:hover {
-  background: var(--color-background-section, #f2f0ea);
+  background: var(--color-background-section, #f3f1ea);
   color: var(--color-text-primary);
 }
 
@@ -339,7 +527,7 @@ html[data-font-size="large"] {
    is intentionally not gated behind any data-chat-bg value. Dots/Grid paint a
    texture over it — deliberately
    using a fixed rgba(black) rather than the `--color-border` token: that token
-   (~#ebebeb) sits only ~15 levels off the app's wash background (~#faf9f5),
+   (~#ebebeb) sits only ~15 levels off the app's wash background (~#fcfcfb),
    making a 1px mark essentially invisible once anti-aliased. rgba(0,0,0,.14)/
    .08 stays legible-but-subtle behind message text regardless of the active
    theme's border color. `circle` + an explicit radius keeps the dot crisp
@@ -477,7 +665,7 @@ html[data-chat-bg="grid"] .claw-chat {
   transition: background 0.12s ease, border-color 0.12s ease;
 }
 .claw-suggestion-chip:hover {
-  background: var(--color-background-section, #f2f0ea);
+  background: var(--color-background-section, #f3f1ea);
   border-color: var(--color-border, #d4d1c9);
 }
 
@@ -514,7 +702,7 @@ html[data-chat-bg="grid"] .claw-chat {
   background: transparent;
   font: inherit;
   font-size: 14px;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
   text-align: left;
   cursor: pointer;
 }
@@ -522,7 +710,7 @@ html[data-chat-bg="grid"] .claw-chat {
   border-bottom: none;
 }
 .claw-suggestion-panel-item:hover {
-  background: var(--color-background-section, #f2f0ea);
+  background: var(--color-background-section, #f3f1ea);
 }
 .claw-cursor {
   animation: claw-blink 1s infinite;
@@ -664,10 +852,10 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 /* Collapsible "Quick start guide" — minimal, closed by default. */
 .claw-guide {
-  border: 1px solid var(--color-border-subtle, #e9ebee);
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
   border-radius: 8px;
   padding: 8px 12px;
-  background: var(--color-surface-2, #f7f8fa);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-guide > summary {
   cursor: pointer;
@@ -699,7 +887,7 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-scope-chips code {
   font-size: 0.75rem;
-  background: var(--color-surface-3, #eef0f3);
+  background: var(--color-surface-3, #f3f3f1);
   border: 1px solid var(--color-border-subtle, #e2e4e8);
   border-radius: 4px;
   padding: 1px 6px;
@@ -745,7 +933,7 @@ html[data-chat-bg="grid"] .claw-chat {
   width: 38px;
   height: 38px;
   border-radius: 9px;
-  border: 1px solid var(--color-border-subtle, #e9ebee);
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
   background: var(--color-surface-2, #f5f6f8);
   display: flex;
   align-items: center;
@@ -804,7 +992,7 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-connector-auth {
   font-size: 11px;
   font-weight: 500;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   background: var(--color-surface-2, #f0f1f4);
   border-radius: 5px;
   padding: 1px 7px;
@@ -831,7 +1019,7 @@ html[data-chat-bg="grid"] .claw-chat {
   border-radius: 8px;
   border: 1px solid var(--color-border-subtle, #e4e2dd);
   background: var(--color-surface, #fff);
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
   cursor: pointer;
   max-width: 240px;
 }
@@ -920,7 +1108,7 @@ html[data-chat-bg="grid"] .claw-chat {
   display: flex;
   justify-content: space-between;
   font-size: 10px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-chart-axis span {
   flex: 1 1 0;
@@ -942,7 +1130,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 10px;
   padding: 8px 10px;
   border-radius: 10px;
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-provider-usage-name {
   font-weight: 600;
@@ -952,7 +1140,7 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-provider-usage-models {
   margin-left: auto;
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 
 /* Overview: tokens used per model */
@@ -986,14 +1174,14 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-model-usage-total {
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   white-space: nowrap;
 }
 .claw-model-usage-bar {
   position: relative;
   height: 8px;
   border-radius: 999px;
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
   overflow: hidden;
 }
 .claw-model-usage-bar-prompt,
@@ -1004,7 +1192,7 @@ html[data-chat-bg="grid"] .claw-chat {
   height: 100%;
 }
 .claw-model-usage-bar-prompt {
-  background: var(--color-primary, #4b6bfb);
+  background: var(--color-primary, #2786c2);
 }
 .claw-model-usage-bar-completion {
   background: var(--color-info, #2f9e6f);
@@ -1013,7 +1201,7 @@ html[data-chat-bg="grid"] .claw-chat {
   display: flex;
   gap: 14px;
   font-size: 11px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-model-usage-legend span {
   display: inline-flex;
@@ -1027,7 +1215,7 @@ html[data-chat-bg="grid"] .claw-chat {
   display: inline-block;
 }
 .claw-legend-dot--prompt {
-  background: var(--color-primary, #4b6bfb);
+  background: var(--color-primary, #2786c2);
 }
 .claw-legend-dot--completion {
   background: var(--color-info, #2f9e6f);
@@ -1040,7 +1228,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 10px 14px;
   margin-top: 8px;
   font-size: 11px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-stacked-legend span {
   display: inline-flex;
@@ -1073,7 +1261,7 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-models-grid-head {
   padding-block: 0 6px;
-  border-bottom: 1px solid var(--color-border-subtle, #e4e6ea);
+  border-bottom: 1px solid var(--color-border-subtle, #e8e7e4);
   align-self: end;
   text-transform: uppercase;
   letter-spacing: 0.02em;
@@ -1117,12 +1305,12 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-audit-table {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
   border-radius: 10px;
   overflow: hidden;
 }
 .claw-audit-item {
-  border-bottom: 1px solid var(--color-border-subtle, #eef0f2);
+  border-bottom: 1px solid var(--color-border-subtle, #f3f3f1);
 }
 .claw-audit-item:last-child {
   border-bottom: none;
@@ -1141,7 +1329,7 @@ html[data-chat-bg="grid"] .claw-chat {
   cursor: pointer;
 }
 .claw-audit-head:hover {
-  background: var(--color-background-section, #f5f4ef);
+  background: var(--color-background-section, #f3f3f1);
 }
 .claw-audit-user {
   display: inline-flex;
@@ -1150,7 +1338,7 @@ html[data-chat-bg="grid"] .claw-chat {
   flex: 0 0 auto;
   max-width: 160px;
   font-size: 13px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1163,18 +1351,18 @@ html[data-chat-bg="grid"] .claw-chat {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-audit-time {
   flex: 0 0 auto;
   white-space: nowrap;
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 /* Expanded detail: full pretty-printed payload + actor/session meta. */
 .claw-audit-detail {
   padding: 4px 12px 12px 34px;
-  background: var(--color-background-section, #faf9f5);
+  background: var(--color-background-section, #f3f1ea);
 }
 .claw-audit-detail-meta {
   display: flex;
@@ -1182,7 +1370,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 12px;
   padding: 6px 0;
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-audit-json {
   margin: 0;
@@ -1201,13 +1389,13 @@ html[data-chat-bg="grid"] .claw-chat {
   overflow: hidden;
 }
 .claw-user-row {
-  border-bottom: 1px solid var(--color-border-subtle, #eef0f2);
+  border-bottom: 1px solid var(--color-border-subtle, #f3f3f1);
 }
 .claw-user-row:last-child {
   border-bottom: none;
 }
 .claw-user-row.is-suspended {
-  background: var(--color-background-section, #f5f4ef);
+  background: var(--color-background-section, #f3f3f1);
 }
 .claw-user-head {
   display: flex;
@@ -1225,12 +1413,12 @@ html[data-chat-bg="grid"] .claw-chat {
   justify-content: center;
   font-size: 13px;
   font-weight: 600;
-  background: color-mix(in srgb, var(--color-primary, #4b6bfb) 12%, transparent);
-  color: var(--color-primary, #4b6bfb);
+  background: color-mix(in srgb, var(--color-primary, #2786c2) 12%, transparent);
+  color: var(--color-primary, #2786c2);
 }
 .claw-user-row.is-suspended .claw-user-avatar {
   background: var(--color-background-base, #ece9e2);
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-user-main {
   flex: 1;
@@ -1252,7 +1440,7 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-user-meta {
   font-size: 13px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1301,7 +1489,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 6px;
   border: none;
   background: transparent;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
   border-radius: 999px;
   padding: 6px 10px;
   font: inherit;
@@ -1315,7 +1503,7 @@ html[data-chat-bg="grid"] .claw-chat {
   min-width: 0;
 }
 .claw-model-trigger:hover {
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-model-trigger-label {
   overflow: hidden;
@@ -1348,7 +1536,7 @@ html[data-chat-bg="grid"] .claw-chat {
   text-align: left;
 }
 .claw-model-option:hover {
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-model-option-main {
   flex: 1 1 auto;
@@ -1366,12 +1554,12 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-model-option-name {
   font-size: 15px;
   font-weight: 600;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
 }
 .claw-model-option-desc {
   font-size: 13px;
   line-height: 1.4;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 /* Marks a user's own bring-your-own-key model in the picker. */
 .claw-model-option-private {
@@ -1394,12 +1582,12 @@ html[data-chat-bg="grid"] .claw-chat {
   border: none;
   border-radius: 999px;
   background: transparent;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
   cursor: pointer;
   padding: 0;
 }
 .claw-mic:hover {
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-mic:disabled {
   cursor: default;
@@ -1425,7 +1613,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 6px;
   border: none;
   background: transparent;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
   border-radius: 999px;
   padding: 6px 10px;
   font: inherit;
@@ -1433,7 +1621,7 @@ html[data-chat-bg="grid"] .claw-chat {
   cursor: pointer;
 }
 .claw-perm-trigger:hover {
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-perm-menu {
   display: flex;
@@ -1454,7 +1642,7 @@ html[data-chat-bg="grid"] .claw-chat {
   text-align: left;
 }
 .claw-perm-option:hover {
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-perm-option-main {
   flex: 1 1 auto;
@@ -1466,12 +1654,12 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-perm-option-name {
   font-size: 15px;
   font-weight: 600;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
 }
 .claw-perm-option-desc {
   font-size: 13px;
   line-height: 1.4;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 
 /* Ask-mode confirmation card (inline in the transcript) */
@@ -1505,7 +1693,7 @@ html[data-chat-bg="grid"] .claw-chat {
   margin: 0;
   padding: 10px 12px;
   border-radius: 8px;
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 13px;
   line-height: 1.45;
@@ -1533,7 +1721,7 @@ html[data-chat-bg="grid"] .claw-chat {
   background: #e6f6ee;
 }
 .claw-cost-medium {
-  color: #1f7ac0;
+  color: #2786c2;
   background: #e6f2fb;
 }
 .claw-cost-high {
@@ -1554,7 +1742,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 4px 14px;
   margin-top: 4px;
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 /* Each group in the Groups manager stacks its row above a plan picker. */
 .claw-plan-group-item {
@@ -1588,7 +1776,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 10px;
   padding: 8px 10px;
   border-radius: 10px;
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 /* At/over a quota — tint red so it stands out in a long list. */
 .claw-plan-usage-row.is-over {
@@ -1605,7 +1793,7 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-plan-usage-metric {
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   white-space: nowrap;
 }
 
@@ -1630,12 +1818,12 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-preset-card:hover {
   border-color: var(--color-border, #cfccc4);
-  background: var(--color-background-section, #f5f4ef);
+  background: var(--color-background-section, #f3f3f1);
 }
 .claw-preset-card.is-active {
-  border-color: var(--color-primary, #4b6bfb);
+  border-color: var(--color-primary, #2786c2);
   border-width: 2px;
-  background: color-mix(in srgb, var(--color-primary, #4b6bfb) 6%, transparent);
+  background: color-mix(in srgb, var(--color-primary, #2786c2) 6%, transparent);
 }
 /* Fixed-height band so every card's logo sits on the same baseline regardless
    of whether the brand mark is a square glyph or a wide wordmark. */
@@ -1652,7 +1840,7 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-preset-sub {
   font-size: 11px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 
 /* ---- Provider brand marks: fixed height, natural width, no square frame ----
@@ -1688,7 +1876,7 @@ html[data-chat-bg="grid"] .claw-chat {
   align-items: center;
   justify-content: center;
   border-radius: 9px;
-  background: var(--color-background-section, #f2f0ea);
+  background: var(--color-background-section, #f3f1ea);
 }
 .claw-provider-logo-fallback--sm {
   width: 30px;
@@ -1713,7 +1901,7 @@ html[data-chat-bg="grid"] .claw-chat {
   border: none;
   border-left: 1px solid var(--color-border-subtle, #e4e2dd);
   background: transparent;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -1721,7 +1909,7 @@ html[data-chat-bg="grid"] .claw-chat {
   border-left: none;
 }
 .claw-segmented button.is-active {
-  background: var(--color-text-primary, #1a1a1a);
+  background: var(--color-text-primary, #1c1a18);
   color: var(--color-background-base, #fff);
 }
 
@@ -1732,7 +1920,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 8px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: var(--color-background-section, #f5f4ef);
+  background: var(--color-background-section, #f3f3f1);
 }
 .claw-info-box code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1760,7 +1948,7 @@ html[data-chat-bg="grid"] .claw-chat {
   padding: 0;
   font: inherit;
   font-size: 13px;
-  color: var(--color-primary, #4b6bfb);
+  color: var(--color-primary, #2786c2);
   cursor: pointer;
 }
 
@@ -1795,11 +1983,11 @@ html[data-chat-bg="grid"] .claw-chat {
   cursor: pointer;
   font: inherit;
   font-size: 14px;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
   text-align: left;
 }
 .claw-plus-item:hover {
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-plus-item > span:first-of-type {
   flex: 1 1 auto;
@@ -1813,7 +2001,7 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-plus-divider {
   height: 1px;
-  background: var(--color-border-subtle, #e9ebee);
+  background: var(--color-border-subtle, #e8e7e4);
   margin: 4px 0;
 }
 .claw-plus-empty {
@@ -1829,8 +2017,8 @@ html[data-chat-bg="grid"] .claw-chat {
   align-items: center;
   gap: 6px;
   border: none;
-  background: var(--color-surface-2, #f2f3f5);
-  color: var(--color-text-primary, #1a1a1a);
+  background: var(--color-surface-2, #f3f1ea);
+  color: var(--color-text-primary, #1c1a18);
   border-radius: 999px;
   padding: 6px 12px;
   font: inherit;
@@ -1838,13 +2026,13 @@ html[data-chat-bg="grid"] .claw-chat {
   cursor: pointer;
 }
 .claw-image-mode-back:hover {
-  background: var(--color-border-subtle, #e9ebee);
+  background: var(--color-border-subtle, #e8e7e4);
 }
 .claw-plus-count {
   flex: 0 0 auto;
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
-  background: var(--color-surface-2, #f2f3f5);
+  color: var(--color-text-secondary, #6b6760);
+  background: var(--color-surface-2, #f3f1ea);
   border-radius: 10px;
   padding: 1px 7px;
 }
@@ -1867,19 +2055,19 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-slash-item-kind {
   flex: 0 0 auto;
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
-  background: var(--color-surface-2, #f2f3f5);
+  color: var(--color-text-secondary, #6b6760);
+  background: var(--color-surface-2, #f3f1ea);
   border-radius: 10px;
   padding: 1px 7px;
 }
 /* "Manage in Settings" footer link: same layout as a list item, but muted so
    it reads as a navigational aside rather than another selectable entry. */
 .claw-plus-manage {
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   font-size: 13px;
 }
 .claw-plus-manage:hover {
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
 }
 
 /* ---- guided connector setup (no MCP jargon) ---- */
@@ -1911,7 +2099,7 @@ html[data-chat-bg="grid"] .claw-chat {
   right: 12px;
   z-index: 5;
   background: var(--color-surface-1, #fff);
-  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
   border-radius: 8px;
 }
 .claw-exec-panel {
@@ -1924,7 +2112,7 @@ html[data-chat-bg="grid"] .claw-chat {
      and collapse the chat column. overflow:hidden lets the row ellipsis clip. */
   min-width: 0;
   overflow: hidden;
-  border-left: 1px solid var(--color-border-subtle, #e4e6ea);
+  border-left: 1px solid var(--color-border-subtle, #e8e7e4);
   background: var(--color-surface-1, #fff);
 }
 .claw-exec-header {
@@ -1932,7 +2120,7 @@ html[data-chat-bg="grid"] .claw-chat {
   align-items: center;
   justify-content: space-between;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--color-border-subtle, #eef0f2);
+  border-bottom: 1px solid var(--color-border-subtle, #f3f3f1);
   position: sticky;
   top: 0;
   background: inherit;
@@ -1954,9 +2142,9 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-plan-card {
   margin: 8px 10px 4px;
   padding: 10px 12px;
-  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
   border-radius: 10px;
-  background: var(--color-surface-2, #f7f8fa);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-plan-head {
   display: flex;
@@ -1968,14 +2156,14 @@ html[data-chat-bg="grid"] .claw-chat {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-plan-progress {
   margin-left: auto;
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   background: var(--color-surface-1, #fff);
-  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
   border-radius: 10px;
   padding: 0 8px;
 }
@@ -1983,7 +2171,7 @@ html[data-chat-bg="grid"] .claw-chat {
   margin-top: 6px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
 }
 .claw-plan-steps {
   margin-top: 8px;
@@ -1996,7 +2184,7 @@ html[data-chat-bg="grid"] .claw-chat {
   align-items: baseline;
   gap: 8px;
   font-size: 13px;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
 }
 .claw-plan-step svg,
 .claw-plan-step .claw-xdot {
@@ -2012,7 +2200,7 @@ html[data-chat-bg="grid"] .claw-chat {
   overflow-wrap: break-word;
 }
 .claw-plan-step--complete .claw-plan-step-label {
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   text-decoration: line-through;
 }
 .claw-plan-step--running .claw-plan-step-label {
@@ -2079,17 +2267,17 @@ html[data-chat-bg="grid"] .claw-chat {
   flex: 0 0 auto;
   font-size: 13px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
 }
 .claw-xrow--bookend .claw-xname {
   font-family: inherit;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-xdetail {
   flex: 1;
   min-width: 0;
   font-size: 12px;
-  color: var(--color-text-secondary, #9096a0);
+  color: var(--color-text-secondary, #6b6760);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: nowrap;
   overflow: hidden;
@@ -2100,7 +2288,7 @@ html[data-chat-bg="grid"] .claw-chat {
   margin-left: auto;
   padding-left: 8px;
   font-size: 11px;
-  color: var(--color-text-secondary, #9096a0);
+  color: var(--color-text-secondary, #6b6760);
 }
 /* "step X of N" pill on a running long-tool row */
 .claw-xcounter {
@@ -2110,14 +2298,14 @@ html[data-chat-bg="grid"] .claw-chat {
   padding: 1px 7px;
   border-radius: 999px;
   background: var(--color-surface-2, #eef1f5);
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   white-space: nowrap;
 }
 /* Live sub-step checklist nested under a workflow row */
 .claw-xsubs {
   margin: 2px 0 4px 10px;
   padding-left: 12px;
-  border-left: 1px solid var(--color-border-subtle, #e9ebee);
+  border-left: 1px solid var(--color-border-subtle, #e8e7e4);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -2129,13 +2317,13 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-xsub-label {
   font-size: 12.5px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .claw-xsub-label--active {
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
 }
 .claw-xexpand {
   display: flex;
@@ -2143,11 +2331,11 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 4px;
   margin: 2px 8px 8px 24px;
   padding-left: 10px;
-  border-left: 2px solid var(--color-border-subtle, #e4e6ea);
+  border-left: 2px solid var(--color-border-subtle, #e8e7e4);
 }
 .claw-xexpand-label {
   font-size: 11px;
-  color: var(--color-text-secondary, #9096a0);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-xpre {
   margin: 0;
@@ -2328,16 +2516,16 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 8px;
   max-width: 320px;
   padding: 7px 12px;
-  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
   border-radius: 10px;
   background: var(--color-surface-1, #fff);
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
   text-decoration: none;
   font-size: 13px;
   transition: box-shadow 0.15s, border-color 0.15s;
 }
 .claw-artifact-chip:hover {
-  border-color: var(--color-primary, #4b6bfb);
+  border-color: var(--color-primary, #2786c2);
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08);
 }
 .claw-artifact-name {
@@ -2361,7 +2549,7 @@ html[data-chat-bg="grid"] .claw-chat {
   display: block;
   width: fit-content;
   max-width: 100%;
-  border: 1px solid var(--color-border-subtle, #e4e6ea);
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
   border-radius: 10px;
   overflow: hidden;
   background: var(--color-surface-1, #fff);
@@ -2370,7 +2558,7 @@ html[data-chat-bg="grid"] .claw-chat {
   cursor: pointer;
 }
 .claw-artifact-image:hover {
-  border-color: var(--color-primary, #4b6bfb);
+  border-color: var(--color-primary, #2786c2);
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08);
 }
 .claw-artifact-image img {
@@ -2440,7 +2628,7 @@ html[data-chat-bg="grid"] .claw-chat {
   align-items: center;
   gap: 12px;
   font-size: 12px;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-kb-meta span {
   display: inline-flex;
@@ -2450,7 +2638,7 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-kb-shared {
   padding: 1px 8px;
   border-radius: 999px;
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 .claw-kb-actions {
   display: flex;
@@ -2464,7 +2652,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 4px;
   margin-top: 6px;
   padding-top: 8px;
-  border-top: 1px solid var(--color-border-subtle, #e9ebee);
+  border-top: 1px solid var(--color-border-subtle, #e8e7e4);
 }
 .claw-kb-doc {
   display: flex;
@@ -2482,7 +2670,7 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-kb-doc-meta {
   flex: 0 0 auto;
   font-size: 11px;
-  color: var(--color-text-secondary, #9096a0);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-kb-doc-processing {
   color: var(--color-accent-purple, #7c3aed);
@@ -2511,7 +2699,7 @@ html[data-chat-bg="grid"] .claw-chat {
   font-size: 12px;
   line-height: 1.5;
   font-family: var(--font-mono, ui-monospace, monospace);
-  color: var(--color-text-primary, #1a1a1a);
+  color: var(--color-text-primary, #1c1a18);
 }
 /* Larger, full-height variant used inside the "expanded view" dialog. */
 .claw-kb-doc-preview-body--expanded {
@@ -2529,7 +2717,7 @@ html[data-chat-bg="grid"] .claw-chat {
   border-radius: 6px;
 }
 .claw-kb-doc-expand:hover {
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 /* Brand logo inside a Badge (e.g. signup-method: Google/Microsoft). */
 .claw-signup-logo {
@@ -2559,7 +2747,7 @@ html[data-chat-bg="grid"] .claw-chat {
   background: transparent;
   cursor: pointer;
   padding: 0;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--color-text-secondary, #6b6760);
 }
 .claw-chip-x:hover {
   color: var(--color-text-error, #dc2626);
@@ -2577,7 +2765,7 @@ html[data-chat-bg="grid"] .claw-chat {
   border-radius: 6px;
 }
 .claw-kb-doc-del:hover {
-  background: var(--color-surface-2, #f2f3f5);
+  background: var(--color-surface-2, #f3f1ea);
 }
 
 /* Mention chip inserted in the composer (Skills/Connectors/Knowledge picks).
