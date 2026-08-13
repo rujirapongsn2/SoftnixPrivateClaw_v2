@@ -637,6 +637,7 @@ function MemoryPanel() {
   const [memory, setMemory] = useState<MemoryInfo | null>(null);
   const [draft, setDraft] = useState("");
   const [saved, setSaved] = useState(false);
+  const [dropped, setDropped] = useState<string[]>([]);
   const { error, guard } = useAsyncError();
 
   useEffect(() => {
@@ -657,17 +658,34 @@ function MemoryPanel() {
         onChange={(v) => {
           setDraft(v);
           setSaved(false);
+          setDropped([]);
         }}
         rows={10}
       />
       {error && <ErrorText>{error}</ErrorText>}
+      {dropped.length > 0 && (
+        <Card padding={2} variant="muted">
+          <Text size="sm" weight="semibold">
+            {t("settings.memory.dropped")}
+          </Text>
+          {dropped.map((d, i) => (
+            <Text key={i} size="sm" color="secondary">
+              {d}
+            </Text>
+          ))}
+        </Card>
+      )}
       <div className="claw-row">
         <Button
           label={t("settings.memory.save")}
           icon={<Icon icon="check" size="sm" />}
           clickAction={() =>
             guard(async () => {
-              await api.saveMemory(draft);
+              const result = await api.saveMemory(draft);
+              // Show what was stored, not what was typed: the server sanitizes,
+              // so leaving the draft up would present rejected lines as saved.
+              setDraft(result.core);
+              setDropped(result.dropped);
               setSaved(true);
             })
           }

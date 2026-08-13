@@ -19,6 +19,31 @@ async def test_usage_store_records_and_aggregates(db_factory, stores):
     assert total["prompt_tokens"] == 155 and total["turns"] == 3
 
 
+async def test_background_spend_is_billed_but_is_not_a_turn(db_factory):
+    """Memory consolidation spends real tokens without the user taking a turn.
+
+    Every turn figure has to agree on that: the quota reads UsageDaily.turns
+    while the admin and per-user reports count usage_records, so if only one
+    side excluded background work a user would see more turns billed than
+    their own quota shows.
+    """
+    usage = UsageStore(db_factory, is_postgres=False)
+    await usage.record("u1", "s1", "gpt", {"prompt_tokens": 100, "completion_tokens": 20})
+    await usage.record("u1", "s1", "gpt", {"prompt_tokens": 1200, "completion_tokens": 80}, count_turn=False)
+
+    assert (await usage.usage_today("u1"))["turns"] == 1
+    assert await usage.totals_for_user("u1") == {
+        "prompt_tokens": 1300,
+        "completion_tokens": 100,
+        "turns": 1,
+    }
+    assert (await usage.totals())["turns"] == 1
+    # Recorded under the real model name, so provider resolution and the
+    # model filter in the usage report still reach these tokens.
+    by_model = await usage.by_model()
+    assert [(r["model"], r["prompt_tokens"], r["turns"]) for r in by_model] == [("gpt", 1300, 1)]
+
+
 async def test_zero_usage_not_recorded(db_factory):
     usage = UsageStore(db_factory, is_postgres=False)
     await usage.record("u1", "s1", "gpt", {"prompt_tokens": 0, "completion_tokens": 0})

@@ -183,6 +183,14 @@ body {
   outline-offset: 2px;
 }
 
+/* Chat composer's contenteditable already gets its own focus affordance
+   (the composer body's box-shadow deepens on :focus-within) — the generic
+   ring above would stack a hard blue rectangle on top of that every time
+   you type, so it's suppressed here specifically. */
+[data-astryx-theme] .astryx-chat-composer-input [contenteditable]:focus-visible {
+  outline: none;
+}
+
 /* ── Scrollbar — OA subtle ── */
 [data-astryx-theme] ::-webkit-scrollbar {
   width: 8px;

@@ -296,6 +296,12 @@ class UsageRecord(Base):
     model: Mapped[str] = mapped_column(String(128), default="")
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # False for background work (memory consolidation): the tokens are real and
+    # belong in the bill, but the row is not a chat turn the user took, so every
+    # turn count has to exclude it or it contradicts the user's own quota.
+    counts_as_turn: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("1")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

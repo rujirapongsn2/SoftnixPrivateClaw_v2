@@ -119,6 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         window=settings.memory.window,
         keep=settings.memory.keep,
         is_postgres=is_postgres,
+        usage=usage,
     )
     runtime = AgentRuntime(
         settings=settings,

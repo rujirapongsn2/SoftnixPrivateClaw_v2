@@ -317,6 +317,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.memory.label": "Core memory",
     "settings.memory.save": "Save memory",
     "settings.memory.saved": "Saved",
+    "settings.memory.dropped": "Some lines were removed before saving:",
     "settings.memory.historyTitle": "Recent consolidation history",
     "settings.memory.historyEmpty":
       "Nothing consolidated yet — history entries appear as conversations grow.",
@@ -1194,6 +1195,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.memory.label": "ความจำหลัก",
     "settings.memory.save": "บันทึกความจำ",
     "settings.memory.saved": "บันทึกแล้ว",
+    "settings.memory.dropped": "มีบางบรรทัดถูกตัดออกก่อนบันทึก:",
     "settings.memory.historyTitle": "ประวัติการรวบรวมล่าสุด",
     "settings.memory.historyEmpty": "ยังไม่มีการรวบรวม — รายการประวัติจะปรากฏเมื่อบทสนทนาสะสมมากขึ้น",
 

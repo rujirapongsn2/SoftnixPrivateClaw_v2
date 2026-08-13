@@ -115,6 +115,13 @@ export interface MemoryInfo {
   history: string[];
 }
 
+export interface SavedMemory {
+  // The stored document, which the server may have sanitized — the editor shows
+  // this rather than the submitted draft, or rejected lines would look saved.
+  core: string;
+  dropped: string[];
+}
+
 export interface ConnectorInfo {
   id: string;
   name: string;
@@ -825,7 +832,7 @@ export const api = {
 
   getMemory: () => request<MemoryInfo>("/api/memory"),
   saveMemory: (content: string) =>
-    request("/api/memory", { method: "PUT", body: JSON.stringify({ content }) }),
+    request<SavedMemory>("/api/memory", { method: "PUT", body: JSON.stringify({ content }) }),
 
   listConnectors: () => request<ConnectorInfo[]>("/api/connectors"),
   connectorPresets: () => request<ConnectorPreset[]>("/api/connectors/presets"),

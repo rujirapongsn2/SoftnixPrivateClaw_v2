@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     bindparam,
+    case,
     cast,
     false as sa_false,
     func,
@@ -1322,8 +1323,20 @@ class UsageStore:
         self.is_postgres = is_postgres
 
     async def record(
-        self, user_id: str, session_id: str | None, model: str, usage: dict[str, int]
+        self,
+        user_id: str,
+        session_id: str | None,
+        model: str,
+        usage: dict[str, int],
+        count_turn: bool = True,
     ) -> None:
+        """Record token spend. `count_turn=False` for background work (memory
+        consolidation): the tokens are real and belong in the bill, but they are
+        not a chat turn the user took. It is persisted on the raw row as well as
+        applied to the rollup, because every turn figure has to agree — the
+        quota reads UsageDaily.turns while the admin and per-user reports count
+        usage_records, and a user seeing more turns billed than their own quota
+        shows would be reporting a bug we wrote."""
         prompt = int(usage.get("prompt_tokens", 0) or 0)
         completion = int(usage.get("completion_tokens", 0) or 0)
         if prompt == 0 and completion == 0:
@@ -1344,6 +1357,7 @@ class UsageStore:
                             model=model,
                             prompt_tokens=prompt,
                             completion_tokens=completion,
+                            counts_as_turn=count_turn,
                         )
                     )
                     res = await db.execute(
@@ -1356,7 +1370,7 @@ class UsageStore:
                         .values(
                             prompt_tokens=UsageDaily.prompt_tokens + prompt,
                             completion_tokens=UsageDaily.completion_tokens + completion,
-                            turns=UsageDaily.turns + 1,
+                            turns=UsageDaily.turns + (1 if count_turn else 0),
                         )
                     )
                     if res.rowcount == 0:
@@ -1367,7 +1381,7 @@ class UsageStore:
                                 model=model,
                                 prompt_tokens=prompt,
                                 completion_tokens=completion,
-                                turns=1,
+                                turns=1 if count_turn else 0,
                             )
                         )
                     await db.commit()
@@ -1613,6 +1627,10 @@ class UsageStore:
             rows = await db.execute(select(UsageDaily.user_id).where(*conds).distinct())
             return [r[0] for r in rows.all() if r[0]]
 
+    # Rows written by background work carry counts_as_turn=False, so a plain
+    # count() over usage_records would report more turns than the quota counts.
+    _TURNS = func.coalesce(func.sum(case((UsageRecord.counts_as_turn, 1), else_=0)), 0)
+
     async def totals(self) -> dict[str, int]:
         async with self.factory() as db:
             row = (
@@ -1620,7 +1638,7 @@ class UsageStore:
                     select(
                         func.coalesce(func.sum(UsageRecord.prompt_tokens), 0),
                         func.coalesce(func.sum(UsageRecord.completion_tokens), 0),
-                        func.count(),
+                        self._TURNS,
                     )
                 )
             ).one()
@@ -1633,7 +1651,7 @@ class UsageStore:
                     select(
                         func.coalesce(func.sum(UsageRecord.prompt_tokens), 0),
                         func.coalesce(func.sum(UsageRecord.completion_tokens), 0),
-                        func.count(),
+                        self._TURNS,
                     ).where(UsageRecord.user_id == user_id)
                 )
             ).one()
@@ -1649,7 +1667,7 @@ class UsageStore:
                         UsageRecord.model,
                         func.coalesce(func.sum(UsageRecord.prompt_tokens), 0),
                         func.coalesce(func.sum(UsageRecord.completion_tokens), 0),
-                        func.count(),
+                        self._TURNS,
                     )
                     .group_by(UsageRecord.model)
                     .order_by(

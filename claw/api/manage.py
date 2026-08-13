@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from claw.api import connector_shared as connectors
 from claw.api import llm_shared as llm
 from claw.api.deps import AppState, current_user, get_state, require_admin
+from claw.core.memory import MAX_CORE_MEMORY_CHARS, sanitize_core_document
 from claw.core.scheduler import compute_next_run
 from claw.db.models import User
 
@@ -126,8 +127,18 @@ async def get_memory(user: User = Depends(current_user), state: AppState = Depen
 async def update_memory(
     body: MemoryBody, user: User = Depends(require_operator), state: AppState = Depends(get_state)
 ) -> dict:
-    await state.memories.set_core(user.id, body.content)
-    return {"core": body.content}
+    # The manual editor writes the same document consolidation does, and it is
+    # replayed into every later system prompt — so it clears the same bar. Users
+    # paste "notes" straight off web pages; without this, text that remember()
+    # would reject lands verbatim in every future prompt, permanently.
+    if len(body.content) > MAX_CORE_MEMORY_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"memory is limited to {MAX_CORE_MEMORY_CHARS} characters",
+        )
+    content, dropped = sanitize_core_document(body.content)
+    await state.memories.set_core(user.id, content)
+    return {"core": content, "dropped": dropped}
 
 
 # ---------------------------------------------------------------- connectors
