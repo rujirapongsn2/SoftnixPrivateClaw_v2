@@ -120,6 +120,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         keep=settings.memory.keep,
         is_postgres=is_postgres,
         usage=usage,
+        policy=policy,
     )
     runtime = AgentRuntime(
         settings=settings,

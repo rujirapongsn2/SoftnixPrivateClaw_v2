@@ -17,6 +17,7 @@ from claw.api.deps import AppState, current_user, get_state
 from claw.auth import connector_oauth as flow
 from claw.core.connector_presets import get_preset
 from claw.db.models import User
+from claw.db.stores import ConnectorKindMismatch
 
 router = APIRouter(prefix="/api/connectors/oauth")
 
@@ -75,9 +76,28 @@ async def callback(
         return bounce("error", preset.key)
 
     existing = await app_state.connectors.list_for_user(payload["u"])
-    is_new = not any(c.name == preset.name for c in existing)
+    current = next((c for c in existing if c.name == preset.name), None)
+    is_new = current is None
+    if current is not None and current.kind != "mcp":
+        # The user already has a custom kind="api" connector under this
+        # preset's name. Installing over it would overwrite its url/env with
+        # the preset's while leaving kind="api" and its now-meaningless
+        # `operations` in place — a half-MCP/half-REST row whose tools would
+        # fire the stale operations at the preset's host using this OAuth
+        # token. Refuse instead; the user can rename their own connector.
+        logger.warning(
+            "Connector OAuth install for {} blocked: user already has a kind={} connector named {}",
+            preset.key,
+            current.kind,
+            preset.name,
+        )
+        return bounce("name_conflict", preset.key)
 
     fields: dict[str, Any] = dict(
+        # Explicit (rather than relying on the column default) so this row can
+        # never drift into an api-kind shape — the store's kind check treats an
+        # omitted kind as "leave untouched".
+        kind="mcp",
         transport=preset.transport,
         command=preset.command,
         url=preset.url,
@@ -90,6 +110,16 @@ async def callback(
         # user has since edited themselves.
         fields["description"] = preset.description
 
-    await app_state.connectors.upsert(payload["u"], preset.name, **fields)
+    try:
+        await app_state.connectors.upsert(payload["u"], preset.name, **fields)
+    except ConnectorKindMismatch:
+        # The check above is a read, so it can go stale: the user can create a
+        # kind="api" connector under this name between the two. The store's own
+        # in-transaction check is what actually holds, and letting it escape
+        # here would abandon the user on a raw 500 page mid-OAuth instead of
+        # bouncing them back to the app with the same conflict the read path
+        # already renders.
+        logger.warning("Connector OAuth install for {} lost a kind race on {}", preset.key, preset.name)
+        return bounce("name_conflict", preset.key)
     await app_state.connectors_mgr.invalidate(payload["u"])
     return bounce("connected", preset.key)

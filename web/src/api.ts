@@ -122,33 +122,76 @@ export interface SavedMemory {
   dropped: string[];
 }
 
+export interface ApiOperationParam {
+  name: string;
+  location: "path" | "query" | "header" | "body";
+  type: "string" | "number" | "boolean";
+  required: boolean;
+  description: string;
+}
+
+export interface ApiOperation {
+  name: string;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  description: string;
+  parameters: ApiOperationParam[];
+  // JSON template sent as the request body, e.g. {"limit": {limit}} — only
+  // meaningful for POST/PUT/PATCH. Empty string = no body sent.
+  body: string;
+}
+
 export interface ConnectorInfo {
   id: string;
   name: string;
   description: string;
+  // "mcp" speaks the MCP protocol over transport/command/url (default);
+  // "api" is a plain REST base URL described by `operations`, called
+  // directly with no MCP handshake.
+  kind: "mcp" | "api";
   transport: "stdio" | "http";
   command: string;
   url: string;
   env: Record<string, string>;
+  // Only meaningful when kind === "api".
+  operations: ApiOperation[];
   // Per-connector connect/tool-call timeout override, in milliseconds. null =
   // use the instance-wide default.
   timeout_ms: number | null;
   enabled: boolean;
-  // tool_names are the exact `mcp_{connector}_{tool}` names a skill must
-  // reference to call one of this connector's tools — not the server's own
-  // (unprefixed) tool name.
-  runtime: { status: string; tools?: number; tool_names?: string[]; error?: string };
+  // tool_names are the exact `mcp_{connector}_{tool}` (or `api_{connector}_
+  // {operation}`) names a skill must reference to call one of this
+  // connector's tools — not the server's own (unprefixed) tool name.
+  // shadowed_tools are names another connector already registered, so this
+  // connector's version of them is NOT reachable — see _register_scoped.
+  runtime: {
+    status: string;
+    tools?: number;
+    tool_names?: string[];
+    shadowed_tools?: string[];
+    error?: string;
+  };
 }
 
-// Redacted view of an admin-global connector — never carries command/url/env,
-// since the viewer (any regular user) is never that connector's owner.
+// Redacted view of an admin-global connector — never carries command/url/env/
+// operations, since the viewer (any regular user) is never that connector's
+// owner.
 export interface ConnectorGlobalSummary {
   id: string;
   name: string;
   description: string;
+  kind: "mcp" | "api";
   transport: "stdio" | "http";
   enabled: boolean;
-  runtime: { status: string; tools?: number; tool_names?: string[]; error?: string };
+  // shadowed_tools are names another connector already registered, so this
+  // connector's version of them is NOT reachable — see _register_scoped.
+  runtime: {
+    status: string;
+    tools?: number;
+    tool_names?: string[];
+    shadowed_tools?: string[];
+    error?: string;
+  };
 }
 
 export interface FieldSpec {

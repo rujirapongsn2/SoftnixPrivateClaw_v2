@@ -97,6 +97,14 @@ _BUILTINS: tuple[PolicyRule, ...] = (
 # Masking their arguments would break the action (e.g. an Outlook draft created
 # with a [REDACTED_EMAIL] recipient). MCP tools are named mcp_{connector}_{tool},
 # so these globs target whole connectors. Admins can edit the list at runtime.
+#
+# No api_* glob, deliberately: those are kind="api" connectors, which any user
+# can create and point at any host, so shipping a blanket exemption would let a
+# user-chosen endpoint receive unmasked PII by default. The cost is that a
+# legitimate value shaped like PII (an order number that trips the card rule) is
+# masked and the model isn't told, so the call fails looking like a missing
+# record — an admin resolves that by adding api_<connector>_* here for that one
+# connector, which the Guardrails panel spells out.
 DEFAULT_TOOL_ARGS_EXEMPT: tuple[str, ...] = (
     "mcp_outlook_*",
     "mcp_outlook-calendar_*",

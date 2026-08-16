@@ -68,6 +68,27 @@ _BACKOFF_BASE_SECONDS = 300
 _BACKOFF_MAX_SECONDS = 3600
 _MAX_TRACKED_SESSIONS = 512
 
+# Backoff alone can't end a *poison* window — one whose content makes the
+# summarizer reply with something unusable every single time (a refusal, a
+# malformed tool call). The cursor only advances on success, so that window is
+# re-sent on every later turn forever, and the backoff above lives in memory, so
+# a restart wipes even the throttle. After this many consecutive unusable
+# responses for the same window, skip it: the cursor jumps past it with a loud
+# warning, trading that window's memory (best-effort by design) for an end to
+# the paid-call loop. Only counts responses we received and couldn't use —
+# provider errors are transient and left to the backoff.
+_MAX_POISON_ATTEMPTS = 5
+
+# How many batches one invocation may retire. Consolidation fires once per
+# completed turn and a pass covers at most `window * 2` messages, while a single
+# tool-heavy turn can append more than that — so one pass per turn lets the
+# backlog grow without bound. Four passes drain ~240 messages, comfortably above
+# what any one turn can append, which is what makes the backlog converge. It is
+# capped rather than unbounded because every pass is a paid LLM call: a session
+# that fell far behind catches up over a few turns instead of stalling one turn
+# behind dozens of provider calls.
+_MAX_CATCH_UP_PASSES = 4
+
 
 def _sanitize(text: str) -> str:
     return _INVISIBLE_CHARS.sub("", text)
@@ -108,7 +129,9 @@ The document may also contain stray lines outside the five sections — left by 
 Prefer `replace` over `add` whenever a related line already exists — merging beats accumulating near-duplicates. Each section holds at most {max_lines} lines and each line at most {max_chars} characters; once a section is full, further `add` ops there are dropped, so merge with `replace` instead. Return an empty list when the conversation taught you nothing durable; that is a normal outcome, not a failure.
 
 ## Writing history_entry
-2-5 sentences starting with [YYYY-MM-DD HH:MM]. It is retrieved later by keyword search, so name the concrete entities involved — files, services, features, decisions — rather than describing them abstractly."""
+Optional — omit it entirely unless this stretch of conversation produced a decision, a correction, a stated preference, or an outcome worth finding again months later. Routine chatter, questions answered from existing knowledge, and tasks that left nothing behind get no entry; history is searched by keyword, and contentless summaries only bury the entries that matter.
+
+When you do write one: 2-5 sentences starting with [YYYY-MM-DD HH:MM], naming the concrete entities involved — files, services, features, decisions — rather than describing them abstractly."""
 # Not str.format: the prompt is full of literal JSON braces.
 _CONSOLIDATION_SYSTEM_PROMPT = _CONSOLIDATION_SYSTEM_PROMPT.replace(
     "{max_lines}", str(_MAX_SECTION_LINES)
@@ -125,7 +148,11 @@ _SAVE_MEMORY_TOOL = [
                 "properties": {
                     "history_entry": {
                         "type": "string",
-                        "description": "2-5 sentence summary of key events/decisions, starting with [YYYY-MM-DD HH:MM].",
+                        "description": "2-5 sentence summary starting with [YYYY-MM-DD HH:MM]. Only for a "
+                        "conversation that produced a decision, correction, stated preference, or outcome "
+                        "worth finding again later. Omit it entirely for routine chatter — history is "
+                        "searched by the recall tool, and an entry with nothing durable in it only makes "
+                        "the real ones harder to find.",
                     },
                     "memory_ops": {
                         "type": "array",
@@ -149,7 +176,11 @@ _SAVE_MEMORY_TOOL = [
                         },
                     },
                 },
-                "required": ["history_entry"],
+                # Nothing is required: a pass that learned nothing durable and
+                # saw nothing worth recording later must still be able to call
+                # the tool and report exactly that. Making history_entry
+                # mandatory is what filled history with contentless summaries.
+                "required": [],
             },
         },
     }
@@ -252,6 +283,25 @@ def _rejection_reason(text: str) -> str | None:
     if not bare:
         return "punctuation only"
     return None
+
+
+def _screen_for_memory(text: str, policy: Any) -> tuple[str, str | None]:
+    """Mask secrets/PII out of a line bound for durable memory.
+
+    Returns (text, rejection reason). Core memory is replayed into the system
+    prompt on every later turn, so a token or ID number that the guardrails
+    already mask in a single response would otherwise be re-injected forever —
+    and paid for on every turn. Runs the "output" scope rather than a
+    memory-only one so the built-in PII/secret rules and any admin-added output
+    rule apply as they are; a new scope would match no existing rule until
+    every operator went and opted their rules into it.
+    """
+    if policy is None or not text:
+        return text, None
+    decision = policy.enforce(text, "output")
+    if decision.blocked:
+        return "", f"blocked by guardrail ({', '.join(decision.matched_rules) or 'policy'})"
+    return decision.text, None
 
 
 def _coerce_ops(raw: Any) -> list[Any] | None:
@@ -430,6 +480,7 @@ class MemoryService:
         keep: int = 20,
         is_postgres: bool = True,
         usage: UsageStore | None = None,
+        policy: Any = None,
     ):
         self.memories = memories
         self.messages = messages
@@ -440,11 +491,38 @@ class MemoryService:
         self.keep = keep
         self.is_postgres = is_postgres
         self.usage = usage
+        self.policy = policy
         # session_id -> (consecutive failures, monotonic time to retry after).
         # Deliberately in-process: backoff only needs to outlive the next few
         # turns, and a restart is itself a reason to try again.
         self._failures: dict[str, tuple[int, float]] = {}
         self._in_flight: set[str] = set()
+
+    def _screen_ops(self, ops: list[Any]) -> tuple[list[Any], list[str]]:
+        """Run every op's `text` through the guardrails before it can be written.
+
+        `target` is deliberately left alone: it names a line already in the
+        document (so already screened when it was written), and masking it here
+        would only stop it from matching.
+        """
+        if self.policy is None:
+            return ops, []
+        screened: list[Any] = []
+        notes: list[str] = []
+        for raw in ops:
+            if not isinstance(raw, dict) or not raw.get("text"):
+                screened.append(raw)
+                continue
+            original = str(raw["text"])
+            text, reason = _screen_for_memory(original, self.policy)
+            if reason:
+                notes.append(f"skipped {raw.get('op') or 'op'} in {raw.get('section')}: {reason}")
+                continue
+            if text != original:
+                notes.append(f"masked secrets/PII in an {raw.get('op') or 'op'} for {raw.get('section')}")
+                raw = {**raw, "text": text}
+            screened.append(raw)
+        return screened, notes
 
     async def recall(self, user_id: str, query: str, limit: int = 8) -> list[str]:
         """Search the append-only consolidated history for entries matching a
@@ -476,6 +554,10 @@ class MemoryService:
         fact = _clean_line(fact)
         if not fact:
             return "Nothing to remember."
+        fact, blocked = _screen_for_memory(fact, self.policy)
+        if blocked:
+            logger.warning("Rejected remember() for {}: {}", user_id, blocked)
+            return f"Cannot save that to memory ({blocked})."
         reason = _rejection_reason(fact)
         if reason:
             logger.warning("Rejected remember() for {}: {}", user_id, reason)
@@ -521,16 +603,71 @@ class MemoryService:
             delay,
         )
 
+    async def _record_usage(self, user_id: str, session_id: str, result: Any) -> None:
+        """Bill one consolidation call against the user, whatever came back."""
+        if self.usage is None or not result.usage:
+            return
+        # Recorded under the real model name — usage reporting resolves the
+        # provider by exact model id, so decorating the label would strand the
+        # spend outside every model and provider filter. `count_turn` is what
+        # separates background passes from the user's chat turns.
+        try:
+            await self.usage.record(
+                user_id, session_id, self.model or "", result.usage, count_turn=False
+            )
+        except Exception:
+            logger.exception("Failed recording memory-consolidation usage")
+
+    async def _note_unusable(self, session_id: str, cutoff: int, reason: str) -> bool:
+        """Record a summarizer response we received but could not use, and skip
+        the window once it has failed that way _MAX_POISON_ATTEMPTS times.
+
+        Separate from _note_failure (which also covers provider errors) because
+        only a response we actually got back is evidence about *this window's
+        content*; a timeout or a 503 says nothing about it and must not push a
+        salvageable window toward being dropped.
+
+        Returns True when the skip happened, i.e. the cursor moved and the
+        backlog shrank — the catch-up loop must keep going on that, exactly as
+        it would after a normal pass."""
+        count = await self.sessions.bump_consolidation_failures(session_id)
+        if count < _MAX_POISON_ATTEMPTS:
+            logger.warning("Memory consolidation ({}): {}", session_id, reason)
+            self._note_failure(session_id)
+            return False
+        # set_consolidated_seq resets the counter, so the next window starts clean.
+        await self.sessions.set_consolidated_seq(session_id, cutoff)
+        self._failures.pop(session_id, None)
+        logger.error(
+            "Memory consolidation ({}): skipping messages up to seq {} after {} unusable "
+            "responses (last: {}) — that window will never be summarized into core memory",
+            session_id,
+            cutoff,
+            count,
+            reason,
+        )
+        return True
+
     async def maybe_consolidate(self, user_id: str, session_id: str) -> bool:
-        """Consolidate when enough unconsolidated messages accumulated. Returns True if ran."""
+        """Consolidate while enough unconsolidated messages remain. Returns True if any pass ran."""
         # Keyed by user, not session: core memory is per-user, so a user with
         # two live sessions (web + Telegram) would otherwise have both passes
-        # read the same document and the slower write discard the faster.
+        # read the same document and the slower write discard the faster. The
+        # slot is taken once for the whole catch-up, not per pass, so a second
+        # session cannot interleave into the middle of it.
         if user_id in self._in_flight or self._backing_off(session_id):
             return False
         self._in_flight.add(user_id)
+        ran = False
         try:
-            return await self._consolidate(user_id, session_id)
+            for _ in range(_MAX_CATCH_UP_PASSES):
+                # False means stop, whatever produced it: an empty backlog, a
+                # provider failure, or an unusable response the cursor did not
+                # move past. Retrying any of those in-loop would burn a paid
+                # call per iteration for nothing.
+                if not await self._consolidate(user_id, session_id):
+                    break
+                ran = True
         except Exception:
             # Store/DB failures land here. Without this they escape to the
             # caller's fire-and-forget guard, leaving no failure recorded and
@@ -538,9 +675,9 @@ class MemoryService:
             # LLM call and appends another duplicate history entry.
             logger.exception("Memory consolidation failed for session {}", session_id)
             self._note_failure(session_id)
-            return False
         finally:
             self._in_flight.discard(user_id)
+        return ran
 
     async def _consolidate(self, user_id: str, session_id: str) -> bool:
         session = await self.sessions.get(session_id)
@@ -551,14 +688,33 @@ class MemoryService:
         if unconsolidated < self.window:
             return False
 
-        cutoff = max_seq - self.keep
-        old = await self.messages.recent(
-            session_id, after_seq=session.last_consolidated_seq, limit=self.window * 2
-        )
         # Only messages up to the cutoff participate; the recent tail stays raw.
-        old = old[: max(0, len(old) - self.keep)]
+        # Oldest-first and capped at `window * 2`: when the backlog is larger
+        # than one batch (a long backoff, a restart, or a second live session
+        # holding the per-user in-flight slot), this summarizes the oldest slice
+        # and the catch-up loop in maybe_consolidate re-enters to walk forward
+        # through the rest, instead of jumping the cursor over messages that
+        # were never sent to the model.
+        old = await self.messages.oldest_for_consolidation(
+            session_id,
+            after_seq=session.last_consolidated_seq,
+            through_seq=max_seq - self.keep,
+            limit=self.window * 2,
+        )
         if not old:
             return False
+        # The cursor may only advance as far as this batch actually reached.
+        cutoff = old[-1]["seq"]
+        # How far a *skip* may advance it, which is not the same thing.
+        # `through_seq` moves forward while the backoff ladder runs, so a batch
+        # that was 18 messages on the first attempt can be 60 by the fifth —
+        # retiring all of it would discard messages the summarizer saw once or
+        # twice, under a counter that promises five tries. Clamping to the first
+        # `window` messages bounds that loss and, because the batch always
+        # starts at the cursor, makes the target the same seq on every attempt
+        # once the backlog is that deep — which is what makes "the same window
+        # failed five times" actually true.
+        skip_cutoff = old[min(self.window, len(old)) - 1]["seq"]
 
         current_memory = await self.memories.get_core(user_id)
         # Defanged, not just sanitized: a message that contains the fence marker
@@ -590,31 +746,38 @@ class MemoryService:
             self._note_failure(session_id)
             return False
 
+        # Billed the moment the provider answered, so recorded here rather than
+        # on the success path below: an unusable response costs exactly what a
+        # usable one does, and every branch below can return early. Leaving this
+        # at the end hid the spend of every poisoned window — up to
+        # _MAX_POISON_ATTEMPTS full-transcript calls each — from the usage
+        # report, which is the only place an operator can see it.
+        await self._record_usage(user_id, session_id, result)
+
         if not result.has_tool_calls:
-            logger.warning("Memory consolidation: model did not call save_memory")
-            self._note_failure(session_id)
-            return False
+            return await self._note_unusable(
+                session_id, skip_cutoff, "model did not call save_memory"
+            )
         args: dict[str, Any] = result.tool_calls[0].arguments
         ops = _coerce_ops(args.get("memory_ops"))
         if ops is None:
             # Dropping malformed ops silently would be worse than failing: the
             # cursor would still advance, so the window they summarized could
             # never be reprocessed and the loss would leave no trace anywhere.
-            logger.warning(
-                "Memory consolidation ({}): unusable memory_ops of type {}",
+            return await self._note_unusable(
                 session_id,
-                type(args.get("memory_ops")).__name__,
+                skip_cutoff,
+                f"unusable memory_ops of type {type(args.get('memory_ops')).__name__}",
             )
-            self._note_failure(session_id)
-            return False
 
         # Write order matters. The core-memory write is the one that can fail on
         # oversized content, so it goes first: if it raises, the cursor stays put
         # and the history row was never appended, so the retry redoes the whole
         # pass instead of stacking another duplicate summary on every attempt.
         if ops:
+            ops, screen_notes = self._screen_ops(ops)
             updated, notes = _apply_ops(current_memory, ops)
-            for note in notes:
+            for note in screen_notes + notes:
                 logger.warning("Memory consolidation ({}): {}", session_id, note)
             if updated != current_memory:
                 await self.memories.set_core(user_id, updated)
@@ -623,23 +786,16 @@ class MemoryService:
 
         entry = args.get("history_entry")
         if isinstance(entry, str) and entry.strip():
-            await self.memories.append_history(user_id, _clean_line(entry)[:2000])
+            line, reason = _screen_for_memory(_clean_line(entry)[:2000], self.policy)
+            if reason:
+                logger.warning("Memory consolidation ({}): history entry {}", session_id, reason)
+            elif line:
+                await self.memories.append_history(user_id, line)
 
         # Cleared only once the pass actually landed. Clearing it right after the
         # LLM replied would mean a failure that reliably happens in the writes
         # never accumulates a count, so backoff would stay at attempt 1 forever.
         self._failures.pop(session_id, None)
 
-        if self.usage is not None and result.usage:
-            # Recorded under the real model name — usage reporting resolves the
-            # provider by exact model id, so decorating the label would strand
-            # the spend outside every model and provider filter. `count_turn`
-            # is what separates background passes from the user's chat turns.
-            try:
-                await self.usage.record(
-                    user_id, session_id, self.model or "", result.usage, count_turn=False
-                )
-            except Exception:
-                logger.exception("Failed recording memory-consolidation usage")
         logger.info("Consolidated session {} up to seq {}", session_id, cutoff)
         return True

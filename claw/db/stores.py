@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -118,6 +118,34 @@ class MessageStore:
             out.append(entry)
         return out
 
+    async def oldest_for_consolidation(
+        self, session_id: str, *, after_seq: int, through_seq: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """Oldest-first slice of a session's messages, for memory consolidation.
+
+        Ascending, unlike `recent()`, and carrying each row's `seq`. Both matter
+        for the same reason: consolidation advances a cursor past everything it
+        reads, so it has to take the OLDEST unconsolidated messages and move the
+        cursor to the last seq it actually summarized. Taking the newest N of a
+        backlog larger than `limit` (what `recent()` returns) while moving the
+        cursor to the end would strand every message before that window,
+        permanently unsummarized.
+        """
+        async with self.factory() as db:
+            rows = (
+                await db.scalars(
+                    select(Message)
+                    .where(
+                        Message.session_id == session_id,
+                        Message.seq > after_seq,
+                        Message.seq <= through_seq,
+                    )
+                    .order_by(Message.seq.asc())
+                    .limit(limit)
+                )
+            ).all()
+        return [{"seq": row.seq, "role": row.role, "content": row.content} for row in rows]
+
     async def max_seq(self, session_id: str) -> int:
         async with self.factory() as db:
             return await db.scalar(
@@ -232,11 +260,26 @@ class SessionStore:
             ) or 0
 
     async def set_consolidated_seq(self, session_id: str, seq: int) -> None:
+        """Advance the consolidation cursor, clearing the poison counter — the
+        window that counter described is now behind the cursor either way."""
         async with self.factory() as db:
             session = await db.get(ChatSession, session_id)
             if session is not None:
                 session.last_consolidated_seq = seq
+                session.consolidation_failures = 0
                 await db.commit()
+
+    async def bump_consolidation_failures(self, session_id: str) -> int:
+        """Record one unusable summarizer response for the current window and
+        return the new consecutive count."""
+        async with self.factory() as db:
+            session = await db.get(ChatSession, session_id)
+            if session is None:
+                return 0
+            session.consolidation_failures = (session.consolidation_failures or 0) + 1
+            count = session.consolidation_failures
+            await db.commit()
+            return count
 
     async def set_model(self, session_id: str, model: str | None) -> None:
         async with self.factory() as db:
@@ -470,15 +513,58 @@ class SkillStore:
             return True
 
 
+class ConnectorKindMismatch(Exception):
+    """Raised by ConnectorStore.upsert when a caller's explicit ``kind`` differs
+    from the stored row's. Checked inside the write transaction (not by a
+    separate read beforehand) so two concurrent writers can't both see "no
+    conflict" and then race each other's kind through — see
+    claw/api/connector_shared.py's upsert_connector, which turns this into 422."""
+
+    def __init__(self, existing_kind: str):
+        self.existing_kind = existing_kind
+        super().__init__(f"connector kind cannot be changed after creation (existing kind: {existing_kind})")
+
+
+def _map_operation_bodies(operations: Any, transform: Callable[[str], str]) -> Any:
+    """Apply `transform` to every operation's `body` template, leaving the rest
+    of the operation JSON untouched.
+
+    A kind="api" body template is a request body the cURL importer copies from
+    whatever example request the user pasted, so it routinely carries a literal
+    credential that has no BODY_* env equivalent to move it to. Only `body` is
+    transformed: the other fields (name, method, path, parameter schema) are
+    read by the admin UI and by ConnectorManager's tool-name collision check,
+    and encrypting them would make the stored row unreadable for those.
+
+    Tolerant of a malformed stored row — `operations` is JSON that can be
+    hand-edited, and this runs on every connector read."""
+    if not isinstance(operations, list):
+        return operations
+    out = []
+    for op in operations:
+        if isinstance(op, dict) and isinstance(op.get("body"), str) and op["body"]:
+            op = {**op, "body": transform(op["body"])}
+        out.append(op)
+    return out
+
+
 class ConnectorStore:
     def __init__(self, factory: async_sessionmaker[AsyncSession], secret_box: Any | None = None):
         self.factory = factory
-        # When set, connector env values are encrypted at rest and decrypted on read.
+        # When set, connector env values and api-operation body templates are
+        # encrypted at rest and decrypted on read.
         self.secret_box = secret_box
 
     def _decrypt(self, row: McpConnector) -> McpConnector:
-        if self.secret_box is not None and row.env:
+        if self.secret_box is None:
+            return row
+        if row.env:
             row.env = self.secret_box.decrypt_map(row.env)
+        if row.operations:
+            # SecretBox.decrypt passes a non-prefixed value straight through,
+            # so rows written before body encryption existed keep working
+            # without a data migration.
+            row.operations = _map_operation_bodies(row.operations, self.secret_box.decrypt)
         return row
 
     async def list_for_user(self, owner_id: str) -> list[McpConnector]:
@@ -536,27 +622,63 @@ class ConnectorStore:
         result.sort(key=lambda r: r.name)
         return result
 
-    async def upsert(self, owner_id: str | None, name: str, **fields: Any) -> McpConnector:
+    async def get_by_name(self, owner_id: str | None, name: str) -> McpConnector | None:
         async with self.factory() as db:
             row = await db.scalar(
                 select(McpConnector).where(McpConnector.owner_id == owner_id, McpConnector.name == name)
             )
+            return self._decrypt(row) if row is not None else None
+
+    async def upsert(self, owner_id: str | None, name: str, **fields: Any) -> McpConnector:
+        # Retried once: a concurrent creator can win the (owner_id, name) unique
+        # index between our select and commit, turning the insert into an
+        # IntegrityError. The retry re-selects, finds the now-existing row, and
+        # takes the update path — where the kind check below applies, so the
+        # loser of that race is rejected rather than silently overwriting the
+        # winner's kind.
+        for attempt in (1, 2):
+            try:
+                return await self._upsert_once(owner_id, name, fields)
+            except IntegrityError:
+                if attempt == 2:
+                    raise
+        raise AssertionError("unreachable")
+
+    async def _upsert_once(
+        self, owner_id: str | None, name: str, fields: dict[str, Any]
+    ) -> McpConnector:
+        async with self.factory() as db:
+            row = await db.scalar(
+                select(McpConnector).where(McpConnector.owner_id == owner_id, McpConnector.name == name)
+            )
+            # A connector's kind is fixed at creation: flipping it would orphan
+            # every existing reference to its old mcp_*/api_* tool names
+            # (skills, tool_args_exempt globs). Enforced here, inside the same
+            # transaction as the write, so it can't be raced. Callers that
+            # legitimately don't care about kind (e.g. connector_oauth.py's
+            # token refresh) omit the key and are unaffected.
+            if row is not None and fields.get("kind") is not None and row.kind != fields["kind"]:
+                raise ConnectorKindMismatch(row.kind)
             if row is None:
                 row = McpConnector(owner_id=owner_id, name=name)
                 db.add(row)
-            # `description`/`timeout_ms` are the only nullable columns, so only
-            # those two support `key in fields` (caller explicitly passed
-            # `timeout_ms=None` to clear an override back to "use the
-            # instance-wide default"). The rest are NOT NULL columns — for
-            # those, `None` can't mean "clear it" (there's no valid empty
-            # state to clear to), so they keep the older "explicit None ==
-            # leave untouched" behavior, same as omitting the kwarg entirely
-            # (e.g. connector_oauth.py's preset install never passes these).
-            nullable_keys = ("description", "timeout_ms")
-            not_null_keys = ("transport", "command", "url", "env", "enabled")
+            # `description`/`timeout_ms`/`operations` are the only nullable
+            # columns, so only those support `key in fields` (caller
+            # explicitly passed `timeout_ms=None` to clear an override back to
+            # "use the instance-wide default", or `operations=None` for a
+            # kind="mcp" row). The rest are NOT NULL columns — for those,
+            # `None` can't mean "clear it" (there's no valid empty state to
+            # clear to), so they keep the older "explicit None == leave
+            # untouched" behavior, same as omitting the kwarg entirely (e.g.
+            # connector_oauth.py's preset install never passes these).
+            nullable_keys = ("description", "timeout_ms", "operations")
+            not_null_keys = ("kind", "transport", "command", "url", "env", "enabled")
             for key in nullable_keys:
                 if key in fields:
-                    setattr(row, key, fields[key])
+                    value = fields[key]
+                    if key == "operations" and self.secret_box is not None:
+                        value = _map_operation_bodies(value, self.secret_box.encrypt)
+                    setattr(row, key, value)
             for key in not_null_keys:
                 if key in fields and fields[key] is not None:
                     value = fields[key]
@@ -1329,6 +1451,7 @@ class UsageStore:
         model: str,
         usage: dict[str, int],
         count_turn: bool = True,
+        metrics: dict[str, int] | None = None,
     ) -> None:
         """Record token spend. `count_turn=False` for background work (memory
         consolidation): the tokens are real and belong in the bill, but they are
@@ -1336,11 +1459,23 @@ class UsageStore:
         applied to the rollup, because every turn figure has to agree — the
         quota reads UsageDaily.turns while the admin and per-user reports count
         usage_records, and a user seeing more turns billed than their own quota
-        shows would be reporting a bug we wrote."""
+        shows would be reporting a bug we wrote.
+
+        `metrics` carries the turn's shape (iterations, tool_calls, ttft_ms,
+        duration_ms) onto the raw row only — the daily rollup stays a pure cost
+        table, since averaging latency across a day×user×model bucket would
+        lose the distribution that makes the number worth having."""
         prompt = int(usage.get("prompt_tokens", 0) or 0)
         completion = int(usage.get("completion_tokens", 0) or 0)
-        if prompt == 0 and completion == 0:
+        # A caller with turn-shape metrics to report (a real chat turn) still
+        # has something worth writing even if the provider reported no token
+        # usage (some OpenAI-compatible backends omit usage on a streamed
+        # response) — only skip the write when there is truly nothing: no
+        # tokens and no metrics, which is the pre-metrics behavior memory
+        # consolidation's caller (no `metrics` arg) still relies on.
+        if prompt == 0 and completion == 0 and metrics is None:
             return
+        shape = metrics or {}
         today = datetime.now(timezone.utc).date()
         model = model or ""
         # Write the raw per-turn row AND fold it into today's rollup bucket in
@@ -1358,6 +1493,10 @@ class UsageStore:
                             prompt_tokens=prompt,
                             completion_tokens=completion,
                             counts_as_turn=count_turn,
+                            iterations=int(shape.get("iterations", 0) or 0),
+                            tool_calls=int(shape.get("tool_calls", 0) or 0),
+                            ttft_ms=int(shape.get("ttft_ms", 0) or 0),
+                            duration_ms=int(shape.get("duration_ms", 0) or 0),
                         )
                     )
                     res = await db.execute(

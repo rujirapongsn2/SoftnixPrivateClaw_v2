@@ -12,6 +12,7 @@ import pytest
 
 from claw.core.memory import (
     _BACKOFF_BASE_SECONDS,
+    _MAX_CATCH_UP_PASSES,
     _MAX_DOC_CHARS,
     _MAX_TRACKED_SESSIONS,
     MemoryService,
@@ -20,6 +21,7 @@ from claw.core.memory import (
     sanitize_core_document,
 )
 from claw.providers.base import ChatResult, ToolCall
+from claw.security.policy import PolicyEngine
 
 DOC = """## Profile
 - Rujirapong is a backend engineer at Softnix
@@ -254,26 +256,46 @@ def test_sanitize_core_document_holds_manual_edits_to_the_same_bar():
 
 
 class _Session:
-    last_consolidated_seq = 0
+    def __init__(self, last_consolidated_seq=0):
+        self.last_consolidated_seq = last_consolidated_seq
 
 
 class _Sessions:
-    def __init__(self):
+    def __init__(self, last_consolidated_seq=0, consolidation_failures=0):
         self.seq = None
+        self.cursor = last_consolidated_seq
+        self.failures = consolidation_failures
 
     async def get(self, session_id):
-        return _Session()
+        return _Session(self.cursor)
 
     async def set_consolidated_seq(self, session_id, seq):
         self.seq = seq
+        self.cursor = seq
+        self.failures = 0
+
+    async def bump_consolidation_failures(self, session_id):
+        self.failures += 1
+        return self.failures
 
 
 class _Messages:
-    async def max_seq(self, session_id):
-        return 100
+    """Seq-numbered stand-in for MessageStore.
 
-    async def recent(self, session_id, after_seq, limit):
-        return [{"role": "user", "content": f"msg {i}"} for i in range(60)]
+    Consolidation reads an oldest-first slice and advances the cursor to the
+    last seq it actually read, so the fake has to honour after_seq/through_seq/
+    limit — returning a fixed blob would hide exactly the bug those bounds fix.
+    """
+
+    def __init__(self, max_seq=50):
+        self._max_seq = max_seq
+
+    async def max_seq(self, session_id):
+        return self._max_seq
+
+    async def oldest_for_consolidation(self, session_id, *, after_seq, through_seq, limit):
+        seqs = range(after_seq + 1, min(through_seq, self._max_seq) + 1)
+        return [{"seq": s, "role": "user", "content": f"msg {s}"} for s in seqs][:limit]
 
 
 class _Memories:
@@ -309,16 +331,17 @@ def _provider(result=None, error=None):
     return _P()
 
 
-def _service(memories, provider, sessions=None, usage=None):
+def _service(memories, provider, sessions=None, usage=None, messages=None, policy=None):
     return MemoryService(
         memories,
-        _Messages(),
+        messages or _Messages(),
         sessions or _Sessions(),
         provider,
         model="gpt-x",
         window=30,
         keep=12,
         usage=usage,
+        policy=policy,
     )
 
 
@@ -341,7 +364,7 @@ async def test_consolidation_applies_ops_and_bills_tokens_without_a_turn():
 
     assert "old fact" in memories.core and "Replies in Thai" in memories.core
     assert len(memories.history) == 1
-    assert sessions.seq == 88
+    assert sessions.seq == 38
     # Background spend is recorded under the REAL model name — usage reporting
     # resolves the provider by exact model id, so a decorated label would strand
     # the spend outside every filter. count_turn is what marks it as background.
@@ -356,7 +379,87 @@ async def test_no_op_consolidation_still_advances_the_cursor():
 
     assert memories.core == "## Profile\n- keep me"
     # Otherwise every later turn would re-run the same window forever.
-    assert sessions.seq == 88
+    assert sessions.seq == 38
+
+
+class _Recording:
+    """Provider that records the transcript each consolidation pass was given."""
+
+    def __init__(self):
+        self.seen = []
+
+    async def chat(self, **kwargs):
+        self.seen.append(kwargs["messages"][1]["content"])
+        return _save_memory(memory_ops=[])
+
+
+@pytest.mark.asyncio
+async def test_a_backlog_larger_than_one_batch_is_walked_not_skipped():
+    # A backlog builds whenever consolidation is suppressed for a while: a
+    # backoff window, a restart, or a second live session holding the per-user
+    # in-flight slot. A pass may only retire what it actually summarized —
+    # jumping the cursor to the end would strand every earlier message
+    # permanently unconsolidated, and those facts are then unrecoverable.
+    provider = _Recording()
+    messages, sessions = _Messages(max_seq=300), _Sessions()
+    service = _service(_Memories(), provider, sessions, messages=messages)
+
+    assert await service.maybe_consolidate("u1", "s") is True
+    # Consecutive batches of window * 2, each really summarized — never a jump
+    # straight to max_seq - keep (288) over messages the model never saw.
+    assert len(provider.seen) == _MAX_CATCH_UP_PASSES
+    for i, transcript in enumerate(provider.seen):
+        assert f"USER: msg {i * 60 + 1}\n" in transcript
+        assert f"USER: msg {(i + 1) * 60}\n" in transcript
+        assert f"USER: msg {(i + 1) * 60 + 1}\n" not in transcript
+    assert sessions.seq == 240
+
+    # The next call resumes exactly where the catch-up stopped and drains the
+    # remainder, leaving only the `keep` tail (289-300) raw.
+    assert await service.maybe_consolidate("u1", "s") is True
+    assert "USER: msg 241" in provider.seen[4] and "USER: msg 288" in provider.seen[4]
+    assert sessions.seq == 288
+    # Nothing left above the window, so no further paid call is made.
+    assert await service.maybe_consolidate("u1", "s") is False
+    assert len(provider.seen) == 5
+
+
+@pytest.mark.asyncio
+async def test_catch_up_is_bounded_so_one_turn_cannot_fire_unlimited_passes():
+    # Catching up matters because the unconsolidated tail IS the prompt: left
+    # behind, every later turn ships ~200 raw messages to the LLM. But each pass
+    # is a paid provider call, so a session that fell thousands of messages
+    # behind must drain over several turns rather than in one unbounded burst.
+    provider = _Recording()
+    messages, sessions = _Messages(max_seq=100_000), _Sessions()
+    service = _service(_Memories(), provider, sessions, messages=messages)
+
+    assert await service.maybe_consolidate("u1", "s") is True
+    assert len(provider.seen) == _MAX_CATCH_UP_PASSES
+    assert sessions.seq == _MAX_CATCH_UP_PASSES * 60  # window * 2 per pass
+    assert f"USER: msg {sessions.seq}" in provider.seen[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_pass_stops_the_catch_up_instead_of_spinning():
+    # Failures are systemic (provider down, model off-schema), so the remaining
+    # passes would fail identically — and each one costs a call.
+    calls = []
+
+    class _FailsAfterOne:
+        async def chat(self, **kwargs):
+            calls.append(1)
+            if len(calls) > 1:
+                raise RuntimeError("provider down")
+            return _save_memory(memory_ops=[])
+
+    messages, sessions = _Messages(max_seq=300), _Sessions()
+    service = _service(_Memories(), _FailsAfterOne(), sessions, messages=messages)
+
+    # True: the first pass did land, and its cursor move must stand.
+    assert await service.maybe_consolidate("u1", "s11") is True
+    assert len(calls) == 2 and sessions.seq == 60
+    assert service._failures["s11"][0] == 1
 
 
 @pytest.mark.asyncio
@@ -495,7 +598,7 @@ async def test_malformed_memory_ops_fail_the_pass_instead_of_vanishing():
         memories, sessions = _Memories("## Profile\n- keep me"), _Sessions()
         service = _service(memories, _provider(_save_memory(history_entry="x", memory_ops=shape)), sessions)
         assert await service.maybe_consolidate("u1", "s7") is True
-        assert "Replies in Thai" in memories.core and sessions.seq == 88
+        assert "Replies in Thai" in memories.core and sessions.seq == 38
 
     # Genuinely unusable ops must not advance the cursor: doing so would retire
     # the window they summarized, making the lost facts unrecoverable and
@@ -507,6 +610,44 @@ async def test_malformed_memory_ops_fail_the_pass_instead_of_vanishing():
 
 
 @pytest.mark.asyncio
+async def test_secrets_and_pii_are_masked_before_they_can_become_permanent():
+    # Guardrails mask a token or an ID out of a single response, but core memory
+    # is replayed into every later system prompt — an unscreened write survives
+    # that masking forever, and is re-sent (and paid for) on every turn.
+    memories, sessions = _Memories("## Profile\n- keep me"), _Sessions()
+    result = _save_memory(
+        history_entry="[2026-08-13 10:00] Rotated the key to sk-abcdefghijklmnop12345.",
+        memory_ops=[
+            {"op": "add", "section": "Profile", "text": "Contact is rujirapong@gmail.com"},
+            {"op": "add", "section": "Notes", "text": "Prod key is sk-abcdefghijklmnop12345"},
+        ],
+    )
+    service = _service(memories, _provider(result), sessions, policy=PolicyEngine())
+    assert await service.maybe_consolidate("u1", "s9") is True
+
+    assert "rujirapong@gmail.com" not in memories.core and "REDACTED_EMAIL" in memories.core
+    assert "sk-abcdefghijklmnop12345" not in memories.core
+    # The history row is durable and keyword-searched too, so it gets the same pass.
+    assert memories.history and "sk-abcdefghijklmnop12345" not in memories.history[0]
+
+    # remember() writes the same document from arbitrary agent-supplied text.
+    assert "REDACTED_EMAIL" in (await service.remember("u1", "Email rujirapong@gmail.com") or "")
+    assert "rujirapong@gmail.com" not in memories.core
+
+
+@pytest.mark.asyncio
+async def test_a_pass_with_nothing_worth_recording_writes_no_history():
+    # history_entry used to be required, so every pass — including the many that
+    # learned nothing — appended a contentless summary. History is retrieved by
+    # keyword search, where that noise buries the entries that matter.
+    memories, sessions = _Memories("## Profile\n- keep me"), _Sessions()
+    assert await _service(memories, _provider(_save_memory(memory_ops=[])), sessions).maybe_consolidate("u1", "s10")
+
+    assert memories.history == []
+    assert sessions.seq == 38  # still retires the window it read
+
+
+@pytest.mark.asyncio
 async def test_remember_reports_failure_when_the_section_is_full():
     # _apply_ops re-renders the document, so a trailing newline alone used to
     # make a dropped fact look like a successful write.
@@ -515,3 +656,81 @@ async def test_remember_reports_failure_when_the_section_is_full():
     reply = await _service(memories, _provider()).remember("u1", "brand new fact")
     assert "Could not save" in reply and "cap" in reply
     assert "brand new fact" not in memories.core
+
+
+@pytest.mark.asyncio
+async def test_a_window_the_summarizer_can_never_process_is_eventually_skipped():
+    # The cursor only advances on success, so before this a window whose content
+    # made the model reply with something unusable every time was re-sent — and
+    # paid for — on every later turn, forever. The counter lives in the session
+    # row, not in memory, so a restart doesn't reset the escape hatch.
+    memories, sessions = _Memories("## Profile\n- keep me"), _Sessions()
+    service = _service(memories, _provider(_save_memory(memory_ops="not json")), sessions)
+
+    for attempt in range(1, 5):
+        service._failures.pop("s-poison", None)  # skip the backoff wait
+        assert await service.maybe_consolidate("u1", "s-poison") is False
+        assert sessions.seq is None, f"cursor moved on attempt {attempt}"
+        assert sessions.failures == attempt
+
+    service._failures.pop("s-poison", None)
+    # True, not False: the skip moved the cursor and shrank the backlog, so the
+    # catch-up loop has to treat it as a pass that ran. Reporting no progress
+    # here would break it out one pass early with the rest of the backlog — the
+    # very messages the skip exists to reach — left for a later turn.
+    assert await service.maybe_consolidate("u1", "s-poison") is True
+    # One window's worth (not the whole 38-message batch) is given up, so the
+    # cursor is past the poison and the rest is still summarizable.
+    assert sessions.seq == 30
+    assert sessions.failures == 0  # and the counter starts clean for it
+    assert "s-poison" not in service._failures  # progress was made; no backoff
+
+
+@pytest.mark.asyncio
+async def test_a_skip_only_retires_one_window_however_far_the_batch_grew():
+    # The batch grows while the backoff ladder runs (through_seq follows
+    # max_seq), so by the fifth attempt it can be twice what the first attempt
+    # covered. Retiring all of it would discard messages that were tried once
+    # under a counter that promises five tries — so a skip may only ever cover
+    # the first `window` messages, the slice every attempt did see.
+    sessions = _Sessions()
+    service = _service(
+        _Memories(), _provider(_save_memory(memory_ops="not json")), sessions, messages=_Messages(200)
+    )
+    for _ in range(5):
+        service._failures.pop("s-deep", None)  # skip the backoff wait
+        await service.maybe_consolidate("u1", "s-deep")
+    # The batch reached seq 60 (window * 2); only seqs 1-30 are given up.
+    assert sessions.seq == 30
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_response_is_still_billed():
+    # It cost exactly what a usable one costs. Recording only the passes that
+    # landed hid a misconfigured summarizer model — every window burning
+    # _MAX_POISON_ATTEMPTS full-transcript calls — from the usage report, which
+    # is the only place the spend shows up before the provider invoice does.
+    usage, sessions = _Usage(), _Sessions()
+    service = _service(_Memories(), _provider(_save_memory(memory_ops="not json")), sessions, usage)
+    assert await service.maybe_consolidate("u1", "s-billed") is False
+    assert usage.calls == [("gpt-x", {"prompt_tokens": 1200, "completion_tokens": 80}, False)]
+
+
+@pytest.mark.asyncio
+async def test_provider_errors_never_push_a_window_toward_being_skipped():
+    # A 503 or a timeout says nothing about this window's content, so counting it
+    # would let a provider outage quietly discard salvageable conversations.
+    memories, sessions = _Memories("## Profile\n- keep me"), _Sessions()
+    service = _service(memories, _provider(error=RuntimeError("provider down")), sessions)
+    for _ in range(8):
+        service._failures.pop("s-outage", None)
+        assert await service.maybe_consolidate("u1", "s-outage") is False
+    assert sessions.failures == 0 and sessions.seq is None
+
+
+@pytest.mark.asyncio
+async def test_one_good_pass_clears_an_accumulated_poison_count():
+    memories, sessions = _Memories("## Profile\n- keep me"), _Sessions(consolidation_failures=4)
+    service = _service(memories, _provider(_save_memory(memory_ops=[])), sessions)
+    assert await service.maybe_consolidate("u1", "s-recovered") is True
+    assert sessions.seq == 38 and sessions.failures == 0

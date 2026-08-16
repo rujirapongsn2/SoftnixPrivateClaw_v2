@@ -258,15 +258,29 @@ class ClawAgent:
             f"## Runtime\n{runtime}\n\n"
             f"## Workspace\nYour workspace is mounted for file tools; shell commands run "
             f"in an isolated sandbox with the same workspace at /workspace.\n\n"
+            "## Answering directly\n"
+            "Most requests are best answered straight from your own knowledge, in the chat, "
+            "with no tool call at all — writing a PRD, a marketing plan, an email, a strategy, "
+            "an explanation, a comparison, or a review of text the user pasted. For these, "
+            "just write the answer. Every tool call the user didn't need is pure waiting.\n"
+            "Reach for a tool only when the request genuinely needs one:\n"
+            "- facts you don't have, or that must be current (`web_search`, `web_fetch`)\n"
+            "- the user's own files, data, or knowledge bases\n"
+            "- an action in the world: running code, browsing, sending, scheduling\n"
+            "Do not produce a .docx/.xlsx/.pptx/.pdf file unless the user actually asked for a "
+            "file. Write the content in the chat as markdown and offer to export it.\n"
+            "Never search the filesystem for your own instructions, skills, or capabilities — "
+            "everything you have is already in this prompt or one `read_skill` call away.\n\n"
             "## Guidelines\n"
             "- State intent before tool calls; never claim results before receiving them.\n"
             "- Read a file before modifying it. Analyze tool errors before retrying.\n"
             "- Ask for clarification when the request is ambiguous.\n"
             "- Match the user's language in your replies.\n"
-            "- For a multi-step or long-running task, call `update_plan` to record the goal "
-            "and steps, and keep it updated as you progress. The plan stays pinned in your "
-            "context, so you keep the thread even after earlier messages scroll away — lean "
-            "on it instead of losing track of the original request.\n"
+            "- When a task will genuinely take several tool calls, call `update_plan` to record "
+            "the goal and steps, and keep it updated as you progress. The plan stays pinned in "
+            "your context, so you keep the thread even after earlier messages scroll away — lean "
+            "on it instead of losing track of the original request. A request you can answer in "
+            "one written reply needs no plan; writing one just delays the answer.\n"
             "- You have long-term memory: when the user shares something worth keeping "
             "(their name, preferences, ongoing work, or asks you to remember something), "
             "call the `remember` tool to save it. Your saved memory is shown under "
@@ -458,6 +472,38 @@ class AgentRuntime:
             await self.connectors.sync_tools(user_id, agent.tools)
         except Exception:
             logger.exception("Connector warm failed for {}", user_id)
+
+    # -------------------------------------------------- Prompt-context fetches
+    # Each returns an empty result when its subsystem is disabled, so the turn
+    # can gather them unconditionally instead of branching per optional store.
+    async def _sync_connectors(self, user_id: str, tools: ToolRegistry) -> None:
+        if self.connectors is None:
+            return
+        try:
+            await self.connectors.sync_tools(user_id, tools)
+        except Exception:
+            logger.exception("Connector sync failed for {}", user_id)
+
+    async def _user_skills(self, user_id: str) -> list:
+        if self.skills is None:
+            return []
+        return await self.skills.enabled_for_user(user_id)
+
+    async def _knowledge_bases(self, user_id: str) -> list[dict]:
+        if self.knowledge is None:
+            return []
+        try:
+            return await self.knowledge.list_accessible(user_id)
+        except Exception:
+            return []
+
+    async def _connected_connectors(self, user_id: str) -> list:
+        if self.connectors is None:
+            return []
+        try:
+            return await self.connectors.store.enabled_accessible(user_id)
+        except Exception:
+            return []
 
     def _session_lock(self, session_id: str) -> asyncio.Lock:
         lock = self._session_locks.get(session_id)
@@ -676,20 +722,32 @@ class AgentRuntime:
                         return msg
                     if model and session is not None and session.model != model:
                         self._spawn_background(self.sessions.set_model(session_id, model))
-                history = await self.messages.recent(session_id, after_seq=after_seq)
-                memory_context = await self.memory.build_context(user_id)
-                # Sync connectors BEFORE building the skills summary below — a
-                # skill linked to a connector needs that connector's live tool
-                # names, which only exist after this call has run.
-                if self.connectors is not None:
-                    try:
-                        await self.connectors.sync_tools(user_id, agent.tools)
-                    except Exception:
-                        logger.exception("Connector sync failed for {}", user_id)
+                # Everything the prompt needs, fetched concurrently. These reads
+                # are independent, and the user waits for all of them before the
+                # first token — serializing them just adds their latencies up.
+                # Connector sync is the only network-bound step, so it overlaps
+                # the DB reads rather than blocking them; it is still awaited
+                # before the skills summary and the turn itself, because a
+                # connector-linked skill needs the tool names it registers.
+                # Tracked in _background (like _spawn_background) so a failure in
+                # one of the gathered reads below can't leave it orphaned outside
+                # drain()'s view — the `finally` guarantees it's awaited even if
+                # gather raises, instead of being abandoned mid-flight.
+                sync_task = asyncio.create_task(self._sync_connectors(user_id, agent.tools))
+                self._background.add(sync_task)
+                sync_task.add_done_callback(self._background.discard)
+                try:
+                    history, memory_context, user_skills, bases, connected_rows = await asyncio.gather(
+                        self.messages.recent(session_id, after_seq=after_seq),
+                        self.memory.build_context(user_id),
+                        self._user_skills(user_id),
+                        self._knowledge_bases(user_id),
+                        self._connected_connectors(user_id),
+                    )
+                finally:
+                    await sync_task
                 # Built-in skills are always offered; user skills are merged in.
-                enabled_skills = list(builtin_skills())
-                if self.skills is not None:
-                    enabled_skills += await self.skills.enabled_for_user(user_id)
+                enabled_skills = [*builtin_skills(), *user_skills]
                 # For any user skill linked to a connector, resolve that
                 # connector's CURRENT registered tool names (mcp_{name}_{tool})
                 # live — never hardcoded in the skill's own text, so renaming or
@@ -716,34 +774,25 @@ class AgentRuntime:
                 # Tell the agent which knowledge bases exist so it knows to reach for
                 # the search_knowledge tool when a question may be answered by them.
                 knowledge_summary = ""
-                if self.knowledge is not None:
-                    try:
-                        bases = await self.knowledge.list_accessible(user_id)
-                    except Exception:
-                        bases = []
-                    usable = [b for b in bases if b["docs"] > 0]
-                    if usable:
-                        lines = "\n".join(
-                            f"- {b['name']}" + (f": {b['description']}" if b["description"] else "")
-                            for b in usable
-                        )
-                        knowledge_summary = (
-                            "# Knowledge bases\n\n"
-                            "The user has uploaded documents into these knowledge bases. When a "
-                            "question may be answered by them, call the `search_knowledge` tool "
-                            "(optionally with `knowledge_base` to target one) and answer from the "
-                            "returned passages, citing the source.\n\n" + lines
-                        )
+                usable = [b for b in bases if b["docs"] > 0]
+                if usable:
+                    lines = "\n".join(
+                        f"- {b['name']}" + (f": {b['description']}" if b["description"] else "")
+                        for b in usable
+                    )
+                    knowledge_summary = (
+                        "# Knowledge bases\n\n"
+                        "The user has uploaded documents into these knowledge bases. When a "
+                        "question may be answered by them, call the `search_knowledge` tool "
+                        "(optionally with `knowledge_base` to target one) and answer from the "
+                        "returned passages, citing the source.\n\n" + lines
+                    )
                 # Tell the agent which integrations exist but aren't connected yet,
                 # so it points the user at Settings -> Connectors instead of
                 # improvising a workaround with the generic browser/web-fetch tools
                 # (e.g. asking them to make a private Google Sheet public).
                 connectors_summary = ""
                 if self.connectors is not None:
-                    try:
-                        connected_rows = await self.connectors.store.enabled_accessible(user_id)
-                    except Exception:
-                        connected_rows = []
                     connected_names = {c.name for c in connected_rows}
                     not_connected = [p for p in list_presets() if p["name"] not in connected_names]
                     if not_connected:
@@ -870,10 +919,27 @@ class AgentRuntime:
                 self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
                 raise TurnFailed(message) from exc
 
+        logger.info(
+            "Turn {} shape: iterations={} tool_calls={} ttft_ms={} duration_ms={}",
+            turn_id,
+            outcome.iterations,
+            outcome.tool_calls,
+            outcome.ttft_ms,
+            outcome.duration_ms,
+        )
         if self.usage is not None:
             self._spawn_background(
                 self.usage.record(
-                    user_id, session_id, effective_model or self.settings.llm.model, outcome.usage
+                    user_id,
+                    session_id,
+                    effective_model or self.settings.llm.model,
+                    outcome.usage,
+                    metrics={
+                        "iterations": outcome.iterations,
+                        "tool_calls": outcome.tool_calls,
+                        "ttft_ms": outcome.ttft_ms,
+                        "duration_ms": outcome.duration_ms,
+                    },
                 )
             )
         self._spawn_background(self.memory.maybe_consolidate(user_id, session_id))

@@ -629,7 +629,12 @@ export default function App() {
       toast(
         connectorStatus === "connected"
           ? { body: `${connector || "Connector"} connected`, type: "info", autoHideDuration: 3000 }
-          : { body: "Couldn't connect. Please try again.", type: "error" },
+          : connectorStatus === "name_conflict"
+            ? {
+                body: `You already have your own connector named "${connector || ""}". Rename it first, then connect.`,
+                type: "error",
+              }
+            : { body: "Couldn't connect. Please try again.", type: "error" },
       );
       window.history.replaceState({}, "", window.location.pathname);
     }

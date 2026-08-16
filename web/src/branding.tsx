@@ -344,10 +344,62 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.saving": "Saving…",
     "settings.connectors.addConnector": "Add connector",
     "settings.connectors.toolNamesCount": "{count} tool name{plural} to reference in a skill",
+    "settings.connectors.shadowedTools":
+      "{count} tool name{plural} already taken by another connector — not callable here: {names}",
     "settings.connectors.nameLabel": "Name (lowercase, e.g. github)",
     "settings.connectors.descOptional": "Description (optional)",
     "settings.connectors.transportStdio": "stdio (local command)",
     "settings.connectors.transportHttp": "HTTP (remote server)",
+    "settings.connectors.kindMcp": "MCP server",
+    "settings.connectors.kindApi": "API",
+    "settings.connectors.apiBaseUrlLabel": "Base URL (e.g. https://api.example.com)",
+    "settings.connectors.operationsLabel": "Operations",
+    "settings.connectors.operationsEmpty": "No operations yet — add one to define a callable endpoint.",
+    "settings.connectors.addOperation": "+ Add operation",
+    "settings.connectors.operationNameLabel": "Operation name (e.g. get_user)",
+    "settings.connectors.operationMethodLabel": "Method",
+    "settings.connectors.operationPathLabel": "Path (e.g. /users/{id})",
+    "settings.connectors.operationDescLabel": "Description (optional)",
+    "settings.connectors.operationBodyLabel": "Request body (JSON template, optional)",
+    "settings.connectors.operationBodyDesc":
+      "A JSON template sent as the request body. Use {name} for a body parameter's value, unquoted even for strings — e.g. {\"limit\": {limit}}.",
+    "settings.connectors.removeOperation": "Remove operation",
+    "settings.connectors.parametersLabel": "Parameters",
+    "settings.connectors.addParameter": "+ Add parameter",
+    "settings.connectors.paramNameLabel": "Parameter name",
+    "settings.connectors.paramLocationLabel": "Location",
+    "settings.connectors.paramLocationPath": "Path",
+    "settings.connectors.paramLocationQuery": "Query",
+    "settings.connectors.paramLocationHeader": "Header",
+    "settings.connectors.paramLocationBody": "Body",
+    "settings.connectors.paramTypeLabel": "Type",
+    "settings.connectors.paramRequiredLabel": "Required",
+    "settings.connectors.removeParameter": "Remove parameter",
+    "settings.connectors.curlImportToggle": "Import from cURL",
+    "settings.connectors.curlImportLabel": "Paste a curl command",
+    "settings.connectors.curlImportDesc":
+      "Paste an example request (e.g. \"Copy as cURL\" from your browser's devtools, or an API doc's example) to prefill an operation, base URL, and auth.",
+    "settings.connectors.curlImportAction": "Parse & add operation",
+    "settings.connectors.curlImportError": "Couldn't find a URL in that — paste the full curl command, including the http(s):// address.",
+    "settings.connectors.curlImportSuccess": "Added operation \"{name}\" from the pasted request.",
+    "settings.connectors.curlImportBodyWarning":
+      "The operation was added, but its request body couldn't be imported automatically (not valid JSON, or a non-JSON form) — add it by hand in the Request body field if needed.",
+    "settings.connectors.curlImportBodySecretWarning":
+      "The imported request body looks like it contains a credential. Unlike the auth headers above, an operation's body is stored as-is and is not encrypted — replace that value with a {placeholder} parameter or remove it, unless you meant to store it.",
+    "settings.connectors.curlImportBodyPlaceholderWarning":
+      "The operation was added without its request body: the pasted body contains {keys} in curly braces, which is the same syntax used for body parameters. Add the body by hand and decide which of those should become real parameters.",
+    "settings.connectors.curlImportOriginMismatch":
+      "Nothing was imported: that request goes to {pasted}, but this connector's base URL is {base}. An operation always runs against the base URL with this connector's stored credentials, so importing it would send them to the wrong service. Use a separate connector for {pasted}.",
+    "settings.connectors.curlImportBasePathMismatch":
+      "Nothing was imported: that request's path is {pasted}, which isn't under this connector's base path {base}. The base path is prepended at call time, so the operation would end up calling {base}{pasted}.",
+    "settings.connectors.duplicateHeaderKeys":
+      "Nothing was saved: {keys} name the same HTTP header — header names are case-insensitive. Keep one of each pair in the Environment field and save again.",
+    "settings.connectors.curlImportDuplicateHeader":
+      "The pasted request sets {keys} more than once, with different values — HTTP header names are case-insensitive, so those are one header. The first value was kept; check that it is the right one.",
+    "settings.connectors.curlImportEnvCollision":
+      "Kept the existing values for {keys} — the pasted request had different ones. Auth is shared by every operation in this connector, so check them by hand if the new request needs different credentials.",
+    "settings.connectors.curlImportQueryNotice":
+      "Query parameters {keys} were saved as connector auth, so they will be sent on every operation. If they belong to this one request only, move them into the operation's parameters instead.",
     "settings.connectors.commandLabel": "Command (e.g. npx -y @modelcontextprotocol/server-github)",
     "settings.connectors.commandAdminOnly":
       "Only an administrator can set a custom local command — ask them to change this.",
@@ -737,6 +789,10 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.guardrails.exemptToolsDesc2": ". Use tool-name globs like",
     "admin.guardrails.exemptToolsDesc3": "or",
     "admin.guardrails.exemptToolsDesc4": "Input and output masking are unaffected.",
+    "admin.guardrails.exemptToolsApiNote1":
+      "Generic REST connectors are deliberately not exempt by default — any user can create one and point it at any host. If one of them legitimately needs real values (an order number shaped like a card number, a customer id shaped like a national id), add",
+    "admin.guardrails.exemptToolsApiNote2":
+      "for that one connector. Without an exemption the tool silently receives the masked value and the model is never told, so the call fails in a way that looks like a missing record.",
     "admin.guardrails.noExemptions": "No exemptions — every tool's arguments are masked.",
     "admin.guardrails.removeExemption": "Remove {name}",
     "admin.guardrails.addExemption": "Add exemption",
@@ -1221,10 +1277,62 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.saving": "กำลังบันทึก…",
     "settings.connectors.addConnector": "เพิ่มตัวเชื่อมต่อ",
     "settings.connectors.toolNamesCount": "{count} ชื่อเครื่องมือสำหรับอ้างอิงในสกิล",
+    "settings.connectors.shadowedTools":
+      "{count} ชื่อเครื่องมือถูกตัวเชื่อมต่ออื่นใช้ไปแล้ว จึงเรียกผ่านตัวนี้ไม่ได้: {names}",
     "settings.connectors.nameLabel": "ชื่อ (ตัวพิมพ์เล็ก เช่น github)",
     "settings.connectors.descOptional": "คำอธิบาย (ไม่บังคับ)",
     "settings.connectors.transportStdio": "stdio (คำสั่งภายในเครื่อง)",
     "settings.connectors.transportHttp": "HTTP (เซิร์ฟเวอร์ระยะไกล)",
+    "settings.connectors.kindMcp": "เซิร์ฟเวอร์ MCP",
+    "settings.connectors.kindApi": "API",
+    "settings.connectors.apiBaseUrlLabel": "Base URL (เช่น https://api.example.com)",
+    "settings.connectors.operationsLabel": "Operations",
+    "settings.connectors.operationsEmpty": "ยังไม่มี operation — เพิ่มเพื่อกำหนดเอ็นด์พอยต์ที่เรียกใช้ได้",
+    "settings.connectors.addOperation": "+ เพิ่ม operation",
+    "settings.connectors.operationNameLabel": "ชื่อ operation (เช่น get_user)",
+    "settings.connectors.operationMethodLabel": "Method",
+    "settings.connectors.operationPathLabel": "Path (เช่น /users/{id})",
+    "settings.connectors.operationDescLabel": "คำอธิบาย (ไม่บังคับ)",
+    "settings.connectors.operationBodyLabel": "Request body (JSON template, ไม่บังคับ)",
+    "settings.connectors.operationBodyDesc":
+      "เทมเพลต JSON ที่จะส่งเป็น request body ใช้ {name} แทนค่าพารามิเตอร์แบบ body โดยไม่ต้องใส่เครื่องหมายคำพูดแม้เป็น string — เช่น {\"limit\": {limit}}",
+    "settings.connectors.removeOperation": "ลบ operation",
+    "settings.connectors.parametersLabel": "พารามิเตอร์",
+    "settings.connectors.addParameter": "+ เพิ่มพารามิเตอร์",
+    "settings.connectors.paramNameLabel": "ชื่อพารามิเตอร์",
+    "settings.connectors.paramLocationLabel": "ตำแหน่ง",
+    "settings.connectors.paramLocationPath": "Path",
+    "settings.connectors.paramLocationQuery": "Query",
+    "settings.connectors.paramLocationHeader": "Header",
+    "settings.connectors.paramLocationBody": "Body",
+    "settings.connectors.paramTypeLabel": "ชนิดข้อมูล",
+    "settings.connectors.paramRequiredLabel": "จำเป็นต้องระบุ",
+    "settings.connectors.removeParameter": "ลบพารามิเตอร์",
+    "settings.connectors.curlImportToggle": "นำเข้าจาก cURL",
+    "settings.connectors.curlImportLabel": "วางคำสั่ง curl",
+    "settings.connectors.curlImportDesc":
+      "วางตัวอย่างคำขอ (เช่นจาก \"Copy as cURL\" ใน devtools ของเบราว์เซอร์ หรือตัวอย่างจากเอกสาร API) เพื่อกรอก operation, Base URL และการยืนยันตัวตนให้อัตโนมัติ",
+    "settings.connectors.curlImportAction": "แปลงและเพิ่ม operation",
+    "settings.connectors.curlImportError": "ไม่พบ URL ในข้อความนี้ — กรุณาวางคำสั่ง curl แบบเต็ม รวมที่อยู่ http(s):// ด้วย",
+    "settings.connectors.curlImportSuccess": "เพิ่ม operation \"{name}\" จากคำขอที่วางแล้ว",
+    "settings.connectors.curlImportBodyWarning":
+      "เพิ่ม operation สำเร็จแล้ว แต่ไม่สามารถนำเข้า request body ให้อัตโนมัติได้ (ไม่ใช่ JSON ที่ถูกต้อง หรือเป็นรูปแบบอื่น) — กรุณาใส่เองในช่อง Request body หากต้องการ",
+    "settings.connectors.curlImportBodySecretWarning":
+      "request body ที่นำเข้ามาดูเหมือนมีข้อมูลลับ (credential) อยู่ — ต่างจาก header สำหรับยืนยันตัวตนด้านบน body ของ operation จะถูกเก็บตามที่กรอกและไม่ได้เข้ารหัส กรุณาเปลี่ยนค่านั้นเป็นพารามิเตอร์ {placeholder} หรือลบออก หากไม่ได้ตั้งใจจะเก็บไว้",
+    "settings.connectors.curlImportBodyPlaceholderWarning":
+      "เพิ่ม operation แล้วแต่ไม่ได้นำ request body มาด้วย เพราะ body ที่วางมามี {keys} อยู่ในวงเล็บปีกกา ซึ่งซ้ำกับรูปแบบที่ใช้ประกาศพารามิเตอร์ของ body — กรุณาใส่ body เองและเลือกว่าตัวไหนควรเป็นพารามิเตอร์จริง",
+    "settings.connectors.curlImportOriginMismatch":
+      "ไม่ได้นำเข้าอะไรเลย: คำขอนี้ยิงไปที่ {pasted} แต่ Base URL ของ connector นี้คือ {base} — operation จะถูกเรียกที่ Base URL พร้อมข้อมูลลับที่เก็บไว้ใน connector นี้เสมอ การนำเข้าจึงเท่ากับส่งข้อมูลลับไปผิดปลายทาง หากต้องการใช้ {pasted} กรุณาสร้าง connector แยกต่างหาก",
+    "settings.connectors.curlImportBasePathMismatch":
+      "ไม่ได้นำเข้าอะไรเลย: path ของคำขอคือ {pasted} ซึ่งไม่ได้อยู่ภายใต้ base path {base} ของ connector นี้ — base path จะถูกเติมด้านหน้าตอนเรียกใช้งาน operation จึงจะกลายเป็น {base}{pasted}",
+    "settings.connectors.duplicateHeaderKeys":
+      "ยังไม่ได้บันทึก: {keys} หมายถึง HTTP header ตัวเดียวกัน เพราะชื่อ header ไม่แยกตัวพิมพ์เล็ก-ใหญ่ กรุณาลบให้เหลือคู่ละหนึ่งรายการในช่อง Environment แล้วบันทึกใหม่",
+    "settings.connectors.curlImportDuplicateHeader":
+      "คำขอที่วางมากำหนด {keys} ซ้ำกันโดยมีค่าต่างกัน — ชื่อ HTTP header ไม่แยกตัวพิมพ์เล็ก-ใหญ่ จึงถือเป็น header เดียวกัน ระบบเก็บค่าแรกไว้ กรุณาตรวจสอบว่าเป็นค่าที่ถูกต้อง",
+    "settings.connectors.curlImportEnvCollision":
+      "คงค่าเดิมของ {keys} ไว้ เพราะคำขอที่วางมามีค่าต่างจากเดิม — ข้อมูลยืนยันตัวตนถูกใช้ร่วมกันทุก operation ใน connector นี้ หากคำขอใหม่ต้องใช้ค่าอื่นกรุณาตรวจสอบและแก้เอง",
+    "settings.connectors.curlImportQueryNotice":
+      "พารามิเตอร์ query {keys} ถูกบันทึกเป็นข้อมูลยืนยันตัวตนของ connector จึงจะถูกส่งไปกับทุก operation หากใช้เฉพาะคำขอนี้ กรุณาย้ายไปไว้ในพารามิเตอร์ของ operation แทน",
     "settings.connectors.commandLabel": "คำสั่ง (เช่น npx -y @modelcontextprotocol/server-github)",
     "settings.connectors.commandAdminOnly":
       "มีเพียงผู้ดูแลระบบเท่านั้นที่ตั้งค่าคำสั่งภายในเครื่องแบบกำหนดเองได้ — ขอให้ผู้ดูแลระบบเปลี่ยนค่านี้",
@@ -1613,6 +1721,10 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.guardrails.exemptToolsDesc2": " ใช้รูปแบบชื่อเครื่องมือ (glob) เช่น",
     "admin.guardrails.exemptToolsDesc3": "หรือ",
     "admin.guardrails.exemptToolsDesc4": "การปิดบัง input และ output ไม่ได้รับผลกระทบ",
+    "admin.guardrails.exemptToolsApiNote1":
+      "ตัวเชื่อมต่อ REST ทั่วไปไม่ถูกยกเว้นโดยค่าเริ่มต้นโดยตั้งใจ — ผู้ใช้ทุกคนสร้างเองและชี้ไปที่โฮสต์ใดก็ได้ ถ้าตัวใดจำเป็นต้องใช้ค่าจริง (เลขที่ออร์เดอร์ที่หน้าตาเหมือนเลขบัตร หรือรหัสลูกค้าที่เหมือนเลขบัตรประชาชน) ให้เพิ่ม",
+    "admin.guardrails.exemptToolsApiNote2":
+      "เฉพาะตัวเชื่อมต่อนั้น หากไม่ยกเว้น เครื่องมือจะได้รับค่าที่ถูกปิดบังไปเงียบๆ และโมเดลไม่รู้ตัว ทำให้การเรียกล้มเหลวในลักษณะที่ดูเหมือนไม่พบข้อมูล",
     "admin.guardrails.noExemptions": "ยังไม่มีการยกเว้น — อาร์กิวเมนต์ของทุกเครื่องมือจะถูกปิดบัง",
     "admin.guardrails.removeExemption": "ลบ {name}",
     "admin.guardrails.addExemption": "เพิ่มการยกเว้น",

@@ -15,6 +15,8 @@ shared session rather than a per-user connection.
 """
 
 import asyncio
+import json
+import re
 import shlex
 import sys
 import time
@@ -29,6 +31,7 @@ from loguru import logger
 from mcp.shared.exceptions import McpError
 
 from claw.db.stores import ConnectorStore
+from claw.security.ssrf import resolve_public_ips
 from claw.tools.base import Tool
 from claw.tools.registry import ToolRegistry
 
@@ -89,17 +92,266 @@ _MIN_TIMEOUT_MS = 1000
 _MAX_TIMEOUT_MS = 120_000
 
 
+# Which config values count as secrets for redaction. This decides what gets
+# replaced by "***" in tool results and error messages, so it is wrong in both
+# directions: too broad and real response data is corrupted before the model
+# reads it; too narrow and a credential lands in the transcript, which is
+# persisted and replayed to the LLM on every later turn.
+#
+# An env entry is classified by its PREFIX, because the prefix already says
+# what the value is used for, and a name-guessing heuristic alone is not safe
+# enough for the two auth-carrying prefixes (nothing tells "HEADER_X-Auth-Email"
+# or "QUERY_pass" from a credential except that they *are* one):
+#
+#   HEADER_* -> a request header. Secret unless it's a known-boring one, so a
+#               new/odd auth header name is redacted by default.
+#   QUERY_*  -> a URL query parameter. Always masked inside a URL (?name=***),
+#               which is where the leak actually happens; global replacement of
+#               the bare value too, unless the param name is in
+#               _QUERY_ALLOWLIST (a known-boring one like "page" or "status")
+#               and it doesn't also look credential-shaped — same
+#               redact-unless-known-boring polarity as HEADER_*, since an odd
+#               auth param name ("code", "sid", a client's custom token param)
+#               is exactly the case a fixed word list can't anticipate.
+#   anything else -> process env for a stdio MCP server (PGPASSWORD,
+#               DATABASE_URL, GITHUB_TOKEN). Never response data, so always
+#               redacted.
+_HEADER_ALLOWLIST = frozenset(
+    {
+        "accept",
+        "accept-charset",
+        "accept-encoding",
+        "accept-language",
+        "cache-control",
+        "content-type",
+        "origin",
+        "pragma",
+        "referer",
+        "user-agent",
+        "x-requested-with",
+    }
+)
+
+# Mirrors _HEADER_ALLOWLIST's polarity: a QUERY_* param is redacted-by-default
+# unless it's a known-boring one, so an odd/new param name (e.g. "code", "sid"
+# — neither a _SECRET_HEAD_WORDS hit nor token-shaped) still gets scrubbed
+# instead of silently passing through. The cURL importer (web/src/Settings.tsx's
+# CurlImportPanel) turns EVERY captured query parameter into a QUERY_* env var,
+# auth or not, so this list exists to keep genuinely common, non-secret REST
+# params (pagination, formatting, filtering) from being shredded out of
+# ordinary response bodies by the global replace below.
+_QUERY_ALLOWLIST = frozenset(
+    {
+        "page", "per_page", "page_size", "limit", "offset",
+        "sort", "order", "order_by",
+        "format", "fields", "include", "expand",
+        "filter", "q", "query", "search",
+        "lang", "language", "locale", "timezone", "tz",
+        "view", "type", "status",
+        "since", "until", "start_date", "end_date", "date_from", "date_to",
+    }
+)
+
+# Key matching is head-noun based ("access_token", "X-Api-Key", "client_secret"
+# all end in the credential word) rather than substring, because substring
+# matching catches "author" (-> auth) and "token_count" and would blank an
+# author's name or a token count out of every response.
+_STRONG_SECRET_WORDS = frozenset(
+    {
+        "secret", "password", "passwd", "passphrase", "pwd", "pw", "pass",
+        "credential", "credentials", "apikey", "bearer", "otp", "pin", "salt",
+    }
+)
+_SECRET_HEAD_WORDS = _STRONG_SECRET_WORDS | {
+    "key", "keys", "token", "tokens", "auth", "authorization", "cookie", "cookies",
+    "session", "signature", "sig", "pat", "private", "access",
+}
+# Punctuation, plus camelCase boundaries so "apiKey" splits like "api_key".
+# The character class must stay case-insensitive: with [^a-z0-9] an
+# all-caps key like "HEADER_X-Api-Key" shreds into ("pi", "ey") and matches
+# nothing.
+_WORD_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
+# Long and opaque: "sk-live-abc123...", "ghp_xxxx", a base64/JWT fragment.
+# Charset and length alone are not enough — "-" and "_" are in the class, so
+# an ordinary slug ("in_progress_review", "acme-website-redesign") clears both
+# and would be blanked out of every response that contains it. Requiring a
+# digit AND a letter AND (an uppercase letter OR an 8-char unbroken
+# alphanumeric run) keeps human-written slugs out while still matching real
+# token formats, which are either mixed-case or long unbroken random strings.
+_TOKEN_CHARSET_RE = re.compile(r"^[A-Za-z0-9_\-.=+]{16,}$")
+_LONG_ALNUM_RUN_RE = re.compile(r"[A-Za-z0-9]{8,}")
+
+# Below this a value is too common to replace safely: blanking "10" or "ok"
+# everywhere would shred surrounding text far worse than leaking it.
+_MIN_REDACTABLE_LEN = 4
+_MIN_REDACTABLE_NUMBER_LEN = 6
+
+
+def _key_names_a_secret(key: str) -> bool:
+    words = [w for w in _WORD_SPLIT_RE.split(key.strip()) if w]
+    if not words:
+        return False
+    lowered = [w.lower() for w in words]
+    if lowered[-1] in _SECRET_HEAD_WORDS:
+        return True
+    return any(word in _STRONG_SECRET_WORDS for word in lowered)
+
+
+def _value_looks_like_a_token(value: str) -> bool:
+    if not _TOKEN_CHARSET_RE.match(value):
+        return False
+    if not any(char.isdigit() for char in value):
+        return False
+    if not any(char.isalpha() for char in value):
+        return False
+    return any(char.isupper() for char in value) or bool(_LONG_ALNUM_RUN_RE.search(value))
+
+
+def _is_secret_value(key: str, value: Any) -> bool:
+    """Whether a *body template literal* is a credential — key or shape."""
+    if not isinstance(value, str):
+        # A numeric credential still has to be scrubbed; it just can't be
+        # judged by shape, so the key alone decides.
+        return _key_names_a_secret(key)
+    if len(value) < _MIN_REDACTABLE_LEN:
+        return False
+    return _key_names_a_secret(key) or _value_looks_like_a_token(value)
+
+
+# Placeholders are filled from the caller's arguments at call time, so a
+# template holds no secret of its own there. Swapped for a sentinel so the
+# template parses as JSON (see _body_secrets). The sentinel must be printable:
+# json.loads is strict by default and rejects raw control characters inside a
+# string, which would make every templated body unparseable and silently skip
+# redaction entirely.
+_BODY_PLACEHOLDER_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}")
+_PLACEHOLDER_SENTINEL = "claw~placeholder~2f8c1d"
+
+
+def _collect_secret_literals(node: Any, key: str, out: list[str]) -> None:
+    if isinstance(node, dict):
+        for child_key, child in node.items():
+            _collect_secret_literals(child, str(child_key), out)
+    elif isinstance(node, list):
+        for child in node:
+            _collect_secret_literals(child, key, out)
+    elif isinstance(node, bool) or node is None:
+        return
+    elif isinstance(node, str):
+        if node != _PLACEHOLDER_SENTINEL and _is_secret_value(key, node):
+            out.append(node)
+    elif isinstance(node, (int, float)) and _key_names_a_secret(key):
+        # json.dumps, not str(): that is how the number is spelled in the
+        # rendered body, so it is the form an echoing endpoint sends back.
+        rendered = json.dumps(node)
+        # Same floor the string branch has. Without it a body template of
+        # {"private": 1} makes "1" a redaction literal, and every digit 1 in
+        # every response — including the "[200] " status prefix — turns into
+        # "***", corrupting the JSON the model has to read. A number that
+        # short cannot be a credential anyway. The floor is higher than the
+        # string one because a bare number carries no distinguishing shape.
+        if len(rendered) >= _MIN_REDACTABLE_NUMBER_LEN:
+            out.append(rendered)
+
+
+def _body_secrets(connector) -> list[str]:
+    """Literal credentials stored in a kind="api" operation's body template.
+
+    A body pasted through the cURL importer (web/src/Settings.tsx's
+    CurlImportPanel) carries whatever literal credentials the example request
+    used — there is no BODY_* env equivalent to move them to. ConnectorStore
+    encrypts the body at rest, but by the time a connector reaches here it is
+    decrypted, so these values still need keeping out of transcripts and logs:
+    an endpoint that echoes the request back would otherwise replay them
+    verbatim.
+    """
+    values: list[str] = []
+    for operation in getattr(connector, "operations", None) or []:
+        # A stored row is JSON and can be hand-edited or imported, so an entry
+        # that isn't a dict must not raise — _redact_secrets runs inside except
+        # blocks whose whole job is to scrub the message being handled.
+        if not isinstance(operation, dict):
+            continue
+        body = operation.get("body")
+        if not isinstance(body, str) or not body:
+            continue
+        try:
+            parsed = json.loads(_BODY_PLACEHOLDER_RE.sub(f'"{_PLACEHOLDER_SENTINEL}"', body))
+        except ValueError:
+            continue
+        _collect_secret_literals(parsed, "", values)
+    return values
+
+
 def _redact_secrets(text: str, connector) -> str:
-    """Strip a connector's secret env values out of a freeform error string
-    before it's logged or returned via the API. For an http connector using
+    """Strip a connector's secrets out of a freeform string before it's logged,
+    returned via the API, or handed to the model. For an http connector using
     QUERY_* auth, the secret is embedded in the request URL itself, so an
     underlying httpx/mcp exception's message (e.g. on a bad/rate-limited key)
-    includes the raw URL, secret and all — this scrubs any such value
-    (header or query) wherever it appears in the message, not just the URL."""
-    for value in (connector.env or {}).values():
-        if value and len(value) >= 4:
-            text = text.replace(value, "***")
+    includes the raw URL, secret and all — this scrubs any such value (header,
+    query, or api-connector body literal) wherever it appears, not just the URL.
+
+    See the _HEADER_ALLOWLIST comment for how each env prefix is classified."""
+    for raw_key, value in (connector.env or {}).items():
+        key = str(raw_key)
+        if not value:
+            continue
+        if key.startswith(_QUERY_ENV_PREFIX):
+            param = key[len(_QUERY_ENV_PREFIX) :]
+            if param:
+                # Mask by position, not by value: this catches the leak even
+                # when the value is short or punctuated ("?pass=letmein"),
+                # where a value-shape test would not fire. Anchoring on the
+                # parameter name means there is no collateral damage, so this
+                # runs before the length floor below (which exists only to keep
+                # the global replace from shredding text around a short value).
+                text = re.sub(rf"([?&]{re.escape(param)}=)[^&\s\"'<>]+", r"\1***", text)
+            if param.lower() in _QUERY_ALLOWLIST and not (
+                _key_names_a_secret(param) or _value_looks_like_a_token(value)
+            ):
+                # A known-boring, non-credential-shaped query value ("status=active")
+                # also occurs as ordinary response data, so it is masked only
+                # in the URL above, never replaced globally. Anything not on
+                # the allowlist falls through to the global replace below,
+                # since an unrecognized param name is exactly the case where a
+                # heuristic can't rule out "credential".
+                continue
+        elif key.startswith(_HEADER_ENV_PREFIX):
+            name = key[len(_HEADER_ENV_PREFIX) :]
+            if name.lower() in _HEADER_ALLOWLIST and not _value_looks_like_a_token(value):
+                # Same value-shape escape hatch the QUERY_* branch above uses:
+                # the allowlist says "this header name is normally boring", but
+                # APIs do smuggle credentials through boring names (a signed
+                # session in a Cookie, a JWT in User-Agent for a fingerprinting
+                # gateway). Name alone is not enough to conclude the value is
+                # safe to echo, and a token-shaped value has no benign reading.
+                continue
+        if len(value) < _MIN_REDACTABLE_LEN:
+            continue
+        text = text.replace(value, "***")
+    for value in _body_secrets(connector):
+        text = text.replace(value, "***")
     return text
+
+
+def _register_scoped(registry: ToolRegistry, state, tool: Tool, connector_name: str) -> bool:
+    """Register `tool` unless its name is already taken in this registry.
+
+    ToolRegistry.register is a bare dict assignment, and a user's connectors are
+    registered after the admin-global ones, so without this a user could name a
+    connector/operation so that `api_hr_get_salary` (or `mcp_...`) collides with
+    an admin-global tool and silently take over every call the model makes to
+    that name — including calls issued by a shared skill written against the
+    global connector. First registration wins: globals, then the user's own.
+    """
+    if registry.has(tool.name):
+        logger.warning(
+            "Connector {} tool {} not registered: name already taken", connector_name, tool.name
+        )
+        return False
+    registry.register(tool)
+    state.tool_names.append(tool.name)
+    return True
 
 
 class McpToolProxy(Tool):
@@ -197,7 +449,11 @@ class _GlobalConnections:
     stacks: dict[str, AsyncExitStack] = field(default_factory=dict)
     signatures: dict[str, tuple] = field(default_factory=dict)
     sessions: dict[str, Any] = field(default_factory=dict)
-    proxies: dict[str, list["McpToolProxy"]] = field(default_factory=dict)
+    # The connector row each name is currently serving. A kind="api" tool has
+    # no session to go stale, so this is what its `connector_ref` reads to pick
+    # up a rotated credential or a repointed base url — see GenericApiTool.
+    rows: dict[str, Any] = field(default_factory=dict)
+    proxies: dict[str, list["Tool"]] = field(default_factory=dict)
     statuses: dict[str, dict] = field(default_factory=dict)
     errored_monotonic: dict[str, float] = field(default_factory=dict)
     # True once sync_global has completed at least one full pass. Guards the
@@ -208,6 +464,71 @@ class _GlobalConnections:
     # populate a still-empty pool for the very first time could both bail
     # out, serving zero global connectors for that call.
     synced_once: bool = False
+
+    def tracked_names(self) -> set[str]:
+        """Every connector name this pool holds ANY state for.
+
+        Deliberately the union of all seven name-keyed dicts, not `stacks`
+        alone: a kind="api" connector never opens a session, so it only ever
+        appears in `signatures`/`proxies`/`statuses`/`errored_monotonic` (see
+        sync_global). Driving sync_global's "no longer enabled" cleanup off
+        `stacks` therefore skipped api connectors entirely — a disabled or
+        deleted one kept its "connected" status forever, so sync_tools went on
+        re-registering its credential-bearing tools into every user's registry
+        until the process restarted. Any new name-keyed dict added to this
+        dataclass must be unioned in here too, or it will resurrect that bug.
+        """
+        return (
+            self.stacks.keys()
+            | self.sessions.keys()
+            | self.rows.keys()
+            | self.proxies.keys()
+            | self.statuses.keys()
+            | self.signatures.keys()
+            | self.errored_monotonic.keys()
+        )
+
+
+def _apply_global_shadowing(state: _GlobalConnections) -> None:
+    """Split every connected global connector's built tools into the names it
+    actually owns and the ones another global connector already claims.
+
+    Two admin-global connectors can spell the same tool name — connector
+    `github` with operation `issues_list` and connector `github_issues` with
+    operation `list` both produce `api_github_issues_list`. Registration is
+    first-wins per registry (_register_scoped), so exactly one of them serves
+    the name; without this the loser still advertised it in `tool_names`, which
+    is what resolve_tool_names hands to a linked skill and to the Connectors
+    UI. A skill written against the loser was told to call a name that reaches
+    the WINNER's base url with the winner's credentials — a silent
+    cross-connector credential swap, not the unknown-tool error it looks like.
+
+    Resolved pool-wide and in the same sorted order sync_tools registers in, so
+    the reported status and every user's registry agree. Recomputed from
+    `proxies` on each pass, never from the previous verdict, so it is
+    idempotent and self-heals once the colliding connector is renamed or
+    removed."""
+    claimed: set[str] = set()
+    for name in sorted(state.statuses):
+        status = state.statuses[name]
+        if status.get("status") != "connected":
+            continue
+        owned: list[str] = []
+        shadowed: list[str] = []
+        for tool in state.proxies.get(name, []):
+            if tool.name in claimed:
+                # Also catches two operations on the SAME connector colliding,
+                # which _register_scoped rejects identically.
+                shadowed.append(tool.name)
+            else:
+                claimed.add(tool.name)
+                owned.append(tool.name)
+        status["tools"] = len(owned)
+        status["tool_names"] = owned
+        if shadowed:
+            status["shadowed_tools"] = shadowed
+        else:
+            status.pop("shadowed_tools", None)
 
 
 class ConnectorManager:
@@ -385,25 +706,64 @@ class ConnectorManager:
             self._users[user_id] = state
 
             for name in effective_global:
+                # Only the names this global connector actually owns pool-wide
+                # (see _apply_global_shadowing): registering a shadowed proxy
+                # here would be a no-op in the common case, but if the owner is
+                # excluded from effective_global by a same-name connector of
+                # this user's, the runner-up would silently inherit the name
+                # for this one user while every other user's registry — and
+                # resolve_tool_names — still attribute it to the owner.
+                owned = set(global_state.statuses.get(name, {}).get("tool_names") or ())
                 for proxy in global_state.proxies.get(name, []):
-                    registry.register(proxy)
-                    state.tool_names.append(proxy.name)
+                    if proxy.name in owned:
+                        _register_scoped(registry, state, proxy, name)
 
             if not connectors:
                 return
 
+            # api-kind connectors need no session/handshake at all — build
+            # their tools straight from the stored row, zero I/O, so a bad
+            # base url or bad credential only surfaces when a tool is
+            # actually called (see _build_api_tools).
+            api_connectors = [c for c in connectors if c.kind == "api"]
+            mcp_connectors = [c for c in connectors if c.kind != "api"]
+            for connector in api_connectors:
+                try:
+                    tools = self._build_api_tools(connector)
+                except Exception as exc:  # malformed stored `operations`
+                    state.statuses[connector.name] = {"status": "error", "error": str(exc)}
+                    logger.warning("API connector {} failed to build tools: {}", connector.name, exc)
+                    continue
+                registered = [t.name for t in tools if _register_scoped(registry, state, t, connector.name)]
+                state.statuses[connector.name] = {
+                    "status": "connected",
+                    "tools": len(registered),
+                    "tool_names": registered,
+                }
+                shadowed = [t.name for t in tools if t.name not in registered]
+                if shadowed:
+                    state.statuses[connector.name]["shadowed_tools"] = shadowed
+
+            # No early-return for an empty `mcp_connectors` here: entering an
+            # AsyncExitStack and asyncio.gather()-ing zero coroutines are both
+            # no-ops, and falling through lets the errored_monotonic stamp
+            # below still run for a user whose connectors are all kind="api"
+            # (an early return here previously skipped it, so an all-api user
+            # with one broken connector never got the error-retry cooldown —
+            # see sync_global's equivalent stamp, which isn't gated this way).
             await state.stack.__aenter__()
             # Connect all of a user's connectors concurrently, not one at a
             # time — otherwise N broken/hanging connectors cost N times the
             # per-connector timeout instead of one timeout period total,
             # while this method holds the per-user lock throughout.
-            results = await asyncio.gather(*(self._connect_one(state.stack, c) for c in connectors))
+            results = await asyncio.gather(*(self._connect_one(state.stack, c) for c in mcp_connectors))
             for connector, session, listed, error in results:
                 if error is not None:
                     state.statuses[connector.name] = error
                     logger.warning("MCP connector {} {}", connector.name, error["error"])
                     continue
                 registered_names: list[str] = []
+                shadowed_names: list[str] = []
                 for tool in listed.tools:
                     proxy = McpToolProxy(
                         session,
@@ -415,9 +775,10 @@ class ConnectorManager:
                             connector, self.tool_call_timeout_seconds
                         ),
                     )
-                    registry.register(proxy)
-                    state.tool_names.append(proxy.name)
-                    registered_names.append(proxy.name)
+                    if _register_scoped(registry, state, proxy, connector.name):
+                        registered_names.append(proxy.name)
+                    else:
+                        shadowed_names.append(proxy.name)
                 # `tool_names` here are the exact names a skill's instructions
                 # must reference to call this connector's tools (the
                 # `mcp_{connector}_{tool}` prefix, not the server's raw tool
@@ -428,11 +789,36 @@ class ConnectorManager:
                     "tools": len(registered_names),
                     "tool_names": registered_names,
                 }
+                # A name collision drops the tool silently otherwise: the
+                # connector reports "connected" and the model simply never
+                # sees that tool, which looks like the MCP server being broken.
+                # Same field the api branch above sets, for the same reason.
+                if shadowed_names:
+                    state.statuses[connector.name]["shadowed_tools"] = shadowed_names
                 logger.info("MCP connector {} connected with {} tools", connector.name, len(registered_names))
             # Stamp the failure time so the next sync holds off retrying the
             # whole set until the cooldown elapses (see sync_tools docstring).
             if any(s.get("status") == "error" for s in state.statuses.values()):
                 state.errored_monotonic = time.monotonic()
+
+    def _build_api_tools(self, connector, *, connector_ref: Callable[[], Any] | None = None) -> list[Tool]:
+        """Build a kind="api" connector's tools straight from its stored
+        `operations` — pure in-memory construction, no I/O, no session. See
+        claw/tools/api.py's GenericApiTool; imported lazily here to avoid a
+        claw.core <-> claw.tools import cycle (connectors.py's _redact_secrets
+        is in turn imported lazily by GenericApiTool.execute).
+
+        `connector_ref` is passed only for admin-global connectors, whose tools
+        outlive an edit in other users' registries — see GenericApiTool. A
+        per-user connector needs no such indirection: the same sync_tools pass
+        that could invalidate its row is the one that rebuilt these tools."""
+        from claw.tools.api import GenericApiTool
+
+        timeout = self._effective_timeout_seconds(connector, self.tool_call_timeout_seconds)
+        return [
+            GenericApiTool(connector, operation, timeout_seconds=timeout, connector_ref=connector_ref)
+            for operation in connector.operations or []
+        ]
 
     async def _connect_one(self, stack: AsyncExitStack, connector) -> tuple[Any, Any, Any, dict | None]:
         """Connect+list one connector under its own timeout. Never raises —
@@ -511,6 +897,23 @@ class ConnectorManager:
                 merged = [(k, v) for k, v in existing if k not in query_overrides]
                 merged.extend((k, v) for k, v in query_overrides.items() if v)
                 url = urlunsplit(parts._replace(query=urlencode(merged)))
+            # Same SSRF threat model as a kind="api" connector (see
+            # claw/security/ssrf.py): a per-user connector's url is chosen by
+            # an ordinary user, so without this the agent can be pointed at
+            # 169.254.169.254 or any other host inside the deployment's
+            # network and this process will dial it. An admin-global connector
+            # (owner_id NULL) is exempt: the operator configures those in the
+            # Control Plane, pointing one at internal infrastructure is a
+            # legitimate self-hosted setup, and an admin can already run
+            # arbitrary stdio commands on this host anyway.
+            #
+            # Weaker than claw/tools/api.py's equivalent: the MCP client owns
+            # the socket, so the validated address can't be pinned and a
+            # rebinding attacker with a TTL-0 record can still win the race.
+            # This closes the ordinary "just point it at an internal host"
+            # case, which is the one a user reaches without any setup.
+            if connector.owner_id is not None:
+                await resolve_public_ips(url)
             read, write, _ = await stack.enter_async_context(
                 streamablehttp_client(url, headers=headers or None)
             )
@@ -609,8 +1012,13 @@ class ConnectorManager:
             current_names = {c.name for c in connectors}
 
             # A connector no longer enabled (disabled or deleted) loses its
-            # session entirely — closing only ITS stack, never another's.
-            for stale_name in [n for n in state.stacks if n not in current_names]:
+            # session and all of its bookkeeping — closing only ITS stack,
+            # never another's. Driven off every tracked name (see
+            # _GlobalConnections.tracked_names), not just the ones holding a
+            # stack, so a session-less kind="api" connector is torn down here
+            # too. The set difference is materialized up front because
+            # _close_one_global mutates the very dicts it is derived from.
+            for stale_name in state.tracked_names() - current_names:
                 await self._close_one_global(state, stale_name)
 
             to_reconnect = []
@@ -631,8 +1039,49 @@ class ConnectorManager:
                 to_reconnect.append(connector)
 
             if to_reconnect:
-                stacks = {c.name: AsyncExitStack() for c in to_reconnect}
-                for c in to_reconnect:
+                # api-kind connectors need no session/stack at all — build
+                # their tools straight from the stored row (zero I/O) and
+                # register them into `proxies` directly; `stacks`/`sessions`
+                # simply never get an entry for these names (the .pop(name,
+                # None) cleanup calls elsewhere already tolerate that).
+                api_reconnect = [c for c in to_reconnect if c.kind == "api"]
+                mcp_reconnect = [c for c in to_reconnect if c.kind != "api"]
+
+                for connector in api_reconnect:
+                    state.signatures[connector.name] = (connector.id, connector.updated_at.isoformat())
+                    # Published before the tools are built so connector_ref
+                    # resolves from the very first call.
+                    state.rows[connector.name] = connector
+                    try:
+                        tools = self._build_api_tools(
+                            connector,
+                            connector_ref=(lambda name=connector.name: state.rows.get(name)),
+                        )
+                    except Exception as exc:  # malformed stored `operations`
+                        # Isolated exactly like a failed MCP connect: this one
+                        # connector goes to "error", every other connector in
+                        # the shared global pool keeps working.
+                        state.statuses[connector.name] = {"status": "error", "error": str(exc)}
+                        state.errored_monotonic[connector.name] = time.monotonic()
+                        logger.warning(
+                            "API connector {} failed to build tools: {}", connector.name, exc
+                        )
+                        continue
+                    state.proxies[connector.name] = tools
+                    # tools/tool_names are provisional; _apply_global_shadowing
+                    # below has the final say once the whole pool is rebuilt.
+                    state.statuses[connector.name] = {
+                        "status": "connected",
+                        "tools": len(tools),
+                        "tool_names": [t.name for t in tools],
+                    }
+                    state.errored_monotonic.pop(connector.name, None)
+                    logger.info(
+                        "API connector {} registered with {} operations", connector.name, len(tools)
+                    )
+
+                stacks = {c.name: AsyncExitStack() for c in mcp_reconnect}
+                for c in mcp_reconnect:
                     state.stacks[c.name] = stacks[c.name]
                     state.signatures[c.name] = (c.id, c.updated_at.isoformat())
                     await stacks[c.name].__aenter__()
@@ -642,7 +1091,7 @@ class ConnectorManager:
                 # timeout period total, not N of them, while still only ever
                 # touching the sessions that actually need to change.
                 results = await asyncio.gather(
-                    *(self._connect_one(stacks[c.name], c) for c in to_reconnect)
+                    *(self._connect_one(stacks[c.name], c) for c in mcp_reconnect)
                 )
                 for connector, session, listed, error in results:
                     if error is not None:
@@ -681,6 +1130,11 @@ class ConnectorManager:
                         "MCP global connector {} connected with {} tools", connector.name, len(proxies)
                     )
 
+            # Unconditional, not gated on `to_reconnect`: removing a connector
+            # (handled above, before the diff) frees tool names that a
+            # still-running one may now own.
+            _apply_global_shadowing(state)
+
             state.signature = tuple(sorted((c.id, c.updated_at.isoformat()) for c in connectors))
             state.synced_once = True
 
@@ -694,6 +1148,10 @@ class ConnectorManager:
         registry on that user's next sync."""
         stack = state.stacks.pop(name, None)
         state.sessions.pop(name, None)
+        # Dropped BEFORE any await below, so an api tool still registered in
+        # some user's registry starts refusing calls the moment the connector
+        # is disabled or deleted, rather than at that user's next sync_tools.
+        state.rows.pop(name, None)
         state.proxies.pop(name, None)
         state.statuses.pop(name, None)
         state.signatures.pop(name, None)

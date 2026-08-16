@@ -984,6 +984,52 @@ html[data-chat-bg="grid"] .claw-chat {
   margin-top: 4px;
   padding-left: 18px;
 }
+.claw-connector-shadowed-tools {
+  font-size: 12px;
+  word-break: break-word;
+  margin-top: 4px;
+  color: var(--color-warning, #b45309);
+}
+/* ---- API connector operations editor (kind="api") ---- */
+.claw-api-operations {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.claw-api-operation-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px !important;
+}
+.claw-api-param-row {
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.claw-curl-import {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.claw-curl-import-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+.claw-curl-import-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px dashed var(--color-border-subtle, #e4e2dd);
+  border-radius: 8px;
+}
 .claw-connector-desc {
   display: -webkit-box;
   -webkit-line-clamp: 1;
@@ -2098,6 +2144,13 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-setup-help {
   margin: 0;
+}
+/* Several findings from one cURL import, stacked inside a single toast — the
+   viewport keeps only the newest few, so one toast per finding pushed the
+   success message out of view. */
+.claw-toast-lines {
+  display: grid;
+  gap: 6px;
 }
 
 /* ---- right execution panel (vertical timeline) ---- */

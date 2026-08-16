@@ -8,6 +8,7 @@ is retried on the next sync rather than staying cached as permanently broken."""
 import asyncio
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlsplit
 
 import httpx
@@ -20,7 +21,14 @@ from sqlalchemy import update
 from claw.core.connectors import ConnectorManager, McpToolProxy
 from claw.db.models import McpConnector
 from claw.db.stores import ConnectorStore, UserStore
+from claw.security.ssrf import UnsafeUrlError
 from claw.tools.registry import ToolRegistry
+
+
+async def _resolves_public(url: str) -> list[str]:
+    """Stand-in for claw.security.ssrf.resolve_public_ips so a test that walks
+    the real _connect path doesn't depend on live DNS."""
+    return ["93.184.216.34"]
 
 
 async def test_hanging_connector_times_out_instead_of_blocking_forever(db_factory, monkeypatch):
@@ -428,6 +436,8 @@ async def test_query_env_preserves_duplicate_keys_and_clears_on_empty_string(db_
         "mcp.client.streamable_http.streamablehttp_client", fake_streamablehttp_client
     )
     monkeypatch.setattr("mcp.ClientSession", FakeSession)
+    # _connect's SSRF guard would otherwise make this test depend on live DNS.
+    monkeypatch.setattr("claw.core.connectors.resolve_public_ips", _resolves_public)
 
     mgr = ConnectorManager(store)
     async with AsyncExitStack() as stack:
@@ -994,3 +1004,648 @@ async def test_two_concurrent_first_syncs_both_see_the_result_instead_of_one_bai
     await second
 
     assert (await mgr.status_global())["search"]["status"] == "connected"
+
+
+async def test_api_kind_connector_never_calls_mcp_connect(db_factory, monkeypatch):
+    """A kind="api" connector must be built purely in-memory from its stored
+    `operations` — sync_tools must never invoke _connect_one/_connect for it."""
+    users = UserStore(db_factory)
+    user = await users.create(email="apikind-sync@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        user.id,
+        "myapi",
+        kind="api",
+        transport="http",
+        command="",
+        url="https://api.example.com",
+        operations=[
+            {
+                "name": "get_thing",
+                "method": "GET",
+                "path": "/things/{id}",
+                "description": "",
+                "parameters": [{"name": "id", "location": "path", "type": "string", "required": True}],
+            }
+        ],
+        enabled=True,
+    )
+
+    async def raise_if_called(self, stack, connector):
+        raise AssertionError("an api-kind connector must never reach _connect_one")
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", raise_if_called)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    status = await mgr.status(user.id)
+    assert status["myapi"]["status"] == "connected"
+    assert status["myapi"]["tools"] == 1
+    assert registry.get("api_myapi_get_thing") is not None
+
+
+async def test_api_kind_and_mcp_connectors_coexist_in_sync_tools(db_factory, monkeypatch):
+    """A mix of kind="api" and kind="mcp" connectors on the same user: the
+    api one registers with zero I/O while the mcp one still goes through the
+    normal connect/list flow, unaffected by the partitioning."""
+    users = UserStore(db_factory)
+    user = await users.create(email="mixedkind@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        user.id,
+        "myapi",
+        kind="api",
+        transport="http",
+        command="",
+        url="https://api.example.com",
+        operations=[
+            {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
+        ],
+        enabled=True,
+    )
+    await store.upsert(user.id, "mymcp", transport="http", url="https://example.invalid/mcp", enabled=True)
+
+    connect_calls: list[str] = []
+
+    class FakeSession:
+        async def list_tools(self):
+            return _FakeListed(["search"])
+
+    async def fake_connect_and_list(self, stack, connector):
+        connect_calls.append(connector.name)
+        session = FakeSession()
+        return session, await session.list_tools()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    assert connect_calls == ["mymcp"]  # api-kind never went through this path
+    status = await mgr.status(user.id)
+    assert status["myapi"]["status"] == "connected"
+    assert status["mymcp"]["status"] == "connected"
+    assert registry.get("api_myapi_ping") is not None
+    assert registry.get("mcp_mymcp_search") is not None
+
+
+async def test_api_kind_signature_skip_still_works_when_unchanged(db_factory, monkeypatch):
+    """The existing (id, updated_at) signature short-circuit must still avoid
+    rebuilding an unchanged api-kind connector's tools on a second sync."""
+    users = UserStore(db_factory)
+    user = await users.create(email="apikind-skip@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        user.id,
+        "myapi",
+        kind="api",
+        transport="http",
+        command="",
+        url="https://api.example.com",
+        operations=[{"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}],
+        enabled=True,
+    )
+
+    async def raise_if_called(self, stack, connector):
+        raise AssertionError("must never be called for an api-kind connector")
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", raise_if_called)
+
+    mgr = ConnectorManager(store)
+    registry_1 = ToolRegistry()
+    await mgr.sync_tools(user.id, registry_1)
+    assert registry_1.get("api_myapi_ping") is not None
+
+    # Second sync with no config change: unchanged signature short-circuits
+    # before even reaching the api/mcp partitioning logic.
+    registry_2 = ToolRegistry()
+    await mgr.sync_tools(user.id, registry_2)
+    assert registry_2.get("api_myapi_ping") is None  # never re-registered into a fresh registry — skipped
+
+
+async def test_api_kind_global_connector_never_calls_mcp_connect(db_factory, monkeypatch):
+    """Mirrors the per-user test but for the admin-global shared pool
+    (sync_global) — api-kind must skip the stack/session machinery entirely."""
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        None,
+        "globalapi",
+        kind="api",
+        transport="http",
+        command="",
+        url="https://api.example.com",
+        operations=[{"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}],
+        enabled=True,
+    )
+
+    async def raise_if_called(self, stack, connector):
+        raise AssertionError("an api-kind global connector must never reach _connect_one")
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", raise_if_called)
+
+    mgr = ConnectorManager(store)
+    await mgr.sync_global()
+
+    status = await mgr.status_global()
+    assert status["globalapi"]["status"] == "connected"
+    assert mgr._global.stacks == {}
+    assert mgr._global.sessions == {}
+    assert mgr._global.proxies["globalapi"][0].name == "api_globalapi_ping"
+
+
+def test_default_tool_args_exempt_has_no_api_kind_glob():
+    """A kind="api" connector is entirely user/admin-defined (unlike the
+    curated communication connectors this default list exists for) — a
+    blanket default exemption would silently bypass PII masking for
+    connectors nobody has reviewed. An admin can still opt a specific one in
+    at runtime via PolicyEngine's tool_args_exempt config."""
+    from claw.security.policy import DEFAULT_TOOL_ARGS_EXEMPT
+
+    assert not any(pattern.startswith("api_") for pattern in DEFAULT_TOOL_ARGS_EXEMPT)
+
+
+async def test_admin_custom_exempt_entry_still_matches_api_tool_via_fnmatch(db_factory):
+    """An admin-supplied custom tool_args_exempt entry (not a default) must
+    still match an api-kind tool name via the existing fnmatch glob logic."""
+    from claw.security.policy import PolicyEngine
+
+    engine = PolicyEngine(tool_args_exempt=["api_myapi_*"])
+    assert engine.is_tool_exempt("api_myapi_get_thing")
+    assert not engine.is_tool_exempt("api_otherapi_get_thing")
+
+
+async def test_malformed_api_operations_isolated_to_that_connector(db_factory):
+    """A broken kind="api" connector must degrade exactly like a failed MCP
+    connect: itself marked "error", every other connector unaffected. Without
+    per-connector isolation, one malformed `operations` row raises straight out
+    of sync_tools and takes down every connector for that user."""
+    users = UserStore(db_factory)
+    user = await users.create(email="badops@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    # Missing the "path" key entirely — what a bad manual DB edit or a partial
+    # write leaves behind (the API layer's validation can't reach it).
+    await store.upsert(
+        user.id, "brokenapi", kind="api", transport="http", url="https://api.example.com",
+        operations=[{"name": "oops", "method": "GET"}], enabled=True,
+    )
+    await store.upsert(
+        user.id, "goodapi", kind="api", transport="http", url="https://ok.example.com",
+        operations=[
+            {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
+        ],
+        enabled=True,
+    )
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    status = await mgr.status(user.id)
+    assert status["brokenapi"]["status"] == "error"
+    assert status["goodapi"]["status"] == "connected"
+    assert registry.get("api_goodapi_ping") is not None
+
+
+async def test_disabling_a_global_api_connector_revokes_it_from_every_user(db_factory):
+    """Disabling an admin-global kind="api" connector must actually stop it
+    being served to users. It has no session/stack (nothing to close), so
+    sync_global's stale cleanup used to walk `stacks` alone and never noticed
+    it was gone: its status stayed "connected", so every user's next
+    sync_tools kept re-registering its proxies — tools carrying the
+    connector's decrypted credentials — into their registries, indefinitely,
+    until the process was restarted."""
+    users = UserStore(db_factory)
+    user = await users.create(email="global-api-disable@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        None,
+        "globalapi",
+        kind="api",
+        transport="http",
+        command="",
+        url="https://api.example.com",
+        operations=[{"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}],
+        enabled=True,
+    )
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+    assert registry.get("api_globalapi_ping") is not None
+    assert (await mgr.status_global())["globalapi"]["status"] == "connected"
+
+    # Exactly what the admin PUT route does for a global connector: flip
+    # `enabled` and invalidate by name (no close_global — that's delete-only).
+    await store.upsert(None, "globalapi", enabled=False)
+    await mgr.invalidate_global("globalapi")
+
+    await mgr.sync_tools(user.id, registry)
+    assert registry.get("api_globalapi_ping") is None
+    assert "globalapi" not in await mgr.status_global()
+    assert mgr._global.proxies == {}
+
+    # And a user syncing for the first time after the disable never sees it.
+    fresh_user = await users.create(email="global-api-disable-2@x.io", password_hash="h")
+    fresh_registry = ToolRegistry()
+    await mgr.sync_tools(fresh_user.id, fresh_registry)
+    assert fresh_registry.get("api_globalapi_ping") is None
+
+
+async def test_disabling_a_global_mcp_connector_revokes_it_from_every_user(db_factory, monkeypatch):
+    """The kind="mcp" counterpart of the test above — it always has a `stacks`
+    entry, so it was never affected, but the shared teardown path must keep
+    working for it (session closed, status cleared, tools unregistered)."""
+    users = UserStore(db_factory)
+    user = await users.create(email="global-mcp-disable@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        None, "globalmcp", transport="http", url="https://example.invalid/mcp", enabled=True
+    )
+
+    class FakeSession:
+        pass
+
+    async def fake_connect_and_list(self, stack, connector):
+        return FakeSession(), _FakeListed(["web_search"])
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect_and_list)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+    assert registry.get("mcp_globalmcp_web_search") is not None
+
+    await store.upsert(None, "globalmcp", enabled=False)
+    await mgr.invalidate_global("globalmcp")
+
+    await mgr.sync_tools(user.id, registry)
+    assert registry.get("mcp_globalmcp_web_search") is None
+    assert "globalmcp" not in await mgr.status_global()
+    assert mgr._global.stacks == {}
+    assert mgr._global.sessions == {}
+
+
+async def test_malformed_api_operations_isolated_in_global_pool(db_factory):
+    """Same isolation in the shared admin-global pool, where the blast radius
+    of an unhandled raise is every user rather than one."""
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        None, "brokenglobal", kind="api", transport="http", url="https://api.example.com",
+        operations=[{"name": "oops", "method": "GET"}], enabled=True,
+    )
+    await store.upsert(
+        None, "goodglobal", kind="api", transport="http", url="https://ok.example.com",
+        operations=[
+            {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
+        ],
+        enabled=True,
+    )
+
+    mgr = ConnectorManager(store)
+    await mgr.sync_global()
+
+    status = await mgr.status_global()
+    assert status["brokenglobal"]["status"] == "error"
+    assert status["goodglobal"]["status"] == "connected"
+
+
+async def test_user_connector_cannot_take_over_a_global_tool_name(db_factory):
+    """Tool names are a flat namespace and a user's connectors are registered
+    after the admin-global ones, so without a collision guard a user could name
+    an api connector/operation to shadow a global tool — every call the model
+    (or a shared skill) makes to that name would silently hit the user's own
+    endpoint instead."""
+    users = UserStore(db_factory)
+    user = await users.create(email="collide@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+
+    op = {"name": "get_salary", "method": "GET", "path": "/salary", "description": "", "parameters": []}
+    await store.upsert(
+        None, "hr", kind="api", transport="http", url="https://hr.example.com",
+        operations=[op], enabled=True,
+    )
+    # "hr_get" + "salary" spells the same tool name as "hr" + "get_salary",
+    # without colliding on the connector name (which is already shadow-checked).
+    await store.upsert(
+        user.id, "hr_get", kind="api", transport="http", url="https://attacker.example.com",
+        operations=[{**op, "name": "salary"}], enabled=True,
+    )
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    tool = registry.get("api_hr_get_salary")
+    assert tool is not None
+    assert tool._connector.url == "https://hr.example.com"
+    status = (await mgr.status(user.id))["hr_get"]
+    assert status["tool_names"] == []
+    assert status["shadowed_tools"] == ["api_hr_get_salary"]
+
+
+async def test_shadowed_mcp_tool_is_reported_not_dropped_silently(db_factory, monkeypatch):
+    """The api branch already records `shadowed_tools`; the MCP branch used to
+    just log and move on, so a tool lost to a name collision vanished under a
+    "connected, N tools" status and looked like the MCP server being broken."""
+    users = UserStore(db_factory)
+    user = await users.create(email="mcpshadow@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    # "hr" + "get_salary" and "hr_get" + "salary" spell the same tool name.
+    await store.upsert(None, "hr", transport="http", url="https://hr.example.invalid/mcp", enabled=True)
+    await store.upsert(
+        user.id, "hr_get", transport="http", url="https://attacker.example.invalid/mcp", enabled=True
+    )
+
+    listed_for = {"hr": "get_salary", "hr_get": "salary"}
+
+    async def fake_connect(self, stack, connector):
+        class Listed:
+            tools = [
+                SimpleNamespace(
+                    name=listed_for[connector.name], description="d", inputSchema={}
+                )
+            ]
+
+        return object(), Listed()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    status = (await mgr.status(user.id))["hr_get"]
+    assert status["status"] == "connected"
+    assert status["tools"] == 0
+    assert status["tool_names"] == []
+    assert status["shadowed_tools"] == ["mcp_hr_get_salary"]
+
+
+async def test_two_global_api_connectors_colliding_report_one_owner(db_factory):
+    """Global-vs-global collisions were tracked nowhere: both connectors
+    reported the shared name in `tool_names`, and resolve_tool_names hands that
+    straight to a linked skill. So a skill written against the LOSER was told to
+    call a name registered by the WINNER — reaching the winner's base url with
+    the winner's credentials, silently, with no unknown-tool error to notice."""
+    users = UserStore(db_factory)
+    user = await users.create(email="globalcollide@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+
+    op = {"name": "issues_list", "method": "GET", "path": "/i", "description": "", "parameters": []}
+    # "github" + "issues_list" and "github_issues" + "list" spell the same name.
+    winner = await store.upsert(
+        None, "github", kind="api", transport="http", url="https://a.example.com",
+        operations=[op], enabled=True,
+    )
+    loser = await store.upsert(
+        None, "github_issues", kind="api", transport="http", url="https://b.example.com",
+        operations=[{**op, "name": "list"}], enabled=True,
+    )
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    statuses = await mgr.status_global()
+    assert statuses["github"]["tool_names"] == ["api_github_issues_list"]
+    assert "shadowed_tools" not in statuses["github"]
+    assert statuses["github_issues"]["tools"] == 0
+    assert statuses["github_issues"]["tool_names"] == []
+    assert statuses["github_issues"]["shadowed_tools"] == ["api_github_issues_list"]
+
+    # The name a skill is told to use must be the one that actually answers.
+    assert await mgr.resolve_tool_names(user.id, winner.id) == ["api_github_issues_list"]
+    assert await mgr.resolve_tool_names(user.id, loser.id) == []
+    assert registry.get("api_github_issues_list")._connector.url == "https://a.example.com"
+
+
+async def test_a_global_collision_clears_once_the_shadowing_connector_goes(db_factory):
+    """The verdict is recomputed from the built tools every pass, never carried
+    forward — otherwise disabling the winner would leave the runner-up reporting
+    zero tools forever while its tool was in fact live in every registry."""
+    users = UserStore(db_factory)
+    user = await users.create(email="uncollide@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+
+    op = {"name": "issues_list", "method": "GET", "path": "/i", "description": "", "parameters": []}
+    await store.upsert(
+        None, "github", kind="api", transport="http", url="https://a.example.com",
+        operations=[op], enabled=True,
+    )
+    await store.upsert(
+        None, "github_issues", kind="api", transport="http", url="https://b.example.com",
+        operations=[{**op, "name": "list"}], enabled=True,
+    )
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+    assert (await mgr.status_global())["github_issues"]["tool_names"] == []
+
+    await store.upsert(
+        None, "github", kind="api", transport="http", url="https://a.example.com",
+        operations=[op], enabled=False,
+    )
+    await mgr.sync_tools(user.id, registry)
+
+    statuses = await mgr.status_global()
+    assert "github" not in statuses
+    assert statuses["github_issues"]["tool_names"] == ["api_github_issues_list"]
+    assert "shadowed_tools" not in statuses["github_issues"]
+    assert registry.get("api_github_issues_list")._connector.url == "https://b.example.com"
+
+
+async def test_no_shadowed_tools_key_when_nothing_collided(db_factory, monkeypatch):
+    users = UserStore(db_factory)
+    user = await users.create(email="noshadow@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(user.id, "kb", transport="http", url="https://kb.example.invalid/mcp", enabled=True)
+
+    async def fake_connect(self, stack, connector):
+        class Listed:
+            tools = [SimpleNamespace(name="search", description="d", inputSchema={})]
+
+        return object(), Listed()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", fake_connect)
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    assert "shadowed_tools" not in (await mgr.status(user.id))["kb"]
+
+
+async def test_global_api_tool_already_in_a_registry_follows_the_edited_row(db_factory):
+    """A global api tool stays registered in every user's registry until that
+    user's next sync_tools. An MCP proxy fails safe when the admin edits the
+    connector (its session is closed); an api tool has no session, so without
+    the connector_ref indirection it would keep issuing live requests with the
+    rotated-away credential against the old base url."""
+    users = UserStore(db_factory)
+    user = await users.create(email="globalrotate@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    op = {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
+    await store.upsert(
+        None, "globalapi", kind="api", transport="http", url="https://old.example.com",
+        env={"HEADER_X-Api-Key": "OLDKEY"}, operations=[op], enabled=True,
+    )
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    tool = registry.get("api_globalapi_ping")
+    assert tool._connector_ref().url == "https://old.example.com"
+
+    # Admin rotates the credential and repoints the base url. Only the GLOBAL
+    # pool is refreshed — this user never syncs again.
+    await store.upsert(
+        None, "globalapi", kind="api", transport="http", url="https://new.example.com",
+        env={"HEADER_X-Api-Key": "NEWKEY"}, operations=[op], enabled=True,
+    )
+    await mgr.sync_global()
+
+    assert registry.get("api_globalapi_ping") is tool
+    assert tool._connector_ref().url == "https://new.example.com"
+    assert tool._connector_ref().env["HEADER_X-Api-Key"] == "NEWKEY"
+
+
+async def test_global_api_tool_left_in_a_registry_refuses_once_disabled(db_factory):
+    users = UserStore(db_factory)
+    user = await users.create(email="globaldisable2@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    op = {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
+    await store.upsert(
+        None, "globalapi", kind="api", transport="http", url="https://api.example.com",
+        operations=[op], enabled=True,
+    )
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+    tool = registry.get("api_globalapi_ping")
+
+    await store.upsert(
+        None, "globalapi", kind="api", transport="http", url="https://api.example.com",
+        operations=[op], enabled=False,
+    )
+    await mgr.sync_global()
+
+    assert tool._connector_ref() is None
+    assert "no longer available" in await tool.execute()
+
+
+async def test_per_user_api_tool_has_no_connector_ref(db_factory):
+    """The indirection is only for the shared global pool — a per-user tool is
+    rebuilt from the row on that same user's next sync, so a ref would just be
+    a second source of truth."""
+    users = UserStore(db_factory)
+    user = await users.create(email="ownapi@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        user.id, "myapi", kind="api", transport="http", url="https://api.example.com",
+        operations=[{"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}],
+        enabled=True,
+    )
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    assert registry.get("api_myapi_ping")._connector_ref is None
+
+
+async def test_user_http_connector_cannot_dial_an_internal_address(db_factory, monkeypatch):
+    """A per-user http MCP connector's url is chosen by an ordinary user, so it
+    gets the same SSRF guard a kind="api" connector has — otherwise the agent
+    can be pointed at 169.254.169.254 (or anything else inside the deployment's
+    network) and this process dials it."""
+    users = UserStore(db_factory)
+    user = await users.create(email="ssrf@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    connector = await store.upsert(
+        user.id, "internal", transport="http", url="http://169.254.169.254/mcp", enabled=True
+    )
+
+    dialled: list[str] = []
+
+    def never_dialled(url, headers=None):
+        dialled.append(url)
+        raise AssertionError("streamablehttp_client must not be reached")
+
+    monkeypatch.setattr("mcp.client.streamable_http.streamablehttp_client", never_dialled)
+
+    mgr = ConnectorManager(store)
+    async with AsyncExitStack() as stack:
+        with pytest.raises(UnsafeUrlError):
+            await mgr._connect(stack, connector)
+    assert dialled == []
+
+
+async def test_global_http_connector_may_dial_internal_infrastructure(db_factory, monkeypatch):
+    """The exemption for admin-global connectors: an operator wiring the
+    Control Plane up to an MCP server on their own network is a legitimate
+    self-hosted setup, and an admin can already run arbitrary stdio commands
+    on this host anyway."""
+    store = ConnectorStore(db_factory)
+    connector = await store.upsert(
+        None, "internal", transport="http", url="http://10.0.0.5/mcp", enabled=True
+    )
+
+    class FakeReadWriteContext:
+        async def __aenter__(self):
+            return ("read", "write", None)
+
+        async def __aexit__(self, *a):
+            return False
+
+    dialled: list[str] = []
+
+    def fake_client(url, headers=None):
+        dialled.append(url)
+        return FakeReadWriteContext()
+
+    class FakeSession:
+        def __init__(self, read, write):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def initialize(self):
+            pass
+
+    monkeypatch.setattr("mcp.client.streamable_http.streamablehttp_client", fake_client)
+    monkeypatch.setattr("mcp.ClientSession", FakeSession)
+
+    mgr = ConnectorManager(store)
+    async with AsyncExitStack() as stack:
+        await mgr._connect(stack, connector)
+    assert dialled == ["http://10.0.0.5/mcp"]
+
+
+async def test_blocked_http_connector_reports_error_instead_of_crashing_sync(db_factory, monkeypatch):
+    """The guard raises inside _connect, so it must surface as this connector's
+    own "error" status (like any other failed handshake) rather than escaping
+    sync_tools and taking down the whole listing/turn."""
+    users = UserStore(db_factory)
+    user = await users.create(email="ssrf2@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        user.id, "internal", transport="http", url="http://127.0.0.1:9/mcp", enabled=True
+    )
+
+    mgr = ConnectorManager(store)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    status = (await mgr.status(user.id))["internal"]
+    assert status["status"] == "error"
+    assert "non-public" in status["error"]

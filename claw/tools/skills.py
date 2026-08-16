@@ -137,7 +137,10 @@ def build_skills_summary(skills: list, tool_names_by_skill: dict[str, list[str]]
         "# Skills",
         "",
         "These skills extend your capabilities. To use one, read its full content "
-        "with the read_skill tool first.",
+        "with the read_skill tool first — but only when you are actually going to do "
+        "the thing it describes. Writing content in the chat never needs a skill; the "
+        "document skills apply when the user asked for a real file, not when they "
+        "asked for the text that would go in one.",
         "",
     ]
     for s in skills:

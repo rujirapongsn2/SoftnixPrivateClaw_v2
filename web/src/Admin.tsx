@@ -61,8 +61,12 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
 import {
+  ApiOperationsEditor,
   ConnectorBrandTile,
+  ConnectorShadowedTools,
   ConnectorToolNames,
+  CurlImportPanel,
+  duplicateHeaderKeys,
   formatEnvText,
   parseEnvText,
   presetAuthHint,
@@ -216,7 +220,10 @@ function useAsyncError() {
       setError("");
       await fn();
     } catch (e) {
-      setError(String(e));
+      // .message, not String(e): a thrown Error renders as "Error: <text>",
+      // which reads as a crash when the text is a validation message written
+      // for the user.
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
   return { error, guard };
@@ -1977,10 +1984,12 @@ function AdminGuidedFields({
       await ADMIN_CONNECTOR_API.save({
         name: preset.name,
         description: preset.description ?? "",
+        kind: "mcp",
         transport: preset.transport,
         command: preset.command,
         url: effectiveUrl,
         env,
+        operations: [],
         timeout_ms: null,
         enabled: true,
       });
@@ -2086,6 +2095,7 @@ function PrebuiltConnectorsPanel() {
 
   if (editing) {
     const transport = editing.transport ?? "stdio";
+    const kind = editing.kind ?? "mcp";
     return (
       <div className="claw-panel">
         <TextInput
@@ -2100,32 +2110,83 @@ function PrebuiltConnectorsPanel() {
           onChange={(v) => setEditing({ ...editing, description: v })}
           rows={2}
         />
-        <div className="claw-row">
-          <Button
-            label={t("settings.connectors.transportStdio")}
-            size="sm"
-            variant={transport === "stdio" ? "primary" : "secondary"}
-            clickAction={() => setEditing({ ...editing, transport: "stdio" })}
-          />
-          <Button
-            label={t("settings.connectors.transportHttp")}
-            size="sm"
-            variant={transport === "http" ? "primary" : "secondary"}
-            clickAction={() => setEditing({ ...editing, transport: "http" })}
-          />
-        </div>
-        {transport === "stdio" ? (
-          <TextInput
-            label={t("settings.connectors.commandLabel")}
-            value={editing.command ?? ""}
-            onChange={(v) => setEditing({ ...editing, command: v })}
-          />
+        {/* Existing connectors keep their kind fixed — see the matching note
+            in Settings.tsx's ConnectorsPanel. */}
+        {!editing.id && (
+          <div className="claw-row">
+            <Button
+              label={t("settings.connectors.kindMcp")}
+              size="sm"
+              variant={kind === "mcp" ? "primary" : "secondary"}
+              clickAction={() => setEditing({ ...editing, kind: "mcp" })}
+            />
+            <Button
+              label={t("settings.connectors.kindApi")}
+              size="sm"
+              variant={kind === "api" ? "primary" : "secondary"}
+              clickAction={() => setEditing({ ...editing, kind: "api", transport: "http" })}
+            />
+          </div>
+        )}
+        {kind === "api" ? (
+          <>
+            <TextInput
+              label={t("settings.connectors.apiBaseUrlLabel")}
+              value={editing.url ?? ""}
+              onChange={(v) => setEditing({ ...editing, url: v })}
+            />
+            <CurlImportPanel
+              operationNames={(editing.operations ?? []).map((op) => op.name)}
+              baseUrl={editing.url ?? ""}
+              env={editing.env ?? {}}
+              onImport={({ origin, envAdditions, operation }) =>
+                setEditing({
+                  ...editing,
+                  // Never overwrite a base URL the user already set — only
+                  // prefill it the first time. A paste aimed at a different
+                  // origin is rejected inside CurlImportPanel, so by here the
+                  // operation and the base URL always agree.
+                  url: editing.url && editing.url.trim() ? editing.url : origin,
+                  env: { ...(editing.env ?? {}), ...envAdditions },
+                  operations: [...(editing.operations ?? []), operation],
+                })
+              }
+            />
+            <ApiOperationsEditor
+              operations={editing.operations ?? []}
+              onChange={(operations) => setEditing({ ...editing, operations })}
+            />
+          </>
         ) : (
-          <TextInput
-            label={t("settings.connectors.urlLabel")}
-            value={editing.url ?? ""}
-            onChange={(v) => setEditing({ ...editing, url: v })}
-          />
+          <>
+            <div className="claw-row">
+              <Button
+                label={t("settings.connectors.transportStdio")}
+                size="sm"
+                variant={transport === "stdio" ? "primary" : "secondary"}
+                clickAction={() => setEditing({ ...editing, transport: "stdio" })}
+              />
+              <Button
+                label={t("settings.connectors.transportHttp")}
+                size="sm"
+                variant={transport === "http" ? "primary" : "secondary"}
+                clickAction={() => setEditing({ ...editing, transport: "http" })}
+              />
+            </div>
+            {transport === "stdio" ? (
+              <TextInput
+                label={t("settings.connectors.commandLabel")}
+                value={editing.command ?? ""}
+                onChange={(v) => setEditing({ ...editing, command: v })}
+              />
+            ) : (
+              <TextInput
+                label={t("settings.connectors.urlLabel")}
+                value={editing.url ?? ""}
+                onChange={(v) => setEditing({ ...editing, url: v })}
+              />
+            )}
+          </>
         )}
         <TextArea
           label={t("settings.connectors.envLabel")}
@@ -2161,13 +2222,21 @@ function PrebuiltConnectorsPanel() {
             icon={<Icon icon="check" size="sm" />}
             clickAction={() =>
               guard(async () => {
+                const duplicates = duplicateHeaderKeys(editing.env ?? {});
+                if (duplicates.length) {
+                  throw new Error(
+                    t("settings.connectors.duplicateHeaderKeys", { keys: duplicates.join("; ") })
+                  );
+                }
                 await ADMIN_CONNECTOR_API.save({
                   name: (editing.name ?? "").trim(),
                   description: editing.description ?? "",
+                  kind,
                   transport,
                   command: editing.command ?? "",
                   url: editing.url ?? "",
                   env: editing.env ?? {},
+                  operations: editing.operations ?? [],
                   timeout_ms:
                     editing.timeout_ms != null
                       ? Math.max(1000, Math.min(120000, editing.timeout_ms))
@@ -2289,7 +2358,7 @@ function PrebuiltConnectorsPanel() {
                 <div>
                   <div className="claw-row">
                     <Text weight="semibold">{c.name}</Text>
-                    <Badge variant="neutral" label={c.transport} />
+                    <Badge variant="neutral" label={c.kind === "api" ? "api" : c.transport} />
                     {c.runtime.status === "connected" && (
                       <Badge
                         variant="success"
@@ -2302,9 +2371,12 @@ function PrebuiltConnectorsPanel() {
                     )}
                   </div>
                   <Text size="sm" color="secondary" as="p">
-                    {c.transport === "stdio" ? c.command : c.url}
+                    {c.kind === "api" ? c.url : c.transport === "stdio" ? c.command : c.url}
                   </Text>
                   {(c.runtime.tool_names?.length ?? 0) > 0 && <ConnectorToolNames names={c.runtime.tool_names!} />}
+                  {(c.runtime.shadowed_tools?.length ?? 0) > 0 && (
+                    <ConnectorShadowedTools names={c.runtime.shadowed_tools!} />
+                  )}
                   {c.runtime.error && (
                     <Text size="sm" color="secondary" as="p">
                       {c.runtime.error}
@@ -2983,6 +3055,10 @@ function GuardrailsPanel() {
               {t("admin.guardrails.exemptToolsDesc2")}{" "}
               <code>mcp_outlook_*</code> {t("admin.guardrails.exemptToolsDesc3")}{" "}
               <code>mcp_*_send_*</code>. {t("admin.guardrails.exemptToolsDesc4")}
+            </Text>
+            <Text size="sm" color="secondary" as="p">
+              {t("admin.guardrails.exemptToolsApiNote1")} <code>api_&lt;connector&gt;_*</code>{" "}
+              {t("admin.guardrails.exemptToolsApiNote2")}
             </Text>
           </div>
           <div className="claw-chip-list">

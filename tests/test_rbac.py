@@ -126,3 +126,41 @@ async def test_dev_token_fallback_when_enabled(db_factory):
     async with client(app) as c:
         r = await c.get("/api/skills", params={"token": "t", "email": "script@x.io"})
         assert r.status_code == 200
+
+
+async def test_non_admin_cannot_point_an_http_connector_at_an_internal_address(db_factory):
+    """An http MCP endpoint is dialled from this host exactly like a kind="api"
+    base url, so a user's own connector gets the same SSRF guard — otherwise
+    any authenticated user can aim the agent at the cloud metadata endpoint or
+    an internal service. An admin-global connector (Control Plane) is exempt:
+    that one is operator configuration."""
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        admin_token, _ = await _register(c, "admin@x.io")  # first = admin
+        user_token, _ = await _register(c, "normal@x.io")
+
+        internal = {
+            "name": "meta",
+            "transport": "http",
+            "url": "http://169.254.169.254/mcp",
+            "env": {},
+            "enabled": True,
+        }
+        r = await c.put("/api/connectors/meta", json=internal, headers=_bearer(user_token))
+        assert r.status_code == 422
+        assert "not allowed" in r.json()["detail"]
+
+        # A public url is still fine.
+        internal["url"] = "https://mcp.example.com/mcp"
+        r = await c.put("/api/connectors/meta", json=internal, headers=_bearer(user_token))
+        assert r.status_code == 200
+
+        # The admin-global (Control Plane) route may still target internal
+        # infrastructure. Different name: the global scope has its own
+        # uniqueness on name.
+        internal["name"] = "meta-global"
+        internal["url"] = "http://10.0.0.5/mcp"
+        r = await c.put(
+            "/api/admin/connectors/meta-global", json=internal, headers=_bearer(admin_token)
+        )
+        assert r.status_code == 200

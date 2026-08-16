@@ -6,6 +6,7 @@ per session and adapters consume events from the bus.
 """
 
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,6 +83,22 @@ class TurnOutcome:
     # Workspace-relative paths of files the agent created/edited this turn, so
     # the UI can offer them as downloadable/openable artifacts.
     artifacts: list[str] = field(default_factory=list)
+    # Per-turn cost shape, recorded alongside tokens: how many LLM round-trips
+    # the turn took, how many tools it ran, and how long the user waited for the
+    # first visible character. Tokens alone can't tell a one-shot answer apart
+    # from a five-tool detour that produced the same reply.
+    iterations: int = 0
+    tool_calls: int = 0
+    ttft_ms: int = 0
+    duration_ms: int = 0
+
+
+def _elapsed_ms(started: float, mark: float | None) -> int:
+    """Milliseconds from `started` to `mark`; 0 when the mark never happened
+    (a turn that emitted no visible text has no time-to-first-token)."""
+    if mark is None:
+        return 0
+    return max(0, int((mark - started) * 1000))
 
 
 def _args_preview(arguments: dict[str, Any]) -> str:
@@ -135,8 +152,13 @@ class AgentLoop:
         # `exec` command created (e.g. a saved chart) by diffing the workspace.
         artifacts: list[str] = []
         baseline = _snapshot_workspace(self.workspace) if self.workspace is not None else {}
+        started = time.monotonic()
+        first_text_at: float | None = None
+        tool_call_count = 0
+        iterations = 0
 
         for _iteration in range(self.max_iterations):
+            iterations += 1
             result: ChatResult | None = None
             async for event in self.provider.stream_chat(
                 working,
@@ -148,6 +170,8 @@ class AgentLoop:
                 api_base=api_base,
             ):
                 if isinstance(event, TextDelta):
+                    if first_text_at is None:
+                        first_text_at = time.monotonic()
                     emit(TextDeltaEvent(turn_id=turn_id, text=event.text))
                 elif isinstance(event, ThinkingDelta):
                     emit(ThinkingDeltaEvent(turn_id=turn_id, text=event.text))
@@ -166,6 +190,10 @@ class AgentLoop:
                     new_messages=working[base_len:],
                     usage=usage_total,
                     artifacts=artifacts,
+                    iterations=iterations,
+                    tool_calls=tool_call_count,
+                    ttft_ms=_elapsed_ms(started, first_text_at),
+                    duration_ms=_elapsed_ms(started, time.monotonic()),
                 )
 
             working.append(
@@ -186,6 +214,7 @@ class AgentLoop:
                 }
             )
             for tc in result.tool_calls:
+                tool_call_count += 1
                 args_preview = _args_preview(tc.arguments)
                 emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
                 logger.info("Tool call: {}({})", tc.name, args_preview)
@@ -278,4 +307,8 @@ class AgentLoop:
             usage=usage_total,
             reached_max_iterations=True,
             artifacts=artifacts,
+            iterations=iterations,
+            tool_calls=tool_call_count,
+            ttft_ms=_elapsed_ms(started, first_text_at),
+            duration_ms=_elapsed_ms(started, time.monotonic()),
         )

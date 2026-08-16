@@ -14,3 +14,5 @@ workspaces/
 /branding/
 softnix-agenticclaw/
 .DS_Store
+.claw.pid
+claw.log

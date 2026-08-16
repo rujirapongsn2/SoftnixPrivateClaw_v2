@@ -52,6 +52,8 @@ import { useBranding, useT } from "./branding";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
 import {
+  ApiOperation,
+  ApiOperationParam,
   AuthUser,
   BrandingChatBackground,
   BrandingFontSize,
@@ -135,7 +137,10 @@ function useAsyncError() {
       setError("");
       await fn();
     } catch (e) {
-      setError(String(e));
+      // .message, not String(e): a thrown Error renders as "Error: <text>",
+      // which reads as a crash when the text is a validation message written
+      // for the user.
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
   return { error, guard };
@@ -863,10 +868,12 @@ function GuidedSetup({
       await api.saveConnector({
         name: preset.name,
         description: preset.description ?? "",
+        kind: "mcp",
         transport: preset.transport,
         command: preset.command,
         url: effectiveUrl,
         env,
+        operations: [],
         timeout_ms: null,
         enabled: true,
       });
@@ -966,6 +973,24 @@ export function parseEnvText(text: string): Record<string, string> {
   return env;
 }
 
+/** HEADER_* keys that name the same HTTP header, as "first / second" pairs.
+ *
+ * The textarea above keeps whatever case was typed, so "Authorization: a" and
+ * "authorization: b" become two keys for one header. The backend rejects that
+ * on save, and its 422 reaches the user as a raw pydantic blob — so both
+ * connector editors check for it first and say it in words instead. */
+export function duplicateHeaderKeys(env: Record<string, string>): string[] {
+  const seen = new Map<string, string>();
+  const duplicates: string[] = [];
+  for (const key of Object.keys(env)) {
+    if (!key.startsWith(HEADER_ENV_PREFIX)) continue;
+    const first = seen.get(key.toLowerCase());
+    if (first === undefined) seen.set(key.toLowerCase(), key);
+    else duplicates.push(`${first} / ${key}`);
+  }
+  return duplicates;
+}
+
 export function formatEnvText(env: Record<string, string> | undefined): string {
   return Object.entries(env ?? {})
     .map(([k, v]) => {
@@ -1019,6 +1044,22 @@ export function ConnectorToolNames({ names }: { names: string[] }) {
   );
 }
 
+// A tool lost to a name collision is otherwise invisible: the connector still
+// reports "connected", just with fewer tools than its operation list, which
+// reads as the server being broken rather than as a fixable naming clash.
+export function ConnectorShadowedTools({ names }: { names: string[] }) {
+  const t = useT();
+  return (
+    <Text size="sm" color="inherit" as="p" className="claw-connector-shadowed-tools">
+      {t("settings.connectors.shadowedTools", {
+        count: String(names.length),
+        plural: names.length === 1 ? "" : "s",
+        names: names.join(", "),
+      })}
+    </Text>
+  );
+}
+
 // Connector names must match the backend's `^[a-z0-9_-]+$` (max 64 chars) —
 // sanitize as the user types instead of letting a friendly name like
 // "Softnix KB Intelligence" reach the API and bounce back as a raw 422.
@@ -1029,6 +1070,773 @@ export function slugifyConnectorName(raw: string): string {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 64);
+}
+
+// Operation parameter names must match the backend's
+// `^[a-zA-Z_][a-zA-Z0-9_.\-]*$` (max 64) — sanitized as the user types, like
+// the connector and operation name fields already are, so a pasted "X-Api Key"
+// or a leading digit doesn't bounce back as a raw 422 on save. Case, dots and
+// dashes are preserved (unlike slugifyConnectorName): header and query
+// parameters are sent verbatim and real APIs need "X-Api-Key"/"filter.name".
+// Path and body names are stricter — they're substituted into `{placeholder}`
+// templates, which only match identifiers (connector_shared.py's
+// _IDENTIFIER_PARAM_RE), so a dot or dash there would never be filled in.
+export function sanitizeApiParamName(raw: string, location: ApiOperationParam["location"]): string {
+  const allowed = location === "path" || location === "body" ? /[^a-zA-Z0-9_]+/g : /[^a-zA-Z0-9_.-]+/g;
+  return raw.replace(allowed, "").replace(/^[^a-zA-Z_]+/, "").slice(0, 64);
+}
+
+// Best-effort curl-command parser feeding CurlImportPanel below — regex-based
+// rather than a full shell tokenizer, tuned for the common case (one quoted
+// -H per header, at most one -d/--data flag, one bare URL); doesn't attempt
+// exotic shell quoting/variable expansion.
+export interface ParsedCurl {
+  method: string;
+  origin: string;
+  path: string;
+  query: Record<string, string>;
+  headers: Record<string, string>;
+  hasBody: boolean;
+  // Raw captured -d/--data* content, if any — a literal example payload, not
+  // yet a {placeholder} template (see CurlImportPanel.handleParse). "" when
+  // hasBody is false, or when the captured value isn't valid JSON.
+  body: string;
+}
+
+// btoa() throws on any code point above U+00FF. Encode as UTF-8 first, which
+// is what RFC 7617 specifies for Basic credentials anyway.
+function base64Utf8(input: string): string {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(input)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+const _URL_TOKEN_RE = /(['"]?)(https?:\/\/[^\s'"]+)\1/;
+const _EXPLICIT_URL_FLAG_RE = /(?:^|\s)--url\s+(['"]?)(https?:\/\/[^\s'"]+)\1/;
+// Flags whose value can itself contain a URL — a JSON body's "callback_url", a
+// Referer header, and so on. Their values must be excluded before searching for
+// the request target, or the first URL in the string wins even when it's buried
+// inside a -d payload that precedes the real endpoint.
+const _VALUE_FLAG_RE =
+  /(?:^|\s)(?:--data(?:-urlencode|-binary|-ascii|-raw)?|--user-agent|--referer|--header|--cookie|--output|--form|--user|-H|-d|-F|-e|-A|-b|-o|-u)\s+(?:(['"])[\s\S]*?\1|\S+)/g;
+
+function extractRequestUrl(normalized: string): string | null {
+  const explicit = normalized.match(_EXPLICIT_URL_FLAG_RE);
+  if (explicit) return explicit[2];
+  const stripped = normalized.replace(_VALUE_FLAG_RE, " ");
+  const match = stripped.match(_URL_TOKEN_RE) ?? normalized.match(_URL_TOKEN_RE);
+  return match ? match[2] : null;
+}
+
+export function parseCurlCommand(input: string): ParsedCurl | { error: true } {
+  // Collapse shell line-continuations ("\" at end of line — how browser
+  // devtools' "Copy as cURL" formats a multi-line command) before matching.
+  const normalized = input.replace(/\\\r?\n/g, " ").trim();
+  const rawUrl = extractRequestUrl(normalized);
+  if (!rawUrl) return { error: true };
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return { error: true };
+  }
+
+  const headers: Record<string, string> = {};
+  for (const m of normalized.matchAll(/(?:-H|--header)\s+(['"])([\s\S]*?)\1/g)) {
+    const colon = m[2].indexOf(":");
+    if (colon === -1) continue;
+    const key = m[2].slice(0, colon).trim();
+    if (key) headers[key] = m[2].slice(colon + 1).trim();
+  }
+  const userMatch = normalized.match(/(?:-u|--user)\s+(['"]?)([^\s'"]+)\1/);
+  if (userMatch && !Object.keys(headers).some((k) => k.toLowerCase() === "authorization")) {
+    headers.Authorization = `Basic ${base64Utf8(userMatch[2])}`;
+  }
+  const cookieMatch = normalized.match(/(?:-b|--cookie)\s+(['"])([\s\S]*?)\1/);
+  if (cookieMatch && !Object.keys(headers).some((k) => k.toLowerCase() === "cookie")) {
+    headers.Cookie = cookieMatch[2];
+  }
+
+  const methodMatch = normalized.match(/(?:-X|--request)\s+(['"]?)([A-Za-z]+)\1/);
+  // Only -d/--data/--data-raw/--data-binary carry a request payload we can
+  // reuse as-is; --data-urlencode's value is (key=)value, not JSON, and
+  // -F/--form is multipart, not a JSON body — neither is captured here.
+  const bodyMatch = normalized.match(/(?:^|\s)(?:-d|--data(?:-raw|-binary)?)\s+(['"])([\s\S]*?)\1/);
+  // No explicit -X but a body flag present -> curl itself defaults to POST.
+  const hasBody = !!bodyMatch;
+  const method = (methodMatch ? methodMatch[2] : hasBody ? "POST" : "GET").toUpperCase();
+
+  const query: Record<string, string> = {};
+  url.searchParams.forEach((v, k) => {
+    query[k] = v;
+  });
+
+  return { method, origin: url.origin, path: url.pathname || "/", query, headers, hasBody, body: bodyMatch?.[2] ?? "" };
+}
+
+// Headers a captured example carries that describe that one connection rather
+// than the request, and so must never be stored and replayed. Backed up by the
+// same drop server-side (_CONNECTION_HEADERS in claw/tools/api.py) — filtered
+// here too so the user isn't shown env entries that are silently ignored. The
+// sharpest one is Content-Length: replayed against a different body it makes
+// every call of the connector fail outright.
+const _UNIMPORTABLE_HEADERS = new Set([
+  "host",
+  "content-length",
+  // Not hop-by-hop, but equally unreplayable: a devtools paste advertises
+  // "br, zstd", which the backend can only decode if the optional codec deps
+  // are installed — otherwise the response comes back compressed and the
+  // model reads binary garbage under a 200.
+  "accept-encoding",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+// Browser devtools' "Copy as cURL" adds a dozen client-fingerprint headers that
+// are noise in a server-to-server connector — kept out of the imported env so
+// the auth headers that matter aren't buried.
+const _DEVTOOLS_NOISE_HEADER_RE = /^(sec-|sec-ch-|dnt$|upgrade-insecure-requests$|priority$|pragma$)/i;
+
+function isImportableHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return !_UNIMPORTABLE_HEADERS.has(lower) && !_DEVTOOLS_NOISE_HEADER_RE.test(lower);
+}
+
+// Credential-shaped fields in a pasted request body. Mirrors
+// _is_secret_value/_collect_secret_literals in claw/core/connectors.py, which
+// keep such a value out of transcripts; this is the other half — telling the
+// user it is about to be stored in an operation's body, which (unlike the
+// connector's auth env) is not encrypted at rest and has no BODY_* env
+// equivalent to move it to. Kept deliberately in step with the backend: key
+// matching is head-noun based, not substring, or "author" (-> auth) and
+// "token_count" trip the warning on every ordinary paste and users learn to
+// ignore it.
+const _STRONG_SECRET_WORDS = new Set([
+  "secret",
+  "password",
+  "passwd",
+  "passphrase",
+  "pwd",
+  "pw",
+  "pass",
+  "credential",
+  "credentials",
+  "apikey",
+  "bearer",
+  "otp",
+  "pin",
+  "salt",
+]);
+const _SECRET_HEAD_WORDS = new Set([
+  ..._STRONG_SECRET_WORDS,
+  "key",
+  "keys",
+  "token",
+  "tokens",
+  "auth",
+  "authorization",
+  "cookie",
+  "cookies",
+  "session",
+  "signature",
+  "sig",
+  "pat",
+  "private",
+  "access",
+]);
+// Length and charset alone are not enough: "-" and "_" are in the class, so an
+// ordinary slug ("in_progress_review") clears both. Requiring a digit, a
+// letter, and either mixed case or an 8-char unbroken alphanumeric run keeps
+// human-written slugs from tripping the warning on every paste.
+const _TOKEN_CHARSET_RE = /^[A-Za-z0-9_\-.=+]{16,}$/;
+const _LONG_ALNUM_RUN_RE = /[A-Za-z0-9]{8,}/;
+
+function valueLooksLikeAToken(value: string): boolean {
+  if (!_TOKEN_CHARSET_RE.test(value)) return false;
+  if (!/[0-9]/.test(value) || !/[A-Za-z]/.test(value)) return false;
+  return /[A-Z]/.test(value) || _LONG_ALNUM_RUN_RE.test(value);
+}
+
+function keyNamesASecret(key: string): boolean {
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((w) => w.toLowerCase());
+  if (!words.length) return false;
+  if (_SECRET_HEAD_WORDS.has(words[words.length - 1])) return true;
+  return words.some((w) => _STRONG_SECRET_WORDS.has(w));
+}
+
+function holdsSecretLiteral(node: unknown, key: string): boolean {
+  if (Array.isArray(node)) return node.some((child) => holdsSecretLiteral(child, key));
+  if (node !== null && typeof node === "object")
+    return Object.entries(node as Record<string, unknown>).some(([k, v]) => holdsSecretLiteral(v, k));
+  if (typeof node === "string") return node.length >= 4 && (keyNamesASecret(key) || valueLooksLikeAToken(node));
+  // Matches the backend's floor: a number that short can't be a credential,
+  // and warning about {"private": 1} would make the notice noise.
+  if (typeof node === "number") return String(node).length >= 6 && keyNamesASecret(key);
+  return false;
+}
+
+export function bodyLooksLikeItHoldsACredential(body: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  return holdsSecretLiteral(parsed, "");
+}
+
+const _NUMERIC_SEGMENT_RE = /^\d+$/;
+const _UUID_SEGMENT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Turns a literal example path like "/users/12345" into a reusable template
+// "/users/{id}" plus a declared, required path parameter (path parameters
+// must be required — see claw/api/connector_shared.py) — the most tedious
+// manual step in defining an operation by hand. Only numeric/UUID segments
+// are templated; anything else (e.g. "/search") is almost never a resource
+// id, so it's left as a literal route segment.
+function templatizePath(pathname: string): { path: string; parameters: ApiOperationParam[] } {
+  // A pasted API-doc example carries its own placeholders ("/v1/users/{user_id}"),
+  // and new URL() percent-encodes the braces on the way in. Left encoded they
+  // are an ordinary literal segment: nothing is declared, the backend's
+  // placeholder check sees no braces either, and every call the agent makes
+  // 404s on a URL that looks right to everyone. Decode them, and fold a
+  // human-written name the backend can't accept ("{user-id}") to the
+  // identifier it obviously means rather than importing a dead operation.
+  const decoded = pathname
+    .replace(/%7B/gi, "{")
+    .replace(/%7D/gi, "}")
+    .replace(/\{([^{}/]+)\}/g, (whole, inner: string) => {
+      const name = sanitizeApiParamName(inner, "path");
+      return name ? `{${name}}` : whole;
+    });
+  const taken = new Set([...pathPlaceholderNames(decoded)]);
+  let idCount = 0;
+  const nextIdName = () => {
+    let name: string;
+    do {
+      idCount += 1;
+      name = idCount === 1 ? "id" : `id${idCount}`;
+    } while (taken.has(name));
+    taken.add(name);
+    return name;
+  };
+  const path =
+    decoded
+      .split("/")
+      .map((seg) =>
+        _NUMERIC_SEGMENT_RE.test(seg) || _UUID_SEGMENT_RE.test(seg) ? `{${nextIdName()}}` : seg
+      )
+      .join("/") || "/";
+  // Declared from the finished path, so a placeholder that came in with the
+  // paste is treated exactly like one this function generated — the backend
+  // requires the two sets to match exactly.
+  const parameters: ApiOperationParam[] = [];
+  const declared = new Set<string>();
+  for (const name of pathPlaceholderNames(path)) {
+    if (declared.has(name)) continue;
+    declared.add(name);
+    parameters.push({
+      name,
+      location: "path",
+      // Always "string", never "number", even for an all-digit segment. A
+      // URL path segment is an opaque string: typing it as a number tells
+      // the model to send JSON numbers, which drops leading zeros
+      // ("/users/007" becomes /users/7) and rounds any id past 2^53 to a
+      // different id — both silently hitting the wrong record.
+      type: "string",
+      required: true,
+      description: "",
+    });
+  }
+  return { path, parameters };
+}
+
+// Mirrors _PATH_PLACEHOLDER_RE in claw/api/connector_shared.py.
+function* pathPlaceholderNames(text: string): Generator<string> {
+  for (const m of text.matchAll(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g)) yield m[1];
+}
+
+function toastLines(lines: string[]) {
+  if (lines.length === 1) return lines[0];
+  return (
+    <div className="claw-toast-lines">
+      {lines.map((line, i) => (
+        <span key={i}>{line}</span>
+      ))}
+    </div>
+  );
+}
+
+function suggestOperationName(method: string, pathname: string, existing: string[]): string {
+  const literalSegments = pathname
+    .split("/")
+    .filter((s) => s && !_NUMERIC_SEGMENT_RE.test(s) && !_UUID_SEGMENT_RE.test(s));
+  const base =
+    slugifyConnectorName(`${method.toLowerCase()}_${literalSegments[literalSegments.length - 1] || "request"}`)
+      .replace(/-/g, "_")
+      .slice(0, 49) || "operation";
+  let name = base;
+  let n = 2;
+  while (existing.includes(name)) {
+    name = `${base.slice(0, 46)}_${n}`;
+    n += 1;
+  }
+  return name;
+}
+
+const _KNOWN_OPERATION_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+
+// A second way to define an API operation besides filling the form by hand —
+// paste a real example request (e.g. browser devtools' "Copy as cURL", or an
+// API doc's example call) and get a pre-filled operation, base URL, and auth
+// env in one step. Shared by ConnectorsPanel and Admin.tsx's
+// PrebuiltConnectorsPanel exactly like ApiOperationsEditor above.
+export function CurlImportPanel({
+  operationNames,
+  baseUrl,
+  env,
+  onImport,
+}: {
+  operationNames: string[];
+  // The connector as it stands right now. Needed, not just cosmetic: an
+  // imported operation is executed against this base URL with these stored
+  // credentials, so both have to be reconciled with the paste before merging
+  // (see handleParse).
+  baseUrl: string;
+  env: Record<string, string>;
+  onImport: (result: { origin: string; envAdditions: Record<string, string>; operation: ApiOperation }) => void;
+}) {
+  const t = useT();
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+
+  const handleParse = () => {
+    // Arbitrary pasted text is a boundary — a parse failure must surface as a
+    // toast, never as an unhandled exception in the click handler.
+    let parsed: ParsedCurl | { error: true };
+    try {
+      parsed = parseCurlCommand(text);
+    } catch {
+      parsed = { error: true };
+    }
+    if ("error" in parsed) {
+      toast({ body: t("settings.connectors.curlImportError"), type: "error" });
+      return;
+    }
+    // Reconcile the paste with the base URL the connector already has. An
+    // operation is only ever sent to that base URL, carrying that connector's
+    // stored credentials, so a paste aimed at a different origin can't be
+    // merged in: the request would go to the configured vendor at a path that
+    // only exists on the pasted one, with the configured vendor's auth
+    // attached. Refuse rather than silently retarget it.
+    const currentBase = baseUrl.trim();
+    let basePath = "";
+    if (currentBase) {
+      let base: URL | null = null;
+      try {
+        base = new URL(currentBase);
+      } catch {
+        base = null; // half-typed URL — nothing to reconcile against yet
+      }
+      if (base) {
+        if (base.origin !== parsed.origin) {
+          toast({
+            body: t("settings.connectors.curlImportOriginMismatch", { base: base.origin, pasted: parsed.origin }),
+            type: "error",
+          });
+          return;
+        }
+        basePath = base.pathname.replace(/\/+$/, "");
+      }
+    }
+    // The base URL's own path prefix is prepended at call time, so keeping it
+    // in the operation path too yields "/v1/v1/users/42".
+    let requestPath = parsed.path;
+    if (basePath) {
+      if (requestPath !== basePath && !requestPath.startsWith(`${basePath}/`)) {
+        // Not under the base path, so there is nothing to strip — and keeping
+        // it whole means the call goes to basePath + requestPath, e.g. base
+        // "/v1" plus a pasted "/v2/reports" hits "/v1/v2/reports". That URL
+        // usually 404s, but it can just as easily be a real, different
+        // endpoint. Same reasoning as the origin check above: refuse rather
+        // than silently retarget.
+        toast({
+          body: t("settings.connectors.curlImportBasePathMismatch", { base: basePath, pasted: requestPath }),
+          type: "error",
+        });
+        return;
+      }
+      requestPath = requestPath.slice(basePath.length) || "/";
+    }
+    const { path, parameters } = templatizePath(requestPath);
+    // Headers/query values in a captured example are almost always static
+    // config (auth tokens, api keys) — import them the same way manual
+    // setup already does (HEADER_*/QUERY_* env, see parseEnvText above), not
+    // as per-call operation parameters. A user who does want one of these to
+    // vary per call can move it into the operation's declared parameters
+    // afterward, same as any hand-authored operation.
+    // HEADER_* keys match case-insensitively because HTTP header names are:
+    // HEADER_authorization next to HEADER_Authorization is two keys for one
+    // header, which the backend rejects on save. QUERY_* stays exact — query
+    // strings are case-sensitive.
+    const matchingKey = (keys: string[], key: string): string | undefined => {
+      if (keys.includes(key)) return key;
+      if (!key.startsWith("HEADER_")) return undefined;
+      const lowered = key.toLowerCase();
+      return keys.find((k) => k.toLowerCase() === lowered);
+    };
+    const envAdditions: Record<string, string> = {};
+    // env is connector-wide, so a second paste would otherwise overwrite the
+    // first one's tenant id or api key without a word — and the value it
+    // replaces may be the only copy the user has. Existing values win; the
+    // user is told which ones differed so they can reconcile by hand.
+    const collisions: string[] = [];
+    // The same fold applies within one paste: a single command can carry the
+    // same header twice in different cases (curl sends both, the server reads
+    // one), and letting both through produced an unexplained 422 from the
+    // backend's duplicate-header check on save.
+    const duplicateHeaders: string[] = [];
+    // One verdict per pasted value, decided against the saved env first: doing
+    // it in two passes let one header be reported as both kept and discarded,
+    // and could drop a differing value before it was ever compared to env.
+    const offer = (key: string, value: string) => {
+      const saved = matchingKey(Object.keys(env), key);
+      if (saved !== undefined) {
+        // Identical values need no telling; only a real disagreement does,
+        // because then the discarded one may be the credential that works.
+        if (env[saved] !== value) collisions.push(saved);
+        return;
+      }
+      const pending = matchingKey(Object.keys(envAdditions), key);
+      if (pending !== undefined) {
+        if (envAdditions[pending] !== value) duplicateHeaders.push(pending);
+        return;
+      }
+      envAdditions[key] = value;
+    };
+    for (const [k, v] of Object.entries(parsed.headers)) {
+      if (isImportableHeader(k)) offer(`HEADER_${k}`, v);
+    }
+    for (const [k, v] of Object.entries(parsed.query)) offer(`QUERY_${k}`, v);
+    const storedQueryKeys = Object.keys(envAdditions)
+      .filter((k) => k.startsWith("QUERY_"))
+      .map((k) => k.slice("QUERY_".length));
+    const name = suggestOperationName(parsed.method, requestPath, operationNames);
+    const method = _KNOWN_OPERATION_METHODS.has(parsed.method) ? (parsed.method as ApiOperation["method"]) : "GET";
+    // The captured body is a literal example payload (real values, no
+    // {placeholder} tokens) — usable as-is only when it's actually valid
+    // JSON and the method carries a payload; -F/--form and
+    // --data-urlencode content is deliberately never captured (see
+    // parseCurlCommand), and non-JSON -d content (e.g. raw form-encoded
+    // text) can't be reused as a JSON body template either.
+    let body = "";
+    let bodyImported = true;
+    let bodyPlaceholders: string[] = [];
+    if (parsed.hasBody && (method === "POST" || method === "PUT" || method === "PATCH")) {
+      // A literal {word} in the pasted payload — e.g. {"text": "Hello {name}"}
+      // from a notification API's example — collides with the body-template
+      // placeholder syntax. Importing it verbatim makes the operation
+      // unsaveable: the backend demands a declared body parameter per
+      // placeholder, and declaring one substitutes json.dumps() INSIDE the
+      // surrounding quotes, which then fails the JSON check. Neither error
+      // tells the user what to do, so drop the body and say so instead.
+      bodyPlaceholders = [...parsed.body.matchAll(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g)].map((m) => m[1]);
+      if (bodyPlaceholders.length) {
+        bodyImported = false;
+      } else {
+        try {
+          JSON.parse(parsed.body);
+          body = parsed.body;
+        } catch {
+          bodyImported = false;
+        }
+      }
+    } else if (parsed.hasBody) {
+      bodyImported = false;
+    }
+    const operation: ApiOperation = { name, method, path, description: "", parameters, body };
+    onImport({ origin: parsed.origin, envAdditions, operation });
+    toast({ body: t("settings.connectors.curlImportSuccess", { name }), type: "info", autoHideDuration: 3000 });
+    // One import can raise up to five follow-ups; the toast viewport only keeps
+    // the newest few, so they are grouped into one toast per severity instead of
+    // pushing each other — and the success message — out of view.
+    const problems: string[] = [];
+    const notices: string[] = [];
+    if (parsed.hasBody && !bodyImported) {
+      // Not a failure — the operation above was still added successfully —
+      // just a heads-up that the request body couldn't be reused verbatim
+      // and needs to be added by hand in the operation's body field.
+      notices.push(
+        bodyPlaceholders.length
+          ? t("settings.connectors.curlImportBodyPlaceholderWarning", {
+              keys: [...new Set(bodyPlaceholders)].join(", "),
+            })
+          : t("settings.connectors.curlImportBodyWarning")
+      );
+    }
+    if (body && bodyLooksLikeItHoldsACredential(body)) {
+      problems.push(t("settings.connectors.curlImportBodySecretWarning"));
+    }
+    // Deduped: three case variants of one header name it twice over, and the
+    // key is what the user has to go find — repeating it reads as two problems.
+    if (duplicateHeaders.length) {
+      problems.push(
+        t("settings.connectors.curlImportDuplicateHeader", {
+          keys: [...new Set(duplicateHeaders)].join(", "),
+        })
+      );
+    }
+    if (collisions.length) {
+      problems.push(
+        t("settings.connectors.curlImportEnvCollision", {
+          keys: [...new Set(collisions)].join(", "),
+        })
+      );
+    }
+    if (storedQueryKeys.length) {
+      notices.push(
+        t("settings.connectors.curlImportQueryNotice", { keys: storedQueryKeys.join(", ") })
+      );
+    }
+    if (problems.length) toast({ body: toastLines(problems), type: "error" });
+    if (notices.length) toast({ body: toastLines(notices), type: "info" });
+    setText("");
+    setOpen(false);
+  };
+
+  return (
+    <div className="claw-curl-import">
+      <button
+        type="button"
+        className="claw-curl-import-toggle"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <Icon icon={open ? ChevronDown : ChevronRight} size="xsm" color="secondary" />
+        <Text size="sm" color="secondary">
+          {t("settings.connectors.curlImportToggle")}
+        </Text>
+      </button>
+      {open && (
+        <div className="claw-curl-import-body">
+          <TextArea
+            label={t("settings.connectors.curlImportLabel")}
+            description={t("settings.connectors.curlImportDesc")}
+            placeholder="curl https://api.example.com/users/123 -H 'Authorization: Bearer TOKEN'"
+            value={text}
+            onChange={setText}
+            rows={3}
+          />
+          <div className="claw-row">
+            <Button
+              label={t("settings.connectors.curlImportAction")}
+              size="sm"
+              variant="secondary"
+              clickAction={handleParse}
+              isDisabled={!text.trim()}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const EMPTY_API_OPERATION: ApiOperation = {
+  name: "",
+  method: "GET",
+  path: "/",
+  description: "",
+  parameters: [],
+  body: "",
+};
+const EMPTY_API_PARAM: ApiOperationParam = {
+  name: "",
+  location: "query",
+  type: "string",
+  required: false,
+  description: "",
+};
+
+// Repeatable operation/parameter list for a kind="api" connector — shared by
+// ConnectorsPanel's (per-user) and Admin.tsx's PrebuiltConnectorsPanel's
+// (admin-global) "Add custom" forms, since both save the same ConnectorInfo
+// shape via api.saveConnector/admin.connectors.save.
+export function ApiOperationsEditor({
+  operations,
+  onChange,
+}: {
+  operations: ApiOperation[];
+  onChange: (ops: ApiOperation[]) => void;
+}) {
+  const t = useT();
+
+  const updateOp = (i: number, patch: Partial<ApiOperation>) => {
+    onChange(operations.map((op, idx) => (idx === i ? { ...op, ...patch } : op)));
+  };
+  const removeOp = (i: number) => onChange(operations.filter((_, idx) => idx !== i));
+  const addOp = () => onChange([...operations, { ...EMPTY_API_OPERATION }]);
+
+  const updateParam = (opIdx: number, paramIdx: number, patch: Partial<ApiOperationParam>) => {
+    updateOp(opIdx, {
+      parameters: operations[opIdx].parameters.map((p, idx) => (idx === paramIdx ? { ...p, ...patch } : p)),
+    });
+  };
+  const removeParam = (opIdx: number, paramIdx: number) => {
+    updateOp(opIdx, { parameters: operations[opIdx].parameters.filter((_, idx) => idx !== paramIdx) });
+  };
+  const addParam = (opIdx: number) => {
+    updateOp(opIdx, { parameters: [...operations[opIdx].parameters, { ...EMPTY_API_PARAM }] });
+  };
+
+  return (
+    <div className="claw-api-operations">
+      <Text type="label">{t("settings.connectors.operationsLabel")}</Text>
+      {operations.length === 0 && (
+        <Text size="sm" color="secondary">
+          {t("settings.connectors.operationsEmpty")}
+        </Text>
+      )}
+      {operations.map((op, i) => (
+        <Card key={i} className="claw-api-operation-row">
+          <div className="claw-row claw-row-between">
+            <TextInput
+              label={t("settings.connectors.operationNameLabel")}
+              placeholder="get_user"
+              value={op.name}
+              onChange={(v) => updateOp(i, { name: slugifyConnectorName(v).replace(/-/g, "_") })}
+            />
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Icon icon={Trash2} size="sm" />}
+              clickAction={() => removeOp(i)}
+              label={t("settings.connectors.removeOperation")}
+            />
+          </div>
+          <SegmentedControl
+            value={op.method}
+            onChange={(v) => updateOp(i, { method: v as ApiOperation["method"] })}
+            label={t("settings.connectors.operationMethodLabel")}
+          >
+            <SegmentedControlItem value="GET" label="GET" />
+            <SegmentedControlItem value="POST" label="POST" />
+            <SegmentedControlItem value="PUT" label="PUT" />
+            <SegmentedControlItem value="PATCH" label="PATCH" />
+            <SegmentedControlItem value="DELETE" label="DELETE" />
+          </SegmentedControl>
+          <TextInput
+            label={t("settings.connectors.operationPathLabel")}
+            placeholder="/users/{id}"
+            value={op.path}
+            onChange={(v) => updateOp(i, { path: v })}
+          />
+          <TextArea
+            label={t("settings.connectors.operationDescLabel")}
+            value={op.description}
+            onChange={(v) => updateOp(i, { description: v })}
+            rows={1}
+          />
+          {(op.method === "POST" || op.method === "PUT" || op.method === "PATCH") && (
+            <TextArea
+              label={t("settings.connectors.operationBodyLabel")}
+              description={t("settings.connectors.operationBodyDesc")}
+              placeholder={'{"limit": {limit}}'}
+              value={op.body}
+              onChange={(v) => updateOp(i, { body: v })}
+              rows={3}
+            />
+          )}
+          <Divider />
+          <Text type="label" size="sm">
+            {t("settings.connectors.parametersLabel")}
+          </Text>
+          {op.parameters.map((p, pi) => (
+            <div key={pi} className="claw-row claw-api-param-row">
+              <TextInput
+                label={t("settings.connectors.paramNameLabel")}
+                value={p.name}
+                onChange={(v) => updateParam(i, pi, { name: sanitizeApiParamName(v, p.location) })}
+              />
+              <SegmentedControl
+                value={p.location}
+                onChange={(v) => {
+                  const location = v as ApiOperationParam["location"];
+                  // A path or body parameter that's missing from a call
+                  // silently substitutes as "" (path) or a literal "{name}"
+                  // token (body), corrupting the request (see
+                  // claw/tools/api.py) — the backend rejects either as
+                  // required=false, so force it here too.
+                  updateParam(
+                    i,
+                    pi,
+                    location === "path" || location === "body"
+                      ? // Also re-narrows the name: "filter.name" is a valid
+                        // header/query parameter but never a path/body one.
+                        { location, required: true, name: sanitizeApiParamName(p.name, location) }
+                      : { location },
+                  );
+                }}
+                label={t("settings.connectors.paramLocationLabel")}
+              >
+                <SegmentedControlItem value="path" label={t("settings.connectors.paramLocationPath")} />
+                <SegmentedControlItem value="query" label={t("settings.connectors.paramLocationQuery")} />
+                <SegmentedControlItem value="header" label={t("settings.connectors.paramLocationHeader")} />
+                <SegmentedControlItem value="body" label={t("settings.connectors.paramLocationBody")} />
+              </SegmentedControl>
+              <SegmentedControl
+                value={p.type}
+                onChange={(v) => updateParam(i, pi, { type: v as ApiOperationParam["type"] })}
+                label={t("settings.connectors.paramTypeLabel")}
+              >
+                <SegmentedControlItem value="string" label="string" />
+                <SegmentedControlItem value="number" label="number" />
+                <SegmentedControlItem value="boolean" label="boolean" />
+              </SegmentedControl>
+              <Switch
+                value={p.required}
+                label={t("settings.connectors.paramRequiredLabel")}
+                changeAction={(checked) => updateParam(i, pi, { required: checked })}
+                isDisabled={p.location === "path" || p.location === "body"}
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={<Icon icon={Trash2} size="sm" />}
+                clickAction={() => removeParam(i, pi)}
+                label={t("settings.connectors.removeParameter")}
+                isIconOnly
+              />
+            </div>
+          ))}
+          <Button
+            label={t("settings.connectors.addParameter")}
+            variant="secondary"
+            size="sm"
+            clickAction={() => addParam(i)}
+          />
+        </Card>
+      ))}
+      <Button
+        label={t("settings.connectors.addOperation")}
+        variant="secondary"
+        size="sm"
+        icon={<Icon icon={Plus} size="sm" />}
+        clickAction={addOp}
+      />
+    </div>
+  );
 }
 
 function ConnectorsPanel() {
@@ -1101,6 +1909,7 @@ function ConnectorsPanel() {
 
   if (editing) {
     const transport = editing.transport ?? "http";
+    const kind = editing.kind ?? "mcp";
     return (
       <div className="claw-panel">
         <TextInput
@@ -1123,46 +1932,97 @@ function ConnectorsPanel() {
           onChange={(v) => setEditing({ ...editing, description: v })}
           rows={2}
         />
-        <div className="claw-row">
-          {/* stdio spawns a real subprocess on the server (unsandboxed) — only
-              an admin may pick it for a NEW connector. An existing stdio
-              connector (a built-in preset the user installed) still shows so
-              they can manage it, but see the disabled Command field below. */}
-          {(isAdmin || transport === "stdio") && (
+        {/* Existing connectors keep their kind fixed — switching an already-
+            saved connector between "speaks MCP" and "plain REST" would orphan
+            whatever's already registered under its current tool names. */}
+        {!editing.id && (
+          <div className="claw-row">
             <Button
-              label={t("settings.connectors.transportStdio")}
+              label={t("settings.connectors.kindMcp")}
               size="sm"
-              variant={transport === "stdio" ? "primary" : "secondary"}
-              clickAction={() => setEditing({ ...editing, transport: "stdio" })}
+              variant={kind === "mcp" ? "primary" : "secondary"}
+              clickAction={() => setEditing({ ...editing, kind: "mcp" })}
             />
-          )}
-          <Button
-            label={t("settings.connectors.transportHttp")}
-            size="sm"
-            variant={transport === "http" ? "primary" : "secondary"}
-            clickAction={() => setEditing({ ...editing, transport: "http" })}
-          />
-        </div>
-        {transport === "stdio" ? (
+            <Button
+              label={t("settings.connectors.kindApi")}
+              size="sm"
+              variant={kind === "api" ? "primary" : "secondary"}
+              clickAction={() => setEditing({ ...editing, kind: "api", transport: "http" })}
+            />
+          </div>
+        )}
+        {kind === "api" ? (
           <>
             <TextInput
-              label={t("settings.connectors.commandLabel")}
-              value={editing.command ?? ""}
-              onChange={(v) => setEditing({ ...editing, command: v })}
-              isDisabled={!isAdmin}
+              label={t("settings.connectors.apiBaseUrlLabel")}
+              value={editing.url ?? ""}
+              onChange={(v) => setEditing({ ...editing, url: v })}
             />
-            {!isAdmin && (
-              <Text size="sm" color="secondary">
-                {t("settings.connectors.commandAdminOnly")}
-              </Text>
-            )}
+            <CurlImportPanel
+              operationNames={(editing.operations ?? []).map((op) => op.name)}
+              baseUrl={editing.url ?? ""}
+              env={editing.env ?? {}}
+              onImport={({ origin, envAdditions, operation }) =>
+                setEditing({
+                  ...editing,
+                  // Never overwrite a base URL the user already set — only
+                  // prefill it the first time (e.g. before any operation exists).
+                  url: editing.url && editing.url.trim() ? editing.url : origin,
+                  env: { ...(editing.env ?? {}), ...envAdditions },
+                  operations: [...(editing.operations ?? []), operation],
+                })
+              }
+            />
+            <ApiOperationsEditor
+              operations={editing.operations ?? []}
+              onChange={(operations) => setEditing({ ...editing, operations })}
+            />
           </>
         ) : (
-          <TextInput
-            label={t("settings.connectors.urlLabel")}
-            value={editing.url ?? ""}
-            onChange={(v) => setEditing({ ...editing, url: v })}
-          />
+          <>
+            <div className="claw-row">
+              {/* stdio spawns a real subprocess on the server (unsandboxed) —
+                  only an admin may pick it for a NEW connector. An existing
+                  stdio connector (a built-in preset the user installed)
+                  still shows so they can manage it, but see the disabled
+                  Command field below. */}
+              {(isAdmin || transport === "stdio") && (
+                <Button
+                  label={t("settings.connectors.transportStdio")}
+                  size="sm"
+                  variant={transport === "stdio" ? "primary" : "secondary"}
+                  clickAction={() => setEditing({ ...editing, transport: "stdio" })}
+                />
+              )}
+              <Button
+                label={t("settings.connectors.transportHttp")}
+                size="sm"
+                variant={transport === "http" ? "primary" : "secondary"}
+                clickAction={() => setEditing({ ...editing, transport: "http" })}
+              />
+            </div>
+            {transport === "stdio" ? (
+              <>
+                <TextInput
+                  label={t("settings.connectors.commandLabel")}
+                  value={editing.command ?? ""}
+                  onChange={(v) => setEditing({ ...editing, command: v })}
+                  isDisabled={!isAdmin}
+                />
+                {!isAdmin && (
+                  <Text size="sm" color="secondary">
+                    {t("settings.connectors.commandAdminOnly")}
+                  </Text>
+                )}
+              </>
+            ) : (
+              <TextInput
+                label={t("settings.connectors.urlLabel")}
+                value={editing.url ?? ""}
+                onChange={(v) => setEditing({ ...editing, url: v })}
+              />
+            )}
+          </>
         )}
         <TextArea
           label={t("settings.connectors.envLabel")}
@@ -1201,13 +2061,21 @@ function ConnectorsPanel() {
             icon={<Icon icon="check" size="sm" />}
             clickAction={() =>
               guard(async () => {
+                const duplicates = duplicateHeaderKeys(editing.env ?? {});
+                if (duplicates.length) {
+                  throw new Error(
+                    t("settings.connectors.duplicateHeaderKeys", { keys: duplicates.join("; ") })
+                  );
+                }
                 await api.saveConnector({
                   name: (editing.name ?? "").trim(),
                   description: editing.description ?? "",
+                  kind,
                   transport,
                   command: editing.command ?? "",
                   url: editing.url ?? "",
                   env: editing.env ?? {},
+                  operations: editing.operations ?? [],
                   timeout_ms:
                     editing.timeout_ms != null
                       ? Math.max(1000, Math.min(120000, editing.timeout_ms))
@@ -1357,7 +2225,7 @@ function ConnectorsPanel() {
                 <div>
                   <div className="claw-row">
                     <Text weight="semibold">{c.name}</Text>
-                    <Badge variant="neutral" label={c.transport} />
+                    <Badge variant="neutral" label={c.kind === "api" ? "api" : c.transport} />
                     {c.runtime.status === "connected" && (
                       <Badge
                         variant="success"
@@ -1370,10 +2238,13 @@ function ConnectorsPanel() {
                     )}
                   </div>
                   <Text size="sm" color="secondary" as="p">
-                    {c.transport === "stdio" ? c.command : c.url}
+                    {c.kind === "api" ? c.url : c.transport === "stdio" ? c.command : c.url}
                   </Text>
                   {(c.runtime.tool_names?.length ?? 0) > 0 && (
                     <ConnectorToolNames names={c.runtime.tool_names!} />
+                  )}
+                  {(c.runtime.shadowed_tools?.length ?? 0) > 0 && (
+                    <ConnectorShadowedTools names={c.runtime.shadowed_tools!} />
                   )}
                   {c.runtime.error && (
                     <Text size="sm" color="secondary" as="p">
@@ -1440,7 +2311,7 @@ function ConnectorsPanel() {
             <Card key={c.id} padding={2}>
               <div className="claw-row">
                 <Text weight="semibold">{c.name}</Text>
-                <Badge variant="neutral" label={c.transport} />
+                <Badge variant="neutral" label={c.kind === "api" ? "api" : c.transport} />
                 {c.runtime.status === "connected" && (
                   <Badge
                     variant="success"
@@ -1458,6 +2329,9 @@ function ConnectorsPanel() {
                 </Text>
               )}
               {(c.runtime.tool_names?.length ?? 0) > 0 && <ConnectorToolNames names={c.runtime.tool_names!} />}
+              {(c.runtime.shadowed_tools?.length ?? 0) > 0 && (
+                <ConnectorShadowedTools names={c.runtime.shadowed_tools!} />
+              )}
             </Card>
           ))}
         </div>

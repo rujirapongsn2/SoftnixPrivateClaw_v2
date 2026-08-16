@@ -158,6 +158,12 @@ class ChatSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     last_consolidated_seq: Mapped[int] = mapped_column(Integer, default=0)
+    # Consecutive times the summarizer returned something unusable for the
+    # window starting at last_consolidated_seq. Persisted (not just in-memory)
+    # so a window it can never process is eventually skipped rather than
+    # retried on every turn forever — see claw/core/memory.py's
+    # _MAX_POISON_ATTEMPTS. Reset to 0 by any successful pass.
+    consolidation_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Working plan for the current task: {"goal": str, "steps": [{"step", "status"}]}.
     # Pinned into the system prompt every turn (never trimmed) so the agent keeps
     # the thread on long/autonomous runs even after early messages scroll out of
@@ -222,7 +228,7 @@ class Skill(Base):
 
 
 class McpConnector(Base):
-    """MCP server config; tools register as mcp_{name}_{tool}.
+    """Connector config; tools register as {kind}_{name}_{tool}.
 
     Ownership scope: ``owner_id`` NULL means an admin-global connector (Control
     Plane "Pre-built Connectors", provisioned once and shared by every user). A
@@ -231,6 +237,15 @@ class McpConnector(Base):
     per owner, plus a partial unique index enforces global-name uniqueness
     among the NULL-owner rows (Postgres treats NULLs as distinct, so the
     composite index alone wouldn't keep global names unique).
+
+    ``kind`` distinguishes two unrelated tool-execution paths sharing one row
+    shape (mirrors how ``LLMProvider.owner_id`` already carries two roles):
+    "mcp" (default) speaks the MCP protocol over ``transport``/``command``/
+    ``url``; "api" is a plain REST API described by ``operations``, called
+    directly over HTTP with no MCP handshake — see claw/tools/api.py and
+    claw/core/connectors.py's kind-based partitioning in sync_tools/sync_global.
+    For "api" rows, ``url`` holds the API's base URL (reusing the same column
+    the "http" MCP transport already uses) and ``command`` is unused.
     """
 
     __tablename__ = "mcp_connectors"
@@ -251,10 +266,19 @@ class McpConnector(Base):
     )
     name: Mapped[str] = mapped_column(String(64))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "mcp" | "api" — see class docstring.
+    kind: Mapped[str] = mapped_column(String(16), default="mcp", server_default="mcp")
     transport: Mapped[str] = mapped_column(String(16), default="stdio")  # stdio|http
     command: Mapped[str] = mapped_column(Text, default="")  # stdio: command line
-    url: Mapped[str] = mapped_column(String(500), default="")  # http: endpoint
+    url: Mapped[str] = mapped_column(String(500), default="")  # http/api: endpoint
     env: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Only meaningful when kind == "api": list of callable REST operations,
+    # e.g. [{"name": "get_user", "method": "GET", "path": "/users/{id}",
+    # "description": "...", "parameters": [...]}]. Auth belongs in env, but a
+    # cURL-imported `body` template carries whatever literal credential the
+    # pasted example used, so ConnectorStore encrypts each operation's `body`
+    # at rest (only that field — the rest stays readable JSON).
+    operations: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # Per-connector connect/tool-call timeout override, in milliseconds. Null =
     # use the instance-wide ConnectorSettings default (claw/config.py) — see
     # claw/core/connectors.py's _effective_timeout_seconds for the clamp
@@ -302,6 +326,13 @@ class UsageRecord(Base):
     counts_as_turn: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("1")
     )
+    # Cost *shape* of the turn, not just its price: LLM round-trips, tools run,
+    # and the wait before the first visible character. Tokens alone can't tell a
+    # one-shot answer apart from a multi-tool detour that produced the same reply.
+    iterations: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    tool_calls: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    ttft_ms: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
