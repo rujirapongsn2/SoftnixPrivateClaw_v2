@@ -277,12 +277,17 @@ interface ChatProps {
   onOpenSettings?: (section: "skills" | "connectors" | "knowledge" | "models") => void;
 }
 
-// Cap on WebSocket reconnect attempts before giving up and surfacing an error
-// instead of retrying forever — a deleted/foreign session or a permanently
-// invalid token both close the socket in a way the browser can't reliably
-// distinguish from a transient drop, so silence isn't an option but neither
-// is an infinite retry loop.
+// Cap on WebSocket reconnect attempts before giving up retrying — a
+// deleted/foreign session or a permanently invalid token both close the socket
+// in a way the browser can't reliably distinguish from a transient drop, so an
+// infinite retry loop isn't an option. Giving up is silent unless a message was
+// riding on that socket; the next send reopens it from scratch.
 const MAX_RECONNECT_ATTEMPTS = 6;
+
+// How long a send waits for the socket to come back before telling the user the
+// connection dropped. A reconnect normally lands well inside this, and a notice
+// that resolves itself a moment later reads as a fault the user has to act on.
+const RECONNECT_NOTICE_DELAY_MS = 1500;
 
 export function Chat({
   sessionId,
@@ -408,6 +413,17 @@ export function Chat({
   const ensureConnectedRef = useRef<() => void>(() => {});
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The banner text the connection paths below put on screen, so a successful
+  // reconnect can retract it without also wiping an unrelated error (a model
+  // failure, a failed upload) that happened to land in the same banner after.
+  const connectionErrorRef = useRef<string | null>(null);
+  // `busy` read from inside the per-session effect, whose closures are bound
+  // once per session and would otherwise see it as it was at bind time.
+  const busyRef = useRef(false);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
 
   useEffect(() => {
     // Safari's contenteditable text layout picks shaping rules from the
@@ -431,6 +447,7 @@ export function Chat({
     setItems([]);
     setStreaming("");
     setError("");
+    connectionErrorRef.current = null;
     setAttachments([]);
     setFeedback({});
     setPlan(null); // plan is per-session; don't leak one chat's plan into another
@@ -472,8 +489,38 @@ export function Chat({
     setBusy(handoff || running === true);
     let cancelled = false;
     let socket: WebSocket | null = null;
+    const cancelReconnectNotice = () => {
+      if (!reconnectNoticeTimerRef.current) return;
+      clearTimeout(reconnectNoticeTimerRef.current);
+      reconnectNoticeTimerRef.current = null;
+    };
+    // Every banner about the connection goes through here so onOpen knows which
+    // text it is allowed to retract later.
+    const showConnectionError = (message: string) => {
+      connectionErrorRef.current = message;
+      setError(message);
+    };
     const onOpen = () => {
+      // A socket still mid-handshake when this effect was torn down (session
+      // switch, StrictMode remount) is closed by the cleanup only once it
+      // opens, so its onopen still fires — and everything below would then
+      // act on the CURRENT session's state: retracting its notice, and
+      // draining pendingRef into a rawSend that no-ops because socketRef now
+      // points at a different, not-yet-open socket. That silently ate the
+      // message.
+      if (cancelled) return;
       reconnectAttemptRef.current = 0;
+      // Back before the notice was due — the drop never became the user's
+      // problem, so don't tell them about it.
+      cancelReconnectNotice();
+      // The connection is demonstrably back, so retract the banner that said
+      // otherwise — but only if it's still the one on screen. Leaving it up
+      // was the whole reason users learned to reload a working app.
+      if (connectionErrorRef.current !== null) {
+        const stale = connectionErrorRef.current;
+        connectionErrorRef.current = null;
+        setError((current) => (current === stale ? "" : current));
+      }
       const pending = pendingRef.current;
       // Only flush a pending message that's either a draft handoff (targets
       // whichever session gets created next) or explicitly queued for THIS
@@ -660,15 +707,20 @@ export function Chat({
     // instead of silently discarding it.
     const discardQueuedMessage = () => {
       const pending = pendingRef.current;
-      if (pending && (pending.sessionId === null || pending.sessionId === sessionId)) {
-        pendingRef.current = null;
-        toast({ body: t("chat.error.sendFailed"), type: "error" });
-      }
+      if (!pending || (pending.sessionId !== null && pending.sessionId !== sessionId)) return false;
+      pendingRef.current = null;
+      toast({ body: t("chat.error.sendFailed"), type: "error" });
+      return true;
     };
     const onClose = (ev: CloseEvent) => {
+      // Checked before anything below reads component state: a socket belonging
+      // to a torn-down session must not paint a banner or drain pendingRef,
+      // which by now may hold the draft the user is typing into a new chat.
+      if (cancelled) return;
       if (ev.code === 4401) {
-        setError(t("chat.error.authFailed"));
+        showConnectionError(t("chat.error.authFailed"));
         discardQueuedMessage();
+        cancelReconnectNotice();
         return;
       }
       // Any other close (network drop, mobile suspension, server restart) is
@@ -680,12 +732,23 @@ export function Chat({
       // the browser with their real code, only as an aborted handshake — so
       // this can't special-case them; the attempt cap below bounds the
       // damage instead.
-      if (cancelled) return;
       const attempt = reconnectAttemptRef.current + 1;
       reconnectAttemptRef.current = attempt;
       if (attempt > MAX_RECONNECT_ATTEMPTS) {
-        setError(t("chat.error.reconnectFailed"));
-        discardQueuedMessage();
+        // Stop retrying, but only say so if the user is actually waiting on
+        // this socket — a message queued on it, or a turn still streaming. An
+        // idle tab drops its socket routinely (server restart, laptop sleep)
+        // and reopens fine on the next send or tab focus; a banner telling
+        // those users to reload is wrong, and it trained people to reload for
+        // a connection that was never broken. `busyRef` matters because the
+        // spinner has no other way out here: the transcript refetch that
+        // normally rescues a missed completion is driven by the session-list
+        // poll flipping running true→false, and that poll fails (leaving the
+        // stale value) against the same dead backend that killed this socket.
+        if (discardQueuedMessage() || busyRef.current) {
+          showConnectionError(t("chat.error.reconnectFailed"));
+        }
+        cancelReconnectNotice();
         return;
       }
       const delay = Math.min(1000 * 2 ** (attempt - 1), 15000);
@@ -763,6 +826,7 @@ export function Chat({
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
+      cancelReconnectNotice();
       const s = socket;
       if (!s) return;
       // Closing a socket still mid-handshake (React StrictMode remount) logs a
@@ -1184,11 +1248,14 @@ export function Chat({
         queueOfflineMessage(sessionId, content, atts, model);
         setAttachments([]);
         setError("");
-        toast({
-          body: t("chat.info.reconnecting"),
-          type: "info",
-          uniqueID: "ws-reconnect",
-        });
+        // Held back so a reconnect that lands quickly stays invisible: onopen
+        // cancels this and flushes the queued message, and the send looks like
+        // any other. uniqueID collapses repeat taps into one toast.
+        if (reconnectNoticeTimerRef.current) clearTimeout(reconnectNoticeTimerRef.current);
+        reconnectNoticeTimerRef.current = setTimeout(() => {
+          reconnectNoticeTimerRef.current = null;
+          toast({ body: t("chat.info.reconnecting"), type: "info", uniqueID: "ws-reconnect" });
+        }, RECONNECT_NOTICE_DELAY_MS);
         ensureConnectedRef.current();
         return;
       }
