@@ -17,6 +17,17 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "th": "โมเดลนี้ไม่รองรับการเรียกใช้เครื่องมือ (tool calling) จึงใช้เป็นโมเดลแชทในระบบนี้ไม่ได้ กรุณาเลือกโมเดลอื่น",
     },
+    # Distinct from error.llm for the same reason as error.llm_no_tool_support:
+    # retrying with an image attached to a text-only model fails identically
+    # every time, so this tells the user to remove the attachment or switch
+    # models instead of "please try again".
+    "error.llm_no_vision_support": {
+        "en": (
+            "This model doesn't support image input, so it can't read the attached image. "
+            "Please remove the attachment or pick a vision-capable model."
+        ),
+        "th": "โมเดลนี้ไม่รองรับการรับรูปภาพ จึงไม่สามารถอ่านรูปที่แนบมาได้ กรุณานำไฟล์แนบออก หรือเลือกโมเดลที่รองรับรูปภาพแทน",
+    },
     "error.tool": {
         "en": "A tool failed while working on your request ({reason}).",
         "th": "เครื่องมือทำงานไม่สำเร็จระหว่างประมวลผลคำขอ ({reason})",
@@ -79,6 +90,35 @@ def is_no_tool_support_error(detail: str) -> bool:
             "no endpoints found that support tool use",
             "does not support tool",
             "does not support function calling",
+        )
+    )
+
+
+def is_no_vision_support_error(detail: str) -> bool:
+    """True when the provider rejected the request specifically because the
+    selected model doesn't support image/vision input — retrying gets the
+    identical rejection every time (the model can never read the image), so
+    this needs its own message telling the user to drop the attachment or
+    switch models, same as is_no_tool_support_error above. This is the
+    reactive safety net for any text-only model the registry's proactive
+    supports_vision() check doesn't yet know about."""
+    lowered = detail.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "does not support image",
+            "does not support vision",
+            "no endpoints found that support image",
+            "multimodal messages are not enabled",
+            "image content is not supported",
+            "unsupported image",
+            "invalid content type: image",
+            "model does not support the image_url",
+            # Observed verbatim from an OpenAI-compatible gateway fronting a
+            # text-only model: the server's message schema has no image_url
+            # variant at all, so it fails at JSON deserialization rather than
+            # with a capability message.
+            "unknown variant `image_url`",
         )
     )
 

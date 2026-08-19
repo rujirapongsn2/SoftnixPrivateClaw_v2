@@ -9,11 +9,12 @@ from claw.config import SandboxSettings, Settings
 from claw.core.bus import EventBus
 from claw.core.memory import MemoryService
 from claw.core.runtime import AgentRuntime, TurnFailed
+from claw.db.stores import LLMConfigStore
 from claw.providers.base import ProviderError
 from tests.conftest import FakeProvider, text_turn
 
 
-def make_runtime(stores, provider, tmp_path, policy=None) -> AgentRuntime:
+def make_runtime(stores, provider, tmp_path, policy=None, llm_config=None) -> AgentRuntime:
     settings = Settings(
         _env_file=None,
         database_url="sqlite+aiosqlite:///:memory:",
@@ -33,6 +34,7 @@ def make_runtime(stores, provider, tmp_path, policy=None) -> AgentRuntime:
         memory=memory,
         audit=stores["audit"],
         policy=policy,
+        llm_config=llm_config,
     )
 
 
@@ -186,3 +188,59 @@ async def test_error_messages_are_localized(stores, tmp_path, locale, expected_f
 
     result = await runtime.handle_message(user.id, session.id, "hi", locale=locale)
     assert expected_fragment in result
+
+
+async def test_image_attachment_short_circuits_for_text_only_model(stores, db_factory, tmp_path):
+    """deepseek-chat is registered as text-only in the provider registry — an
+    image attachment must be rejected before ever calling the provider, not
+    after a wasted (and confusingly-generic) round trip."""
+    llm_config = LLMConfigStore(db_factory)
+    provider_row = await llm_config.create_provider("prov-ds", "sk-test", "", True, "", owner_id=None)
+    await llm_config.create_model(
+        provider_row.id, "deepseek-chat", "DeepSeek Chat", True, "medium", "", kind="chat", owner_id=None
+    )
+
+    provider = FakeProvider([text_turn("should not run")])
+    runtime = make_runtime(stores, provider, tmp_path, llm_config=llm_config)
+    user = await stores["users"].get_or_create_by_email("v@x.y")
+    session = await stores["sessions"].create(user.id)
+
+    image_path = tmp_path / "photo.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+
+    result = await runtime.handle_message(
+        user.id, session.id, "what is this?", media=[str(image_path)], model="deepseek-chat"
+    )
+
+    assert "vision-capable model" in result.lower()
+    assert provider.calls == []  # model never invoked
+
+    # The user's message + attachment note must still land in history (same as
+    # the policy-blocked path) even though the turn was rejected pre-provider.
+    history = await stores["messages"].recent(session.id)
+    assert [m["role"] for m in history] == ["user"]
+    assert "photo.png" in history[0]["content"]
+
+
+async def test_vision_rejection_from_provider_gets_clear_message(stores, tmp_path):
+    """Reactive safety net: even if the registry doesn't know a model is
+    text-only, a provider-side vision rejection must surface the same clear
+    "switch models" message instead of the generic internal-error text."""
+
+    class VisionRejectingProvider(FakeProvider):
+        async def stream_chat(self, *args, **kwargs):
+            raise ProviderError("BadRequestError: this model does not support image input")
+            yield  # pragma: no cover
+
+    runtime = make_runtime(stores, VisionRejectingProvider([]), tmp_path)
+    user = await stores["users"].get_or_create_by_email("v2@x.y")
+    session = await stores["sessions"].create(user.id)
+
+    image_path = tmp_path / "photo.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+
+    result = await runtime.handle_message(
+        user.id, session.id, "what is this?", media=[str(image_path)]
+    )
+
+    assert "vision-capable model" in result.lower()

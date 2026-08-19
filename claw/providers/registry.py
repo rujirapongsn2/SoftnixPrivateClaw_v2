@@ -53,6 +53,13 @@ _SPECS: tuple[ProviderSpec, ...] = (
 )
 
 
+# Matched anywhere in the model id, independent of find_spec()'s routing order.
+# Text-only families first, with their vision-capable checkpoints listed as
+# exceptions below (checked first in supports_vision).
+_TEXT_ONLY_MODEL_TOKENS: tuple[str, ...] = ("deepseek",)
+_VISION_MODEL_TOKENS: tuple[str, ...] = ("deepseek-vl",)
+
+
 def find_spec(model: str) -> ProviderSpec | None:
     lowered = (model or "").lower()
     for spec in _SPECS:
@@ -64,6 +71,26 @@ def find_spec(model: str) -> ProviderSpec | None:
 def supports_prompt_caching(model: str) -> bool:
     spec = find_spec(model)
     return spec is not None and spec.supports_prompt_caching
+
+
+def supports_vision(model: str) -> bool:
+    """Whether the model can accept image_url content blocks.
+
+    Deliberately NOT spec-driven: _SPECS is first-match-wins on the ROUTING
+    prefix, but vision capability follows the underlying model. A text-only
+    DeepSeek reached through an OpenAI-compatible gateway is the id
+    "openai/deepseek-v4-flash", which find_spec() resolves to the openai spec —
+    so a per-spec flag would never see the deepseek part. Matching tokens
+    anywhere in the id gets that case right regardless of how it's routed.
+
+    Permissive by default: an unlisted model is unknown, not confirmed
+    text-only, so it is allowed through and the reactive
+    is_no_vision_support_error() check in claw/i18n.py is the safety net.
+    """
+    lowered = (model or "").lower()
+    if any(token in lowered for token in _VISION_MODEL_TOKENS):
+        return True
+    return not any(token in lowered for token in _TEXT_ONLY_MODEL_TOKENS)
 
 
 def apply_model_overrides(model: str, kwargs: dict) -> None:

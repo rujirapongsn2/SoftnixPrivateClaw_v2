@@ -49,8 +49,9 @@ from claw.db.stores import (
     UsageStore,
     UserStore,
 )
-from claw.i18n import classify_error_reason, is_no_tool_support_error, t
+from claw.i18n import classify_error_reason, is_no_tool_support_error, is_no_vision_support_error, t
 from claw.providers.base import LLMProvider, ProviderError
+from claw.providers.registry import supports_vision as model_supports_vision
 from claw.sandbox.ephemeral import EphemeralSandbox
 from claw.security.policy import Action, PolicyEngine
 from claw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -809,6 +810,26 @@ class AgentRuntime:
                         )
                 runtime_ctx = build_runtime_context(channel, locale)
                 model_content, storage_text = build_user_content(content, media, agent.workspace)
+                # model_content is only ever a list when build_user_content produced at
+                # least one image_url block (see its docstring) — reject before ever
+                # calling the provider so a text-only model doesn't burn a round trip on
+                # a request that will fail identically every time.
+                # effective_model is None when no Control Plane model resolved and the
+                # provider falls back to its own default, so mirror that fallback here or
+                # the check silently skips on env-configured deployments.
+                vision_model = effective_model or self.settings.llm.model
+                if (
+                    isinstance(model_content, list)
+                    and vision_model
+                    and not model_supports_vision(vision_model)
+                ):
+                    msg = t("error.llm_no_vision_support", locale)
+                    # Persist before returning (same as the policy-blocked path above) so
+                    # the user's message + attachment note don't vanish from history just
+                    # because this turn was rejected before reaching the model.
+                    await self.messages.append(session_id, [{"role": "user", "content": storage_text}])
+                    self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
+                    return msg
                 if isinstance(model_content, str):
                     user_message = {"role": "user", "content": f"{runtime_ctx}\n\n{model_content}"}
                 else:
@@ -859,6 +880,11 @@ class AgentRuntime:
                         # request) — tell the user to switch models instead of
                         # error.llm's generic "please try again".
                         message = t("error.llm_no_tool_support", locale)
+                    elif is_no_vision_support_error(detail):
+                        # Safety net for a text-only model the registry's proactive
+                        # supports_vision() check above doesn't yet know about —
+                        # same non-retryable reasoning as the tool-support branch.
+                        message = t("error.llm_no_vision_support", locale)
                     else:
                         reason = t(classify_error_reason(detail), locale)
                         message = t("error.llm", locale, reason=reason)

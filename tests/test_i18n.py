@@ -2,7 +2,7 @@
 distinguishes a permanent "this model can't do tool calling at all" failure
 (retrying is futile) from a transient one (error.llm's generic "try again")."""
 
-from claw.i18n import classify_error_reason, is_no_tool_support_error, t
+from claw.i18n import classify_error_reason, is_no_tool_support_error, is_no_vision_support_error, t
 
 
 def test_no_tool_support_error_detected_from_openrouter_message():
@@ -28,3 +28,32 @@ def test_llm_no_tool_support_message_does_not_suggest_retrying():
 
 def test_classify_error_reason_still_falls_back_to_internal():
     assert classify_error_reason("No endpoints found that support tool use.") == "reason.internal"
+
+
+def test_no_vision_support_error_detected_from_provider_message():
+    detail = 'litellm.BadRequestError: This model does not support image input in the request.'
+    assert is_no_vision_support_error(detail) is True
+
+
+def test_no_vision_support_error_detected_from_json_deserialization_failure():
+    # The error actually observed in production: an OpenAI-compatible gateway
+    # whose message schema has no image_url variant fails at deserialization,
+    # never emitting a "does not support image" style message.
+    detail = (
+        "litellm.BadRequestError: OpenAIException - Failed to deserialize the JSON body "
+        "into the target type: messages[1]: unknown variant `image_url`, expected `text` "
+        "at line 1 column 132627"
+    )
+    assert is_no_vision_support_error(detail) is True
+
+
+def test_no_vision_support_error_not_confused_with_other_failures():
+    assert is_no_vision_support_error("connection timed out") is False
+    assert is_no_vision_support_error("401 unauthorized: invalid api key") is False
+    assert is_no_vision_support_error("No endpoints found that support tool use.") is False
+
+
+def test_llm_no_vision_support_message_does_not_suggest_retrying():
+    message = t("error.llm_no_vision_support", "en")
+    assert "try again" not in message.lower()
+    assert "vision-capable model" in message.lower()
