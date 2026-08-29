@@ -11,6 +11,7 @@ touches the main conversation's context window.
 """
 
 from collections.abc import Awaitable, Callable
+from time import monotonic
 
 from loguru import logger
 
@@ -53,6 +54,10 @@ _PLAN_TOOL = [
 ]
 
 _MAX_STEPS = 8
+
+# Don't start a step with less than this left on the clock: it would spend an
+# LLM call only to be cut off, and the step reads better as "never started".
+_MIN_STEP_SECONDS = 15.0
 
 
 class WorkflowService:
@@ -97,23 +102,58 @@ class WorkflowService:
             steps = [WorkflowStep(title="Complete the task", instruction=request)]
         return WorkflowPlan(request=request, steps=steps)
 
-    async def run(self, plan: WorkflowPlan, on_progress: ProgressCb = None) -> WorkflowResult:
+    async def run(
+        self,
+        plan: WorkflowPlan,
+        on_progress: ProgressCb = None,
+        outer_deadline: float | None = None,
+    ) -> WorkflowResult:
         completed: list[str] = []
         total = len(plan.steps)
+        # One wall-clock budget for the whole workflow, shared across its steps.
+        # Each step otherwise gets the parent turn's full budget, so an 8-step
+        # plan can run 8x as long as the turn that started it — and the parent
+        # only checks its own clock between iterations, so it cannot notice.
+        budget = self.subagents.max_turn_seconds
+        deadline = monotonic() + budget if budget > 0 else None
+        # `outer_deadline` is the calling turn's own absolute deadline (same
+        # monotonic clock) — a workflow started late in that turn must not grant
+        # itself a fresh full budget regardless of how little time is actually
+        # left, so the tighter of the two always wins.
+        if outer_deadline is not None:
+            deadline = outer_deadline if deadline is None else min(deadline, outer_deadline)
         for i, step in enumerate(plan.steps, start=1):
-            step.status = "running"
-            if on_progress:
-                await on_progress(
-                    {"stage": "step", "label": step.title, "index": i, "total": total, "status": "running"}
-                )
-            context = "\n\n".join(completed) if completed else ""
-            try:
-                step.output = await self.subagents.run(step.instruction, context=context)
-                step.status = "done"
-            except ProviderError as exc:
+            remaining = None if deadline is None else deadline - monotonic()
+            if remaining is not None and remaining < _MIN_STEP_SECONDS:
                 step.status = "error"
-                step.output = f"error: {exc}"
-                logger.warning("Workflow step {} failed: {}", step.title, exc)
+                step.output = "Not started: the workflow ran out of time before reaching this step."
+                logger.warning("Workflow ran out of time before step {}", step.title)
+            else:
+                step.status = "running"
+                if on_progress:
+                    await on_progress(
+                        {
+                            "stage": "step",
+                            "label": step.title,
+                            "index": i,
+                            "total": total,
+                            "status": "running",
+                        }
+                    )
+                context = "\n\n".join(completed) if completed else ""
+                try:
+                    run = await self.subagents.run_result(
+                        step.instruction, context=context, max_turn_seconds=remaining
+                    )
+                    # A subagent reports failure in prose, not by raising, so the
+                    # status has to come from its flag — otherwise a step that
+                    # timed out is recorded as done and synthesized into an answer.
+                    step.output = run.text
+                    step.status = "done" if run.ok else "error"
+                except ProviderError as exc:
+                    step.status = "error"
+                    step.output = f"error: {exc}"
+                    logger.warning("Workflow step {} failed: {}", step.title, exc)
             if on_progress:
                 await on_progress(
                     {
@@ -124,7 +164,11 @@ class WorkflowService:
                         "status": "done" if step.status == "done" else "error",
                     }
                 )
-            completed.append(f"## {step.title}\n{step.output}")
+            # Mark the failures inline: this list is both the context handed to
+            # later steps and the input to synthesis, and neither can tell a
+            # limit message from a real result without it.
+            marker = "" if step.status == "done" else " (did not finish)"
+            completed.append(f"## {step.title}{marker}\n{step.output}")
 
         if on_progress and total > 1:
             await on_progress({"stage": "synthesize", "label": "Synthesizing answer", "status": "running"})
@@ -141,7 +185,9 @@ class WorkflowService:
                     {
                         "role": "system",
                         "content": "Synthesize the step results into one clear, complete answer "
-                        "to the original request. Match the user's language.",
+                        "to the original request. Match the user's language. A step marked "
+                        "'did not finish' produced no result — say plainly what is missing "
+                        "instead of inventing what it would have found.",
                     },
                     {
                         "role": "user",
@@ -155,12 +201,22 @@ class WorkflowService:
             return "\n\n".join(step_outputs) + f"\n\n(synthesis failed: {exc})"
         return result.content or "\n\n".join(step_outputs)
 
-    async def run_request(self, request: str, on_progress: ProgressCb = None) -> WorkflowResult:
+    async def run_request(
+        self,
+        request: str,
+        on_progress: ProgressCb = None,
+        outer_deadline: float | None = None,
+    ) -> WorkflowResult:
         plan = await self.plan(request)
         if on_progress:
             n = len(plan.steps)
             await on_progress(
-                {"stage": "plan", "label": f"Planned {n} step{'' if n == 1 else 's'}",
-                 "index": 0, "total": n, "status": "done"}
+                {
+                    "stage": "plan",
+                    "label": f"Planned {n} step{'' if n == 1 else 's'}",
+                    "index": 0,
+                    "total": n,
+                    "status": "done",
+                }
             )
-        return await self.run(plan, on_progress=on_progress)
+        return await self.run(plan, on_progress=on_progress, outer_deadline=outer_deadline)

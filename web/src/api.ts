@@ -1,3 +1,16 @@
+import type { LucideIcon } from "lucide-react";
+import {
+  File,
+  FileArchive,
+  FileAudio,
+  FileBox,
+  FileCode,
+  FileCog,
+  FileSpreadsheet,
+  FileText,
+  FileVideo,
+} from "lucide-react";
+
 export interface SessionInfo {
   id: string;
   title: string;
@@ -12,7 +25,7 @@ export interface SessionInfo {
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
-  meta?: { artifacts?: string[] } | null;
+  meta?: { artifacts?: string[]; vision_model?: string } | null;
 }
 
 export interface AttachmentRef {
@@ -70,6 +83,9 @@ export interface AgentEvent {
   content?: string;
   message?: string;
   artifacts?: string[];
+  // turn_completed: the vision model that read an attached image, when the chat
+  // model couldn't. Empty on every ordinary turn.
+  vision_model?: string;
   request_id?: string;
   approved?: boolean;
   // tool_progress: live sub-step of a long tool (workflow plan/step/synthesize)
@@ -303,6 +319,9 @@ export interface AuthUser {
   language: BrandingLanguage | null;
   font_size: BrandingFontSize | null;
   chat_background: BrandingChatBackground | null;
+  // Desktop UI's Execution panel: off by default, no admin-level default to
+  // inherit — a plain boolean, unlike the appearance overrides above.
+  execution_panel_enabled: boolean;
 }
 
 export interface AdminUser extends AuthUser {
@@ -495,7 +514,7 @@ export interface PlanUsageRow {
 
 export type ModelCost = "low" | "medium" | "high" | "very_high";
 
-export type ModelKind = "chat" | "image";
+export type ModelKind = "chat" | "image" | "vision";
 
 export interface LLMModelCfg {
   id: string;
@@ -507,6 +526,8 @@ export interface LLMModelCfg {
   description: string;
   // "chat" = agent chat picker; "image" = text-to-image only.
   kind: ModelKind;
+  // Admin's input-token window override; null = look it up from LiteLLM's table.
+  context_window: number | null;
 }
 
 export interface LLMProviderCfg {
@@ -610,6 +631,7 @@ export interface PreferencesUpdateBody {
   language?: BrandingLanguage;
   font_size?: BrandingFontSize;
   chat_background?: BrandingChatBackground;
+  execution_panel_enabled?: boolean;
 }
 
 export interface OAuthAppPublic {
@@ -670,6 +692,7 @@ export interface LlmModelCreate {
   cost?: ModelCost;
   description?: string;
   kind?: ModelKind;
+  context_window?: number | null;
 }
 export interface LlmModelPatch {
   model_id?: string;
@@ -679,6 +702,8 @@ export interface LlmModelPatch {
   cost?: ModelCost;
   description?: string;
   kind?: ModelKind;
+  // 0 clears the override back to automatic lookup.
+  context_window?: number | null;
 }
 export interface LlmApi {
   list: () => Promise<{ providers: LLMProviderCfg[] }>;
@@ -735,13 +760,22 @@ function authHeaders(): Record<string, string> {
 export class ApiError extends Error {
   status: number;
   body: unknown;
-  constructor(status: number, text: string) {
+  /** `Retry-After` as milliseconds, when the server sent one. */
+  retryAfterMs?: number;
+  constructor(status: number, text: string, retryAfter?: string | null) {
     super(`${status} ${text}`);
     this.status = status;
     try {
       this.body = JSON.parse(text);
     } catch {
       this.body = undefined;
+    }
+    // Only the delta-seconds form is read. The HTTP-date form is legal but
+    // nothing here sends one, and misreading a date as 0 would busy-loop the
+    // caller against an endpoint that just asked it to back off.
+    const seconds = Number(retryAfter);
+    if (retryAfter && Number.isFinite(seconds) && seconds > 0) {
+      this.retryAfterMs = seconds * 1000;
     }
   }
 }
@@ -753,7 +787,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!resp.ok) {
     if (resp.status === 401) clearToken();
-    throw new ApiError(resp.status, await resp.text());
+    throw new ApiError(resp.status, await resp.text(), resp.headers.get("Retry-After"));
   }
   return resp.json();
 }
@@ -866,6 +900,11 @@ export const api = {
   },
 
   listSkills: () => request<SkillInfo[]>("/api/skills"),
+  // Built-in skills come back from listSkills with an empty `content` — theirs
+  // is static and large enough that shipping all of it on every panel open is
+  // wasted bandwidth, so the detail view pulls just the one it is showing.
+  skillContent: (id: string) =>
+    request<{ content: string }>(`/api/skills/${encodeURIComponent(id)}/content`),
   saveSkill: (skill: Omit<SkillInfo, "id">) =>
     request<SkillInfo>(`/api/skills/${encodeURIComponent(skill.name)}`, {
       method: "PUT",
@@ -1255,6 +1294,142 @@ export function openChatSocket(sessionId: string): WebSocket {
 export function fileUrl(sessionId: string, path: string): string {
   const encoded = path.split("/").map(encodeURIComponent).join("/");
   return `/api/sessions/${sessionId}/files/${encoded}?token=${encodeURIComponent(getToken())}`;
+}
+
+/** How many times a preview card retries a shed (503) before giving up and
+ * falling back to the plain download chip. */
+const PREVIEW_RETRY_LIMIT = 4;
+
+/** Delay before a preview card retries, or null if it should stop and fall back.
+ *
+ * Shared by both preview components deliberately. A fixed, uncapped, unjittered
+ * interval is worse than not retrying at all: every card shed in the same burst
+ * re-fires in the same burst, forever, aimed at the endpoint that is already
+ * over capacity — and each attempt costs the server a session lookup and a stat
+ * before admission control can refuse it, so shedding never gets cheaper. The
+ * exponential term lets offered load actually decay, the jitter decorrelates
+ * cards that were shed together, and the cap is what guarantees the loop ends.
+ *
+ * Anything other than a 503 returns null: those are terminal, and retrying a
+ * 400 for a malformed file just repeats the same parse failure. */
+export function previewRetryDelay(err: unknown, attempt: number): number | null {
+  if (!(err instanceof ApiError) || err.status !== 503) return null;
+  if (attempt >= PREVIEW_RETRY_LIMIT) return null;
+  const base = Math.min((err.retryAfterMs ?? 5000) * 2 ** attempt, 60_000);
+  // Jitter upward only, so the wait never undercuts the server's Retry-After.
+  return base + Math.random() * base;
+}
+
+export type TablePreview = {
+  columns: string[];
+  rows: string[][];
+  /** More rows exist than were returned — show a "download for the rest" hint. */
+  truncated: boolean;
+  truncated_columns: boolean;
+  /** Worksheet the rows came from; null for CSV/TSV. */
+  sheet: string | null;
+  sheets?: string[];
+};
+
+/** Extensions the server can render as a table. Kept in sync with
+ * PREVIEWABLE_SUFFIXES in claw/api/file_preview.py. */
+export const PREVIEWABLE_TABLE_RE = /\.(csv|tsv|xlsx)$/i;
+
+/** Intermediate files a turn produces on the way to its real deliverable (a
+ * script that builds the PDF, the JSON/XML it read along the way). They stay in
+ * the workspace and the backend no longer records them as artifacts; this
+ * filter is what keeps OLD transcripts (saved before that) from showing them
+ * either. The suffixes mirror _ARTIFACT_HIDDEN_SUFFIXES in claw/core/loop.py. */
+const HIDDEN_ARTIFACT_RE = /\.(py|json|xml)$/i;
+
+export function isHiddenArtifact(path: string): boolean {
+  return HIDDEN_ARTIFACT_RE.test(path);
+}
+
+/** Icon + human label + accent color class for a downloadable artifact card, by
+ * file extension. Unknown types get a generic file icon in neutral gray. */
+export type ArtifactTypeMeta = {
+  icon: LucideIcon;
+  label: string;
+  className: string;
+};
+
+export const ARTIFACT_TYPE_META: Record<string, ArtifactTypeMeta> = {
+  pdf: { icon: FileText, label: "PDF", className: "pdf" },
+  doc: { icon: FileText, label: "DOC", className: "doc" },
+  docx: { icon: FileText, label: "DOCX", className: "doc" },
+  xls: { icon: FileSpreadsheet, label: "XLS", className: "xls" },
+  xlsx: { icon: FileSpreadsheet, label: "XLSX", className: "xls" },
+  csv: { icon: FileSpreadsheet, label: "CSV", className: "xls" },
+  tsv: { icon: FileSpreadsheet, label: "TSV", className: "xls" },
+  ppt: { icon: FileBox, label: "PPT", className: "ppt" },
+  pptx: { icon: FileBox, label: "PPTX", className: "ppt" },
+  txt: { icon: FileText, label: "TXT", className: "txt" },
+  md: { icon: FileText, label: "MD", className: "txt" },
+  zip: { icon: FileArchive, label: "ZIP", className: "zip" },
+  gz: { icon: FileArchive, label: "GZ", className: "zip" },
+  tar: { icon: FileArchive, label: "TAR", className: "zip" },
+  "7z": { icon: FileArchive, label: "7Z", className: "zip" },
+  rar: { icon: FileArchive, label: "RAR", className: "zip" },
+  mp3: { icon: FileAudio, label: "AUDIO", className: "media" },
+  wav: { icon: FileAudio, label: "AUDIO", className: "media" },
+  m4a: { icon: FileAudio, label: "AUDIO", className: "media" },
+  mp4: { icon: FileVideo, label: "VIDEO", className: "media" },
+  mov: { icon: FileVideo, label: "VIDEO", className: "media" },
+  yaml: { icon: FileCog, label: "YAML", className: "data" },
+  yml: { icon: FileCog, label: "YAML", className: "data" },
+  html: { icon: FileCode, label: "HTML", className: "data" },
+  htm: { icon: FileCode, label: "HTML", className: "data" },
+};
+
+/** Look up artifact card metadata for a path; falls back to a neutral card. */
+export function artifactTypeMeta(path: string): ArtifactTypeMeta {
+  const ext = (path.split(".").pop() ?? "").toLowerCase();
+  return ARTIFACT_TYPE_META[ext] ?? { icon: File, label: ext.toUpperCase() || "FILE", className: "generic" };
+}
+
+/** Bounded table preview of a workspace file. The server caps rows/columns, so
+ * this response stays small no matter how big the underlying file is.
+ *
+ * `signal` aborts the transfer only. It does NOT free the server's preview slot:
+ * Starlette awaits the handler plainly and uvicorn merely flags the disconnect,
+ * so an in-flight parse runs to completion either way. That cuts both ways and
+ * is why passing one is safe — admission accounting cannot desync from what the
+ * pool is actually doing. */
+export function fileTablePreview(
+  sessionId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<TablePreview> {
+  return request<TablePreview>(
+    `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(path)}`,
+    { signal },
+  );
+}
+
+export type HtmlPreview = {
+  /** Raw markup, capped server-side. Only ever safe inside a sandboxed iframe. */
+  html: string;
+  /** The file was longer than the cap and the tail was dropped. */
+  truncated: boolean;
+};
+
+/** Extensions rendered as a sandboxed HTML page. Kept in sync with
+ * PREVIEWABLE_HTML_SUFFIXES in claw/api/file_preview.py. */
+export const PREVIEWABLE_HTML_RE = /\.html?$/i;
+
+/** Bounded source of an HTML artifact. The caller MUST render this only inside
+ * an iframe with a bare `sandbox` attribute — the markup is agent-authored and
+ * is deliberately not sanitized anywhere on the way here. */
+export function fileHtmlPreview(
+  sessionId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<HtmlPreview> {
+  return request<HtmlPreview>(
+    `/api/sessions/${sessionId}/file-preview/html?path=${encodeURIComponent(path)}`,
+    { signal },
+  );
 }
 
 /** Public URL for a file copied into a share snapshot. No auth token — the

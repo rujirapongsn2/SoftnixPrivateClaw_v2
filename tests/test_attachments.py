@@ -3,7 +3,7 @@
 import base64
 from pathlib import Path
 
-from claw.core.context import build_user_content
+from claw.core.context import build_user_content, swap_images_for_description
 from tests.conftest_app import build_api_app, client
 
 # 1x1 transparent PNG.
@@ -29,6 +29,54 @@ def test_image_becomes_inline_block(tmp_path):
     assert image_blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
     # Stored form references the file by name, never the base64 payload.
     assert "pic.png" in stored and "base64" not in stored
+
+
+def test_swapping_images_for_a_description_removes_the_stale_pointer(tmp_path):
+    """The 'attached below' sentence must go with the images it points at —
+    left behind, it tells a text-only model to look at blocks that are no
+    longer in the message."""
+    (tmp_path / "uploads").mkdir()
+    img = tmp_path / "uploads" / "pic.png"
+    img.write_bytes(_PNG)
+    content, _ = build_user_content("what is this?", [str(img)], tmp_path)
+
+    swapped = swap_images_for_description(content, "A red square.", "vendor/eyes-1", described=1)
+
+    assert isinstance(swapped, str)
+    assert "what is this?" in swapped
+    assert "attached below" not in swapped
+    assert "A red square." in swapped
+    assert "vendor/eyes-1" in swapped
+
+
+def test_swap_says_which_images_went_unread(tmp_path):
+    """A cap that bites has to be visible to the chat model — otherwise it
+    answers about an image nobody looked at."""
+    (tmp_path / "uploads").mkdir()
+    paths = []
+    for i in range(3):
+        img = tmp_path / "uploads" / f"pic{i}.png"
+        img.write_bytes(_PNG)
+        paths.append(str(img))
+    content, _ = build_user_content("what are these?", paths, tmp_path)
+
+    swapped = swap_images_for_description(content, "A red square.", "vendor/eyes-1", described=2)
+
+    assert "3 images attached, but only the first 2 could be read" in swapped
+    assert "not read" in swapped
+
+
+def test_swap_flags_a_description_that_was_cut_off(tmp_path):
+    (tmp_path / "uploads").mkdir()
+    img = tmp_path / "uploads" / "pic.png"
+    img.write_bytes(_PNG)
+    content, _ = build_user_content("what is this?", [str(img)], tmp_path)
+
+    swapped = swap_images_for_description(
+        content, "A red squ", "vendor/eyes-1", described=1, truncated=True
+    )
+
+    assert "cut off" in swapped
 
 
 def test_non_image_file_becomes_grounding_note(tmp_path):

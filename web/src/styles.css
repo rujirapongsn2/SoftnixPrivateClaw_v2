@@ -735,6 +735,20 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-feedback {
   display: flex;
   gap: 2px;
+  align-items: center;
+}
+/* "Image read by <model>" marker, sitting inline with the message actions. */
+.claw-vision-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b7280);
 }
 .claw-error {
   color: var(--color-error, #c0392b);
@@ -2311,7 +2325,7 @@ html[data-chat-bg="grid"] .claw-chat {
   background: #1a9e75;
 }
 .claw-xdot--error {
-  background: #e24b4a;
+  background: var(--color-warning, #d97706);
 }
 .claw-xdot--running {
   background: #ef9f27;
@@ -2411,8 +2425,8 @@ html[data-chat-bg="grid"] .claw-chat {
   overflow: auto;
 }
 .claw-xpre--error {
-  color: #d13b6a;
-  background: #fdeaf1;
+  color: #b7791f;
+  background: #fdf3e2;
 }
 
 @keyframes claw-spin {
@@ -2570,6 +2584,74 @@ html[data-chat-bg="grid"] .claw-chat {
      row wider than ITS OWN parent's available width — the same intrinsic-
      sizing-vs-percentage issue as that child's img, one level up. */
   max-width: 100%;
+  /* Smooths the one case where this row's own width/position change after
+     mount rather than at layout time: a table/HTML preview that starts wide
+     (see the @container rule below) and then fails to load, falling back to
+     a narrow .claw-artifact-chip that no longer matches `:has()` below. Without
+     this the row snaps back to the column width instantly, mid-scroll. Also
+     harmless on an ordinary viewport resize crossing the 800px threshold.
+     Only the two properties that can actually interpolate are listed, and they
+     are the ones that between them describe the whole change: `max-width`
+     (which clamps the used width, since `width` itself animates from `auto`
+     and so is not interpolable) and the inline margins that position it. Both
+     are linear, so the row stays centred at every frame rather than sliding in
+     from one side. Listing a property that snaps alongside one that animates
+     is what made an earlier version of this jump and then drift. */
+  transition: max-width 0.2s ease, margin 0.2s ease;
+}
+/* Table/HTML previews are the one artifact kind whose whole point is to show
+   more of a wide report/sheet at once (see the "does NOT shrink-wrap"
+   comments below) — so let just THAT row escape .claw-column's 768px prose
+   width instead of widening the message column itself, which would also
+   stretch every plain-text reply to an uncomfortable line length.
+   .astryx-chat-layout (ChatLayout's own root, an ancestor several levels up)
+   already carries `container-type: inline-size` from the component library,
+   so 100cqw below is the real chat-pane width regardless of viewport size or
+   the sidebar's width — a 100vw breakout would run underneath the sidebar
+   instead. Gated on a container query (not just a media query) so it keys
+   off that same pane width: below it .claw-column isn't clamped to 768px
+   either, so there is nothing to break out of. This also correctly fires in
+   the ~800-1024px tablet band where the sidebar is off-canvas (see the
+   1024px rule further down) — the chat pane genuinely has the room there
+   too, so that overlap is intended, not an oversight.
+   Centering: an earlier version of this rule paired `width` with a hand-
+   derived `margin-left: calc(400px - 50cqw)` (assuming this row's un-shifted
+   position always sits at exactly .claw-column's own content edge). That
+   depends on nothing else offsetting this row horizontally between here and
+   ChatLayout's root — true today, but fragile, and it visibly broke down in
+   real-world testing (Safari, wide window: the card hugged the right edge
+   instead of sitting centered, crowding .claw-table-preview-download's icon
+   against the viewport edge). The symmetric negative margins below center
+   this row within its own containing block instead, without needing to know
+   or re-derive that offset.
+   Capped well below the full pane width (1100px, down from an earlier
+   1400px) so on a wide monitor the card reads as "generously sized" rather
+   than "pinned to the edge," per the same feedback above. */
+@container (min-width: 800px) {
+  .claw-artifacts:has(.claw-html-preview, .claw-table-preview) {
+    /* The base rule above sets max-width:100%, which resolves against THIS
+       element's own (narrow, .claw-column-derived) containing block — left
+       alone it clamps `width` straight back down to the old value and this
+       whole block is a silent no-op. Has to be repeated here against the
+       same cqw math as `width`. */
+    max-width: min(calc(100cqw - 32px), 1100px);
+    width: min(calc(100cqw - 32px), 1100px);
+    /* Negative margins rather than `left: 50%` + `translateX(-50%)`, which
+       computes the same offset but pays for it twice: a transform creates a
+       stacking context AND a containing block, so a `position: fixed` overlay
+       added inside a preview card later would silently anchor to this 1100px
+       box instead of the viewport; and a transform is not snapped to the pixel
+       grid, so an odd used width (routine — `100cqw - 32px` is uncapped below
+       1132px) offset the whole card by half a pixel and rendered the iframe
+       and table text blurry. A margin is plain layout: no stacking context, no
+       containing block, pixel-snapped.
+       `100%` here is this element's OWN containing block width, so like the
+       transform version — and unlike the hand-derived constant it replaced —
+       it needs no assumption about how wide .claw-column happens to be. Both
+       sides are set so the value stays symmetric if the writing direction
+       flips; block layout ignores the trailing one when over-constrained. */
+    margin-inline: calc((100% - min(calc(100cqw - 32px), 1100px)) / 2);
+  }
 }
 .claw-artifact-chip {
   display: inline-flex;
@@ -2593,6 +2675,73 @@ html[data-chat-bg="grid"] .claw-chat {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 500;
+}
+/* ---- Download card for non-previewable artifacts (PDF/DOCX/ZIP/...) ---- */
+/* Replaces the old generic chip: a type-colored icon tile plus a filetype
+   badge and an explicit "Download" label, so a non-technical user can tell
+   what each file is and that clicking downloads it. */
+.claw-artifact-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 320px;
+  padding: 8px 12px 8px 8px;
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
+  border-radius: 12px;
+  background: var(--color-surface-1, #fff);
+  color: var(--color-text-primary, #1c1a18);
+  text-decoration: none;
+  font-size: 13px;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.claw-artifact-card:hover {
+  border-color: var(--color-primary, #2786c2);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08);
+}
+.claw-artifact-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 8px;
+  /* Per-type accent: a translucent wash of the type color behind the icon. */
+  background: var(--claw-artifact-accent, rgba(0, 0, 0, 0.06));
+  color: var(--claw-artifact-accent-strong, #5a5a5a);
+}
+.claw-artifact-card--pdf .claw-artifact-card-icon { --claw-artifact-accent: rgba(226, 74, 61, 0.14); --claw-artifact-accent-strong: #e24a3d; }
+.claw-artifact-card--doc .claw-artifact-card-icon { --claw-artifact-accent: rgba(43, 108, 200, 0.13); --claw-artifact-accent-strong: #2b6cc8; }
+.claw-artifact-card--xls .claw-artifact-card-icon { --claw-artifact-accent: rgba(33, 145, 80, 0.14); --claw-artifact-accent-strong: #219150; }
+.claw-artifact-card--ppt .claw-artifact-card-icon { --claw-artifact-accent: rgba(237, 121, 42, 0.15); --claw-artifact-accent-strong: #ed792a; }
+.claw-artifact-card--txt .claw-artifact-card-icon { --claw-artifact-accent: rgba(90, 90, 90, 0.10); --claw-artifact-accent-strong: #5a5a5a; }
+.claw-artifact-card--zip .claw-artifact-card-icon { --claw-artifact-accent: rgba(146, 90, 201, 0.14); --claw-artifact-accent-strong: #925ac9; }
+.claw-artifact-card--media .claw-artifact-card-icon { --claw-artifact-accent: rgba(20, 140, 160, 0.13); --claw-artifact-accent-strong: #148ca0; }
+.claw-artifact-card--data .claw-artifact-card-icon { --claw-artifact-accent: rgba(180, 130, 30, 0.15); --claw-artifact-accent-strong: #b4821e; }
+.claw-artifact-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.claw-artifact-card-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b6763);
+}
+.claw-artifact-card-badge {
+  padding: 0 5px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  color: var(--claw-artifact-accent-strong, #5a5a5a);
+  background: var(--claw-artifact-accent, rgba(0, 0, 0, 0.06));
+}
+.claw-artifact-card-action {
   font-weight: 500;
 }
 .claw-artifact-image {
@@ -2628,6 +2777,167 @@ html[data-chat-bg="grid"] .claw-chat {
   max-height: 360px;
   height: auto;
   object-fit: contain;
+}
+
+/* ---- Inline spreadsheet preview (CSV/TSV/XLSX artifacts) ---- */
+/* Unlike the image artifact above, this card does NOT shrink-wrap: a table's
+   intrinsic width is its widest row, which for a wide sheet would blow past
+   the message column. It fills the row and scrolls internally instead. */
+.claw-table-preview {
+  flex: 1 1 100%;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
+  border-radius: 10px;
+  background: var(--color-surface-1, #fff);
+  overflow: hidden;
+}
+.claw-table-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border-subtle, #e8e7e4);
+  background: var(--color-surface-2, #faf9f7);
+}
+.claw-table-preview-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-primary, #1c1a18);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claw-table-preview-sheet {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--color-surface-3, #f0eeea);
+  color: var(--color-text-secondary, #6b6862);
+  white-space: nowrap;
+}
+/* This is the only way to reach the untruncated file, and the truncation
+   footer actively tells users to use it — so it gets a real tap target rather
+   than the bare icon's ~16px. */
+.claw-table-preview-download {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 6px;
+}
+.claw-table-preview-download:hover {
+  background: var(--color-surface-3, #f0eeea);
+}
+.claw-table-preview-loading {
+  display: flex;
+  justify-content: center;
+  padding: 20px;
+}
+/* Both axes scroll here rather than on the page: the row cap is server-side,
+   but ~200 rows is still taller than a message should ever be. */
+.claw-table-preview-scroll {
+  overflow: auto;
+  max-height: 340px;
+}
+.claw-table-preview-table {
+  border-collapse: collapse;
+  font-size: 12.5px;
+  width: max-content;
+  min-width: 100%;
+}
+.claw-table-preview-table th,
+.claw-table-preview-table td {
+  padding: 6px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border-subtle, #e8e7e4);
+  /* Cells are capped at 300 chars server-side, which is still far too wide to
+     lay out; clip here and expose the full value via the title attribute. */
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claw-table-preview-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--color-surface-2, #faf9f7);
+  font-weight: 600;
+  color: var(--color-text-secondary, #6b6862);
+  z-index: 1;
+}
+.claw-table-preview-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.claw-table-preview-foot {
+  padding: 7px 12px;
+  border-top: 1px solid var(--color-border-subtle, #e8e7e4);
+  background: var(--color-surface-2, #faf9f7);
+}
+
+/* ---- Inline HTML preview (agent-authored .html artifacts) ---- */
+/* Same full-width card as the spreadsheet preview above, for the same reason:
+   a report's intrinsic width is whatever its author chose. */
+.claw-html-preview {
+  flex: 1 1 100%;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
+  border-radius: 10px;
+  background: var(--color-surface-1, #fff);
+  overflow: hidden;
+}
+.claw-html-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border-subtle, #e8e7e4);
+  background: var(--color-surface-2, #faf9f7);
+}
+.claw-html-preview-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-primary, #1c1a18);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claw-html-preview-open {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 6px;
+}
+.claw-html-preview-open:hover {
+  background: var(--color-surface-3, #f0eeea);
+}
+.claw-html-preview-loading {
+  display: flex;
+  justify-content: center;
+  padding: 20px;
+}
+/* Fixed height, not fitted to the content: measuring a sandboxed frame's
+   document would require allow-same-origin, which is precisely what must never
+   be granted here. The frame scrolls internally instead. */
+.claw-html-preview-frame {
+  display: block;
+  width: 100%;
+  height: 420px;
+  border: 0;
+  background: #fff;
+}
+.claw-html-preview-foot {
+  padding: 7px 12px;
+  border-top: 1px solid var(--color-border-subtle, #e8e7e4);
+  background: var(--color-surface-2, #faf9f7);
 }
 
 /* ---- Knowledge (Settings) ---- */

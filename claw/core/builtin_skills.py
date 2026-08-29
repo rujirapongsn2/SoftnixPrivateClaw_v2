@@ -14,6 +14,13 @@ sandbox image (docker/sandbox.Dockerfile) — python-pptx, openpyxl, PyMuPDF,
 python-docx, reportlab, pandas, etc. — rather than introducing new in-process
 tools, since document creation/editing already happens by shelling out to the
 sandbox.
+
+``html-report`` is the same idea for .html artifacts, which are the one document
+kind rendered back inside the app (Chat.tsx's HtmlPreview): it carries the light
+house palette — kept in step with the token values at the top of
+web/src/styles.css — and the constraints of the preview's sandbox/CSP, so reports
+match the product instead of arriving as dark, script-driven pages that render
+blank in the card.
 """
 
 from dataclasses import dataclass, field
@@ -1264,6 +1271,134 @@ cash flow can be reasonable for high-growth SaaS.
 ```
 """
 
+_HTML_REPORT_CONTENT = """\
+House style for any `.html` file you write into the workspace (report, dashboard,
+one-pager, invoice, summary). Two things drive it: the file is shown inline in the
+chat, in a locked-down frame, and it has to look like part of the product rather
+than a generic dark template.
+
+## Light theme, unless the user asked for dark
+Default to a LIGHT document. Do NOT emit a dark background, a dark "dashboard"
+theme, or a `@media (prefers-color-scheme: dark)` block on your own initiative —
+the product UI is light-only, so an unasked-for dark report looks foreign next to
+it and prints badly. Declare the scheme explicitly so the reader's OS setting
+can't flip parts of it: `<meta name="color-scheme" content="light">` plus
+`color-scheme: light` on :root.
+
+If the user DID ask for a dark report, write one — but say so explicitly, with
+`content="dark"` in that meta and `color-scheme: dark` on :root. The preview
+forces an *undeclared* document to light in order to catch the accidental case,
+and an explicit declaration is the signal that tells it to stand down; a dark
+report that omits it renders light in the card whatever its CSS says. Never
+express this as `@media (prefers-color-scheme: dark)`: that keys off each
+reader's OS rather than the request, so it hands a different document to each of
+them.
+
+## Palette (matches the product's own theme)
+    --bg:        #faf8f4   page background (warm off-white, not pure white)
+    --surface:   #ffffff   cards, table bodies
+    --muted:     #f3f1ea   table headers, subtle fills, code blocks
+    --border:    #e8e7e4   hairlines           --border-strong: #d8d6d1
+    --text:      #1c1a18   body                --text-dim:      #6b6760  secondary
+    --accent:    #2786c2   brand blue — headings' accent rule, links, chart series
+    --accent-ink:#1a5a8a   accent used AS TEXT (brand blue on white is only ~3.4:1,
+                           below WCAG AA for body text — never use #2786c2 for prose)
+    --accent-bg: #e2eef9   accent tint (callouts, selected rows, badges)
+    --danger:    #c0392b   negative deltas, alerts
+Keep the accent for emphasis, not for large fills: one brand-coloured element per
+section reads as designed, a fully blue page reads as a template.
+
+## The preview frame is strict — design for it
+The card in chat renders the file in a sandboxed iframe with
+`default-src 'none'; style-src 'unsafe-inline'; img-src data:` and no scripts.
+So, in a file meant to be previewed:
+- NO `<script>` — it will not run. Chart.js/Plotly/D3/Alpine from a CDN render nothing.
+- NO external CSS, webfonts, or images — no `@import`, no `<link href=https://...>`,
+  no `<img src=https://...>`. They are blocked, not just slow.
+- Inline `<style>` in `<head>` is fine, and is the only stylesheet you get.
+- Charts: prefer inline `<svg>` you compute yourself — it costs a few KB, stays
+  sharp at any zoom, and never runs into the size cap below. Otherwise render a
+  PNG in the sandbox (matplotlib) and embed it as
+  `<img src="data:image/png;base64,...">`.
+- SIZE CAP: only the first 2 MB of the file is previewed; past that the card
+  shows a truncated document (the download link still has the whole thing).
+  base64 inflates a PNG by ~33%, so a few full-width matplotlib figures at
+  default dpi will blow through it and silently cut off every table and chart
+  after them. If you must embed PNGs, keep each one under ~150 KB before
+  encoding — `savefig(..., dpi=100)` at a modest figsize, not `dpi=300`.
+- Fonts: system stack only —
+  `system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif`
+  (that Thai family keeps Thai text from falling back to a mismatched face).
+
+## Layout
+Centered column, `max-width: 960px`, ~32px page padding. Cards are 1px
+`--border` + 10px radius on `--surface`; use a hairline or a light background
+instead of a heavy shadow. Tables: full width, `--muted` header row, 1px
+`--border` row rules, numeric columns right-aligned and tabular
+(`font-variant-numeric: tabular-nums`), no zebra striping on top of card borders.
+Headings: `--text`, with the accent reserved for a short rule/label above an H1
+or a section marker — not for every heading.
+
+## Boilerplate
+Set `lang` to the language the report is actually written in — `en` for an
+English report, `th` for a Thai one. `th` below is only the fallback for when
+the user has not indicated a language; leaving it on an English document makes
+screen readers read it in a Thai voice and triggers a translate prompt.
+```html
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Q3 Supplier Review</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg:#faf8f4; --surface:#fff; --muted:#f3f1ea; --border:#e8e7e4;
+    --text:#1c1a18; --text-dim:#6b6760; --accent:#2786c2; --accent-ink:#1a5a8a;
+    --accent-bg:#e2eef9; --danger:#c0392b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; padding:32px 24px; background:var(--bg); color:var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif;
+    font-size:15px; line-height:1.6;
+  }
+  .wrap { max-width:960px; margin:0 auto; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:18px; margin:32px 0 12px; }
+  .eyebrow { color:var(--accent-ink); font-size:12px; font-weight:600;
+             letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px; }
+  .card { background:var(--surface); border:1px solid var(--border);
+          border-radius:10px; padding:20px; margin:16px 0; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th { background:var(--muted); text-align:left; font-weight:600;
+       padding:10px 12px; border-bottom:1px solid var(--border); }
+  td { padding:10px 12px; border-bottom:1px solid var(--border); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr:last-child td { border-bottom:0; }
+  .muted { color:var(--text-dim); }
+  .neg { color:var(--danger); }
+  a { color:var(--accent-ink); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="eyebrow">Supplier report</div>
+    <h1>Q3 Supplier Review</h1>
+    <p class="muted">Generated 2026-08-29 · 42 suppliers</p>
+    <div class="card"> ... </div>
+  </div>
+</body>
+</html>
+```
+
+Deviate from the palette only when the user asks for their own brand colours —
+then keep the structure and swap the variables in `:root`, so the layout stays
+consistent and one edit re-themes the whole document.
+"""
+
 _LEGAL_RISK_CONTENT = """\
 You are a legal risk assessment assistant for an in-house legal team. You help
 evaluate, classify, and document legal risks using a structured framework based
@@ -1513,6 +1648,38 @@ _BUILTIN_SKILLS: tuple[BuiltinSkill, ...] = (
         summary=(
             "Create and edit Word documents including RFQ letters, supplier evaluation reports, "
             "SOPs, and contract templates with professional formatting."
+        ),
+    ),
+    BuiltinSkill(
+        name="html-report",
+        description=(
+            "House style for any .html file you write — light theme on the product's own "
+            "palette, plus what the in-chat preview actually allows (no scripts, no external "
+            "CSS/fonts/images). Read it BEFORE writing an .html report, dashboard, or page."
+        ),
+        content=_HTML_REPORT_CONTENT,
+        capabilities=(
+            (
+                "Light House Theme",
+                "warm off-white surfaces, brand blue accent, and WCAG-safe text colours matching the product UI",
+            ),
+            (
+                "Preview-Safe Markup",
+                "inline styles only, inline SVG or base64 charts — nothing the sandboxed preview frame blocks",
+            ),
+            (
+                "Report Layout",
+                "centered 960px column, bordered cards, and readable tables with tabular numerics",
+            ),
+            (
+                "Copy-Paste Boilerplate",
+                "a complete document skeleton with the palette as :root variables, re-themable in one edit",
+            ),
+        ),
+        summary=(
+            "Write .html reports that look like part of the product instead of a generic dark "
+            "template: a light palette matching the app's own theme, and markup that actually "
+            "renders inside the chat's sandboxed preview frame."
         ),
     ),
     BuiltinSkill(

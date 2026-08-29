@@ -7,11 +7,13 @@ of concurrent users share the event loop.
 
 import asyncio
 import platform
+import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
 
 from loguru import logger
+from sqlalchemy.exc import SQLAlchemyError
 
 from claw.config import Settings
 from claw.core.bus import EventBus
@@ -20,8 +22,10 @@ from claw.core.context import (
     build_runtime_context,
     build_user_content,
     render_plan,
+    swap_images_for_description,
+    vision_note,
 )
-from claw.core.turn_context import current_session_id
+from claw.core.turn_context import current_session_id, current_turn_deadline
 from claw.core.events import (
     ToolConfirmRequest,
     ToolConfirmResolved,
@@ -71,9 +75,40 @@ from claw.workflows.service import WorkflowService
 
 _STORED_TOOL_RESULT_CAP = 4000
 
+# How many filenames a "no answer, but files were produced" message names before
+# collapsing to a "+N" count — a long run can touch dozens, and an unbounded list
+# would bury the explanation it is appended to.
+_FALLBACK_ARTIFACTS_SHOWN = 8
+
 # How long an "ask"-mode tool waits for the user's approve/deny before it is
 # auto-declined, so a turn can never hang forever on an unanswered card.
 _CONFIRM_TIMEOUT_SECONDS = 600
+
+# Vision delegation: when the chat model can't accept images, the operator's
+# kind="vision" model reads them once and the chat model answers from that
+# description. These bounds keep a delegated turn from costing more than the
+# turn it stands in for — the images are already capped at ~8MB each by
+# build_user_content, but nothing capped how many of them, how long the reader
+# may run, or how much it may write. The image cap matches the upload cap
+# (_MAX_ATTACHMENTS in claw/api/routes.py) so a normal upload is never silently
+# half-read; when a cap does bite, vision_note() tells the chat model so.
+_VISION_MAX_IMAGES = 8
+_VISION_MAX_TOKENS = 1500
+_VISION_TIMEOUT_SECONDS = 90.0
+_VISION_PROMPT = (
+    "Describe the attached image(s) in full, factual detail for a colleague who "
+    "cannot see them. Transcribe any text, numbers, table values, labels, code, or "
+    "error messages exactly as they appear. Describe charts by their data, not just "
+    "their shape. Do not interpret, advise, or answer any question in the image — "
+    "only report what is visible. If something is unreadable, say so."
+)
+
+
+class _VisionBlocked(Exception):
+    """The control policy blocked what the vision model read out of an attached
+    image. Carried as an exception so the turn refuses with the guardrail's own
+    message rather than the generic "this model can't see images" — the two are
+    different problems and only one is fixed by switching models."""
 
 
 class TurnFailed(Exception):
@@ -89,6 +124,22 @@ class TurnFailed(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+
+
+class _TranscriptSaveError(Exception):
+    """Marks a SQLAlchemyError as specifically coming from a transcript
+    write, not from some other DB access nested inside the turn (audit log,
+    a tool querying the DB, …) — those get the generic error.llm message
+    instead of a misleading "your message/answer wasn't saved".
+
+    `stage` distinguishes the two save points: "request" is the user's own
+    message, persisted before the model is ever called, vs. "answer" (the
+    default) for the assistant/tool messages persisted after generation —
+    only the latter can truthfully say "the answer was generated"."""
+
+    def __init__(self, stage: str = "answer") -> None:
+        super().__init__(stage)
+        self.stage = stage
 
 
 class ClawAgent:
@@ -136,11 +187,10 @@ class ClawAgent:
             workspace=workspace,
             model=settings.llm.model,
             max_tokens=settings.llm.max_tokens,
+            max_turn_seconds=settings.llm.max_turn_seconds,
         )
         self.tools.register(SpawnTool(subagents))
-        self.tools.register(
-            WorkflowTool(WorkflowService(provider, subagents, model=settings.llm.model))
-        )
+        self.tools.register(WorkflowTool(WorkflowService(provider, subagents, model=settings.llm.model)))
         # One tool named "browser": when client-extension pairing is enabled, the
         # unified tool prefers the user's paired Chrome and falls back to the
         # server-side browser; otherwise keep the server-side-only tool.
@@ -177,6 +227,7 @@ class ClawAgent:
             temperature=settings.llm.temperature,
             arg_guard=self._guard_tool_args if policy is not None else None,
             workspace=workspace,
+            max_turn_seconds=settings.llm.max_turn_seconds,
         )
 
     def _guard_tool_args(self, tool_name: str, args: dict) -> tuple[dict, str | None]:
@@ -371,9 +422,7 @@ class AgentRuntime:
         return {sid for sid, n in self._active_turns.items() if n > 0}
 
     # ------------------------------------------------------------------ Ask-mode
-    async def request_confirmation(
-        self, session_id: str, turn_id: str, tool: str, args_preview: str
-    ) -> bool:
+    async def request_confirmation(self, session_id: str, turn_id: str, tool: str, args_preview: str) -> bool:
         """Publish a confirm-request and block until the user answers (or timeout)."""
         request_id = uuid.uuid4().hex[:12]
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
@@ -386,9 +435,7 @@ class AgentRuntime:
         }
         self.bus.publish(
             session_id,
-            ToolConfirmRequest(
-                turn_id=turn_id, request_id=request_id, tool=tool, args_preview=args_preview
-            ),
+            ToolConfirmRequest(turn_id=turn_id, request_id=request_id, tool=tool, args_preview=args_preview),
         )
         try:
             approved = await asyncio.wait_for(future, timeout=_CONFIRM_TIMEOUT_SECONDS)
@@ -413,9 +460,7 @@ class AgentRuntime:
             future.set_result(approved)
         self.bus.publish(
             entry["session_id"],
-            ToolConfirmResolved(
-                turn_id=entry["turn_id"], request_id=request_id, approved=approved
-            ),
+            ToolConfirmResolved(turn_id=entry["turn_id"], request_id=request_id, approved=approved),
         )
         return True
 
@@ -662,18 +707,32 @@ class AgentRuntime:
                 effective_model: str | None = None
                 model_key: str | None = None
                 model_base: str | None = None
+                model_window: int | None = None
                 if self.llm_config is not None:
                     requested = model or (session.model if session else None)
                     if requested:
-                        resolved = await self.llm_config.resolve(
-                            requested, user_id, max_cost=plan_chat_cost
-                        )
+                        resolved = await self.llm_config.resolve(requested, user_id, max_cost=plan_chat_cost)
                         if resolved is not None:
                             effective_model = resolved["model_id"]
                             model_key = resolved["api_key"] or None
                             model_base = resolved["api_base"] or None
+                            model_window = resolved["context_window"]
                     if effective_model is None:
                         effective_model = await self.llm_config.default_model_for(plan_chat_cost)
+                        if effective_model is not None:
+                            # Second lookup purely for the admin's context-window
+                            # override; credentials stay on the env default here,
+                            # as they have always been on this fallback path.
+                            # Scoped to admin-global rows (user_id=None) to match
+                            # default_model_for, which picked this model from that
+                            # scope: resolve() otherwise prefers the caller's own
+                            # row on a model_id tie, so a user with a same-named
+                            # BYOK model would set the window for a turn running on
+                            # the admin's credentials.
+                            fallback = await self.llm_config.resolve(
+                                effective_model, None, max_cost=plan_chat_cost
+                            )
+                            model_window = fallback["context_window"] if fallback else None
                     # A plan cost ceiling is in effect but no admin-global model
                     # satisfies it. Distinguish two cases before rejecting:
                     #   1. Admin-global models DO exist but the plan allows none of
@@ -694,8 +753,11 @@ class AgentRuntime:
                         if any_global is not None:
                             await self.audit.log(
                                 "quota",
-                                {"event": "no_model_for_plan", "plan": plan["name"] if plan else None,
-                                 "max_chat_cost": plan_chat_cost},
+                                {
+                                    "event": "no_model_for_plan",
+                                    "plan": plan["name"] if plan else None,
+                                    "max_chat_cost": plan_chat_cost,
+                                },
                                 user_id=user_id,
                                 session_id=session_id,
                             )
@@ -747,15 +809,28 @@ class AgentRuntime:
                     )
                 finally:
                     await sync_task
-                # Built-in skills are always offered; user skills are merged in.
-                enabled_skills = [*builtin_skills(), *user_skills]
+                # Built-in skills are always offered; user skills are merged in,
+                # and one of the same name SHADOWS the built-in instead of
+                # joining it. Both other readers already resolve it that way —
+                # read_skill checks the store first, and Settings hides the
+                # built-in behind `shadows_builtin` — so listing both here would
+                # advertise a built-in's description alongside content the tool
+                # can never return. A user can hold such a name from before it
+                # was reserved: the reserved-name check only guards new writes.
+                user_names = {s.name for s in user_skills}
+                enabled_skills = [
+                    *(b for b in builtin_skills() if b.name not in user_names),
+                    *user_skills,
+                ]
                 # For any user skill linked to a connector, resolve that
                 # connector's CURRENT registered tool names (mcp_{name}_{tool})
                 # live — never hardcoded in the skill's own text, so renaming or
                 # recreating the connector never leaves the skill's instructions
                 # pointing at a stale/nonexistent tool name.
                 tool_names_by_skill: dict[str, list[str]] = {}
-                if self.connectors is not None and any(getattr(s, "connector_id", None) for s in enabled_skills):
+                if self.connectors is not None and any(
+                    getattr(s, "connector_id", None) for s in enabled_skills
+                ):
                     # Fetch each list once for the whole turn instead of once per
                     # linked skill — resolve_tool_names would otherwise re-query
                     # both the user's own connectors and the global ones on every
@@ -811,25 +886,55 @@ class AgentRuntime:
                 runtime_ctx = build_runtime_context(channel, locale)
                 model_content, storage_text = build_user_content(content, media, agent.workspace)
                 # model_content is only ever a list when build_user_content produced at
-                # least one image_url block (see its docstring) — reject before ever
-                # calling the provider so a text-only model doesn't burn a round trip on
-                # a request that will fail identically every time.
+                # least one image_url block (see its docstring) — never send that to a
+                # text-only model, which would fail identically on every retry.
                 # effective_model is None when no Control Plane model resolved and the
                 # provider falls back to its own default, so mirror that fallback here or
                 # the check silently skips on env-configured deployments.
-                vision_model = effective_model or self.settings.llm.model
+                turn_model = effective_model or self.settings.llm.model
+                stored_content = storage_text  # text + attachment names (never base64)
+                # Persist the user message NOW (not at turn end) so it's durable the
+                # instant the turn starts. Otherwise switching away mid-turn and back
+                # would show an empty transcript — listMessages had nothing yet.
+                # history was already loaded above, so this doesn't duplicate the
+                # prompt's user turn. This has to stay ahead of the vision read
+                # below: that read can block for a minute and a half, and anything
+                # it raises would otherwise take the user's message down with it.
+                try:
+                    user_seq = await self.messages.append(
+                        session_id, [{"role": "user", "content": stored_content}]
+                    )
+                except SQLAlchemyError as exc:
+                    raise _TranscriptSaveError("request") from exc
+                vision_delegate: str | None = None
                 if (
                     isinstance(model_content, list)
-                    and vision_model
-                    and not model_supports_vision(vision_model)
+                    and turn_model
+                    and not model_supports_vision(turn_model)
                 ):
-                    msg = t("error.llm_no_vision_support", locale)
-                    # Persist before returning (same as the policy-blocked path above) so
-                    # the user's message + attachment note don't vanish from history just
-                    # because this turn was rejected before reaching the model.
-                    await self.messages.append(session_id, [{"role": "user", "content": storage_text}])
-                    self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
-                    return msg
+                    # Hand the images to the operator's kind="vision" model once and
+                    # let the chat model answer from its description, so a turn that
+                    # could only ever be refused gets an answer instead. Falls back to
+                    # the refusal when no vision model is configured or the read fails.
+                    refusal: str | None = None
+                    try:
+                        delegated = await self._delegate_vision(user_id, session_id, model_content)
+                    except _VisionBlocked as blocked:
+                        delegated, refusal = None, str(blocked)
+                    if delegated is None:
+                        msg = refusal or t("error.llm_no_vision_support", locale)
+                        self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
+                        return msg
+                    vision_delegate, model_content, description_note = delegated
+                    # Fold the description into the stored message. The images are
+                    # never persisted, so without this every follow-up turn is blind
+                    # to what the user attached while the transcript still claims it
+                    # was read. Backgrounded: losing the enrichment degrades the next
+                    # turn, failing the current one over it would be worse.
+                    stored_content = f"{stored_content}\n\n{description_note}"
+                    self._spawn_background(
+                        self.messages.set_content(session_id, user_seq, stored_content)
+                    )
                 if isinstance(model_content, str):
                     user_message = {"role": "user", "content": f"{runtime_ctx}\n\n{model_content}"}
                 else:
@@ -838,13 +943,6 @@ class AgentRuntime:
                         "role": "user",
                         "content": [{"type": "text", "text": runtime_ctx}, *model_content],
                     }
-                stored_content = storage_text  # text + attachment names (never base64)
-                # Persist the user message NOW (not at turn end) so it's durable the
-                # instant the turn starts. Otherwise switching away mid-turn and back
-                # would show an empty transcript — listMessages had nothing yet.
-                # history was already loaded above, so this doesn't duplicate the
-                # prompt's user turn.
-                await self.messages.append(session_id, [{"role": "user", "content": stored_content}])
                 prompt_messages = self.assembler.assemble(
                     agent.system_prompt(
                         memory_context,
@@ -866,11 +964,24 @@ class AgentRuntime:
                 # Expose the active session to session-scoped tools (update_plan) for
                 # the duration of the turn; reset after so it never leaks to another.
                 _session_token = current_session_id.set(session_id)
+                # Same idea for the wall-clock deadline, read by tools that start a
+                # nested agent so they can't hand themselves a fresh budget on top
+                # of this turn's. Set from the same value the loop enforces.
+                budget = agent.loop.max_turn_seconds
+                _deadline_token = current_turn_deadline.set(
+                    time.monotonic() + budget if budget > 0 else None
+                )
                 try:
                     outcome = await agent.loop.run_turn(
-                        turn_id, prompt_messages, lambda ev: self.bus.publish(session_id, ev),
-                        model=effective_model, api_key=model_key, api_base=model_base,
-                        permission_mode=permission_mode, confirm=_confirm,
+                        turn_id,
+                        prompt_messages,
+                        lambda ev: self.bus.publish(session_id, ev),
+                        model=effective_model,
+                        api_key=model_key,
+                        api_base=model_base,
+                        context_window=model_window,
+                        permission_mode=permission_mode,
+                        confirm=_confirm,
                     )
                 except ProviderError as exc:
                     detail = str(exc)
@@ -895,10 +1006,65 @@ class AgentRuntime:
                     return message
                 finally:
                     current_session_id.reset(_session_token)
+                    current_turn_deadline.reset(_deadline_token)
 
                 final = outcome.final_content
-                if outcome.reached_max_iterations and not final:
-                    final = t("error.max_iterations", locale)
+                # loop.py never appends anything to history for an empty-content
+                # turn (an empty assistant message renders as a blank bubble and
+                # some providers reject it back in context) — but the fallback
+                # text synthesized below IS shown to the user live. Remember to
+                # persist that same text further down, or a reload shows the
+                # user's message with no reply at all even though they saw one.
+                persist_fallback = not final
+                # True when `final` no longer matches the assistant message loop.py
+                # already appended to history, so the stored copy has to be
+                # rewritten below or a reload shows different text than the user saw.
+                rewrite_final = False
+                if not final:
+                    # A turn that ends with nothing to say must still say
+                    # something: publishing an empty TurnCompleted renders as a
+                    # finished turn with no answer, which is indistinguishable
+                    # from the app silently doing nothing.
+                    if outcome.timed_out:
+                        final = t("error.turn_timeout", locale)
+                    elif outcome.reached_max_iterations:
+                        final = t("error.max_iterations", locale)
+                    elif outcome.finish_reason == "length":
+                        final = t("error.truncated", locale)
+                    else:
+                        final = t("error.empty_response", locale)
+                    if outcome.artifacts:
+                        # A timed-out turn very often HAS produced something — the
+                        # files just never got a closing sentence. Naming them turns
+                        # "it failed" into "here is what got done", and the chips
+                        # attached further down make them openable.
+                        shown = outcome.artifacts[:_FALLBACK_ARTIFACTS_SHOWN]
+                        extra = len(outcome.artifacts) - len(shown)
+                        listed = ", ".join(shown) + (f", +{extra}" if extra > 0 else "")
+                        final = f"{final}\n\n{t('error.partial_artifacts', locale, files=listed)}"
+                    logger.warning(
+                        "Turn {} produced no content (finish_reason={} iterations={} artifacts={})",
+                        turn_id,
+                        outcome.finish_reason,
+                        outcome.iterations,
+                        len(outcome.artifacts),
+                    )
+                elif outcome.timed_out:
+                    # The deadline cut the stream off mid-answer. The text is real
+                    # and already on screen, so it is kept — but unmarked it reads
+                    # as a finished reply that merely trails off, and the next turn
+                    # would get it back as history as if the model had said all it
+                    # meant to. Mark where it stops instead. (Artifacts are not
+                    # listed here the way they are above: this turn DID answer, and
+                    # the file chips are attached further down regardless.)
+                    final = f"{final}\n\n{t('error.turn_timeout_partial', locale)}"
+                    rewrite_final = True
+                    logger.warning(
+                        "Turn {} was cut off mid-answer by its time budget (iterations={} chars={})",
+                        turn_id,
+                        outcome.iterations,
+                        len(outcome.final_content or ""),
+                    )
 
                 # Enforce policy on the model's final output before it leaves the system.
                 if self.policy is not None and final:
@@ -906,52 +1072,119 @@ class AgentRuntime:
                     if out_decision.matched_rules:
                         await self.audit.log(
                             "policy",
-                            {"scope": "output", "action": out_decision.action, "rules": out_decision.matched_rules},
+                            {
+                                "scope": "output",
+                                "action": out_decision.action,
+                                "rules": out_decision.matched_rules,
+                            },
                             user_id=user_id,
                             session_id=session_id,
                         )
                     if out_decision.blocked:
                         final = out_decision.message or "Response withheld by the control policy."
+                        rewrite_final = True
                     elif out_decision.masked:
                         final = out_decision.text
+                        # Persist the masked copy, not the raw one: the transcript is
+                        # replayed to the model and re-served on reload, so storing
+                        # the unmasked text would hand back exactly what the rule
+                        # just removed.
+                        rewrite_final = True
 
                 # User message was already persisted at turn start; store only the
                 # new assistant/tool messages this turn produced.
                 to_store = []
                 for msg in outcome.new_messages:
                     entry = dict(msg)
-                    if entry.get("role") == "tool" and len(entry.get("content") or "") > _STORED_TOOL_RESULT_CAP:
+                    if (
+                        entry.get("role") == "tool"
+                        and len(entry.get("content") or "") > _STORED_TOOL_RESULT_CAP
+                    ):
                         entry["content"] = entry["content"][:_STORED_TOOL_RESULT_CAP] + "\n... (truncated)"
                     to_store.append(entry)
+                if persist_fallback:
+                    # Nothing was appended above for this turn (see the comment
+                    # by `persist_fallback`'s assignment) — persist the fallback
+                    # explanation itself, post-policy-enforcement, so history
+                    # matches what the user actually saw.
+                    to_store.append({"role": "assistant", "content": final})
+                anchor = next(
+                    (
+                        e
+                        for e in reversed(to_store)
+                        if e.get("role") == "assistant" and not e.get("tool_calls")
+                    ),
+                    None,
+                )
+                if rewrite_final and anchor is not None:
+                    anchor["content"] = final
                 # Attach artifacts to the final assistant message so they survive a
                 # reload (rendered as openable file chips in the UI).
-                if outcome.artifacts and to_store:
-                    for entry in reversed(to_store):
-                        if entry.get("role") == "assistant" and not entry.get("tool_calls"):
-                            entry["meta"] = {**(entry.get("meta") or {}), "artifacts": outcome.artifacts}
-                            break
+                if outcome.artifacts:
+                    if anchor is None:
+                        # A turn can create files and still end with no closing
+                        # text (the model hits its output cap mid-thought). The
+                        # files must stay reachable anyway, so carry them on an
+                        # empty assistant message — the same shape the image
+                        # tool stores, and what the transcript endpoint keeps.
+                        anchor = {"role": "assistant", "content": ""}
+                        to_store.append(anchor)
+                    anchor["meta"] = {**(anchor.get("meta") or {}), "artifacts": outcome.artifacts}
+                if vision_delegate:
+                    # Record which model actually read the image, so a reloaded
+                    # transcript still explains why a text-only model answered a
+                    # question about a picture.
+                    if anchor is None:
+                        anchor = {"role": "assistant", "content": ""}
+                        to_store.append(anchor)
+                    anchor["meta"] = {**(anchor.get("meta") or {}), "vision_model": vision_delegate}
                 if to_store:
-                    await self.messages.append(session_id, to_store)
+                    try:
+                        await self.messages.append(session_id, to_store)
+                    except SQLAlchemyError as exc:
+                        raise _TranscriptSaveError from exc
 
                 self.bus.publish(
                     session_id,
                     TurnCompleted(
-                        turn_id=turn_id, content=final or "", usage=outcome.usage, artifacts=outcome.artifacts
+                        turn_id=turn_id,
+                        content=final or "",
+                        usage=outcome.usage,
+                        artifacts=outcome.artifacts,
+                        vision_model=vision_delegate or "",
                     ),
                 )
             except Exception as exc:
                 logger.exception("Unhandled turn failure for session {}", session_id)
-                message = t("error.llm", locale, reason=t("reason.internal", locale))
+                # This block wraps the whole turn, so it also catches failures that
+                # happen after the model has already answered — including other DB
+                # access nested inside the turn (audit.log, a tool querying the DB).
+                # Only the transcript write itself is tagged (_TranscriptSaveError,
+                # raised at each self.messages.append call site above); a bare
+                # SQLAlchemyError from elsewhere in the turn gets the generic
+                # message instead of a misleading "your message/answer wasn't
+                # saved". Which save point failed changes what's actually true:
+                # the pre-turn user-message write never reached the model at
+                # all, so it must not claim an answer was generated.
+                if isinstance(exc, _TranscriptSaveError):
+                    message = (
+                        t("error.save_request", locale) if exc.stage == "request" else t("error.save", locale)
+                    )
+                else:
+                    message = t("error.llm", locale, reason=t("reason.internal", locale))
                 self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
                 raise TurnFailed(message) from exc
 
         logger.info(
-            "Turn {} shape: iterations={} tool_calls={} ttft_ms={} duration_ms={}",
+            "Turn {} shape: iterations={} tool_calls={} ttft_ms={} duration_ms={} "
+            "tool_defs_chars={} prompt_chars={}",
             turn_id,
             outcome.iterations,
             outcome.tool_calls,
             outcome.ttft_ms,
             outcome.duration_ms,
+            outcome.tool_defs_chars,
+            outcome.prompt_chars,
         )
         if self.usage is not None:
             self._spawn_background(
@@ -970,6 +1203,104 @@ class AgentRuntime:
             )
         self._spawn_background(self.memory.maybe_consolidate(user_id, session_id))
         return final
+
+    async def _delegate_vision(
+        self,
+        user_id: str,
+        session_id: str,
+        content: list[dict],
+    ) -> tuple[str, str, str] | None:
+        """Read this message's images with the operator's kind="vision" model and
+        return (model_id, text-only content, storage note) for the chat model to
+        answer from.
+
+        The storage note is the same description in a form the transcript keeps,
+        so a follow-up turn — which no longer carries the images — still has
+        what was in them.
+
+        None means "no delegation happened" — no vision model configured, or the
+        read failed — and the caller falls back to refusing the turn. The failure
+        is never surfaced as content: a description that is actually an error
+        string would be answered from as if it were the image.
+        """
+        if self.llm_config is None:
+            return None
+        chosen = await self.llm_config.resolve_vision(user_id)
+        if chosen is None:
+            return None
+        all_images = [b for b in content if b.get("type") == "image_url"]
+        images = all_images[:_VISION_MAX_IMAGES]
+        if not images:
+            return None
+        model_id = chosen["model_id"]
+        try:
+            async with asyncio.timeout(_VISION_TIMEOUT_SECONDS):
+                result = await self.provider.chat(
+                    [{"role": "user", "content": [*images, {"type": "text", "text": _VISION_PROMPT}]}],
+                    model=model_id,
+                    max_tokens=_VISION_MAX_TOKENS,
+                    api_key=chosen["api_key"] or None,
+                    api_base=chosen["api_base"] or None,
+                )
+        except (ProviderError, TimeoutError) as exc:
+            logger.warning("Vision delegation to {} failed: {}", model_id, exc)
+            return None
+        # Bill the tokens even when the description turns out unusable below —
+        # the upstream call was made and charged either way. count_turn=True
+        # because the paths that reject a description (blocked, empty) return
+        # before the turn's own usage.record ever runs; counting only there
+        # would let a user who reliably trips one of them retry a paid upstream
+        # call all day without their daily quota ever moving.
+        if self.usage is not None and result.usage:
+            self._spawn_background(
+                self.usage.record(user_id, session_id, model_id, result.usage)
+            )
+        description = (result.content or "").strip()
+        if not description:
+            logger.warning("Vision delegation to {} returned no description", model_id)
+            return None
+        # The description re-enters the prompt as user text, so it goes through the
+        # same input policy the typed message did. An image is just another way to
+        # put text in front of the model; it must not be the way that skips the
+        # guardrails.
+        if self.policy is not None:
+            decision = self.policy.enforce(description, scope="input")
+            if decision.matched_rules:
+                await self.audit.log(
+                    "policy",
+                    {
+                        "scope": "input",
+                        "source": "vision",
+                        "action": decision.action,
+                        "rules": decision.matched_rules,
+                    },
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+            if decision.blocked:
+                raise _VisionBlocked(decision.message or "Request blocked by the control policy.")
+            if decision.masked:
+                description = decision.text
+        # A reader that ran out of budget mid-sentence produces a description
+        # that reads as complete. Saying it was cut off is the difference
+        # between "I only have part of this table" and a confident wrong total.
+        truncated = result.finish_reason == "length"
+        logger.info(
+            "Turn delegated {}/{} image(s) to vision model {} ({} chars{})",
+            len(images),
+            len(all_images),
+            model_id,
+            len(description),
+            ", truncated" if truncated else "",
+        )
+        note = vision_note(model_id, len(images), len(all_images), truncated)
+        return (
+            model_id,
+            swap_images_for_description(
+                content, description, model_id, described=len(images), truncated=truncated
+            ),
+            f"{note.strip()}\n{description}",
+        )
 
     def _spawn_background(self, coro) -> None:
         task = asyncio.create_task(self._guard(coro))

@@ -10,9 +10,19 @@ class LLMSettings(BaseModel):
     model: str = "anthropic/claude-sonnet-4-5"
     api_key: str = ""
     api_base: str = ""
-    max_tokens: int = 4096
+    # Output cap per LLM call. Reasoning models (Qwen3, DeepSeek-R1, …) spend
+    # this budget on hidden thinking *before* writing any visible answer, so a
+    # tight cap makes them return an empty completion (finish_reason="length")
+    # rather than a short one — 4096 was low enough to do that on a single
+    # tool-using turn.
+    max_tokens: int = 16384
     temperature: float = 0.1
     max_iterations: int = 60
+    # Wall-clock budget for one turn, checked between steps (0 disables it).
+    # The step limit alone doesn't bound how long a user waits: a model stuck
+    # retrying the same slow tool can run for many minutes well inside its
+    # iteration budget.
+    max_turn_seconds: float = 600
     # Token budget for the assembled prompt (input side).
     max_context_tokens: int = 60_000
 
@@ -187,6 +197,34 @@ class SchedulerSettings(BaseModel):
     timezone: str = "Asia/Bangkok"
 
 
+class LogSettings(BaseModel):
+    """Application logging. Left unconfigured, loguru ships a stderr sink with
+    `diagnose=True`, which prints the *value* of every local variable in every
+    traceback frame — so a crash loop writes prompts, message text and the
+    database URL (password included) into whatever file the supervisor is
+    capturing. loguru's own docs call that a leak and advise against it in
+    production; see claw/logging_setup.py for where this gets applied."""
+
+    level: str = "INFO"
+    # Full stack traces stay on — they're the useful half of loguru's default.
+    # Only the per-frame variable dump is dropped.
+    backtrace: bool = True
+    # Leave False outside of local debugging. See the class docstring.
+    diagnose: bool = False
+    # Rotating file sink, relative to the repo root ("" disables it). Separate
+    # from the supervisor's own capture file (claw.log / claw.err.log), which
+    # no in-process sink can rotate because the shell holds it open in append
+    # mode for the lifetime of the process.
+    file: str = "logs/claw.log"
+    # Handed to loguru as-is: a size ("20 MB") or an interval ("1 day").
+    rotation: str = "20 MB"
+    retention: str = "14 days"
+    # Gzip rotated segments — they're mostly repeated stack frames, so they
+    # compress hard. Not a format choice: the archive has to be written
+    # owner-only, and only the gzip path in logging_setup.py does that.
+    compress: bool = True
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CLAW_", env_nested_delimiter="__", env_file=".env", extra="ignore"
@@ -252,11 +290,10 @@ class Settings(BaseSettings):
     # Env names are un-prefixed (QROQ_*) by request, so read via explicit aliases
     # rather than the CLAW_ prefix. STT is enabled when the key is set.
     speech_api_key: str = Field(default="", validation_alias="QROQ_KEY")
-    speech_api_base: str = Field(
-        default="https://api.groq.com/openai/v1", validation_alias="QROQ_URL"
-    )
+    speech_api_base: str = Field(default="https://api.groq.com/openai/v1", validation_alias="QROQ_URL")
     speech_model: str = Field(default="whisper-large-v3", validation_alias="QROQ_MODEL")
 
+    log: LogSettings = LogSettings()
     llm: LLMSettings = LLMSettings()
     sandbox: SandboxSettings = SandboxSettings()
     browser: BrowserSettings = BrowserSettings()

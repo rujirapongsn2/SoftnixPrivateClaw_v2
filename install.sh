@@ -278,8 +278,22 @@ set -a; # shellcheck disable=SC1091
 uv run alembic upgrade head
 ok "schema up to date"
 
+# The supervisor's capture files hold prompts and message text for every tenant
+# on the box. launchd creates a missing StandardOutPath at the umask's 0644, and
+# so does the shell redirect in scripts/claw — pre-create them owner-only so
+# neither ever gets the chance. The app's own logs/claw.log is opened 0600 by
+# claw/logging_setup.py and needs nothing here.
+harden_capture_logs() {
+  local f
+  for f in "$PROJECT_DIR/claw.log" "$PROJECT_DIR/claw.out.log" "$PROJECT_DIR/claw.err.log"; do
+    [[ -e "$f" ]] || : >"$f"
+    chmod 600 "$f" 2>/dev/null || true
+  done
+}
+
 # 7) System service
 install_service() {
+  harden_capture_logs
   if [[ "$OS" == "linux" ]] && have systemctl; then
     step "Installing systemd service (claw.service)"
     local unit="/tmp/claw.service.$$"

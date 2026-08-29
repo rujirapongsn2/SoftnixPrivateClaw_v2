@@ -1,6 +1,6 @@
-"""Provider registry vision-capability metadata (claw/providers/registry.py)."""
+"""Provider registry model metadata (claw/providers/registry.py)."""
 
-from claw.providers.registry import supports_vision
+from claw.providers.registry import context_window, supports_vision
 
 
 def test_deepseek_models_do_not_support_vision():
@@ -28,3 +28,18 @@ def test_unmatched_model_defaults_to_supporting_vision():
 def test_known_vision_capable_families_are_not_blocked():
     assert supports_vision("anthropic/claude-3-5-sonnet") is True
     assert supports_vision("gemini/gemini-1.5-pro") is True
+
+
+def test_context_window_strips_routing_prefixes():
+    # The production id: LiteLLM's table is keyed by the underlying model, so
+    # the gateway prefix has to come off before the lookup hits.
+    assert context_window("openrouter/anthropic/claude-sonnet-5") == context_window("claude-sonnet-5")
+    assert context_window("gpt-4") == 8192
+
+
+def test_context_window_is_none_for_unknown_models():
+    # Never a guess: callers size a context budget off this and must be able to
+    # tell "unknown" apart from a real window.
+    assert context_window("some-private-gateway/internal-model-v9") is None
+    assert context_window("") is None
+    assert context_window(None) is None

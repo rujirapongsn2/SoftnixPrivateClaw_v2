@@ -138,6 +138,60 @@ async def test_stream_recovers_text_tool_call_without_leaking(monkeypatch, tools
     assert result.tool_calls[0].name == "search_knowledge"
 
 
+class _ClosableStream:
+    """Stands in for litellm's CustomStreamWrapper: an async iterator that
+    reports whether the provider released it."""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_abandoned_stream_is_closed(monkeypatch, tools):
+    # The turn deadline cancels the caller's `async for` mid-answer. Python does
+    # not close the generator for us, so without an explicit aclose the httpx
+    # connection is held until GC — a leak once turns start timing out in bulk.
+    stream = _ClosableStream([_chunk(content="a"), _chunk(content="b"), _chunk(content="c", finish="stop")])
+
+    async def fake_acompletion(**kwargs):
+        return stream
+
+    monkeypatch.setattr("litellm.acompletion", fake_acompletion)
+    provider = LiteLLMProvider(default_model="gemma")
+
+    events = provider.stream_chat([{"role": "user", "content": "hi"}], tools=tools)
+    await events.__anext__()  # consume one delta, then walk away
+    await events.aclose()
+
+    assert stream.closed
+
+
+@pytest.mark.asyncio
+async def test_fully_consumed_stream_is_also_closed(monkeypatch, tools):
+    stream = _ClosableStream([_chunk(content="hello", finish="stop")])
+
+    async def fake_acompletion(**kwargs):
+        return stream
+
+    monkeypatch.setattr("litellm.acompletion", fake_acompletion)
+    provider = LiteLLMProvider(default_model="gemma")
+    await _drain(provider, tools)
+
+    assert stream.closed
+
+
 @pytest.mark.asyncio
 async def test_stream_preserves_normal_answer(monkeypatch, tools):
     """A genuine prose answer still streams token-by-token and stays content."""

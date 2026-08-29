@@ -84,6 +84,22 @@ _TOOL_CALL_TIMEOUT_SECONDS = 60
 # module constant so direct construction (tests) has a sane default.
 _ERROR_RETRY_COOLDOWN_SECONDS = 60
 
+# A connector that keeps failing is usually gone for good (server retired, host
+# unreachable), not flapping — but the flat cooldown above retries it forever at
+# a fixed rate, and each retry costs a full connect timeout on a chat turn. So
+# the cooldown doubles per consecutive failed sync, capped so a connector that
+# comes back is still picked up within a few minutes without an admin edit
+# (which resets the streak immediately via invalidate()).
+_MAX_ERROR_BACKOFF_MULTIPLIER = 8
+
+# Caps on the free text a remote MCP server contributes to our tool schemas.
+# Tool definitions are re-sent in full on EVERY LLM call of a turn, so a server
+# that ships multi-paragraph descriptions (common) is a fixed tax on every step:
+# a 14-iteration turn pays it 14 times. Both limits are far above what a usable
+# description needs — they only clip servers that pasted their README in.
+_MAX_TOOL_DESCRIPTION_CHARS = 600
+_MAX_PARAM_DESCRIPTION_CHARS = 250
+
 # Bounds for a connector's own `timeout_ms` override (Settings > Connectors'
 # "Timeout (ms)" field) — mirrors the range enforced by ConnectorBody in
 # claw/api/manage.py, re-checked here in case anything else ever writes
@@ -142,13 +158,36 @@ _HEADER_ALLOWLIST = frozenset(
 # ordinary response bodies by the global replace below.
 _QUERY_ALLOWLIST = frozenset(
     {
-        "page", "per_page", "page_size", "limit", "offset",
-        "sort", "order", "order_by",
-        "format", "fields", "include", "expand",
-        "filter", "q", "query", "search",
-        "lang", "language", "locale", "timezone", "tz",
-        "view", "type", "status",
-        "since", "until", "start_date", "end_date", "date_from", "date_to",
+        "page",
+        "per_page",
+        "page_size",
+        "limit",
+        "offset",
+        "sort",
+        "order",
+        "order_by",
+        "format",
+        "fields",
+        "include",
+        "expand",
+        "filter",
+        "q",
+        "query",
+        "search",
+        "lang",
+        "language",
+        "locale",
+        "timezone",
+        "tz",
+        "view",
+        "type",
+        "status",
+        "since",
+        "until",
+        "start_date",
+        "end_date",
+        "date_from",
+        "date_to",
     }
 )
 
@@ -158,13 +197,37 @@ _QUERY_ALLOWLIST = frozenset(
 # author's name or a token count out of every response.
 _STRONG_SECRET_WORDS = frozenset(
     {
-        "secret", "password", "passwd", "passphrase", "pwd", "pw", "pass",
-        "credential", "credentials", "apikey", "bearer", "otp", "pin", "salt",
+        "secret",
+        "password",
+        "passwd",
+        "passphrase",
+        "pwd",
+        "pw",
+        "pass",
+        "credential",
+        "credentials",
+        "apikey",
+        "bearer",
+        "otp",
+        "pin",
+        "salt",
     }
 )
 _SECRET_HEAD_WORDS = _STRONG_SECRET_WORDS | {
-    "key", "keys", "token", "tokens", "auth", "authorization", "cookie", "cookies",
-    "session", "signature", "sig", "pat", "private", "access",
+    "key",
+    "keys",
+    "token",
+    "tokens",
+    "auth",
+    "authorization",
+    "cookie",
+    "cookies",
+    "session",
+    "signature",
+    "sig",
+    "pat",
+    "private",
+    "access",
 }
 # Punctuation, plus camelCase boundaries so "apiKey" splits like "api_key".
 # The character class must stay case-insensitive: with [^a-z0-9] an
@@ -345,13 +408,38 @@ def _register_scoped(registry: ToolRegistry, state, tool: Tool, connector_name: 
     global connector. First registration wins: globals, then the user's own.
     """
     if registry.has(tool.name):
-        logger.warning(
-            "Connector {} tool {} not registered: name already taken", connector_name, tool.name
-        )
+        logger.warning("Connector {} tool {} not registered: name already taken", connector_name, tool.name)
         return False
     registry.register(tool)
     state.tool_names.append(tool.name)
     return True
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _slim_schema(schema: Any, depth: int = 0) -> Any:
+    """Copy a remote JSON schema with every `description` clipped.
+
+    Only descriptions are touched — types, enums, and `required` are what
+    validation and the model's argument-filling actually depend on, so they are
+    passed through untouched. Recursion is depth-bounded because the schema is
+    third-party input and could be adversarially deep.
+    """
+    if depth > 8 or not isinstance(schema, dict):
+        return schema
+    out: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "description" and isinstance(value, str):
+            out[key] = _clip(value, _MAX_PARAM_DESCRIPTION_CHARS)
+        elif isinstance(value, dict):
+            out[key] = _slim_schema(value, depth + 1)
+        elif isinstance(value, list):
+            out[key] = [_slim_schema(v, depth + 1) for v in value]
+        else:
+            out[key] = value
+    return out
 
 
 class McpToolProxy(Tool):
@@ -381,8 +469,8 @@ class McpToolProxy(Tool):
         self._remote_name = tool_name
         self._tool_call_timeout_seconds = tool_call_timeout_seconds
         self.name = f"mcp_{connector}_{tool_name}"
-        self.description = f"[{connector}] {description or tool_name}"
-        self.parameters = schema or {"type": "object", "properties": {}}
+        self.description = f"[{connector}] {_clip(description or tool_name, _MAX_TOOL_DESCRIPTION_CHARS)}"
+        self.parameters = _slim_schema(schema) if schema else {"type": "object", "properties": {}}
 
     async def execute(self, **kwargs: Any) -> str:
         session = self._session_ref() if self._session_ref is not None else self._session
@@ -390,7 +478,9 @@ class McpToolProxy(Tool):
             return f"Error: {self.name} is not currently connected (reconnecting) — try again shortly"
         try:
             result = await session.call_tool(
-                self._remote_name, kwargs, read_timeout_seconds=timedelta(seconds=self._tool_call_timeout_seconds)
+                self._remote_name,
+                kwargs,
+                read_timeout_seconds=timedelta(seconds=self._tool_call_timeout_seconds),
             )
         except McpError as exc:
             if exc.error.code == httpx.codes.REQUEST_TIMEOUT:
@@ -420,6 +510,11 @@ class _UserConnections:
     # wall-clock) so an NTP/clock adjustment can't skew the cooldown window.
     # None once a sync ends fully healthy.
     errored_monotonic: float | None = None
+    # Consecutive syncs that ended with at least one connector in "error", used
+    # to lengthen the cooldown (see _backoff_seconds). Carried across the state
+    # object being rebuilt on every sync — otherwise it would reset to 0 each
+    # time and the backoff could never grow.
+    error_streak: int = 0
 
 
 @dataclass
@@ -456,6 +551,8 @@ class _GlobalConnections:
     proxies: dict[str, list["Tool"]] = field(default_factory=dict)
     statuses: dict[str, dict] = field(default_factory=dict)
     errored_monotonic: dict[str, float] = field(default_factory=dict)
+    # Per-connector version of _UserConnections.error_streak.
+    error_streaks: dict[str, int] = field(default_factory=dict)
     # True once sync_global has completed at least one full pass. Guards the
     # lock-busy bypass in sync_global: skipping the refresh when the lock is
     # contended is safe once the pool has been populated at least once (the
@@ -468,7 +565,7 @@ class _GlobalConnections:
     def tracked_names(self) -> set[str]:
         """Every connector name this pool holds ANY state for.
 
-        Deliberately the union of all seven name-keyed dicts, not `stacks`
+        Deliberately the union of all eight name-keyed dicts, not `stacks`
         alone: a kind="api" connector never opens a session, so it only ever
         appears in `signatures`/`proxies`/`statuses`/`errored_monotonic` (see
         sync_global). Driving sync_global's "no longer enabled" cleanup off
@@ -477,6 +574,12 @@ class _GlobalConnections:
         re-registering its credential-bearing tools into every user's registry
         until the process restarted. Any new name-keyed dict added to this
         dataclass must be unioned in here too, or it will resurrect that bug.
+
+        `error_streaks` is the one dict _close_one_global deliberately leaves
+        behind (the streak has to survive a reconnect), so after close_global
+        a failed-then-deleted connector is tracked by that dict ALONE — it has
+        to be unioned in here or sync_global's cleanup can never reach the
+        name and the streak entry leaks for the life of the process.
         """
         return (
             self.stacks.keys()
@@ -486,6 +589,7 @@ class _GlobalConnections:
             | self.statuses.keys()
             | self.signatures.keys()
             | self.errored_monotonic.keys()
+            | self.error_streaks.keys()
         )
 
 
@@ -556,6 +660,16 @@ class ConnectorManager:
             lock = asyncio.Lock()
             self._locks[user_id] = lock
         return lock
+
+    def _backoff_seconds(self, streak: int) -> float:
+        """How long to hold off retrying after `streak` consecutive failed syncs.
+
+        streak<=1 is the plain cooldown; every further consecutive failure
+        doubles it up to _MAX_ERROR_BACKOFF_MULTIPLIER.
+        """
+        if streak <= 1:
+            return self.error_retry_cooldown_seconds
+        return self.error_retry_cooldown_seconds * min(2 ** (streak - 1), _MAX_ERROR_BACKOFF_MULTIPLIER)
 
     def _effective_timeout_seconds(self, connector, default_seconds: float) -> float:
         """A connector's own `timeout_ms` (if set) overrides the instance-wide
@@ -676,10 +790,19 @@ class ConnectorManager:
             within_error_cooldown = (
                 had_error
                 and state.errored_monotonic is not None
-                and (time.monotonic() - state.errored_monotonic) < self.error_retry_cooldown_seconds
+                and (time.monotonic() - state.errored_monotonic) < self._backoff_seconds(state.error_streak)
             )
-            if state is not None and state.signature == signature and (not had_error or within_error_cooldown):
+            if (
+                state is not None
+                and state.signature == signature
+                and (not had_error or within_error_cooldown)
+            ):
                 return
+            # The state object below is replaced wholesale, so the streak has to
+            # be carried by hand or the backoff resets to zero on every sync. A
+            # changed signature means an admin/user edited the config — treat
+            # that as "I fixed it" and start the backoff over.
+            previous_streak = state.error_streak if state is not None and state.signature == signature else 0
 
             await self._close_user(user_id, registry)
             # _close_user can genuinely await real I/O (tearing down MCP
@@ -702,7 +825,9 @@ class ConnectorManager:
                 )
             )
             signature = (signature[0], global_state.signature, effective_global)
-            state = _UserConnections(signature=signature, stack=AsyncExitStack())
+            state = _UserConnections(
+                signature=signature, stack=AsyncExitStack(), error_streak=previous_streak
+            )
             self._users[user_id] = state
 
             for name in effective_global:
@@ -800,6 +925,9 @@ class ConnectorManager:
             # whole set until the cooldown elapses (see sync_tools docstring).
             if any(s.get("status") == "error" for s in state.statuses.values()):
                 state.errored_monotonic = time.monotonic()
+                state.error_streak += 1
+            else:
+                state.error_streak = 0
 
     def _build_api_tools(self, connector, *, connector_ref: Callable[[], Any] | None = None) -> list[Tool]:
         """Build a kind="api" connector's tools straight from its stored
@@ -874,7 +1002,7 @@ class ConnectorManager:
             # Split env into HTTP headers (HEADER_*), URL query params
             # (QUERY_*), and everything else.
             headers = {
-                key[len(_HEADER_ENV_PREFIX):]: value
+                key[len(_HEADER_ENV_PREFIX) :]: value
                 for key, value in (connector.env or {}).items()
                 if key.startswith(_HEADER_ENV_PREFIX) and value
             }
@@ -882,7 +1010,7 @@ class ConnectorManager:
             # "not set" — distinct from the key being absent entirely — so it
             # isn't filtered out here the way headers are; it's handled below.
             query_overrides = {
-                key[len(_QUERY_ENV_PREFIX):]: value
+                key[len(_QUERY_ENV_PREFIX) :]: value
                 for key, value in (connector.env or {}).items()
                 if key.startswith(_QUERY_ENV_PREFIX)
             }
@@ -1020,6 +1148,11 @@ class ConnectorManager:
             # _close_one_global mutates the very dicts it is derived from.
             for stale_name in state.tracked_names() - current_names:
                 await self._close_one_global(state, stale_name)
+                # _close_one_global deliberately keeps the streak (it also runs
+                # on the reconnect path, where the streak must survive), so a
+                # connector that is really gone is cleaned up here instead —
+                # otherwise this dict grows without bound over a long uptime.
+                state.error_streaks.pop(stale_name, None)
 
             to_reconnect = []
             for connector in connectors:
@@ -1029,12 +1162,18 @@ class ConnectorManager:
                 within_error_cooldown = (
                     had_error
                     and errored_at is not None
-                    and (time.monotonic() - errored_at) < self.error_retry_cooldown_seconds
+                    and (time.monotonic() - errored_at)
+                    < self._backoff_seconds(state.error_streaks.get(connector.name, 0))
                 )
                 if state.signatures.get(connector.name) == connector_signature and (
                     not had_error or within_error_cooldown
                 ):
                     continue  # unchanged and healthy (or still cooling down) — leave it running
+                if state.signatures.get(connector.name) != connector_signature:
+                    # Config changed — an admin edited it, so restart the
+                    # backoff rather than making the fix wait out an already
+                    # multiplied cooldown.
+                    state.error_streaks.pop(connector.name, None)
                 await self._close_one_global(state, connector.name)
                 to_reconnect.append(connector)
 
@@ -1063,9 +1202,8 @@ class ConnectorManager:
                         # the shared global pool keeps working.
                         state.statuses[connector.name] = {"status": "error", "error": str(exc)}
                         state.errored_monotonic[connector.name] = time.monotonic()
-                        logger.warning(
-                            "API connector {} failed to build tools: {}", connector.name, exc
-                        )
+                        state.error_streaks[connector.name] = state.error_streaks.get(connector.name, 0) + 1
+                        logger.warning("API connector {} failed to build tools: {}", connector.name, exc)
                         continue
                     state.proxies[connector.name] = tools
                     # tools/tool_names are provisional; _apply_global_shadowing
@@ -1076,9 +1214,8 @@ class ConnectorManager:
                         "tool_names": [t.name for t in tools],
                     }
                     state.errored_monotonic.pop(connector.name, None)
-                    logger.info(
-                        "API connector {} registered with {} operations", connector.name, len(tools)
-                    )
+                    state.error_streaks.pop(connector.name, None)
+                    logger.info("API connector {} registered with {} operations", connector.name, len(tools))
 
                 stacks = {c.name: AsyncExitStack() for c in mcp_reconnect}
                 for c in mcp_reconnect:
@@ -1090,16 +1227,16 @@ class ConnectorManager:
                 # user's connectors: N broken/hanging ones should cost one
                 # timeout period total, not N of them, while still only ever
                 # touching the sessions that actually need to change.
-                results = await asyncio.gather(
-                    *(self._connect_one(stacks[c.name], c) for c in mcp_reconnect)
-                )
+                results = await asyncio.gather(*(self._connect_one(stacks[c.name], c) for c in mcp_reconnect))
                 for connector, session, listed, error in results:
                     if error is not None:
                         state.statuses[connector.name] = error
                         state.errored_monotonic[connector.name] = time.monotonic()
+                        state.error_streaks[connector.name] = state.error_streaks.get(connector.name, 0) + 1
                         logger.warning("MCP global connector {} {}", connector.name, error["error"])
                         continue
                     state.errored_monotonic.pop(connector.name, None)
+                    state.error_streaks.pop(connector.name, None)
                     proxies = [
                         McpToolProxy(
                             session,
@@ -1216,6 +1353,8 @@ class ConnectorManager:
         if name is None:
             self._global.signatures.clear()
             self._global.errored_monotonic.clear()
+            self._global.error_streaks.clear()
         else:
             self._global.signatures.pop(name, None)
             self._global.errored_monotonic.pop(name, None)
+            self._global.error_streaks.pop(name, None)

@@ -63,10 +63,15 @@ class MessageStore:
         self.factory = factory
         self.is_postgres = is_postgres
 
-    async def append(self, session_id: str, entries: list[dict[str, Any]]) -> None:
-        """Append turn messages atomically with monotonic per-session seq."""
+    async def append(self, session_id: str, entries: list[dict[str, Any]]) -> int:
+        """Append turn messages atomically with monotonic per-session seq.
+
+        Returns the seq of the first entry written (0 for an empty append), so a
+        caller that has to enrich a message it already made durable can address
+        it via set_content().
+        """
         if not entries:
-            return
+            return 0
         async with self.factory() as db:
             next_seq = (
                 await db.scalar(
@@ -90,10 +95,24 @@ class MessageStore:
             if session is not None:
                 session.updated_at = datetime.now(timezone.utc)
             await db.commit()
+        return next_seq
 
-    async def recent(
-        self, session_id: str, *, after_seq: int = 0, limit: int = 200
-    ) -> list[dict[str, Any]]:
+    async def set_content(self, session_id: str, seq: int, content: str) -> None:
+        """Rewrite one already-appended message's text.
+
+        Exists so a message can be made durable before a slow step and enriched
+        with that step's result afterwards, instead of being held unwritten
+        while the step runs.
+        """
+        async with self.factory() as db:
+            await db.execute(
+                update(Message)
+                .where(Message.session_id == session_id, Message.seq == seq)
+                .values(content=content)
+            )
+            await db.commit()
+
+    async def recent(self, session_id: str, *, after_seq: int = 0, limit: int = 200) -> list[dict[str, Any]]:
         """Load recent messages in chronological order, in LLM message format."""
         async with self.factory() as db:
             rows = (
@@ -240,9 +259,7 @@ class SessionStore:
 
     async def count_by_user(self) -> dict[str, int]:
         async with self.factory() as db:
-            rows = await db.execute(
-                select(ChatSession.user_id, func.count()).group_by(ChatSession.user_id)
-            )
+            rows = await db.execute(select(ChatSession.user_id, func.count()).group_by(ChatSession.user_id))
             return {uid: n for uid, n in rows.all()}
 
     async def total(self) -> int:
@@ -253,11 +270,14 @@ class SessionStore:
         """Distinct users with chat activity in the last `days` days."""
         since = datetime.now(timezone.utc) - timedelta(days=days)
         async with self.factory() as db:
-            return await db.scalar(
-                select(func.count(func.distinct(ChatSession.user_id))).where(
-                    ChatSession.updated_at >= since
+            return (
+                await db.scalar(
+                    select(func.count(func.distinct(ChatSession.user_id))).where(
+                        ChatSession.updated_at >= since
+                    )
                 )
-            ) or 0
+                or 0
+            )
 
     async def set_consolidated_seq(self, session_id: str, seq: int) -> None:
         """Advance the consolidation cursor, clearing the poison counter — the
@@ -288,9 +308,7 @@ class SessionStore:
                 session.model = model
                 await db.commit()
 
-    async def set_plan(
-        self, session_id: str, goal: str, steps: list[dict[str, Any]]
-    ) -> None:
+    async def set_plan(self, session_id: str, goal: str, steps: list[dict[str, Any]]) -> None:
         """Replace the session's working plan (goal + ordered step checklist).
 
         Full-replace (not partial) so the agent sends its complete current plan
@@ -364,16 +382,12 @@ class MemoryStore:
 
     async def get_core(self, user_id: str) -> str:
         async with self.factory() as db:
-            row = await db.scalar(
-                select(Memory).where(Memory.user_id == user_id, Memory.kind == "core")
-            )
+            row = await db.scalar(select(Memory).where(Memory.user_id == user_id, Memory.kind == "core"))
             return row.content if row else ""
 
     async def set_core(self, user_id: str, content: str) -> None:
         async with self.factory() as db:
-            row = await db.scalar(
-                select(Memory).where(Memory.user_id == user_id, Memory.kind == "core")
-            )
+            row = await db.scalar(select(Memory).where(Memory.user_id == user_id, Memory.kind == "core"))
             if row is None:
                 db.add(Memory(user_id=user_id, kind="core", content=content))
             else:
@@ -422,9 +436,7 @@ class MemoryStore:
                     "ORDER BY score DESC LIMIT :limit"
                 )
                 rows = (
-                    await db.execute(
-                        stmt, {"q": query, "uid": user_id, "like": like, "limit": limit}
-                    )
+                    await db.execute(stmt, {"q": query, "uid": user_id, "like": like, "limit": limit})
                 ).all()
                 return [r[0] for r in rows]
             rows = (
@@ -463,31 +475,23 @@ class SkillStore:
 
     async def list_for_user(self, user_id: str) -> list[Skill]:
         async with self.factory() as db:
-            rows = await db.scalars(
-                select(Skill).where(Skill.user_id == user_id).order_by(Skill.name)
-            )
+            rows = await db.scalars(select(Skill).where(Skill.user_id == user_id).order_by(Skill.name))
             return list(rows)
 
     async def enabled_for_user(self, user_id: str) -> list[Skill]:
         async with self.factory() as db:
             rows = await db.scalars(
-                select(Skill)
-                .where(Skill.user_id == user_id, Skill.enabled.is_(True))
-                .order_by(Skill.name)
+                select(Skill).where(Skill.user_id == user_id, Skill.enabled.is_(True)).order_by(Skill.name)
             )
             return list(rows)
 
     async def get_by_name(self, user_id: str, name: str) -> Skill | None:
         async with self.factory() as db:
-            return await db.scalar(
-                select(Skill).where(Skill.user_id == user_id, Skill.name == name)
-            )
+            return await db.scalar(select(Skill).where(Skill.user_id == user_id, Skill.name == name))
 
     async def upsert(self, user_id: str, name: str, **fields: Any) -> Skill:
         async with self.factory() as db:
-            skill = await db.scalar(
-                select(Skill).where(Skill.user_id == user_id, Skill.name == name)
-            )
+            skill = await db.scalar(select(Skill).where(Skill.user_id == user_id, Skill.name == name))
             if skill is None:
                 skill = Skill(user_id=user_id, name=name)
                 db.add(skill)
@@ -644,9 +648,7 @@ class ConnectorStore:
                     raise
         raise AssertionError("unreachable")
 
-    async def _upsert_once(
-        self, owner_id: str | None, name: str, fields: dict[str, Any]
-    ) -> McpConnector:
+    async def _upsert_once(self, owner_id: str | None, name: str, fields: dict[str, Any]) -> McpConnector:
         async with self.factory() as db:
             row = await db.scalar(
                 select(McpConnector).where(McpConnector.owner_id == owner_id, McpConnector.name == name)
@@ -756,9 +758,7 @@ class ScheduleStore:
             )
             return list(rows)
 
-    async def mark_ran(
-        self, schedule_id: str, *, next_run_at: datetime | None, status: str
-    ) -> None:
+    async def mark_ran(self, schedule_id: str, *, next_run_at: datetime | None, status: str) -> None:
         async with self.factory() as db:
             row = await db.get(Schedule, schedule_id)
             if row is None:
@@ -805,9 +805,7 @@ class UserStore:
             return {}
         async with self.factory() as db:
             rows = (
-                await db.execute(
-                    select(User.id, User.display_name, User.email).where(User.id.in_(ids))
-                )
+                await db.execute(select(User.id, User.display_name, User.email).where(User.id.in_(ids)))
             ).all()
         return {uid: (name or email or uid) for uid, name, email in rows}
 
@@ -880,7 +878,9 @@ class UserStore:
                 except IntegrityError:
                     await db.rollback()
                     email = r["email"].lower()
-                    failed[email] = "already_exists" if await self.get_by_email(email) is not None else "error"
+                    failed[email] = (
+                        "already_exists" if await self.get_by_email(email) is not None else "error"
+                    )
         return failed
 
     async def assign_group(self, user_id: str, group_id: str | None) -> User | None:
@@ -916,9 +916,7 @@ class UserStore:
 
     async def count_admins(self) -> int:
         async with self.factory() as db:
-            return await db.scalar(
-                select(func.count()).select_from(User).where(User.is_admin.is_(True))
-            )
+            return await db.scalar(select(func.count()).select_from(User).where(User.is_admin.is_(True)))
 
     async def delete(self, user_id: str) -> bool:
         """Hard-delete a user and everything they own. Audit events are kept
@@ -933,20 +931,14 @@ class UserStore:
                 await db.scalars(select(ChatSession.id).where(ChatSession.user_id == user_id))
             ).all()
             if session_ids:
-                await db.execute(
-                    Message.__table__.delete().where(Message.session_id.in_(session_ids))
-                )
+                await db.execute(Message.__table__.delete().where(Message.session_id.in_(session_ids)))
             # Private (BYOK) providers and their models are owned via owner_id.
             provider_ids = (
                 await db.scalars(select(LLMProvider.id).where(LLMProvider.owner_id == user_id))
             ).all()
             if provider_ids:
-                await db.execute(
-                    LLMModel.__table__.delete().where(LLMModel.provider_id.in_(provider_ids))
-                )
-                await db.execute(
-                    LLMProvider.__table__.delete().where(LLMProvider.owner_id == user_id)
-                )
+                await db.execute(LLMModel.__table__.delete().where(LLMModel.provider_id.in_(provider_ids)))
+                await db.execute(LLMProvider.__table__.delete().where(LLMProvider.owner_id == user_id))
             # Private (non-shared) connectors are likewise owned via owner_id —
             # an admin-global connector (owner_id NULL) is never touched here.
             await db.execute(McpConnector.__table__.delete().where(McpConnector.owner_id == user_id))
@@ -999,6 +991,7 @@ class UserStore:
         ui_language: str | None = None,
         font_size: str | None = None,
         chat_background: str | None = None,
+        execution_panel_enabled: bool | None = None,
     ) -> User | None:
         """Settings > Profile > Preferences — a personal override of the
         Control Plane's global branding defaults. All three are stored null
@@ -1017,6 +1010,8 @@ class UserStore:
                 user.font_size = font_size
             if chat_background is not None:
                 user.chat_background = chat_background
+            if execution_panel_enabled is not None:
+                user.execution_panel_enabled = execution_panel_enabled
             await db.commit()
             return user
 
@@ -1103,9 +1098,7 @@ class UserStore:
         async with self.factory() as db:
             # Clear any previous owner of this Telegram id (defensive; column is unique).
             if telegram_user_id is not None:
-                prior = await db.scalar(
-                    select(User).where(User.telegram_user_id == telegram_user_id)
-                )
+                prior = await db.scalar(select(User).where(User.telegram_user_id == telegram_user_id))
                 if prior is not None and prior.id != user_id:
                     prior.telegram_user_id = None
             user = await db.get(User, user_id)
@@ -1163,9 +1156,7 @@ class GroupStore:
             row = await db.get(UserGroup, group_id)
             if row is None:
                 return False
-            await db.execute(
-                User.__table__.update().where(User.group_id == group_id).values(group_id=None)
-            )
+            await db.execute(User.__table__.update().where(User.group_id == group_id).values(group_id=None))
             # Drop any explicit knowledge-base shares into this group too —
             # same "don't rely on ON DELETE CASCADE" reasoning as above.
             await db.execute(
@@ -1206,9 +1197,7 @@ class GroupStore:
         """user_id count per group_id (excludes ungrouped)."""
         async with self.factory() as db:
             rows = await db.execute(
-                select(User.group_id, func.count())
-                .where(User.group_id.is_not(None))
-                .group_by(User.group_id)
+                select(User.group_id, func.count()).where(User.group_id.is_not(None)).group_by(User.group_id)
             )
             return {gid: n for gid, n in rows.all()}
 
@@ -1267,9 +1256,7 @@ class PolicyPlanStore:
 
     async def list(self) -> list[dict[str, Any]]:
         async with self.factory() as db:
-            rows = await db.scalars(
-                select(PolicyPlan).order_by(PolicyPlan.rank, PolicyPlan.name)
-            )
+            rows = await db.scalars(select(PolicyPlan).order_by(PolicyPlan.rank, PolicyPlan.name))
             return [plan_to_dict(p) for p in rows]
 
     async def get(self, plan_id: str) -> dict[str, Any] | None:
@@ -1304,9 +1291,7 @@ class PolicyPlanStore:
                     setattr(row, key, fields[key])
             if fields.get("is_default") is True:
                 await db.execute(
-                    PolicyPlan.__table__.update()
-                    .where(PolicyPlan.id != plan_id)
-                    .values(is_default=False)
+                    PolicyPlan.__table__.update().where(PolicyPlan.id != plan_id).values(is_default=False)
                 )
                 row.is_default = True
             elif fields.get("is_default") is False:
@@ -1341,13 +1326,9 @@ class PolicyPlanStore:
             row = await db.get(PolicyPlan, plan_id)
             if row is None:
                 return False
+            await db.execute(User.__table__.update().where(User.plan_id == plan_id).values(plan_id=None))
             await db.execute(
-                User.__table__.update().where(User.plan_id == plan_id).values(plan_id=None)
-            )
-            await db.execute(
-                UserGroup.__table__.update()
-                .where(UserGroup.plan_id == plan_id)
-                .values(plan_id=None)
+                UserGroup.__table__.update().where(UserGroup.plan_id == plan_id).values(plan_id=None)
             )
             await db.delete(row)
             await db.commit()
@@ -1422,9 +1403,7 @@ class PolicyPlanStore:
         here)."""
         async with self.factory() as db:
             rows = await db.execute(
-                select(User.plan_id, func.count())
-                .where(User.plan_id.is_not(None))
-                .group_by(User.plan_id)
+                select(User.plan_id, func.count()).where(User.plan_id.is_not(None)).group_by(User.plan_id)
             )
             return {pid: n for pid, n in rows.all()}
 
@@ -1905,9 +1884,7 @@ class AuditStore:
             stmt = stmt.where(AuditEvent.created_at < before)
         if search:
             like = f"%{search}%"
-            stmt = stmt.where(
-                func.cast(AuditEvent.payload, String).ilike(like) | AuditEvent.kind.ilike(like)
-            )
+            stmt = stmt.where(func.cast(AuditEvent.payload, String).ilike(like) | AuditEvent.kind.ilike(like))
         async with self.factory() as db:
             rows = await db.scalars(stmt)
             return [
@@ -2073,9 +2050,7 @@ class LLMConfigStore:
     async def get_by_name(self, name: str, owner_id: str | None = None) -> LLMProvider | None:
         async with self.factory() as db:
             return await db.scalar(
-                select(LLMProvider).where(
-                    LLMProvider.name == name, LLMProvider.owner_id == owner_id
-                )
+                select(LLMProvider).where(LLMProvider.name == name, LLMProvider.owner_id == owner_id)
             )
 
     async def create_provider(
@@ -2136,7 +2111,11 @@ class LLMConfigStore:
     # -- models -------------------------------------------------------------
     @staticmethod
     def _models_query():
-        return select(LLMModel).join(LLMProvider, LLMModel.provider_id == LLMProvider.id).order_by(LLMModel.label)
+        return (
+            select(LLMModel)
+            .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+            .order_by(LLMModel.label)
+        )
 
     async def list_models(self, owner_id: str | None = None) -> list[LLMModel]:
         async with self.factory() as db:
@@ -2169,6 +2148,7 @@ class LLMConfigStore:
         description: str = "",
         kind: str = "chat",
         owner_id: str | None = None,
+        context_window: int | None = None,
     ) -> LLMModel | None:
         async with self.factory() as db:
             # The model inherits its provider's scope; only add it if the caller
@@ -2183,6 +2163,7 @@ class LLMConfigStore:
                 cost=cost or "medium",
                 description=description or "",
                 kind=kind or "chat",
+                context_window=context_window or None,
             )
             db.add(row)
             await db.commit()
@@ -2198,6 +2179,10 @@ class LLMConfigStore:
             for key in ("model_id", "label", "enabled", "cost", "description", "kind"):
                 if key in fields and fields[key] is not None:
                     setattr(row, key, fields[key])
+            # 0 (or any falsy value) clears the override back to "look it up",
+            # since there is no such thing as a zero-token window.
+            if "context_window" in fields:
+                row.context_window = fields["context_window"] or None
             # Only a chat model can be the global default. Reclassifying the
             # current default to "image" (or any non-chat kind) must clear its
             # is_default — otherwise default_model() (which filters kind=="chat")
@@ -2211,9 +2196,7 @@ class LLMConfigStore:
                 await db.execute(
                     LLMModel.__table__.update()
                     .where(
-                        LLMModel.provider_id.in_(
-                            select(LLMProvider.id).where(LLMProvider.owner_id.is_(None))
-                        )
+                        LLMModel.provider_id.in_(select(LLMProvider.id).where(LLMProvider.owner_id.is_(None)))
                     )
                     .values(is_default=False)
                 )
@@ -2279,6 +2262,30 @@ class LLMConfigStore:
             if p.owner_id is not None or cost_allowed(max_cost, m.cost)
         ]
 
+    async def distinct_chat_models(self, limit: int = 200) -> list[tuple[str, int | None]]:
+        """Distinct enabled chat model ids with their context-window override
+        (None = no override), admin-global and BYOK together.
+
+        Read-only and deliberately unscoped by owner (like `list_all_providers`)
+        because it answers a deployment-wide question: which models is the app
+        able to look up metadata for. DISTINCT + LIMIT keeps the result bounded
+        no matter how many users bring their own keys.
+        """
+        async with self.factory() as db:
+            rows = await db.execute(
+                select(LLMModel.model_id, LLMModel.context_window)
+                .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+                .where(
+                    LLMModel.enabled.is_(True),
+                    LLMProvider.enabled.is_(True),
+                    LLMModel.kind == "chat",
+                )
+                .distinct()
+                .order_by(LLMModel.model_id)
+                .limit(limit)
+            )
+            return [(m, w) for m, w in rows]
+
     async def default_model(self) -> str | None:
         async with self.factory() as db:
             row = (
@@ -2304,17 +2311,21 @@ class LLMConfigStore:
         plan allows nothing (or nothing is configured)."""
         async with self.factory() as db:
             rows = (
-                await db.execute(
-                    select(LLMModel)
-                    .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
-                    .where(
-                        LLMModel.enabled.is_(True),
-                        LLMProvider.enabled.is_(True),
-                        LLMModel.kind == "chat",
-                        LLMProvider.owner_id.is_(None),  # global models only
+                (
+                    await db.execute(
+                        select(LLMModel)
+                        .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+                        .where(
+                            LLMModel.enabled.is_(True),
+                            LLMProvider.enabled.is_(True),
+                            LLMModel.kind == "chat",
+                            LLMProvider.owner_id.is_(None),  # global models only
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         allowed = [m for m in rows if cost_allowed(max_cost, m.cost)]
         if not allowed:
             return None
@@ -2326,7 +2337,7 @@ class LLMConfigStore:
 
     async def resolve(
         self, model_id: str, user_id: str | None = None, max_cost: str | None = None
-    ) -> dict[str, str] | None:
+    ) -> dict[str, Any] | None:
         """Given an enabled model id, return its provider credentials (decrypted).
 
         Scope: admin-global providers plus the caller's own private ones. If the
@@ -2373,6 +2384,7 @@ class LLMConfigStore:
             "model_id": m.model_id,
             "api_key": self._clean_key(self._dec(p.api_key)),
             "api_base": p.api_base,
+            "context_window": m.context_window,
         }
 
     async def resolve_image(
@@ -2418,6 +2430,61 @@ class LLMConfigStore:
             "scope": "private" if p.owner_id else "global",
         }
 
+    async def resolve_vision(self, user_id: str | None = None) -> dict[str, Any] | None:
+        """The kind="vision" model to hand an image to when the chat model can't
+        read one, or None when the operator configured no such model.
+
+        Takes no model_id: the user never picks this one — it is the operator's
+        designated reader, selected here. Preference order is the caller's own
+        (BYOK) provider first, then the cheapest tier: this call only has to
+        describe an image, so spending the top tier on it by default would
+        quietly inflate every image turn. is_default is deliberately not
+        consulted — update_model() forces it False on every non-chat kind, so
+        it can never be set on a vision row.
+
+        The plan's max_chat_cost ceiling deliberately does NOT apply here. It
+        gates which model the user may *converse* with; this reader is the
+        operator's own, and applying the chat ceiling to it meant the seeded
+        default plan ("low") hid every medium-tier reader — silently disabling
+        delegation for exactly the users most likely to be on a text-only
+        model. Cost stays bounded by the cheapest-tier preference below.
+
+        Same owner-scoping as resolve(), so one user can never reach another's
+        credentials. The row fetch is bounded because the WHERE clause already
+        narrows to admin-global rows plus this one caller's own."""
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(LLMModel, LLMProvider)
+                    .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+                    .where(
+                        LLMModel.kind == "vision",
+                        LLMModel.enabled.is_(True),
+                        LLMProvider.enabled.is_(True),
+                        or_(
+                            LLMProvider.owner_id.is_(None),
+                            LLMProvider.owner_id == user_id,
+                        ),
+                    )
+                    .limit(50)
+                )
+            ).all()
+        if not rows:
+            return None
+        m, p = min(
+            rows,
+            key=lambda row: (
+                row[1].owner_id is None,  # False(0) for the caller's own → first
+                cost_rank(row[0].cost),
+            ),
+        )
+        return {
+            "model_id": m.model_id,
+            "api_key": self._clean_key(self._dec(p.api_key)),
+            "api_base": p.api_base or "",
+            "scope": "private" if p.owner_id else "global",
+        }
+
 
 class GuardrailStore:
     """Persists control-policy rules + the monitor-only toggle + the tool-args
@@ -2457,8 +2524,16 @@ class GuardrailStore:
             row = await db.get(GuardrailRule, rule_id)
             if row is None:
                 return None
-            for key in ("name", "pattern", "action", "scopes", "placeholder", "severity",
-                        "block_message", "enabled"):
+            for key in (
+                "name",
+                "pattern",
+                "action",
+                "scopes",
+                "placeholder",
+                "severity",
+                "block_message",
+                "enabled",
+            ):
                 if key in fields and fields[key] is not None:
                     setattr(row, key, fields[key])
             await db.commit()
@@ -2881,9 +2956,7 @@ class KnowledgeStore:
         stored here — see KnowledgeBase.visibility)."""
         async with self.factory() as db:
             await db.execute(
-                KnowledgeBaseSharedGroup.__table__.delete().where(
-                    KnowledgeBaseSharedGroup.kb_id == kb_id
-                )
+                KnowledgeBaseSharedGroup.__table__.delete().where(KnowledgeBaseSharedGroup.kb_id == kb_id)
             )
             for group_id in dict.fromkeys(group_ids):  # dedupe, preserve order
                 db.add(KnowledgeBaseSharedGroup(kb_id=kb_id, group_id=group_id))
@@ -2897,12 +2970,16 @@ class KnowledgeStore:
     async def shared_group_ids(self, kb_id: str) -> list[str]:
         async with self.factory() as db:
             rows = (
-                await db.execute(
-                    select(KnowledgeBaseSharedGroup.group_id).where(
-                        KnowledgeBaseSharedGroup.kb_id == kb_id
+                (
+                    await db.execute(
+                        select(KnowledgeBaseSharedGroup.group_id).where(
+                            KnowledgeBaseSharedGroup.kb_id == kb_id
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return list(rows)
 
     async def list_accessible(self, user_id: str) -> list[dict[str, Any]]:
@@ -2933,15 +3010,10 @@ class KnowledgeStore:
             rows = (await db.execute(stmt)).all()
             counts = dict(
                 (
-                    await db.execute(
-                        select(KnowledgeDoc.kb_id, func.count()).group_by(KnowledgeDoc.kb_id)
-                    )
+                    await db.execute(select(KnowledgeDoc.kb_id, func.count()).group_by(KnowledgeDoc.kb_id))
                 ).all()
             )
-            group_names = {
-                g.id: g.name
-                for g in (await db.execute(select(UserGroup))).scalars().all()
-            }
+            group_names = {g.id: g.name for g in (await db.execute(select(UserGroup))).scalars().all()}
             # Explicit shares are only the caller's own business to see —
             # one bounded bulk query over just their own group-visibility
             # bases, not per-row.
@@ -3005,8 +3077,7 @@ class KnowledgeStore:
         if viewer_group_id is None:
             return sa_false()
         return (KnowledgeBase.visibility == "group") & (
-            (owner.group_id == viewer_group_id)
-            | (KnowledgeBaseSharedGroup.group_id == viewer_group_id)
+            (owner.group_id == viewer_group_id) | (KnowledgeBaseSharedGroup.group_id == viewer_group_id)
         )
 
     async def delete_base(self, kb_id: str) -> None:
@@ -3017,9 +3088,7 @@ class KnowledgeStore:
             # — SQLite (tests) doesn't enforce it without a pragma, same reason
             # GroupStore.delete() clears User.group_id explicitly.
             await db.execute(
-                KnowledgeBaseSharedGroup.__table__.delete().where(
-                    KnowledgeBaseSharedGroup.kb_id == kb_id
-                )
+                KnowledgeBaseSharedGroup.__table__.delete().where(KnowledgeBaseSharedGroup.kb_id == kb_id)
             )
             kb = await db.get(KnowledgeBase, kb_id)
             if kb is not None:
@@ -3057,9 +3126,7 @@ class KnowledgeStore:
             await db.flush()
             for i, (page, text) in enumerate(chunk_records):
                 db.add(
-                    KnowledgeChunk(
-                        kb_id=kb_id, doc_id=doc.id, seq=i, title=title[:255], text=text, page=page
-                    )
+                    KnowledgeChunk(kb_id=kb_id, doc_id=doc.id, seq=i, title=title[:255], text=text, page=page)
                 )
             kb = await db.get(KnowledgeBase, kb_id)
             if kb is not None:
@@ -3202,28 +3269,21 @@ class KnowledgeStore:
             if self.is_postgres:
                 # Transaction-local so it never leaks to other pooled connections.
                 await db.execute(
-                    sa_text(
-                        f"SET LOCAL pg_trgm.word_similarity_threshold = {self._WORD_SIM_THRESHOLD}"
-                    )
+                    sa_text(f"SET LOCAL pg_trgm.word_similarity_threshold = {self._WORD_SIM_THRESHOLD}")
                 )
                 sims = ", ".join(f"word_similarity(:q{i}, c.text)" for i in range(len(qs)))
                 score_expr = f"GREATEST({sims})" if len(qs) > 1 else sims
                 # Each variant contributes two GIN-servable predicates (`<%`, ILIKE),
                 # OR-ed together, so the planner BitmapOrs index scans — no full scan.
-                where_ors = " OR ".join(
-                    f"(:q{i} <% c.text OR c.text ILIKE :like{i})" for i in range(len(qs))
-                )
-                stmt = (
-                    sa_text(
-                        f"SELECT c.text, c.title, c.page, c.kb_id, b.name AS kb_name, "
-                        f"{score_expr} AS score "
-                        "FROM knowledge_chunks c JOIN knowledge_bases b ON b.id = c.kb_id "
-                        "WHERE c.kb_id IN :ids "
-                        f"AND ({where_ors}) "
-                        "ORDER BY score DESC LIMIT :limit"
-                    )
-                    .bindparams(bindparam("ids", expanding=True))
-                )
+                where_ors = " OR ".join(f"(:q{i} <% c.text OR c.text ILIKE :like{i})" for i in range(len(qs)))
+                stmt = sa_text(
+                    f"SELECT c.text, c.title, c.page, c.kb_id, b.name AS kb_name, "
+                    f"{score_expr} AS score "
+                    "FROM knowledge_chunks c JOIN knowledge_bases b ON b.id = c.kb_id "
+                    "WHERE c.kb_id IN :ids "
+                    f"AND ({where_ors}) "
+                    "ORDER BY score DESC LIMIT :limit"
+                ).bindparams(bindparam("ids", expanding=True))
                 params: dict[str, Any] = {"ids": kb_ids, "limit": limit}
                 for i, q in enumerate(qs):
                     params[f"q{i}"] = q
@@ -3264,6 +3324,13 @@ def _hash_token(token: str) -> str:
     import hashlib
 
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Timestamps are stored as DateTime(timezone=True), but SQLite has no tz
+    type and hands back naive values — comparing those against an aware now()
+    raises. Everything written here is UTC, so attach that rather than crash."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 class ShareStore:
@@ -3310,14 +3377,10 @@ class ShareStore:
         if not token:
             return None
         async with self.factory() as db:
-            share = (
-                await db.scalars(
-                    select(Share).where(Share.token_hash == _hash_token(token))
-                )
-            ).first()
+            share = (await db.scalars(select(Share).where(Share.token_hash == _hash_token(token)))).first()
             if share is None or share.revoked:
                 return None
-            if share.expires_at is not None and share.expires_at < datetime.now(timezone.utc):
+            if share.expires_at is not None and _as_utc(share.expires_at) < datetime.now(timezone.utc):
                 return None
             if bump:
                 share.view_count = (share.view_count or 0) + 1

@@ -16,3 +16,6 @@ softnix-agenticclaw/
 .DS_Store
 .claw.pid
 claw.log
+claw.out.log
+claw.err.log
+/logs/

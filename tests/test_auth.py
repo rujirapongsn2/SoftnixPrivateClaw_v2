@@ -99,6 +99,25 @@ async def test_me_reports_has_password(db_factory):
         assert me.json()["has_password"] is True
 
 
+async def test_execution_panel_preference_defaults_off_and_round_trips(db_factory):
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        reg = await c.post("/api/auth/register", json={"email": "a@x.io", "password": "password123"})
+        token = reg.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        assert reg.json()["user"]["execution_panel_enabled"] is False
+
+        r = await c.put("/api/auth/preferences", json={"execution_panel_enabled": True}, headers=headers)
+        assert r.status_code == 200
+        assert r.json()["execution_panel_enabled"] is True
+
+        # Omitting the field on a later save must not clobber it back to False
+        # — same "None means leave alone" contract as language/font_size/etc.
+        r2 = await c.put("/api/auth/preferences", json={"language": "th"}, headers=headers)
+        assert r2.status_code == 200
+        assert r2.json()["execution_panel_enabled"] is True
+
+
 async def test_change_password_requires_current_password(db_factory):
     app = build_api_app(db_factory)
     async with client(app) as c:

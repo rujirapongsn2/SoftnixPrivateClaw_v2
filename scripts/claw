@@ -16,7 +16,61 @@ LAUNCHD_LABEL="com.softnix.claw"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
 LAUNCHD_DAEMON_PLIST="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
 PIDFILE="$PROJECT_DIR/.claw.pid"
+# Supervisor capture: whatever the process writes to stdout/stderr before the
+# app configures its own logging (import errors, uvicorn startup, hard faults).
 LOGFILE="$PROJECT_DIR/claw.log"
+
+# The app's own rotating log — see claw/logging_setup.py. Everything logged
+# after startup lands here, not in LOGFILE. Configurable via CLAW_LOG__FILE
+# in .env (same convention as CLAW_PORT below, see port()); read it the same
+# way so an operator who redirects the app log elsewhere doesn't leave
+# `claw start`'s message or `claw logs`'s tail silently pointed at the
+# unconfigured default path.
+# Read one key from .env the way pydantic-settings does: last occurrence wins,
+# surrounding quotes removed, trailing comment on an unquoted value dropped.
+# Returns 1 when the key is absent, so callers can tell "unset" (use the
+# default) from "set to empty" (the operator turned the thing off).
+env_value() {
+  local key="$1" line
+  [[ -f "$PROJECT_DIR/.env" ]] || return 1
+  line="$(grep -E "^[[:space:]]*${key}=" "$PROJECT_DIR/.env" | tail -1)"
+  [[ -n "$line" ]] || return 1
+  line="${line#*=}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  case "$line" in
+    '"'*) line="${line#\"}"; line="${line%%\"*}" ;;
+    "'"*) line="${line#\'}"; line="${line%%\'*}" ;;
+    *) line="${line%%#*}"; line="${line%"${line##*[![:space:]]}"}" ;;
+  esac
+  printf '%s' "$line"
+}
+
+# Empty result = the app's file sink is off (logging_setup skips a blank path),
+# so there is no app log to advertise or tail.
+app_log_path() {
+  local p
+  if p="$(env_value CLAW_LOG__FILE)"; then
+    [[ -n "$p" ]] || return 1
+  else
+    p="logs/claw.log"
+  fi
+  [[ "$p" = /* ]] && echo "$p" || echo "$PROJECT_DIR/$p"
+}
+APPLOG="$(app_log_path || true)"
+
+# These files carry prompts and message text for every tenant on the box, so
+# none of them may inherit the umask's usual world-readable 0644. The app opens
+# APPLOG 0600 itself; the supervisor's capture files are created by a shell
+# redirect or by launchd, which is why they have to be pre-created here — and on
+# every start, not just at install time: deleting one (a disk cleanup, a manual
+# rotation) is all it takes for the supervisor to recreate it at 0644.
+harden_capture_logs() {
+  local f
+  for f in "$@"; do
+    [[ -e "$f" ]] || : >"$f"
+    chmod 600 "$f" 2>/dev/null || true
+  done
+}
 
 # Set by --force-stale (see below): permits restart/update to kill a process
 # that's blocking the port instead of just reporting it and failing.
@@ -55,8 +109,8 @@ sc() { if [[ $EUID -eq 0 ]]; then systemctl "$@"; else sudo systemctl "$@"; fi; 
 lcd() { if [[ $EUID -eq 0 ]]; then launchctl "$@"; else sudo launchctl "$@"; fi; }
 
 port() {
-  local p="8700"
-  [[ -f "$PROJECT_DIR/.env" ]] && p="$(grep -E '^CLAW_PORT=' "$PROJECT_DIR/.env" | tail -1 | cut -d= -f2 || true)"
+  local p
+  p="$(env_value CLAW_PORT)" || p=""
   echo "${p:-8700}"
 }
 
@@ -150,16 +204,22 @@ systemd_is_active() {
 
 cmd_start() {
   case "$(mode)" in
+    # systemd captures stdout/stderr into the journal, so it has no file to harden.
     systemd) sc start "$SYSTEMD_UNIT" ;;
-    launchd-daemon) lcd load -w "$LAUNCHD_DAEMON_PLIST" 2>/dev/null || lcd start "$LAUNCHD_LABEL" ;;
-    launchd) launchctl load -w "$LAUNCHD_PLIST" 2>/dev/null || launchctl start "$LAUNCHD_LABEL" ;;
+    launchd-daemon)
+      harden_capture_logs "$PROJECT_DIR/claw.out.log" "$PROJECT_DIR/claw.err.log"
+      lcd load -w "$LAUNCHD_DAEMON_PLIST" 2>/dev/null || lcd start "$LAUNCHD_LABEL" ;;
+    launchd)
+      harden_capture_logs "$PROJECT_DIR/claw.out.log" "$PROJECT_DIR/claw.err.log"
+      launchctl load -w "$LAUNCHD_PLIST" 2>/dev/null || launchctl start "$LAUNCHD_LABEL" ;;
     nohup)
       if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
         echo "already running (pid $(cat "$PIDFILE"))"; return 0
       fi
+      harden_capture_logs "$LOGFILE"
       nohup "$SERVE" >>"$LOGFILE" 2>&1 &
       echo $! >"$PIDFILE"
-      echo "started (pid $!) — logs: $LOGFILE" ;;
+      echo "started (pid $!) — logs: ${APPLOG:-$LOGFILE}" ;;
   esac
 }
 
@@ -369,10 +429,43 @@ cmd_status() {
 }
 
 cmd_logs() {
+  # -F, not -f: the app rotates its log by renaming, and -f would keep
+  # following the renamed file and go silent. -F re-opens by name.
+  local n="${1:-100}"
+  if [[ -z "$APPLOG" || ! -e "$APPLOG" ]]; then
+    # No app log yet (or the file sink is turned off) — the process never got
+    # far enough to open one, so the supervisor's capture is the only place the
+    # reason can be.
+    case "$(mode)" in
+      systemd) sc --no-pager -n "$n" -f status "$SYSTEMD_UNIT" 2>/dev/null || journalctl -u "$SYSTEMD_UNIT" -n "$n" -f ;;
+      launchd-daemon|launchd) tail -n "$n" -f "$PROJECT_DIR/claw.out.log" "$PROJECT_DIR/claw.err.log" ;;
+      nohup) tail -n "$n" -f "$LOGFILE" ;;
+    esac
+    return
+  fi
+  # APPLOG only carries output logged after the app's own logger starts —
+  # anything before that (a bind failure, import error, OOM kill, or any
+  # crash on a later restart) still only ever reaches the supervisor's own
+  # capture. Tail both live, or an operator troubleshooting a crash that
+  # happens after the very first successful boot (the common case, since
+  # APPLOG persists across restarts) loses live visibility into exactly the
+  # output that would explain it.
   case "$(mode)" in
-    systemd) sc --no-pager -n "${1:-100}" -f status "$SYSTEMD_UNIT" 2>/dev/null || journalctl -u "$SYSTEMD_UNIT" -n "${1:-100}" -f ;;
-    launchd-daemon|launchd) tail -n "${1:-100}" -f "$PROJECT_DIR/claw.out.log" "$PROJECT_DIR/claw.err.log" ;;
-    nohup) tail -n "${1:-100}" -f "$LOGFILE" ;;
+    systemd)
+      echo "==> $APPLOG + journalctl -u $SYSTEMD_UNIT"
+      journalctl -u "$SYSTEMD_UNIT" -n "$n" -f &
+      local jpid=$!
+      trap 'kill "$jpid" 2>/dev/null || true' EXIT
+      tail -n "$n" -F "$APPLOG"
+      ;;
+    launchd-daemon|launchd)
+      echo "==> $APPLOG + claw.out.log + claw.err.log"
+      tail -n "$n" -F "$APPLOG" "$PROJECT_DIR/claw.out.log" "$PROJECT_DIR/claw.err.log"
+      ;;
+    nohup)
+      echo "==> $APPLOG + $LOGFILE"
+      tail -n "$n" -F "$APPLOG" "$LOGFILE"
+      ;;
   esac
 }
 

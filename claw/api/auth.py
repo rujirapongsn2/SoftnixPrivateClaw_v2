@@ -71,6 +71,7 @@ class PreferencesBody(BaseModel):
     language: Language | None = None
     font_size: FontSize | None = None
     chat_background: ChatBackground | None = None
+    execution_panel_enabled: bool | None = None
 
 
 def _user_json(user: User) -> dict:
@@ -95,6 +96,9 @@ def _user_json(user: User) -> dict:
         "language": user.ui_language,
         "font_size": user.font_size,
         "chat_background": user.chat_background,
+        # Desktop UI's Execution panel: off by default, opt-in only via
+        # Settings > Profile > Preferences (no admin-level default to inherit).
+        "execution_panel_enabled": user.execution_panel_enabled,
     }
 
 
@@ -474,6 +478,7 @@ async def update_preferences(
         ui_language=body.language,
         font_size=body.font_size,
         chat_background=body.chat_background,
+        execution_panel_enabled=body.execution_panel_enabled,
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="account no longer exists")
@@ -551,6 +556,7 @@ async def me(user: User = Depends(current_user)) -> dict:
 
 # ---------------------------------------------------------------- OIDC / social login
 
+
 async def _resolve_provider(state: AppState, provider: str):
     """Build a social-login config for `provider`, preferring the admin-registered
     OAuth app in the DB and falling back to environment settings. This is what
@@ -570,9 +576,7 @@ async def _resolve_provider(state: AppState, provider: str):
         return None
     if not (client_id and client_secret):
         return None
-    return oidc.provider_config(
-        provider, client_id=client_id, client_secret=client_secret, tenant=tenant
-    )
+    return oidc.provider_config(provider, client_id=client_id, client_secret=client_secret, tenant=tenant)
 
 
 async def _resolve_providers(state: AppState) -> dict:

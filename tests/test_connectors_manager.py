@@ -373,9 +373,7 @@ async def test_connect_error_redacts_query_secret_from_message(db_factory, monke
     )
 
     async def raises_with_url_in_message(self, stack, connector):
-        raise RuntimeError(
-            "connect failed for https://mcp.alphavantage.co/mcp?apikey=SUPERSECRETKEY123"
-        )
+        raise RuntimeError("connect failed for https://mcp.alphavantage.co/mcp?apikey=SUPERSECRETKEY123")
 
     monkeypatch.setattr(ConnectorManager, "_connect_and_list", raises_with_url_in_message)
 
@@ -432,9 +430,7 @@ async def test_query_env_preserves_duplicate_keys_and_clears_on_empty_string(db_
         async def initialize(self):
             pass
 
-    monkeypatch.setattr(
-        "mcp.client.streamable_http.streamablehttp_client", fake_streamablehttp_client
-    )
+    monkeypatch.setattr("mcp.client.streamable_http.streamablehttp_client", fake_streamablehttp_client)
     monkeypatch.setattr("mcp.ClientSession", FakeSession)
     # _connect's SSRF guard would otherwise make this test depend on live DNS.
     monkeypatch.setattr("claw.core.connectors.resolve_public_ips", _resolves_public)
@@ -496,7 +492,9 @@ async def test_resolve_tool_names_survives_connector_rename(db_factory, monkeypa
     users = UserStore(db_factory)
     user = await users.create(email="rename@x.io", password_hash="h")
     store = ConnectorStore(db_factory)
-    connector = await store.upsert(user.id, "softnixkb", transport="http", url="https://example.invalid/mcp", enabled=True)
+    connector = await store.upsert(
+        user.id, "softnixkb", transport="http", url="https://example.invalid/mcp", enabled=True
+    )
 
     class FakeSession:
         async def list_tools(self):
@@ -558,9 +556,7 @@ async def test_global_connector_shared_across_users_one_connect_call(db_factory,
     user_a = await users.create(email="global-a@x.io", password_hash="h")
     user_b = await users.create(email="global-b@x.io", password_hash="h")
     store = ConnectorStore(db_factory)
-    await store.upsert(
-        None, "search", transport="http", url="https://example.invalid/mcp", enabled=True
-    )
+    await store.upsert(None, "search", transport="http", url="https://example.invalid/mcp", enabled=True)
 
     connect_calls = 0
 
@@ -610,12 +606,22 @@ async def test_users_own_connector_shadows_same_name_global_connector(db_factory
 
     now = datetime.now(timezone.utc)
     global_row = McpConnector(
-        id="global1", owner_id=None, name="search", transport="http",
-        url="https://global.invalid/mcp", enabled=True, updated_at=now,
+        id="global1",
+        owner_id=None,
+        name="search",
+        transport="http",
+        url="https://global.invalid/mcp",
+        enabled=True,
+        updated_at=now,
     )
     private_row = McpConnector(
-        id="private1", owner_id=owner.id, name="search", transport="http",
-        url="https://private.invalid/mcp", enabled=True, updated_at=now,
+        id="private1",
+        owner_id=owner.id,
+        name="search",
+        transport="http",
+        url="https://private.invalid/mcp",
+        enabled=True,
+        updated_at=now,
     )
 
     async def fake_enabled_for_global(self):
@@ -666,12 +672,22 @@ async def test_resolve_tool_names_not_shadowed_by_a_disabled_own_connector(db_fa
 
     now = datetime.now(timezone.utc)
     global_row = McpConnector(
-        id="global-disabled-shadow", owner_id=None, name="search", transport="http",
-        url="https://global.invalid/mcp", enabled=True, updated_at=now,
+        id="global-disabled-shadow",
+        owner_id=None,
+        name="search",
+        transport="http",
+        url="https://global.invalid/mcp",
+        enabled=True,
+        updated_at=now,
     )
     disabled_private_row = McpConnector(
-        id="private-disabled-shadow", owner_id=owner.id, name="search", transport="http",
-        url="https://private.invalid/mcp", enabled=False, updated_at=now,
+        id="private-disabled-shadow",
+        owner_id=owner.id,
+        name="search",
+        transport="http",
+        url="https://private.invalid/mcp",
+        enabled=False,
+        updated_at=now,
     )
 
     async def fake_enabled_for_global(self):
@@ -718,9 +734,7 @@ async def test_global_connector_invalidate_propagates_to_users_on_next_sync(db_f
     users = UserStore(db_factory)
     user = await users.create(email="global-invalidate@x.io", password_hash="h")
     store = ConnectorStore(db_factory)
-    await store.upsert(
-        None, "search", transport="http", url="https://example.invalid/mcp", enabled=True
-    )
+    await store.upsert(None, "search", transport="http", url="https://example.invalid/mcp", enabled=True)
 
     tool_name = "web_search_v1"
 
@@ -832,9 +846,7 @@ async def test_proxy_session_ref_follows_a_replaced_session_instead_of_going_sta
             return FakeResult()
 
     current: dict[str, object | None] = {"session": None}
-    proxy = McpToolProxy(
-        None, "search", "web_search", "desc", {}, session_ref=lambda: current["session"]
-    )
+    proxy = McpToolProxy(None, "search", "web_search", "desc", {}, session_ref=lambda: current["session"])
 
     # No live session yet (e.g. between a teardown and its reconnect) — a
     # friendly error, not an AttributeError on None.
@@ -887,9 +899,7 @@ async def test_close_global_does_not_tear_down_a_recreated_connector_with_a_diff
     under the same name — even though it's keyed by name, it must check the
     id it was meant for before closing anything."""
     store = ConnectorStore(db_factory)
-    old = await store.upsert(
-        None, "search", transport="http", url="https://old.invalid/mcp", enabled=True
-    )
+    old = await store.upsert(None, "search", transport="http", url="https://old.invalid/mcp", enabled=True)
 
     class FakeSession:
         async def list_tools(self):
@@ -908,9 +918,7 @@ async def test_close_global_does_not_tear_down_a_recreated_connector_with_a_diff
     # under the same name (different id) before the original close_global
     # call for "old" got a chance to run.
     await store.delete(None, old.id)
-    new = await store.upsert(
-        None, "search", transport="http", url="https://new.invalid/mcp", enabled=True
-    )
+    new = await store.upsert(None, "search", transport="http", url="https://new.invalid/mcp", enabled=True)
     await mgr.sync_global()
     assert (await mgr.status_global())["search"]["status"] == "connected"
 
@@ -963,9 +971,7 @@ async def test_two_concurrent_first_syncs_both_see_the_result_instead_of_one_bai
     still-completely-empty pool (the lock-busy bypass is only safe once the
     pool has been populated at least once)."""
     store = ConnectorStore(db_factory)
-    await store.upsert(
-        None, "search", transport="http", url="https://example.invalid/mcp", enabled=True
-    )
+    await store.upsert(None, "search", transport="http", url="https://example.invalid/mcp", enabled=True)
 
     started = asyncio.Event()
     release = asyncio.Event()
@@ -1060,9 +1066,7 @@ async def test_api_kind_and_mcp_connectors_coexist_in_sync_tools(db_factory, mon
         transport="http",
         command="",
         url="https://api.example.com",
-        operations=[
-            {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
-        ],
+        operations=[{"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}],
         enabled=True,
     )
     await store.upsert(user.id, "mymcp", transport="http", url="https://example.invalid/mcp", enabled=True)
@@ -1188,14 +1192,21 @@ async def test_malformed_api_operations_isolated_to_that_connector(db_factory):
     # Missing the "path" key entirely — what a bad manual DB edit or a partial
     # write leaves behind (the API layer's validation can't reach it).
     await store.upsert(
-        user.id, "brokenapi", kind="api", transport="http", url="https://api.example.com",
-        operations=[{"name": "oops", "method": "GET"}], enabled=True,
+        user.id,
+        "brokenapi",
+        kind="api",
+        transport="http",
+        url="https://api.example.com",
+        operations=[{"name": "oops", "method": "GET"}],
+        enabled=True,
     )
     await store.upsert(
-        user.id, "goodapi", kind="api", transport="http", url="https://ok.example.com",
-        operations=[
-            {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
-        ],
+        user.id,
+        "goodapi",
+        kind="api",
+        transport="http",
+        url="https://ok.example.com",
+        operations=[{"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}],
         enabled=True,
     )
 
@@ -1261,9 +1272,7 @@ async def test_disabling_a_global_mcp_connector_revokes_it_from_every_user(db_fa
     users = UserStore(db_factory)
     user = await users.create(email="global-mcp-disable@x.io", password_hash="h")
     store = ConnectorStore(db_factory)
-    await store.upsert(
-        None, "globalmcp", transport="http", url="https://example.invalid/mcp", enabled=True
-    )
+    await store.upsert(None, "globalmcp", transport="http", url="https://example.invalid/mcp", enabled=True)
 
     class FakeSession:
         pass
@@ -1293,14 +1302,21 @@ async def test_malformed_api_operations_isolated_in_global_pool(db_factory):
     of an unhandled raise is every user rather than one."""
     store = ConnectorStore(db_factory)
     await store.upsert(
-        None, "brokenglobal", kind="api", transport="http", url="https://api.example.com",
-        operations=[{"name": "oops", "method": "GET"}], enabled=True,
+        None,
+        "brokenglobal",
+        kind="api",
+        transport="http",
+        url="https://api.example.com",
+        operations=[{"name": "oops", "method": "GET"}],
+        enabled=True,
     )
     await store.upsert(
-        None, "goodglobal", kind="api", transport="http", url="https://ok.example.com",
-        operations=[
-            {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
-        ],
+        None,
+        "goodglobal",
+        kind="api",
+        transport="http",
+        url="https://ok.example.com",
+        operations=[{"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}],
         enabled=True,
     )
 
@@ -1324,14 +1340,24 @@ async def test_user_connector_cannot_take_over_a_global_tool_name(db_factory):
 
     op = {"name": "get_salary", "method": "GET", "path": "/salary", "description": "", "parameters": []}
     await store.upsert(
-        None, "hr", kind="api", transport="http", url="https://hr.example.com",
-        operations=[op], enabled=True,
+        None,
+        "hr",
+        kind="api",
+        transport="http",
+        url="https://hr.example.com",
+        operations=[op],
+        enabled=True,
     )
     # "hr_get" + "salary" spells the same tool name as "hr" + "get_salary",
     # without colliding on the connector name (which is already shadow-checked).
     await store.upsert(
-        user.id, "hr_get", kind="api", transport="http", url="https://attacker.example.com",
-        operations=[{**op, "name": "salary"}], enabled=True,
+        user.id,
+        "hr_get",
+        kind="api",
+        transport="http",
+        url="https://attacker.example.com",
+        operations=[{**op, "name": "salary"}],
+        enabled=True,
     )
 
     mgr = ConnectorManager(store)
@@ -1363,11 +1389,7 @@ async def test_shadowed_mcp_tool_is_reported_not_dropped_silently(db_factory, mo
 
     async def fake_connect(self, stack, connector):
         class Listed:
-            tools = [
-                SimpleNamespace(
-                    name=listed_for[connector.name], description="d", inputSchema={}
-                )
-            ]
+            tools = [SimpleNamespace(name=listed_for[connector.name], description="d", inputSchema={})]
 
         return object(), Listed()
 
@@ -1397,12 +1419,22 @@ async def test_two_global_api_connectors_colliding_report_one_owner(db_factory):
     op = {"name": "issues_list", "method": "GET", "path": "/i", "description": "", "parameters": []}
     # "github" + "issues_list" and "github_issues" + "list" spell the same name.
     winner = await store.upsert(
-        None, "github", kind="api", transport="http", url="https://a.example.com",
-        operations=[op], enabled=True,
+        None,
+        "github",
+        kind="api",
+        transport="http",
+        url="https://a.example.com",
+        operations=[op],
+        enabled=True,
     )
     loser = await store.upsert(
-        None, "github_issues", kind="api", transport="http", url="https://b.example.com",
-        operations=[{**op, "name": "list"}], enabled=True,
+        None,
+        "github_issues",
+        kind="api",
+        transport="http",
+        url="https://b.example.com",
+        operations=[{**op, "name": "list"}],
+        enabled=True,
     )
 
     mgr = ConnectorManager(store)
@@ -1432,12 +1464,22 @@ async def test_a_global_collision_clears_once_the_shadowing_connector_goes(db_fa
 
     op = {"name": "issues_list", "method": "GET", "path": "/i", "description": "", "parameters": []}
     await store.upsert(
-        None, "github", kind="api", transport="http", url="https://a.example.com",
-        operations=[op], enabled=True,
+        None,
+        "github",
+        kind="api",
+        transport="http",
+        url="https://a.example.com",
+        operations=[op],
+        enabled=True,
     )
     await store.upsert(
-        None, "github_issues", kind="api", transport="http", url="https://b.example.com",
-        operations=[{**op, "name": "list"}], enabled=True,
+        None,
+        "github_issues",
+        kind="api",
+        transport="http",
+        url="https://b.example.com",
+        operations=[{**op, "name": "list"}],
+        enabled=True,
     )
 
     mgr = ConnectorManager(store)
@@ -1446,8 +1488,13 @@ async def test_a_global_collision_clears_once_the_shadowing_connector_goes(db_fa
     assert (await mgr.status_global())["github_issues"]["tool_names"] == []
 
     await store.upsert(
-        None, "github", kind="api", transport="http", url="https://a.example.com",
-        operations=[op], enabled=False,
+        None,
+        "github",
+        kind="api",
+        transport="http",
+        url="https://a.example.com",
+        operations=[op],
+        enabled=False,
     )
     await mgr.sync_tools(user.id, registry)
 
@@ -1490,8 +1537,14 @@ async def test_global_api_tool_already_in_a_registry_follows_the_edited_row(db_f
     store = ConnectorStore(db_factory)
     op = {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
     await store.upsert(
-        None, "globalapi", kind="api", transport="http", url="https://old.example.com",
-        env={"HEADER_X-Api-Key": "OLDKEY"}, operations=[op], enabled=True,
+        None,
+        "globalapi",
+        kind="api",
+        transport="http",
+        url="https://old.example.com",
+        env={"HEADER_X-Api-Key": "OLDKEY"},
+        operations=[op],
+        enabled=True,
     )
 
     mgr = ConnectorManager(store)
@@ -1504,8 +1557,14 @@ async def test_global_api_tool_already_in_a_registry_follows_the_edited_row(db_f
     # Admin rotates the credential and repoints the base url. Only the GLOBAL
     # pool is refreshed — this user never syncs again.
     await store.upsert(
-        None, "globalapi", kind="api", transport="http", url="https://new.example.com",
-        env={"HEADER_X-Api-Key": "NEWKEY"}, operations=[op], enabled=True,
+        None,
+        "globalapi",
+        kind="api",
+        transport="http",
+        url="https://new.example.com",
+        env={"HEADER_X-Api-Key": "NEWKEY"},
+        operations=[op],
+        enabled=True,
     )
     await mgr.sync_global()
 
@@ -1520,8 +1579,13 @@ async def test_global_api_tool_left_in_a_registry_refuses_once_disabled(db_facto
     store = ConnectorStore(db_factory)
     op = {"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}
     await store.upsert(
-        None, "globalapi", kind="api", transport="http", url="https://api.example.com",
-        operations=[op], enabled=True,
+        None,
+        "globalapi",
+        kind="api",
+        transport="http",
+        url="https://api.example.com",
+        operations=[op],
+        enabled=True,
     )
 
     mgr = ConnectorManager(store)
@@ -1530,8 +1594,13 @@ async def test_global_api_tool_left_in_a_registry_refuses_once_disabled(db_facto
     tool = registry.get("api_globalapi_ping")
 
     await store.upsert(
-        None, "globalapi", kind="api", transport="http", url="https://api.example.com",
-        operations=[op], enabled=False,
+        None,
+        "globalapi",
+        kind="api",
+        transport="http",
+        url="https://api.example.com",
+        operations=[op],
+        enabled=False,
     )
     await mgr.sync_global()
 
@@ -1547,7 +1616,11 @@ async def test_per_user_api_tool_has_no_connector_ref(db_factory):
     user = await users.create(email="ownapi@x.io", password_hash="h")
     store = ConnectorStore(db_factory)
     await store.upsert(
-        user.id, "myapi", kind="api", transport="http", url="https://api.example.com",
+        user.id,
+        "myapi",
+        kind="api",
+        transport="http",
+        url="https://api.example.com",
         operations=[{"name": "ping", "method": "GET", "path": "/ping", "description": "", "parameters": []}],
         enabled=True,
     )
@@ -1638,9 +1711,7 @@ async def test_blocked_http_connector_reports_error_instead_of_crashing_sync(db_
     users = UserStore(db_factory)
     user = await users.create(email="ssrf2@x.io", password_hash="h")
     store = ConnectorStore(db_factory)
-    await store.upsert(
-        user.id, "internal", transport="http", url="http://127.0.0.1:9/mcp", enabled=True
-    )
+    await store.upsert(user.id, "internal", transport="http", url="http://127.0.0.1:9/mcp", enabled=True)
 
     mgr = ConnectorManager(store)
     registry = ToolRegistry()
@@ -1649,3 +1720,147 @@ async def test_blocked_http_connector_reports_error_instead_of_crashing_sync(db_
     status = (await mgr.status(user.id))["internal"]
     assert status["status"] == "error"
     assert "non-public" in status["error"]
+
+
+async def test_repeatedly_failing_connector_backs_off_progressively(db_factory, monkeypatch):
+    """A connector that never comes back must not keep costing a full connect
+    timeout at a fixed rate forever: each consecutive failed sync doubles the
+    cooldown, so a dead server is retried logarithmically rather than linearly."""
+    users = UserStore(db_factory)
+    user = await users.create(email="backoff@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(user.id, "dead", transport="http", url="https://example.invalid/mcp", enabled=True)
+
+    flaky = _FlakyConnect(fail_times=99)
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", flaky)
+
+    mgr = ConnectorManager(store, error_retry_cooldown_seconds=60)
+    registry = ToolRegistry()
+
+    await mgr.sync_tools(user.id, registry)
+    assert flaky.attempts == 1
+    assert mgr._users[user.id].error_streak == 1
+
+    # One cooldown later the second attempt happens, taking the streak to 2 —
+    # which doubles the window to 120s.
+    mgr._users[user.id].errored_monotonic -= 61
+    await mgr.sync_tools(user.id, registry)
+    assert flaky.attempts == 2
+    assert mgr._users[user.id].error_streak == 2
+
+    # 61s is now no longer enough to earn a retry.
+    mgr._users[user.id].errored_monotonic -= 61
+    await mgr.sync_tools(user.id, registry)
+    assert flaky.attempts == 2
+
+    # 121s is.
+    mgr._users[user.id].errored_monotonic -= 121
+    await mgr.sync_tools(user.id, registry)
+    assert flaky.attempts == 3
+
+
+async def test_connector_recovery_resets_the_backoff(db_factory, monkeypatch):
+    users = UserStore(db_factory)
+    user = await users.create(email="backoff2@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(user.id, "flaky", transport="http", url="https://example.invalid/mcp", enabled=True)
+
+    flaky = _FlakyConnect(fail_times=1)
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", flaky)
+
+    mgr = ConnectorManager(store, error_retry_cooldown_seconds=60)
+    registry = ToolRegistry()
+
+    await mgr.sync_tools(user.id, registry)
+    assert mgr._users[user.id].error_streak == 1
+
+    mgr._users[user.id].errored_monotonic -= 61
+    await mgr.sync_tools(user.id, registry)
+    assert (await mgr.status(user.id))["flaky"]["status"] == "connected"
+    # A healthy sync clears the streak, so the next failure starts from the
+    # plain cooldown rather than an already-multiplied one.
+    assert mgr._users[user.id].error_streak == 0
+
+
+async def test_deleting_a_failing_global_connector_leaves_no_bookkeeping_behind(db_factory, monkeypatch):
+    """`error_streaks` is the one dict _close_one_global keeps, so after the
+    delete path (close_global) a failed connector is tracked by that dict
+    ALONE. sync_global's cleanup walks tracked_names(), so if that union
+    omits error_streaks the name is unreachable and its entry survives for
+    the life of the process — one permanent entry per connector an admin
+    ever deletes while it was failing."""
+    store = ConnectorStore(db_factory)
+    connector = await store.upsert(
+        None, "deadglobal", transport="http", url="https://example.invalid/mcp", enabled=True
+    )
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", _FlakyConnect(fail_times=99))
+
+    mgr = ConnectorManager(store)
+    await mgr.sync_global()
+    assert mgr._global.error_streaks == {"deadglobal": 1}
+
+    # Exactly what delete_connector does: tear the session down now, then
+    # drop the row so it stops coming back from enabled_for_global().
+    await mgr.close_global(connector.name, connector.id)
+    await store.delete(None, connector.id)
+
+    await mgr.sync_global()
+    assert mgr._global.error_streaks == {}
+    assert mgr._global.tracked_names() == set()
+
+
+async def test_a_deleted_connector_does_not_reset_a_live_one_s_backoff(db_factory, monkeypatch):
+    """The cleanup above must stay scoped to the name that actually went
+    away: a sibling still enabled and still failing keeps its own streak, so
+    its cooldown goes on doubling instead of restarting from scratch every
+    time an unrelated connector is deleted."""
+    store = ConnectorStore(db_factory)
+    doomed = await store.upsert(
+        None, "doomed", transport="http", url="https://example.invalid/mcp", enabled=True
+    )
+    await store.upsert(None, "survivor", transport="http", url="https://example.invalid/mcp", enabled=True)
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", _FlakyConnect(fail_times=99))
+
+    mgr = ConnectorManager(store, error_retry_cooldown_seconds=60)
+    await mgr.sync_global()
+    mgr._global.errored_monotonic["survivor"] -= 61
+    await mgr.sync_global()
+    assert mgr._global.error_streaks["survivor"] == 2
+
+    await mgr.close_global(doomed.name, doomed.id)
+    await store.delete(None, doomed.id)
+
+    mgr._global.errored_monotonic["survivor"] -= 121
+    await mgr.sync_global()
+    assert "doomed" not in mgr._global.error_streaks
+    assert mgr._global.error_streaks["survivor"] == 3
+
+
+def test_mcp_tool_schema_text_is_clipped():
+    """Tool definitions are re-sent on every LLM call of a turn, so a server
+    that ships a README-sized description is a per-step tax. Types/enums —
+    what validation and argument-filling need — must survive untouched."""
+    proxy = McpToolProxy(
+        session=None,
+        connector="verbose",
+        tool_name="search",
+        description="d" * 5000,
+        schema={
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "p" * 5000, "enum": ["a", "b"]},
+                "nested": {"type": "object", "properties": {"k": {"description": "n" * 5000}}},
+            },
+            "required": ["q"],
+        },
+    )
+
+    assert len(proxy.description) < 700
+    props = proxy.parameters["properties"]
+    assert len(props["q"]["description"]) < 300
+    assert len(props["nested"]["properties"]["k"]["description"]) < 300
+    assert props["q"]["type"] == "string"
+    assert props["q"]["enum"] == ["a", "b"]
+    assert proxy.parameters["required"] == ["q"]

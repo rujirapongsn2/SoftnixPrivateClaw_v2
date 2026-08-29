@@ -1,6 +1,7 @@
 """Provider quirk registry — spec-driven, no if-elif chains in call sites."""
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +92,37 @@ def supports_vision(model: str) -> bool:
     if any(token in lowered for token in _VISION_MODEL_TOKENS):
         return True
     return not any(token in lowered for token in _TEXT_ONLY_MODEL_TOKENS)
+
+
+@lru_cache(maxsize=256)
+def context_window(model: str | None) -> int | None:
+    """Input tokens the model accepts, or None when the model isn't known.
+
+    Read from LiteLLM's bundled model table (a local JSON, no network) rather
+    than a table of our own, which would go stale every time a provider ships a
+    checkpoint. Routing prefixes are stripped progressively because the table is
+    keyed by the underlying model: "openrouter/anthropic/claude-sonnet-5" is
+    absent, "claude-sonnet-5" is not.
+
+    Unknown is returned as None, never as a guess — callers must degrade to a
+    fixed default rather than act on a made-up window.
+    """
+    name = (model or "").strip()
+    if not name:
+        return None
+    try:
+        from litellm import model_cost
+    except ImportError:  # pragma: no cover - litellm is a hard dependency
+        return None
+    parts = name.split("/")
+    for start in range(len(parts)):
+        info = model_cost.get("/".join(parts[start:]))
+        if not info:
+            continue
+        window = info.get("max_input_tokens") or info.get("max_tokens")
+        if isinstance(window, int) and window > 0:
+            return window
+    return None
 
 
 def apply_model_overrides(model: str, kwargs: dict) -> None:

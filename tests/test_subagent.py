@@ -1,7 +1,10 @@
+import asyncio
+import time
 from pathlib import Path
 
 from claw.config import SandboxSettings
 from claw.core.subagent import SubagentManager
+from claw.core.turn_context import current_turn_deadline
 from claw.sandbox.ephemeral import EphemeralSandbox
 from claw.providers.base import ChatResult, ToolCall
 from claw.tools.spawn import SpawnTool
@@ -27,8 +30,14 @@ async def test_subagent_returns_final_text(tmp_path):
 async def test_subagent_can_use_tools(tmp_path):
     provider = FakeProvider(
         [
-            [ChatResult(content=None, tool_calls=[ToolCall(id="1", name="write_file",
-                                                           arguments={"path": "out.txt", "content": "hi"})])],
+            [
+                ChatResult(
+                    content=None,
+                    tool_calls=[
+                        ToolCall(id="1", name="write_file", arguments={"path": "out.txt", "content": "hi"})
+                    ],
+                )
+            ],
             text_turn("wrote the file"),
         ]
     )
@@ -43,6 +52,68 @@ async def test_spawn_tool_delegates(tmp_path):
     mgr = SubagentManager(provider, _sandbox(), tmp_path, max_iterations=5)
     tool = SpawnTool(mgr)
     assert await tool.execute(task="do a thing") == "done by subagent"
+
+
+class SlowProvider(FakeProvider):
+    async def stream_chat(self, *args, **kwargs):
+        await asyncio.sleep(0.05)
+        async for event in super().stream_chat(*args, **kwargs):
+            yield event
+
+
+async def test_subagent_that_runs_out_of_time_says_so_rather_than_blaming_the_step_limit(tmp_path):
+    provider = SlowProvider(
+        [
+            [
+                ChatResult(
+                    content=None, tool_calls=[ToolCall(id="1", name="list_dir", arguments={"path": "."})]
+                )
+            ],
+            text_turn("never reached"),
+        ]
+    )
+    mgr = SubagentManager(provider, _sandbox(), tmp_path, max_iterations=5, max_turn_seconds=0.01)
+    result = await mgr.run("take too long")
+    assert "ran out of time" in result
+    assert "step limit" not in result
+
+
+async def test_subagent_is_clamped_to_the_parent_turns_deadline(tmp_path, monkeypatch):
+    # The parent loop only checks its budget between iterations, so a spawn that
+    # granted itself a fresh 600s would keep the whole turn alive for a second
+    # full budget. The subagent must inherit whatever time is left instead.
+    from claw.core import subagent as subagent_mod
+
+    real = subagent_mod.AgentLoop
+    seen: dict[str, float] = {}
+
+    def spy(**kwargs):
+        seen["budget"] = kwargs["max_turn_seconds"]
+        return real(**kwargs)
+
+    monkeypatch.setattr(subagent_mod, "AgentLoop", spy)
+    provider = FakeProvider([text_turn("ok")])
+    mgr = SubagentManager(provider, _sandbox(), tmp_path, max_iterations=5, max_turn_seconds=600)
+
+    token = current_turn_deadline.set(time.monotonic() + 5)
+    try:
+        await mgr.run("do a thing")
+    finally:
+        current_turn_deadline.reset(token)
+
+    assert 0 < seen["budget"] <= 5
+
+
+async def test_subagent_refuses_to_start_once_the_parent_turn_is_over(tmp_path):
+    provider = FakeProvider([text_turn("should never run")])
+    mgr = SubagentManager(provider, _sandbox(), tmp_path, max_iterations=5)
+    token = current_turn_deadline.set(time.monotonic() - 1)
+    try:
+        result = await mgr.run("too late")
+    finally:
+        current_turn_deadline.reset(token)
+    assert "out of time" in result
+    assert provider.calls == []  # never reached the provider at all
 
 
 async def test_subagent_context_appended(tmp_path):

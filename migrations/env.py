@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from claw.config import load_settings
 from claw.db.models import Base
+from claw.db.types import render_migration_type
 
 config = context.config
 if config.config_file_name is not None:
@@ -27,13 +28,19 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        render_item=render_migration_type,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def _do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        render_item=render_migration_type,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

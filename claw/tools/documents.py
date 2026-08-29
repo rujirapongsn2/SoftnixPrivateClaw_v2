@@ -4,12 +4,21 @@ Parsing libraries are optional (dependency group 'documents'); a tool returns a
 clear error if its library isn't installed rather than crashing the agent.
 """
 
+import asyncio
 import csv
 import io
 from pathlib import Path
 from typing import Any
 
+from claw.api.file_preview import CSV_READ_BYTES
 from claw.tools.base import Tool
+
+# Same process-global raise the preview path applies, restated here rather than
+# inherited: it is set as an import side effect over there, so relying on that
+# would silently reimpose csv's default 131072-char field limit on this tool in
+# any process that never happens to import the preview module. The call is
+# idempotent, so import order does not matter.
+csv.field_size_limit(CSV_READ_BYTES)
 
 _MAX_CHARS = 40_000
 
@@ -80,20 +89,26 @@ class ReadCsvTool(_WorkspaceDocTool):
         "required": ["path"],
     }
 
-    async def execute(self, path: str, max_rows: int = 500, **_: Any) -> str:
-        target = self._resolve(path)
-        if target is None:
-            return f"Error: file not found: {path}"
+    @staticmethod
+    def _parse(target: Path, max_rows: int) -> str:
         text = target.read_text("utf-8", "replace")
         delimiter = "\t" if target.suffix.lower() == ".tsv" else ","
-        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
         lines = []
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
         for i, row in enumerate(reader):
             if i >= max_rows:
                 lines.append("... (more rows)")
                 break
             lines.append(" | ".join(row))
-        return self._cap("\n".join(lines))
+        return "\n".join(lines)
+
+    async def execute(self, path: str, max_rows: int = 500, **_: Any) -> str:
+        target = self._resolve(path)
+        if target is None:
+            return f"Error: file not found: {path}"
+        # Off the event loop: reading and parsing the file is synchronous CPU
+        # work that would otherwise stall every other request in this process.
+        return self._cap(await asyncio.to_thread(self._parse, target, max_rows))
 
 
 class ReadPdfTool(_WorkspaceDocTool):

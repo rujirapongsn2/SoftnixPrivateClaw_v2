@@ -31,6 +31,7 @@ import {
   ChevronRight,
   Code,
   Copy,
+  Download as DownloadIcon,
   ExternalLink,
   File as FileIcon,
   GitBranch,
@@ -60,18 +61,24 @@ import { ExecutionPanel } from "./ExecutionPanel";
 import {
   AgentEvent,
   ApiError,
+  artifactTypeMeta,
   AttachmentRef,
   ConnectorInfo,
+  isHiddenArtifact,
   KnowledgeBase,
   ModelOption,
+  PREVIEWABLE_HTML_RE,
+  PREVIEWABLE_TABLE_RE,
   SkillInfo,
   WorkingPlan,
   api,
   fileUrl,
   openChatSocket,
 } from "./api";
+import { HtmlPreview } from "./HtmlPreview";
 import { SoftnixLogo } from "./Logo";
-import { useT } from "./branding";
+import { TablePreview } from "./TablePreview";
+import { useBranding, useT } from "./branding";
 import { sanitizeModelMarkdown, stripMarkdownForSpeech } from "./markdown";
 
 // Copy text to the clipboard, falling back to execCommand for non-secure
@@ -232,9 +239,83 @@ function confirmTitle(
 }
 
 type TranscriptItem =
-  | { kind: "message"; role: "user" | "assistant"; content: string; artifacts?: string[] }
+  | {
+      kind: "message";
+      role: "user" | "assistant";
+      content: string;
+      artifacts?: string[];
+      visionModel?: string;
+    }
   | { kind: "tools"; calls: ToolCallRow[] }
   | { kind: "confirm"; row: ConfirmRow };
+
+// The most recent tool call still running, if any — a confirm card can land
+// after the tools group (see the tool_finished handler's comment on why), so
+// this scans backward rather than trusting the last item is the tools group.
+function findRunningCall(items: TranscriptItem[]): ToolCallRow | null {
+  for (let gi = items.length - 1; gi >= 0; gi--) {
+    const it = items[gi];
+    if (it.kind !== "tools") continue;
+    for (let k = it.calls.length - 1; k >= 0; k--) {
+      if (it.calls[k].status === "running") return it.calls[k];
+    }
+  }
+  return null;
+}
+
+// A turn that has ended has no tool still executing. Any row left "running"
+// was orphaned — a tool_finished lost to a reconnect that replayed its
+// tool_started, or a call cancelled without one — and because findRunningCall
+// scans the whole transcript, one stale row would relabel the thinking spinner
+// with a finished turn's tool for the rest of the session.
+function settleRunningCalls(
+  items: TranscriptItem[],
+  status: "complete" | "error",
+): TranscriptItem[] {
+  let changed = false;
+  const next = items.map((it) => {
+    if (it.kind !== "tools" || !it.calls.some((c) => c.status === "running")) return it;
+    changed = true;
+    return {
+      ...it,
+      calls: it.calls.map((c) =>
+        c.status === "running"
+          ? {
+              ...c,
+              status,
+              duration: c.duration ?? `${((Date.now() - c.startedAt) / 1000).toFixed(1)}s`,
+              substeps: c.substeps?.map((s) => (s.status === "running" ? { ...s, status } : s)),
+            }
+          : c,
+      ),
+    };
+  });
+  return changed ? next : items;
+}
+
+// A short human label for whatever a running tool call is doing right now —
+// its live sub-step if it has one (e.g. a workflow step), else its args
+// preview, else just its name. Used to replace a static "Thinking…" with
+// something that visibly moves during a long-running call.
+function describeRunningCall(call: ToolCallRow): string {
+  const activeSub =
+    call.substeps && call.substeps.length > 0
+      ? (call.substeps.find((s) => s.status === "running") ?? call.substeps[call.substeps.length - 1])
+      : undefined;
+  const detail = activeSub?.label ?? call.argsPreview;
+  return detail ? `${call.name} · ${detail}` : call.name;
+}
+
+// "12s" under a minute, "1m 05s" past it — coarse enough that it doesn't
+// need to update more than once a second, but still visibly moves so a long
+// wait doesn't read as a frozen screen.
+function formatElapsed(startedAt: number | null): string {
+  if (startedAt == null) return "";
+  const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  return `${mins}m ${String(secs % 60).padStart(2, "0")}s`;
+}
 
 const PERMISSION_OPTS: {
   key: PermissionMode;
@@ -300,9 +381,16 @@ export function Chat({
   onOpenSettings,
 }: ChatProps) {
   const t = useT();
+  const { executionPanelEnabled } = useBranding();
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState(false);
+  // When the current busy period started (for the "Thinking… 12s" counter) —
+  // a ref because it drives a manual re-render tick below, not React state.
+  const busyStartedAtRef = useRef<number | null>(null);
+  // Forces a re-render once a second while busy so the elapsed counter (and
+  // any active tool's live label) visibly moves instead of looking frozen.
+  const [, forceBusyTick] = useState(0);
   const [error, setError] = useState("");
   const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -352,7 +440,13 @@ export function Chat({
   const speakingUrlRef = useRef<string | null>(null);
   // Right execution panel: remember the user's explicit show/hide choice; a tool
   // starting auto-opens it transiently without overwriting that saved default.
+  // The panel itself is opt-in (Settings > Profile > Preferences, off by
+  // default) — a stale "1" from before the setting existed, or from another
+  // account on this browser, must never resurrect it on its own.
   const [execOpen, setExecOpen] = useState(() => localStorage.getItem("claw_exec_open") === "1");
+  const openExecIfEnabled = useCallback(() => {
+    if (executionPanelEnabled) setExecOpen(true);
+  }, [executionPanelEnabled]);
   // The agent's live working plan (from plan_updated events), shown pinned atop
   // the Execution panel. Null until the agent sets one this session.
   const [plan, setPlan] = useState<WorkingPlan | null>(null);
@@ -365,6 +459,18 @@ export function Chat({
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
+  // Drives the "Thinking… Ns" counter: starts the clock the moment a turn
+  // goes busy, ticks once a second so the label visibly moves during a long
+  // tool call, and stops (no wasted timer) the moment it isn't busy anymore.
+  useEffect(() => {
+    if (!busy) {
+      busyStartedAtRef.current = null;
+      return;
+    }
+    busyStartedAtRef.current = Date.now();
+    const id = window.setInterval(() => forceBusyTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [busy]);
   const fileRef = useRef<HTMLInputElement | null>(null);
   // Imperative handle for the composer's contentEditable — lets us insert a
   // styled mention chip (skill/connector/knowledge) instead of raw "@name " text.
@@ -545,7 +651,7 @@ export function Chat({
           break;
         case "tool_started":
           setStreaming("");
-          setExecOpen(true); // auto-open the execution panel while the agent works
+          openExecIfEnabled(); // auto-open the execution panel while the agent works, if enabled
           setItems((prev) => {
             const last = prev[prev.length - 1];
             const row: ToolCallRow = {
@@ -644,11 +750,11 @@ export function Chat({
           break;
         case "plan_updated":
           // The agent revised its working plan — show it pinned in the panel.
-          setExecOpen(true);
+          openExecIfEnabled();
           setPlan({ goal: event.goal ?? "", steps: event.steps ?? [] });
           break;
         case "tool_confirm_request":
-          setExecOpen(true);
+          openExecIfEnabled();
           setItems((prev) => {
             // Ignore a resend for a card we already show (reconnect).
             if (
@@ -685,18 +791,27 @@ export function Chat({
           setBusy(false);
           setStreaming("");
           sawCompletionRef.current = true;
-          if (event.content) {
-            setItems((prev) => [
-              ...prev,
-              { kind: "message", role: "assistant", content: event.content!, artifacts: event.artifacts },
-            ]);
-          }
+          setItems((prev) => {
+            const settled = settleRunningCalls(prev, "complete");
+            if (!event.content) return settled;
+            return [
+              ...settled,
+              {
+                kind: "message",
+                role: "assistant",
+                content: event.content!,
+                artifacts: event.artifacts,
+                visionModel: event.vision_model,
+              },
+            ];
+          });
           onActivity?.();
           break;
         case "turn_error":
           setBusy(false);
           setStreaming("");
           sawCompletionRef.current = true;
+          setItems((prev) => settleRunningCalls(prev, "error"));
           setError(event.message ?? "unknown error");
           onActivity?.();
           break;
@@ -809,6 +924,7 @@ export function Chat({
               role: m.role,
               content: m.content,
               artifacts: m.meta?.artifacts,
+              visionModel: m.meta?.vision_model,
             })),
           );
         })
@@ -903,6 +1019,7 @@ export function Chat({
               role: m.role,
               content: m.content,
               artifacts: m.meta?.artifacts,
+              visionModel: m.meta?.vision_model,
             })),
           );
           setBusy(false);
@@ -1553,7 +1670,7 @@ export function Chat({
   return (
     <div className="claw-chat-shell">
     <div className={`claw-chat${isEmpty ? " claw-chat--empty" : ""}`}>
-      {!isEmpty && !execOpen && (
+      {!isEmpty && executionPanelEnabled && !execOpen && (
         <IconButton
           label={t("chat.exec.show")}
           icon={<Icon icon={PanelRight} size="sm" />}
@@ -2089,15 +2206,33 @@ export function Chat({
               item.kind === "tools" ? (
                 <ChatToolCalls
                   key={i}
-                  calls={item.calls.map((c, j) => ({
-                    key: `${i}-${j}`,
-                    name: c.name,
-                    status: c.status,
-                    target: c.argsPreview,
-                    duration: c.duration,
-                    errorMessage: c.status === "error" ? c.resultPreview : undefined,
-                    resultDetail: c.resultPreview ? <Text size="sm">{c.resultPreview}</Text> : undefined,
-                  }))}
+                  calls={item.calls.map((c, j) => {
+                    // While a long tool (e.g. workflow) is running, surface its live
+                    // sub-step here too — not just in the (opt-in, off-by-default)
+                    // Execution panel — so this row doesn't look stuck.
+                    const activeSub =
+                      c.status === "running" && c.substeps && c.substeps.length > 0
+                        ? (c.substeps.find((s) => s.status === "running") ?? c.substeps[c.substeps.length - 1])
+                        : undefined;
+                    const counter =
+                      c.status === "running" && c.stepIndex && c.stepTotal
+                        ? t("exec.stepCounter", { index: String(c.stepIndex), total: String(c.stepTotal) })
+                        : undefined;
+                    const liveTarget = activeSub
+                      ? counter
+                        ? `${counter} · ${activeSub.label}`
+                        : activeSub.label
+                      : c.argsPreview;
+                    return {
+                      key: `${i}-${j}`,
+                      name: c.name,
+                      status: c.status,
+                      target: liveTarget,
+                      duration: c.duration,
+                      errorMessage: c.status === "error" ? c.resultPreview : undefined,
+                      resultDetail: c.resultPreview ? <Text size="sm">{c.resultPreview}</Text> : undefined,
+                    };
+                  })}
                 />
               ) : item.kind === "confirm" ? (
                 <div key={i} className={`claw-confirm claw-confirm--${item.row.status}`}>
@@ -2156,8 +2291,25 @@ export function Chat({
                         <div className="claw-artifacts">
                           {item.artifacts.map((p) => {
                             const href = fileUrl(sessionId, p);
+                            // Intermediate files (the script that built the
+                            // PDF, the JSON/XML it read along the way) are not
+                            // deliverables — hide them so the download list
+                            // only shows what the user actually asked for.
+                            if (isHiddenArtifact(p)) {
+                              return null;
+                            }
                             // Show images (e.g. a generated chart) inline; keep
                             // everything else as an openable chip.
+                            if (PREVIEWABLE_TABLE_RE.test(p)) {
+                              return (
+                                <TablePreview key={p} sessionId={sessionId} path={p} href={href} />
+                              );
+                            }
+                            if (PREVIEWABLE_HTML_RE.test(p)) {
+                              return (
+                                <HtmlPreview key={p} sessionId={sessionId} path={p} href={href} />
+                              );
+                            }
                             if (/\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(p)) {
                               const name = p.split("/").pop() ?? p;
                               return (
@@ -2184,18 +2336,32 @@ export function Chat({
                                 </a>
                               );
                             }
+                            // Everything else is a download: show a card with a
+                            // clear per-type icon and badge so a non-technical
+                            // user can tell at a glance what each file is.
+                            const meta = artifactTypeMeta(p);
+                            const name = p.split("/").pop() ?? p;
                             return (
                               <a
                                 key={p}
-                                className="claw-artifact-chip"
+                                className={`claw-artifact-card claw-artifact-card--${meta.className}`}
                                 href={href}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                title={t("chat.artifact.open", { name: p })}
+                                download={name}
+                                title={t("chat.artifact.download", { name: p })}
                               >
-                                <Icon icon={FileIcon} size="sm" color="secondary" />
-                                <span className="claw-artifact-name">{p.split("/").pop()}</span>
-                                <Icon icon={ExternalLink} size="xsm" color="secondary" />
+                                <span className="claw-artifact-card-icon">
+                                  <Icon icon={meta.icon} size="md" color="secondary" />
+                                </span>
+                                <span className="claw-artifact-card-body">
+                                  <span className="claw-artifact-name">{name}</span>
+                                  <span className="claw-artifact-card-type">
+                                    <span className="claw-artifact-card-badge">{meta.label}</span>
+                                    <span className="claw-artifact-card-action">
+                                      {t("chat.artifact.downloadAction")}
+                                    </span>
+                                  </span>
+                                </span>
+                                <Icon icon={DownloadIcon} size="sm" color="secondary" />
                               </a>
                             );
                           })}
@@ -2296,7 +2462,14 @@ export function Chat({
               <ChatMessage sender="assistant">
                 <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
                   <span className="claw-thinking">
-                    <Spinner size="sm" shade="subtle" /> {t("chat.msg.thinking")}
+                    <Spinner size="sm" shade="subtle" />{" "}
+                    {(() => {
+                      const elapsed = formatElapsed(busyStartedAtRef.current);
+                      const running = findRunningCall(items);
+                      return running
+                        ? t("chat.msg.workingOn", { label: describeRunningCall(running), elapsed })
+                        : t("chat.msg.thinkingElapsed", { elapsed });
+                    })()}
                   </span>
                 </ChatMessageBubble>
               </ChatMessage>
@@ -2315,7 +2488,7 @@ export function Chat({
         )}
       </ChatLayout>
     </div>
-      {!isEmpty && execOpen && (
+      {!isEmpty && executionPanelEnabled && execOpen && (
         <ExecutionPanel steps={execSteps} plan={plan} running={busy} onClose={() => toggleExec(false)} />
       )}
       <Lightbox

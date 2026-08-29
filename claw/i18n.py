@@ -32,9 +32,63 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "en": "A tool failed while working on your request ({reason}).",
         "th": "เครื่องมือทำงานไม่สำเร็จระหว่างประมวลผลคำขอ ({reason})",
     },
+    # Distinct from error.llm because the model is not at fault: the answer was
+    # produced and then lost on the way to storage. Saying "could not reach the
+    # model" here sends the user (and whoever reads the bug report) after the
+    # provider instead of the database.
+    "error.save": {
+        "en": "The answer was generated but could not be saved (internal error). Please try again.",
+        "th": "สร้างคำตอบสำเร็จแล้ว แต่บันทึกไม่สำเร็จ (ข้อผิดพลาดภายใน) กรุณาลองใหม่อีกครั้ง",
+    },
+    # Distinct from error.save: this is the user's own message failing to
+    # persist *before* the model was ever called — no answer exists yet, so
+    # error.save's "the answer was generated" would be false here.
+    "error.save_request": {
+        "en": "Your message could not be saved (internal error). Please try again.",
+        "th": "บันทึกข้อความของคุณไม่สำเร็จ (ข้อผิดพลาดภายใน) กรุณาลองใหม่อีกครั้ง",
+    },
+    # The model hit its output cap before writing a visible answer — typical of
+    # a reasoning model that spends the whole budget on hidden thinking. Saying
+    # "could not reach the model" would be wrong: it answered, and the answer
+    # was cut off. Retrying is worth it (the next attempt may think less).
+    "error.truncated": {
+        "en": (
+            "The answer hit the response-length limit before it could be written out. "
+            "Please try again, or ask for a shorter answer."
+        ),
+        "th": "คำตอบชนขีดจำกัดความยาวก่อนจะเขียนออกมาได้ กรุณาลองใหม่อีกครั้ง หรือขอคำตอบที่สั้นลง",
+    },
+    # Model finished normally but produced no text at all. Rare, and there is
+    # nothing actionable to say beyond "try again" — but it must still be said,
+    # because an empty turn otherwise looks like the app silently did nothing.
+    "error.empty_response": {
+        "en": "The model returned an empty response. Please try again.",
+        "th": "โมเดลตอบกลับมาว่างเปล่า กรุณาลองใหม่อีกครั้ง",
+    },
+    # The turn ran past its wall-clock budget. Distinct from error.max_iterations:
+    # the step count may be nowhere near its limit, so telling the user to use
+    # fewer steps would be misleading — what ran out was time.
+    "error.turn_timeout": {
+        "en": "This is taking too long, so I stopped before finishing. Try a smaller task, or ask me to continue.",
+        "th": "งานนี้ใช้เวลานานเกินกำหนด จึงหยุดก่อนทำเสร็จ ลองแบ่งงานให้เล็กลง หรือสั่งให้ทำต่อได้",
+    },
+    # The deadline cut the stream off while the model was mid-answer. Distinct
+    # from error.turn_timeout: there IS an answer, it is just unfinished, so the
+    # message has to mark where it stops rather than replace it.
+    "error.turn_timeout_partial": {
+        "en": "[This answer was cut off — the turn ran out of time. Ask me to continue.]",
+        "th": "[คำตอบนี้ถูกตัดกลางคัน เพราะหมดเวลาที่กำหนดไว้ สั่งให้ทำต่อได้]",
+    },
     "error.max_iterations": {
         "en": "I reached the step limit before finishing. Try splitting the task into smaller parts.",
         "th": "ถึงจำนวนขั้นตอนสูงสุดก่อนงานเสร็จ ลองแบ่งงานเป็นส่วนย่อยลง",
+    },
+    # Appended to any of the "no answer" messages above when the turn did in fact
+    # produce files before it ran out of time/steps. Without this the user is told
+    # the turn failed and never learns that the work is sitting in their workspace.
+    "error.partial_artifacts": {
+        "en": "Files created before I stopped: {files}",
+        "th": "ไฟล์ที่สร้างไว้ก่อนหยุด: {files}",
     },
     "error.rate_limited": {
         "en": "You're sending messages too fast. Please wait a moment and try again.",
@@ -128,7 +182,9 @@ def classify_error_reason(detail: str) -> str:
     lowered = detail.lower()
     if any(tok in lowered for tok in ("timeout", "timed out", "deadline")):
         return "reason.timeout"
-    if any(tok in lowered for tok in ("401", "403", "unauthorized", "forbidden", "api key", "authentication")):
+    if any(
+        tok in lowered for tok in ("401", "403", "unauthorized", "forbidden", "api key", "authentication")
+    ):
         return "reason.auth"
     if any(tok in lowered for tok in ("429", "rate limit", "quota", "too many requests")):
         return "reason.rate_limit"

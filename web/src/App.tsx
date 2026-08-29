@@ -668,7 +668,14 @@ export default function App() {
   // login (possibly a different account) doesn't inherit a stale override.
   useEffect(() => {
     setUserOverride(
-      user ? { language: user.language, font_size: user.font_size, chat_background: user.chat_background } : null,
+      user
+        ? {
+            language: user.language,
+            font_size: user.font_size,
+            chat_background: user.chat_background,
+            execution_panel_enabled: user.execution_panel_enabled,
+          }
+        : null,
     );
   }, [user, setUserOverride]);
 

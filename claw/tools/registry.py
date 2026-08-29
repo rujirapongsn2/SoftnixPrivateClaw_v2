@@ -37,7 +37,11 @@ class ToolRegistry:
         return [tool.to_schema() for tool in self._tools.values()]
 
     async def execute(
-        self, name: str, params: dict[str, Any], progress: Callable[[dict], None] | None = None
+        self,
+        name: str,
+        params: dict[str, Any],
+        progress: Callable[[dict], None] | None = None,
+        deadline: float | None = None,
     ) -> str:
         tool = self._tools.get(name)
         if tool is None:
@@ -47,11 +51,14 @@ class ToolRegistry:
             result = f"Error: invalid parameters for '{name}': " + "; ".join(errors) + _RETRY_HINT
             self._audit(name, params, result)
             return result
-        # Only tools that opt in receive the progress callback (kept out of the
-        # normal param set so validation and every other tool are unaffected).
+        # Only tools that opt in receive the progress callback / turn deadline
+        # (kept out of the normal param set so validation and every other tool
+        # are unaffected).
         call_kwargs = dict(params)
         if progress is not None and getattr(tool, "wants_progress", False):
             call_kwargs["progress"] = progress
+        if deadline is not None and getattr(tool, "wants_deadline", False):
+            call_kwargs["deadline"] = deadline
         try:
             result = await tool.execute(**call_kwargs)
         except Exception as exc:

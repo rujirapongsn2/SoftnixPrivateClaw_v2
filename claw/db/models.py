@@ -7,8 +7,16 @@ JSON columns use the portable JSON type (JSONB on Postgres via dialect).
 import uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+# Aliased so every column below is NUL-stripping by construction — see
+# claw/db/types.py. Declared here rather than per-column because the columns at
+# risk (tool output, extracted PDF text, model-generated titles) are spread
+# across many tables, and a column added later would silently miss the guard.
+from claw.db.types import NulSafeJSON as JSON
+from claw.db.types import NulSafeString as String
+from claw.db.types import NulSafeText as Text
 
 
 def _uuid() -> str:
@@ -65,14 +73,10 @@ class User(Base):
     # Last time an imported-pending-activation email was sent — used to rate
     # limit resends (see claw/api/auth.py's activation email helper). Null
     # until the first send.
-    activation_email_sent_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    activation_email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Last time a "forgot password" reset email was sent — rate-limits resends
     # the same way activation_email_sent_at does.
-    password_reset_sent_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    password_reset_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The nonce embedded in the currently-outstanding password-reset token (or
     # null if none is outstanding). Redeeming a reset token clears this via an
     # atomic compare-and-swap (UserStore.redeem_password_reset), so a token
@@ -87,6 +91,10 @@ class User(Base):
     ui_language: Mapped[str | None] = mapped_column(String(8), nullable=True)
     font_size: Mapped[str | None] = mapped_column(String(16), nullable=True)
     chat_background: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Whether the desktop UI's Execution panel (live tool-call timeline) is
+    # shown at all. Unlike the appearance fields above there's no global
+    # default to inherit — it's plain off-by-default, opt-in per user.
+    execution_panel_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     __table_args__ = (
         # Enforces (and indexes) case-insensitive email uniqueness — the
@@ -323,9 +331,7 @@ class UsageRecord(Base):
     # False for background work (memory consolidation): the tokens are real and
     # belong in the bill, but the row is not a chat turn the user took, so every
     # turn count has to exclude it or it contradicts the user's own quota.
-    counts_as_turn: Mapped[bool] = mapped_column(
-        Boolean, default=True, server_default=text("1")
-    )
+    counts_as_turn: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
     # Cost *shape* of the turn, not just its price: LLM round-trips, tools run,
     # and the wait before the first visible character. Tokens alone can't tell a
     # one-shot answer apart from a multi-tool detour that produced the same reply.
@@ -459,6 +465,10 @@ class LLMModel(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Input-token window, for when the admin knows it and LiteLLM's bundled model
+    # table does not (private gateways, brand-new checkpoints). NULL = look it
+    # up; the agent loop sizes its prompt-compaction ceiling from whichever wins.
+    context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -520,12 +530,8 @@ class KnowledgeBaseSharedGroup(Base):
     __tablename__ = "knowledge_base_shared_groups"
     __table_args__ = (Index("ix_kb_shared_groups_group", "group_id"),)
 
-    kb_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), primary_key=True
-    )
-    group_id: Mapped[str] = mapped_column(
-        ForeignKey("user_groups.id", ondelete="CASCADE"), primary_key=True
-    )
+    kb_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id", ondelete="CASCADE"), primary_key=True)
+    group_id: Mapped[str] = mapped_column(ForeignKey("user_groups.id", ondelete="CASCADE"), primary_key=True)
 
 
 class KnowledgeDoc(Base):

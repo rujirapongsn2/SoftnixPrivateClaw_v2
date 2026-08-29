@@ -111,6 +111,9 @@ class TurnCompleted(AgentEvent):
     content: str
     usage: dict[str, int] = field(default_factory=dict)
     artifacts: list[str] = field(default_factory=list)
+    # Set when an attached image was read by a separate vision model because the
+    # chat model couldn't; "" on every ordinary turn.
+    vision_model: str = ""
     type: str = field(default="turn_completed", init=False)
 
 

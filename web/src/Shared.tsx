@@ -92,6 +92,15 @@ export function SharedView({ token }: { token: string }) {
                 <div key={i} className="claw-share-answer">
                   <Markdown>{m.content}</Markdown>
                   {m.files.length > 0 && (
+                    // NOTE: only images/chips render here today. If table/HTML
+                    // preview support (TablePreview/HtmlPreview, see Chat.tsx)
+                    // is ever added to this page, styles.css's .claw-artifacts
+                    // width breakout needs a `container-type: inline-size`
+                    // ancestor added on this page too — it currently relies on
+                    // one from @astryxdesign/core's ChatLayout, which this
+                    // Share page doesn't render, so the breakout would silently
+                    // no-op and the card would stay capped at .claw-share-main's
+                    // 760px.
                     <div className="claw-artifacts">
                       {m.files.map((f) => {
                         const href = shareFileUrl(token, f.name);

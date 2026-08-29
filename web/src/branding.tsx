@@ -32,6 +32,9 @@ export interface UserAppearanceOverride {
   language: BrandingLanguage | null;
   font_size: BrandingFontSize | null;
   chat_background: BrandingChatBackground | null;
+  // Desktop UI's Execution panel: off by default, no admin-level default to
+  // inherit — unlike the three fields above, this is a plain boolean.
+  execution_panel_enabled: boolean;
 }
 
 interface BrandingContextValue {
@@ -44,12 +47,17 @@ interface BrandingContextValue {
   /** Called by the app shell whenever the logged-in user changes (login,
    * logout, or a Preferences save) so the merged branding stays in sync. */
   setUserOverride: (override: UserAppearanceOverride | null) => void;
+  /** Whether Chat's Execution panel is enabled for the current user — false
+   * (and the panel entirely unavailable) until they opt in, or while logged
+   * out. */
+  executionPanelEnabled: boolean;
 }
 
 const BrandingContext = createContext<BrandingContextValue>({
   branding: DEFAULT_BRANDING,
   refresh: async () => {},
   setUserOverride: () => {},
+  executionPanelEnabled: false,
 });
 
 /** Apply the appearance choices that live as root-level attributes (the CSS in
@@ -98,8 +106,12 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
     applyAppearance(branding.font_size, branding.chat_background);
   }, [branding.font_size, branding.chat_background]);
 
+  const executionPanelEnabled = userOverride?.execution_panel_enabled ?? false;
+
   return (
-    <BrandingContext.Provider value={{ branding, refresh: load, setUserOverride }}>
+    <BrandingContext.Provider
+      value={{ branding, refresh: load, setUserOverride, executionPanelEnabled }}
+    >
       {children}
     </BrandingContext.Provider>
   );
@@ -215,6 +227,15 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
 
     "chat.artifact.view": "View {name}",
     "chat.artifact.open": "Open {name}",
+    "chat.artifact.download": "Download {name}",
+    "chat.artifact.downloadAction": "Download",
+
+    "chat.preview.empty": "This file has no rows to preview.",
+    "chat.preview.truncated": "Showing the first {rows} rows — download the file for all of it.",
+    "chat.preview.truncatedColumns": "Showing the first {cols} columns — download the file for all of it.",
+    "chat.preview.truncatedBoth": "Showing the first {rows} rows and {cols} columns — download the file for all of it.",
+    "chat.preview.htmlTruncated": "Showing the start of this page — open the file for all of it.",
+    "chat.preview.htmlNoScripts": "Preview only: scripts don't run here.",
 
     "chat.msg.copied": "Copied",
     "chat.msg.copyResponse": "Copy response",
@@ -224,7 +245,12 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.msg.good": "Good response",
     "chat.msg.bad": "Bad response",
     "chat.msg.share": "Share answer",
+    "chat.msg.visionRead": "Image read by {model}",
+    "chat.msg.visionReadHint":
+      "This chat model cannot see images, so {model} described the attachment and the answer was written from that description.",
     "chat.msg.thinking": "Thinking…",
+    "chat.msg.thinkingElapsed": "Thinking… {elapsed}",
+    "chat.msg.workingOn": "{label}… {elapsed}",
     "chat.msg.generatingImage": "Generating image…",
 
     "chat.slash.menuLabel": "Skills, connectors & knowledge",
@@ -288,6 +314,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.profile.bg.solid": "Solid",
     "settings.profile.bg.dots": "Dots",
     "settings.profile.bg.grid": "Grid",
+    "settings.profile.executionPanel": "Execution panel",
+    "settings.profile.executionPanelDesc":
+      "Show the live tool-call timeline while the agent works. Off by default.",
     "settings.profile.savePreferences": "Save preferences",
 
     "settings.skills.builtinNotice":
@@ -657,6 +686,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.modelTypeAria": "Model type",
     "admin.providers.kindChat": "Chat",
     "admin.providers.kindImage": "Image",
+    "admin.providers.kindVision": "Vision",
+    "admin.providers.kindVisionHint":
+      "Reads images for chat models that can't. When a user attaches an image to a text-only model, this model describes it and the chat model answers from that description. Billed, but not counted as a turn.",
     "admin.providers.modelPrefixWarning": "Start the model id with a provider prefix — e.g. openrouter/, openai/, anthropic/, gemini/. Without it the model can't be reached.",
     "admin.providers.userDescription": "Add your own LLM providers with your own API key. They're private to you and appear in your chat model picker alongside the built-in models. Keys are stored encrypted.",
     "admin.providers.adminDescription": "Configure upstream LLM providers and the models users can pick in chat. API keys are stored encrypted.",
@@ -708,6 +740,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.modelId": "Model id",
     "admin.providers.description": "Description",
     "admin.providers.descriptionHint": "Shown in the model picker",
+    "admin.providers.contextWindow": "Context window (tokens)",
+    "admin.providers.contextWindowHint": "Leave blank to detect automatically. Set it if the model is unknown to the built-in table (private gateway, new checkpoint).",
     "admin.providers.type": "Type",
     "admin.providers.costTier": "Cost tier",
     "admin.providers.modelSavedToast": "Model saved",
@@ -1149,6 +1183,15 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
 
     "chat.artifact.view": "ดู {name}",
     "chat.artifact.open": "เปิด {name}",
+    "chat.artifact.download": "ดาวน์โหลด {name}",
+    "chat.artifact.downloadAction": "ดาวน์โหลด",
+
+    "chat.preview.empty": "ไฟล์นี้ไม่มีข้อมูลให้แสดงตัวอย่าง",
+    "chat.preview.truncated": "แสดง {rows} แถวแรก — ดาวน์โหลดไฟล์เพื่อดูทั้งหมด",
+    "chat.preview.truncatedColumns": "แสดง {cols} คอลัมน์แรก — ดาวน์โหลดไฟล์เพื่อดูทั้งหมด",
+    "chat.preview.truncatedBoth": "แสดง {rows} แถวแรก และ {cols} คอลัมน์แรก — ดาวน์โหลดไฟล์เพื่อดูทั้งหมด",
+    "chat.preview.htmlTruncated": "แสดงเฉพาะส่วนต้นของหน้านี้ — เปิดไฟล์เพื่อดูทั้งหมด",
+    "chat.preview.htmlNoScripts": "ตัวอย่างเท่านั้น: สคริปต์ไม่ทำงานในนี้",
 
     "chat.msg.copied": "คัดลอกแล้ว",
     "chat.msg.copyResponse": "คัดลอกคำตอบ",
@@ -1158,7 +1201,12 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.msg.good": "คำตอบดี",
     "chat.msg.bad": "คำตอบไม่ดี",
     "chat.msg.share": "แชร์คำตอบ",
+    "chat.msg.visionRead": "อ่านรูปด้วย {model}",
+    "chat.msg.visionReadHint":
+      "โมเดลแชทนี้ดูรูปภาพไม่ได้ ระบบจึงให้ {model} อ่านและบรรยายรูปที่แนบมา แล้วตอบจากคำบรรยายนั้น",
     "chat.msg.thinking": "กำลังคิด…",
+    "chat.msg.thinkingElapsed": "กำลังคิด… {elapsed}",
+    "chat.msg.workingOn": "{label}… {elapsed}",
     "chat.msg.generatingImage": "กำลังสร้างภาพ…",
 
     "chat.slash.menuLabel": "สกิล, ตัวเชื่อมต่อ และฐานความรู้",
@@ -1222,6 +1270,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.profile.bg.solid": "ทึบ",
     "settings.profile.bg.dots": "จุด",
     "settings.profile.bg.grid": "ตาราง",
+    "settings.profile.executionPanel": "แผงแสดงการทำงาน",
+    "settings.profile.executionPanelDesc":
+      "แสดงรายการขั้นตอนการทำงานของเอเจนต์แบบเรียลไทม์ขณะทำงาน ปิดไว้เป็นค่าเริ่มต้น",
     "settings.profile.savePreferences": "บันทึกการตั้งค่า",
 
     "settings.skills.builtinNotice":
@@ -1589,6 +1640,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.modelTypeAria": "ประเภทโมเดล",
     "admin.providers.kindChat": "แชท",
     "admin.providers.kindImage": "รูปภาพ",
+    "admin.providers.kindVision": "อ่านรูป",
+    "admin.providers.kindVisionHint":
+      "ใช้อ่านรูปแทนโมเดลแชทที่ดูรูปไม่ได้ เมื่อผู้ใช้แนบรูปมากับโมเดลที่รับได้แต่ข้อความ โมเดลนี้จะบรรยายรูปให้ แล้วโมเดลแชทตอบจากคำบรรยายนั้น คิดค่าโทเคนแต่ไม่นับเป็นเทิร์น",
     "admin.providers.modelPrefixWarning": "ใส่คำนำหน้าผู้ให้บริการที่ id โมเดล — เช่น openrouter/, openai/, anthropic/, gemini/ หากไม่ใส่จะไม่สามารถเรียกใช้โมเดลได้",
     "admin.providers.userDescription": "เพิ่มผู้ให้บริการ LLM ของคุณเองด้วย API key ของคุณ ผู้ให้บริการเหล่านี้เป็นส่วนตัวของคุณและจะปรากฏในตัวเลือกโมเดลของแชทควบคู่กับโมเดลที่มีอยู่แล้ว คีย์จะถูกเข้ารหัสก่อนจัดเก็บ",
     "admin.providers.adminDescription": "ตั้งค่าผู้ให้บริการ LLM ต้นทางและโมเดลที่ผู้ใช้เลือกได้ในแชท API key จะถูกเข้ารหัสก่อนจัดเก็บ",
@@ -1640,6 +1694,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.modelId": "Model id",
     "admin.providers.description": "คำอธิบาย",
     "admin.providers.descriptionHint": "แสดงในตัวเลือกโมเดล",
+    "admin.providers.contextWindow": "Context window (โทเคน)",
+    "admin.providers.contextWindowHint": "เว้นว่างไว้เพื่อตรวจหาอัตโนมัติ กรอกเองเมื่อระบบไม่รู้จักโมเดลนี้ (gateway ส่วนตัว หรือรุ่นใหม่มาก)",
     "admin.providers.type": "ประเภท",
     "admin.providers.costTier": "ระดับต้นทุน",
     "admin.providers.modelSavedToast": "บันทึกโมเดลแล้ว",

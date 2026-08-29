@@ -244,6 +244,7 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
   const [language, setLanguage] = useState<BrandingLanguage>(me.language ?? branding.language);
   const [fontSize, setFontSize] = useState<BrandingFontSize>(me.font_size ?? branding.font_size);
   const [chatBg, setChatBg] = useState<BrandingChatBackground>(me.chat_background ?? branding.chat_background);
+  const [execPanel, setExecPanel] = useState(me.execution_panel_enabled);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const toast = useToast();
@@ -251,7 +252,8 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
   const dirtyLanguage = language !== (me.language ?? branding.language);
   const dirtyFontSize = fontSize !== (me.font_size ?? branding.font_size);
   const dirtyChatBg = chatBg !== (me.chat_background ?? branding.chat_background);
-  const dirty = dirtyLanguage || dirtyFontSize || dirtyChatBg;
+  const dirtyExecPanel = execPanel !== me.execution_panel_enabled;
+  const dirty = dirtyLanguage || dirtyFontSize || dirtyChatBg || dirtyExecPanel;
 
   const save = async () => {
     setSaving(true);
@@ -264,9 +266,15 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
         ...(dirtyLanguage ? { language } : {}),
         ...(dirtyFontSize ? { font_size: fontSize } : {}),
         ...(dirtyChatBg ? { chat_background: chatBg } : {}),
+        ...(dirtyExecPanel ? { execution_panel_enabled: execPanel } : {}),
       });
       onSaved(updated);
-      setUserOverride({ language: updated.language, font_size: updated.font_size, chat_background: updated.chat_background });
+      setUserOverride({
+        language: updated.language,
+        font_size: updated.font_size,
+        chat_background: updated.chat_background,
+        execution_panel_enabled: updated.execution_panel_enabled,
+      });
       toast({ body: t("settings.profile.preferencesSaved"), type: "info", autoHideDuration: 2500 });
     } catch (e) {
       setSaveError(String(e).replace(/^Error:\s*/, ""));
@@ -321,6 +329,16 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
             <SegmentedControlItem value="dots" label={t("settings.profile.bg.dots")} />
             <SegmentedControlItem value="grid" label={t("settings.profile.bg.grid")} />
           </SegmentedControl>
+        </div>
+        <div>
+          <Switch
+            value={execPanel}
+            label={t("settings.profile.executionPanel")}
+            changeAction={setExecPanel}
+          />
+          <Text size="sm" color="secondary">
+            {t("settings.profile.executionPanelDesc")}
+          </Text>
         </div>
         {saveError && <ErrorText>{saveError}</ErrorText>}
         <div>
@@ -583,14 +601,21 @@ function SkillsPanel() {
                   icon={<Icon icon={ExternalLink} size="sm" />}
                   size="sm"
                   variant="ghost"
-                  clickAction={() => {
-                    if (skill.capabilities?.length) {
-                      setViewingDetail(skill);
-                      setDetailOpen(true);
-                    } else {
-                      setEditing(skill);
-                    }
-                  }}
+                  clickAction={() =>
+                    guard(async () => {
+                      // Built-ins arrive from the list without their content —
+                      // see api.skillContent. Both destinations below render it,
+                      // so it has to be in hand before either opens.
+                      const { content } = await api.skillContent(skill.id);
+                      const full = { ...skill, content };
+                      if (skill.capabilities?.length) {
+                        setViewingDetail(full);
+                        setDetailOpen(true);
+                      } else {
+                        setEditing(full);
+                      }
+                    })
+                  }
                 />
               ) : (
                 <div className="claw-row">

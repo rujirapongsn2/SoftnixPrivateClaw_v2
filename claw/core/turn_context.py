@@ -15,3 +15,12 @@ import contextvars
 current_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "claw_current_session_id", default=None
 )
+
+# `time.monotonic()` value past which the turn that is running has no time left.
+# The agent loop only checks its own budget *between* iterations, so a tool that
+# starts a nested agent (spawn, workflow) would otherwise be free to run its own
+# full budget on top of the parent's. Tools that can outlive a turn read this and
+# clamp themselves to what is left. None = no deadline in effect.
+current_turn_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "claw_current_turn_deadline", default=None
+)

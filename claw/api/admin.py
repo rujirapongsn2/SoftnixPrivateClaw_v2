@@ -20,6 +20,7 @@ from claw.api import llm_shared as llm
 from claw.api.auth import _is_pending_imported_account, _send_activation_email
 from claw.api.branding_shared import ChatBackground, FontSize, Language
 from claw.api.deps import AppState, get_state, require_admin
+from claw.api.file_preview import decode_text_bytes
 from claw.auth import oidc
 from claw.auth.passwords import hash_password
 from claw.channels.telegram import validate_bot_token
@@ -36,9 +37,7 @@ _EMAIL_RE = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 async def _reload_policy(state: AppState) -> None:
     """Rebuild the live PolicyEngine from persisted guardrail config."""
     rules = await state.guardrails.list_rules()
-    monitor_only = await state.guardrails.get_monitor_only(
-        default=not state.settings.policy_enforce
-    )
+    monitor_only = await state.guardrails.get_monitor_only(default=not state.settings.policy_enforce)
     exempt = await state.guardrails.get_tool_args_exempt(default=list(DEFAULT_TOOL_ARGS_EXEMPT))
     state.policy.reload(
         [rule_from_row(r) for r in rules],
@@ -71,9 +70,7 @@ class UpdateUserBody(BaseModel):
     plan_id: str | None = "__unset__"
 
 
-def _user_row(
-    user: User, sessions: int, group_names: dict[str, str], plan_names: dict[str, str]
-) -> dict:
+def _user_row(user: User, sessions: int, group_names: dict[str, str], plan_names: dict[str, str]) -> dict:
     return {
         "id": user.id,
         "email": user.email,
@@ -94,6 +91,7 @@ def _user_row(
         "language": user.ui_language,
         "font_size": user.font_size,
         "chat_background": user.chat_background,
+        "execution_panel_enabled": user.execution_panel_enabled,
     }
 
 
@@ -166,9 +164,7 @@ async def update_user(
     if user_id == admin.id and (body.is_admin is False or body.is_active is False):
         raise HTTPException(status_code=400, detail="you cannot demote or suspend yourself")
     if body.is_admin is not None or body.is_active is not None:
-        updated = await state.users.update_flags(
-            user_id, is_admin=body.is_admin, is_active=body.is_active
-        )
+        updated = await state.users.update_flags(user_id, is_admin=body.is_admin, is_active=body.is_active)
     else:
         updated = await state.users.get(user_id)
     if updated is None:
@@ -181,17 +177,11 @@ async def update_user(
         )
     # "__unset__" means the caller didn't touch the group; anything else assigns.
     if body.group_id != "__unset__":
-        updated = await state.users.assign_group(
-            user_id, await _valid_group_id(state, body.group_id)
-        )
+        updated = await state.users.assign_group(user_id, await _valid_group_id(state, body.group_id))
     if body.plan_id != "__unset__":
-        updated = await state.users.assign_plan(
-            user_id, await _valid_plan_id(state, body.plan_id)
-        )
+        updated = await state.users.assign_plan(user_id, await _valid_plan_id(state, body.plan_id))
     counts = await state.sessions.count_by_user()
-    return _user_row(
-        updated, counts.get(updated.id, 0), await _group_names(state), await _plan_names(state)
-    )
+    return _user_row(updated, counts.get(updated.id, 0), await _group_names(state), await _plan_names(state))
 
 
 @router.delete("/users/{user_id}")
@@ -235,7 +225,7 @@ async def resend_activation_email(
             status_code=429,
             detail=(
                 "An activation email was already sent to this user recently — either from this "
-                "action or from the user clicking \"Forgot password?\" themselves; please wait "
+                'action or from the user clicking "Forgot password?" themselves; please wait '
                 "before resending."
             ),
         )
@@ -305,50 +295,35 @@ async def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
             break
         total += len(chunk)
         if total > max_bytes:
-            raise HTTPException(
-                status_code=400, detail=f"file exceeds the {max_bytes // 1_000_000} MB limit"
-            )
+            raise HTTPException(status_code=400, detail=f"file exceeds the {max_bytes // 1_000_000} MB limit")
         chunks.append(chunk)
     if total == 0:
         raise HTTPException(status_code=400, detail="empty file")
     return b"".join(chunks)
 
 
-def _decode_csv_bytes(raw: bytes) -> str:
-    """Try encodings that decode cleanly (no replacement chars) before
-    falling back to a lossy utf-8-sig decode — an Excel export in a regional
-    codepage (e.g. Windows-1252, Thai TIS-620) would otherwise have every
-    non-ASCII character silently mangled with no error surfaced."""
-    for enc in ("utf-8-sig", "cp1252", "cp874"):
-        try:
-            text = raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
-        if "�" not in text:
-            return text
-    return raw.decode("utf-8-sig", errors="replace")
-
-
 @router.post("/users/import/parse")
-async def import_users_parse(
-    file: UploadFile = File(...), admin: User = Depends(require_admin)
-) -> dict:
+async def import_users_parse(file: UploadFile = File(...), admin: User = Depends(require_admin)) -> dict:
     """Parse an uploaded CSV/XLSX into a column grid for the import wizard's
     preview + mapping step. Nothing is persisted here — the browser holds the
     parsed rows and posts them back (with the chosen mapping) to /import/commit."""
     name = (file.filename or "").lower()
     raw = await _read_capped(file, _MAX_IMPORT_BYTES)
     if name.endswith(".csv"):
-        # StringIO (not .splitlines()) so csv.reader can see embedded
-        # newlines inside quoted multi-line cells instead of them being
-        # split apart before csv.reader ever gets a chance to parse them.
-        rows = list(csv.reader(io.StringIO(_decode_csv_bytes(raw))))
+
+        def _parse_csv() -> list[list[str]]:
+            # StringIO (not .splitlines()) so csv.reader can see embedded
+            # newlines inside quoted multi-line cells instead of them being
+            # split apart before csv.reader ever gets a chance to parse them.
+            return list(csv.reader(io.StringIO(decode_text_bytes(raw))))
+
+        # Off the event loop: decode_text_bytes + csv.reader are both
+        # synchronous CPU work and must not run on the loop thread.
+        rows = await asyncio.to_thread(_parse_csv)
     elif name.endswith(".xlsx"):
         # openpyxl parsing is synchronous/blocking — keep it off the event
         # loop, same as the knowledge-doc ingest pipeline does for parsing.
-        wb = await asyncio.to_thread(
-            openpyxl.load_workbook, io.BytesIO(raw), read_only=True, data_only=True
-        )
+        wb = await asyncio.to_thread(openpyxl.load_workbook, io.BytesIO(raw), read_only=True, data_only=True)
         sheet = wb.worksheets[0]
         rows = [["" if c is None else str(c) for c in r] for r in sheet.iter_rows(values_only=True)]
     else:
@@ -432,6 +407,7 @@ async def import_users_commit(
 
 # ---------------------------------------------------------------- user groups
 # Groups are organizational only — they carry no policy/permission meaning.
+
 
 class GroupBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
@@ -645,8 +621,7 @@ async def _build_stats(state: AppState) -> dict:
         # Browser automation is "on" via EITHER path: the server-side Playwright
         # browser, or a paired client Chrome extension. Checking only `.enabled`
         # under-reports capability for deployments that use just the extension.
-        "browser_enabled": state.settings.browser.enabled
-        or state.settings.browser.client_extension_enabled,
+        "browser_enabled": state.settings.browser.enabled or state.settings.browser.client_extension_enabled,
         "telegram_enabled": bool(state.settings.telegram_bot_token),
     }
 
@@ -684,7 +659,11 @@ async def _guardrail_hits_by_user(state: AppState) -> list[dict]:
     hits = await state.audit.policy_hits_by_user(14)
     labels = await state.users.labels([h["user_id"] for h in hits if h["user_id"]])
     return [
-        {"user_id": h["user_id"], "label": labels.get(h["user_id"], h["user_id"] or "(unknown)"), "count": h["count"]}
+        {
+            "user_id": h["user_id"],
+            "label": labels.get(h["user_id"], h["user_id"] or "(unknown)"),
+            "count": h["count"],
+        }
         for h in hits
     ]
 
@@ -750,9 +729,7 @@ _TOKENS_TOP_N = 15
 # label/filter Tokens Usage report rows, is always bounded to owners with
 # actual usage.record() activity (never a blanket every-account scan), and
 # reads provider/model *names* only, never API keys.
-async def _model_provider_map(
-    state: AppState, owner_ids: Sequence[str]
-) -> dict[str | None, dict[str, str]]:
+async def _model_provider_map(state: AppState, owner_ids: Sequence[str]) -> dict[str | None, dict[str, str]]:
     """(owner_id | None) → {model_id: provider name}, admin-global plus the
     given owners' BYOK config. Kept partitioned by owner rather than folded
     into one flat model_id→provider dict: two different users can each
@@ -883,15 +860,15 @@ async def usage_tokens(
         raw = await state.usage.token_series_by_user_model(
             granularity=granularity, start=start_d, end=end_d, user_id=user_id or None, models=models
         )
-        resolved = [
-            {**r, "provider": _provider_of(r["user_id"] or None, r["model"], mapping)} for r in raw
-        ]
+        resolved = [{**r, "provider": _provider_of(r["user_id"] or None, r["model"], mapping)} for r in raw]
         if provider:
             resolved = [r for r in resolved if r["provider"] == provider]
         key_fn = (
             (lambda r: r["provider"])
             if group_by == "provider"
-            else (lambda r: r["user_id"]) if group_by == "user" else (lambda r: r["model"])
+            else (lambda r: r["user_id"])
+            if group_by == "user"
+            else (lambda r: r["model"])
         )
         rows = _fold_by_key(resolved, key_fn)
     else:
@@ -913,9 +890,7 @@ async def usage_tokens(
     return _shape_token_series(rows, granularity, group_by, labels)
 
 
-def _shape_token_series(
-    rows: list[dict], granularity: str, group_by: str, labels: dict[str, str]
-) -> dict:
+def _shape_token_series(rows: list[dict], granularity: str, group_by: str, labels: dict[str, str]) -> dict:
     """Pivot flat (bucket, key, tokens) rows into a top-N series + totals for the
     chart, rolling the long tail into a single 'others' entry."""
     buckets = sorted({r["bucket"] for r in rows})
@@ -970,7 +945,13 @@ def _shape_token_series(
         "completion_tokens": sum(e["completion_tokens"] for e in per_key.values()),
         "turns": sum(e["turns"] for e in per_key.values()),
     }
-    return {"granularity": granularity, "group_by": group_by, "buckets": buckets, "series": series, "totals": totals}
+    return {
+        "granularity": granularity,
+        "group_by": group_by,
+        "buckets": buckets,
+        "series": series,
+        "totals": totals,
+    }
 
 
 # ---------------------------------------------------------------- LLM providers/models
@@ -1072,6 +1053,7 @@ async def delete_admin_connector(
 
 # ---------------------------------------------------------------- guardrails
 
+
 class MonitorBody(BaseModel):
     monitor_only: bool
     # Optional: replace the tool-args exemption list (tool-name globs). Omitted =
@@ -1113,9 +1095,7 @@ def _rule_row(r) -> dict:
 
 
 @router.get("/guardrails")
-async def get_guardrails(
-    admin: User = Depends(require_admin), state: AppState = Depends(get_state)
-) -> dict:
+async def get_guardrails(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
     rules = await state.guardrails.list_rules()
     monitor_only = await state.guardrails.get_monitor_only(default=not state.settings.policy_enforce)
     exempt = await state.guardrails.get_tool_args_exempt(default=list(DEFAULT_TOOL_ARGS_EXEMPT))
@@ -1239,6 +1219,7 @@ async def test_guardrails(
 
 # ---------------------------------------------------------------- OAuth apps (connector sign-in)
 
+
 class OAuthAppBody(BaseModel):
     client_id: str = ""
     client_secret: str = ""  # empty keeps the existing secret
@@ -1250,9 +1231,7 @@ def _connector_redirect_uri(state: AppState, provider: str) -> str:
 
 
 @router.get("/oauth-apps")
-async def get_oauth_apps(
-    admin: User = Depends(require_admin), state: AppState = Depends(get_state)
-) -> dict:
+async def get_oauth_apps(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
     return {
         "google": await state.oauth_apps.public("google"),
         "microsoft": await state.oauth_apps.public("microsoft"),
@@ -1278,11 +1257,14 @@ async def set_oauth_app(
 ) -> dict:
     if provider not in ("google", "microsoft"):
         raise HTTPException(status_code=404, detail="unknown provider")
-    await state.oauth_apps.set(provider, body.client_id.strip(), body.client_secret.strip(), body.tenant.strip())
+    await state.oauth_apps.set(
+        provider, body.client_id.strip(), body.client_secret.strip(), body.tenant.strip()
+    )
     return await state.oauth_apps.public(provider)
 
 
 # ---------------------------------------------------------------- Telegram
+
 
 class TelegramConfigBody(BaseModel):
     bot_token: str = ""  # empty keeps the existing token (e.g. only toggling `enabled`)
@@ -1296,7 +1278,11 @@ async def _telegram_config_json(state: AppState) -> dict:
         # fallback (CLAW_TELEGRAM_BOT_TOKEN) currently supplies a token, so the
         # admin knows saving here will take over from it.
         has_env_token = bool(state.settings.telegram_bot_token)
-        pub = {"has_token": has_env_token, "enabled": has_env_token, "source": "env" if has_env_token else "none"}
+        pub = {
+            "has_token": has_env_token,
+            "enabled": has_env_token,
+            "source": "env" if has_env_token else "none",
+        }
     else:
         pub = {**await state.telegram_config.public(), "source": "database"}
     return {
@@ -1444,6 +1430,7 @@ async def test_email_config(
 
 # ---------------------------------------------------------------- audit logs
 
+
 @router.get("/audit")
 async def audit_logs(
     kind: str | None = None,
@@ -1462,9 +1449,7 @@ async def audit_logs(
             before_dt = datetime.fromisoformat(before)
         except ValueError:
             before_dt = None
-    rows = await state.audit.list(
-        kind=kind, user_id=user_id, search=search, before=before_dt, limit=limit
-    )
+    rows = await state.audit.list(kind=kind, user_id=user_id, search=search, before=before_dt, limit=limit)
     # Attach a human-readable actor to each row so admins see WHO, not a raw id.
     labels = {u.id: (u.display_name or u.email) for u in await state.users.list_all()}
     for r in rows:
@@ -1508,9 +1493,7 @@ class BrandingBody(BaseModel):
 
 
 @router.get("/branding")
-async def get_branding(
-    admin: User = Depends(require_admin), state: AppState = Depends(get_state)
-) -> dict:
+async def get_branding(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
     return await state.branding.get()
 
 
@@ -1541,9 +1524,7 @@ async def upload_branding_logo(
         raise HTTPException(status_code=422, detail="Logo must be 1 MB or smaller.")
     kind = _sniff_image_kind(data)
     if kind is None:
-        raise HTTPException(
-            status_code=422, detail="Logo must be a PNG, JPG, or WebP image."
-        )
+        raise HTTPException(status_code=422, detail="Logo must be a PNG, JPG, or WebP image.")
     ext = _LOGO_EXT[kind]
     root: Path = state.settings.branding_root
     root.mkdir(parents=True, exist_ok=True)

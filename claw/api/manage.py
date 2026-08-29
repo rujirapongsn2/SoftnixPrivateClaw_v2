@@ -33,12 +33,14 @@ class SkillBody(BaseModel):
     connector_id: str | None = None
 
 
-def _skill_json(s, builtin: bool = False, shadows_builtin: bool = False) -> dict:
+def _skill_json(
+    s, builtin: bool = False, shadows_builtin: bool = False, with_content: bool = True
+) -> dict:
     return {
         "id": s.id,
         "name": s.name,
         "description": s.description,
-        "content": s.content,
+        "content": s.content if with_content else "",
         "enabled": s.enabled,
         "connector_id": getattr(s, "connector_id", None),
         "updated_at": s.updated_at.isoformat(),
@@ -62,10 +64,37 @@ async def list_skills(user: User = Depends(current_user), state: AppState = Depe
     user_names = {s.name for s in user_skills}
     builtin_names = {b.name for b in builtin_skills()}
     # Built-ins first (read-only), skipping any a user skill shadows by name.
-    builtins = [_skill_json(b, builtin=True) for b in builtin_skills() if b.name not in user_names]
+    #
+    # Their `content` is deliberately left out. It is static, identical for every
+    # user, and already ~63 KB across the built-ins (one is 34 KB on its own),
+    # while this list renders only name/description/summary — so sending it here
+    # ships the whole corpus on every panel open and grows with each built-in
+    # added. The detail view fetches the one it needs from /skills/{id}/content.
+    # User skills keep theirs inline: they are small, and the edit form and the
+    # enable/disable Switch both round-trip the full object straight back to PUT.
+    builtins = [
+        _skill_json(b, builtin=True, with_content=False)
+        for b in builtin_skills()
+        if b.name not in user_names
+    ]
     return builtins + [
         _skill_json(s, shadows_builtin=s.name in builtin_names) for s in user_skills
     ]
+
+
+@router.get("/skills/{skill_id}/content")
+async def skill_content(skill_id: str, _: User = Depends(require_operator)) -> dict:
+    """Full instructions for one built-in skill, kept out of the list payload.
+
+    Built-ins only: user skills already carry their content in the list, since
+    the edit form needs it in hand to submit an unchanged copy back."""
+    from claw.core.builtin_skills import get_builtin_skill
+
+    prefix = "builtin:"
+    skill = get_builtin_skill(skill_id[len(prefix) :]) if skill_id.startswith(prefix) else None
+    if skill is None:
+        raise HTTPException(status_code=404, detail="skill not found")
+    return {"content": skill.content}
 
 
 @router.put("/skills/{name}")

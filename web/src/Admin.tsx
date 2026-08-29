@@ -1179,14 +1179,22 @@ function CostSegmented({ value, onChange }: { value: ModelCost; onChange: (c: Mo
   );
 }
 
-// Chat vs image classification — image models are text-to-image only, kept out
-// of the chat picker (they can't do tool calling) and offered in the composer's
-// separate "+ Image" picker instead.
+// What a model is for. Only "chat" is user-selectable: "image" models are
+// text-to-image only (no tool calling, offered in the composer's separate
+// "+ Image" picker), and "vision" is the reader a chat turn hands an attached
+// image to when the chat model itself can't accept one.
+const KIND_ORDER: Record<ModelKind, number> = { chat: 0, vision: 1, image: 2 };
+const KIND_LABEL: Record<ModelKind, string> = {
+  chat: "admin.providers.kindChat",
+  image: "admin.providers.kindImage",
+  vision: "admin.providers.kindVision",
+};
+
 function KindSegmented({ value, onChange }: { value: ModelKind; onChange: (k: ModelKind) => void }) {
   const t = useT();
   return (
     <div className="claw-segmented" role="group" aria-label={t("admin.providers.modelTypeAria")}>
-      {(["chat", "image"] as ModelKind[]).map((k) => (
+      {(["chat", "vision", "image"] as ModelKind[]).map((k) => (
         <button
           key={k}
           type="button"
@@ -1194,7 +1202,7 @@ function KindSegmented({ value, onChange }: { value: ModelKind; onChange: (k: Mo
           aria-pressed={value === k}
           onClick={() => onChange(k)}
         >
-          {k === "chat" ? t("admin.providers.kindChat") : t("admin.providers.kindImage")}
+          {t(KIND_LABEL[k])}
         </button>
       ))}
     </div>
@@ -1606,10 +1614,10 @@ function ProviderCard({
           )}
           <span className="claw-models-grid-head" />
           <span className="claw-models-grid-head" />
-          {/* Chat models first, then image models — keeps the two kinds
-              visually grouped within the provider. */}
+          {/* Chat models first, then the vision reader, then image models —
+              keeps the kinds visually grouped within the provider. */}
           {[...provider.models]
-            .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "image" ? 1 : -1))
+            .sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind])
             .map((m) => (
               <ModelRow
                 key={m.id}
@@ -1677,6 +1685,7 @@ function ModelRow({
   const [cost, setCost] = useState<ModelCost>(model.cost);
   const [description, setDescription] = useState(model.description);
   const [kind, setKind] = useState<ModelKind>(model.kind);
+  const [contextWindow, setContextWindow] = useState(String(model.context_window ?? ""));
   const toast = useToast();
 
   if (editing) {
@@ -1714,12 +1723,27 @@ function ModelRow({
             value={description}
             onChange={setDescription}
           />
+          {/* Only the agent loop reads this, and only chat models run turns. */}
+          {kind === "chat" && (
+            <TextInput
+              label={t("admin.providers.contextWindow")}
+              description={t("admin.providers.contextWindowHint")}
+              placeholder="200000"
+              value={contextWindow}
+              onChange={(v) => setContextWindow(v.replace(/\D/g, ""))}
+            />
+          )}
           <div className="claw-row">
             <Text size="sm" color="secondary">
               {t("admin.providers.type")}
             </Text>
             <KindSegmented value={kind} onChange={setKind} />
           </div>
+          {kind === "vision" && (
+            <Text size="2xs" color="secondary">
+              {t("admin.providers.kindVisionHint")}
+            </Text>
+          )}
           <div className="claw-row">
             <Text size="sm" color="secondary">
               {t("admin.providers.costTier")}
@@ -1741,6 +1765,11 @@ function ModelRow({
                     cost,
                     description: description.trim(),
                     kind,
+                    // 0 clears the override; the backend stores it as NULL. Only
+                    // send it while the field is on screen — a non-chat kind hides
+                    // the input, and sending 0 there would wipe an override the
+                    // admin was never shown and never chose to clear.
+                    ...(kind === "chat" ? { context_window: Number(contextWindow || 0) } : {}),
                   });
                   setEditing(false);
                   toast({ body: t("admin.providers.modelSavedToast"), type: "info", autoHideDuration: 2500 });
@@ -1758,6 +1787,7 @@ function ModelRow({
                 setCost(model.cost);
                 setDescription(model.description);
                 setKind(model.kind);
+                setContextWindow(String(model.context_window ?? ""));
                 setEditing(false);
               }}
             />
@@ -1776,7 +1806,7 @@ function ModelRow({
         )}
       </div>
       <div className="claw-model-cost-cell">
-        {model.kind === "image" && <Badge variant="neutral" label={t("admin.providers.kindImage")} />}
+        {model.kind !== "chat" && <Badge variant="neutral" label={t(KIND_LABEL[model.kind])} />}
         <span className={`claw-cost claw-cost-${model.cost}`}>{t(COST_LABEL[model.cost])}</span>
       </div>
       <Text size="sm" color="secondary" className="claw-model-id">
@@ -1805,8 +1835,8 @@ function ModelRow({
           label={model.is_default ? t("admin.providers.defaultLabel") : t("admin.providers.setDefault")}
           size="sm"
           variant={model.is_default ? "secondary" : "ghost"}
-          // An image model can never be the chat default.
-          isDisabled={model.is_default || !model.enabled || model.kind === "image"}
+          // Only a chat model can be the chat default.
+          isDisabled={model.is_default || !model.enabled || model.kind !== "chat"}
           clickAction={() =>
             guard(async () => {
               await llmApi.updateModel(model.id, { is_default: true });
@@ -1859,6 +1889,7 @@ function AddModelForm({
   const [cost, setCost] = useState<ModelCost>("medium");
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState<ModelKind>("chat");
+  const [contextWindow, setContextWindow] = useState("");
   const toast = useToast();
 
   const hasPrefix = Boolean(modelPrefix);
@@ -1895,12 +1926,26 @@ function AddModelForm({
           value={description}
           onChange={setDescription}
         />
+        {kind === "chat" && (
+          <TextInput
+            label={t("admin.providers.contextWindow")}
+            description={t("admin.providers.contextWindowHint")}
+            placeholder="200000"
+            value={contextWindow}
+            onChange={(v) => setContextWindow(v.replace(/\D/g, ""))}
+          />
+        )}
         <div className="claw-row">
           <Text size="sm" color="secondary">
             {t("admin.providers.type")}
           </Text>
           <KindSegmented value={kind} onChange={setKind} />
         </div>
+        {kind === "vision" && (
+          <Text size="2xs" color="secondary">
+            {t("admin.providers.kindVisionHint")}
+          </Text>
+        )}
         <div className="claw-row">
           <Text size="sm" color="secondary">
             {t("admin.providers.costTier")}
@@ -1922,6 +1967,7 @@ function AddModelForm({
                   cost,
                   description: description.trim(),
                   kind,
+                  context_window: kind === "chat" ? Number(contextWindow || 0) : 0,
                 });
                 toast({ body: t("admin.providers.modelAddedToast"), type: "info", autoHideDuration: 2500 });
                 onClose();

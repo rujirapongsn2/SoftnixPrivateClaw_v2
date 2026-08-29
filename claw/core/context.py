@@ -75,6 +75,62 @@ class ContextAssembler:
         return []
 
 
+def _image_grounding(n: int) -> str:
+    return (
+        f"\n[{n} image{'s' if n > 1 else ''} attached below — treat as part of this message "
+        "and use its visual content when answering.]"
+    )
+
+
+def vision_note(model: str, described: int, total: int, truncated: bool) -> str:
+    """The sentence that stands in for images a model can't see.
+
+    `described` is how many of the message's images the reader actually saw. It
+    can be fewer than `total` — saying which is what stops the chat model
+    answering confidently about an image nobody read.
+    """
+    plural = "s" if total > 1 else ""
+    if described < total:
+        scope = (
+            f"{total} image{plural} attached, but only the first {described} could be read"
+        )
+        caveat = " Say so if asked about the ones that were not read."
+    else:
+        scope = f"{total} image{plural} attached"
+        caveat = ""
+    if truncated:
+        caveat += " The description was cut off before it finished."
+    return (
+        f"\n[{scope}. The model answering this cannot see images, so {model} looked at "
+        f"them and described them below — treat that description as the image "
+        f"content.{caveat}]"
+    )
+
+
+def swap_images_for_description(
+    content: list[dict[str, Any]],
+    description: str,
+    model: str,
+    *,
+    described: int,
+    truncated: bool = False,
+) -> str:
+    """Turn a multimodal message into a text-only one carrying a description of
+    its images, for a chat model that cannot accept image blocks.
+
+    The "attached below" grounding sentence build_user_content() wrote is
+    replaced rather than appended to: leaving it in would point the model at
+    images that are no longer in the message. Lives next to the sentence it
+    rewrites so the two can't drift apart.
+    """
+    total = sum(1 for b in content if b.get("type") == "image_url")
+    text = "".join(b.get("text") or "" for b in content if b.get("type") == "text")
+    note = vision_note(model, described, total, truncated) + "\n" + description.strip()
+    if total and _image_grounding(total) in text:
+        return text.replace(_image_grounding(total), note)
+    return text + note
+
+
 def build_user_content(
     text: str, media: list[str] | None, workspace: Path
 ) -> tuple[str | list[dict[str, Any]], str]:
@@ -117,11 +173,7 @@ def build_user_content(
 
     grounding = [text or "Please look at the attached file(s)."]
     if image_blocks:
-        n = len(image_blocks)
-        grounding.append(
-            f"\n[{n} image{'s' if n > 1 else ''} attached below — treat as part of this message "
-            "and use its visual content when answering.]"
-        )
+        grounding.append(_image_grounding(len(image_blocks)))
     if file_notes:
         grounding.append(
             "\n[Attached files — available in your workspace; open them with read_file if needed]\n"

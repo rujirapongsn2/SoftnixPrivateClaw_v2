@@ -57,12 +57,17 @@ from claw.db.stores import (
     UserStore,
 )
 from claw.knowledge.service import KnowledgeService
+from claw.logging_setup import configure_logging
 from claw.providers.litellm_provider import LiteLLMProvider
+from claw.providers.registry import context_window
 from claw.security.crypto import SecretBox
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
+    # Before anything that can raise: an unconfigured loguru dumps local
+    # variables (database URL, prompts, message text) into every traceback.
+    configure_logging(settings.log)
     engine, factory = create_engine_and_factory(settings.database_url)
 
     provider = LiteLLMProvider(
@@ -146,9 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _scheduled_turn(user_id: str, session_id: str, prompt: str) -> str | None:
         return await runtime.handle_message(user_id, session_id, prompt, channel="schedule")
 
-    scheduler = SchedulerService(
-        schedules, sessions, _scheduled_turn, timezone=settings.scheduler.timezone
-    )
+    scheduler = SchedulerService(schedules, sessions, _scheduled_turn, timezone=settings.scheduler.timezone)
     # The schedule tool needs the scheduler to wake it on changes; wire it back now
     # that both exist (scheduler depends on the runtime's turn handler).
     runtime.scheduler = scheduler
@@ -156,8 +159,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _heartbeat_turn(user_id: str, session_id: str, prompt: str) -> str | None:
         return await runtime.handle_message(user_id, session_id, prompt, channel="heartbeat")
 
-    heartbeat = HeartbeatService(users, memories, sessions, provider, _heartbeat_turn,
-                                 model=settings.llm.model)
+    heartbeat = HeartbeatService(
+        users, memories, sessions, provider, _heartbeat_turn, model=settings.llm.model
+    )
 
     telegram_link = LinkCodeService()
     telegram_config = TelegramConfigStore(factory, secret_box=secret_box)
@@ -212,15 +216,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # existing infra-managed deployments keep working unchanged.
         try:
             tg_cfg = await telegram_config.get()
-            tg_token = (tg_cfg["bot_token"] if tg_cfg["enabled"] else "") if tg_cfg else settings.telegram_bot_token
+            tg_token = (
+                (tg_cfg["bot_token"] if tg_cfg["enabled"] else "") if tg_cfg else settings.telegram_bot_token
+            )
             app.state.claw.telegram = await telegram_mgr.ensure_running(tg_token)
             if app.state.claw.telegram is not None:
                 logger.info("Telegram channel enabled")
         except Exception:
             logger.exception("Telegram startup failed")
+        # The agent loop sizes its prompt-compaction ceiling from each model's
+        # context window, read from LiteLLM's bundled model table. A model that
+        # table doesn't know falls back to a conservative default, silently — so
+        # name those once at startup, where an operator can act on it (pin a
+        # different id, or upgrade litellm) instead of wondering why long turns
+        # on a large-context model get compacted early.
+        try:
+            configured: dict[str, int | None] = {settings.llm.model: None}
+            configured.update(await llm_config.distinct_chat_models())
+            unknown = [
+                m for m, override in configured.items() if m and not override and context_window(m) is None
+            ]
+            logger.info(
+                "Context window known for {}/{} configured chat models",
+                len(configured) - len(unknown),
+                len(configured),
+            )
+            if unknown:
+                logger.warning(
+                    "Unknown context window (agent loop will use its default ceiling; set one "
+                    "per model in the Control Plane): {}",
+                    ", ".join(unknown[:20]),
+                )
+        except Exception:
+            logger.exception("Could not resolve model context windows")
         logger.info(
             "Softnix PrivateClaw up — model={}, sandbox={}, browser={}, tts={}",
-            settings.llm.model, runtime.sandbox.describe(),
+            settings.llm.model,
+            runtime.sandbox.describe(),
             "enabled" if browser_mgr is not None else "disabled",
             "enabled" if settings.tts.api_key else "disabled (CLAW_TTS__API_KEY not set)",
         )

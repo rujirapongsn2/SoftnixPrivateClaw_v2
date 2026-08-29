@@ -1,5 +1,6 @@
 """LiteLLM-backed provider with true token streaming and prompt caching."""
 
+import asyncio
 import re
 import secrets
 import string
@@ -351,6 +352,7 @@ class LiteLLMProvider(LLMProvider):
         run_len = 0
         truncated_repeat = False
 
+        stream = None
         try:
             stream = await acompletion(**kwargs)
             async for chunk in stream:
@@ -406,6 +408,20 @@ class LiteLLMProvider(LLMProvider):
         except Exception as exc:
             logger.warning("LLM stream failed for {}: {}", model, exc)
             raise ProviderError(str(exc)) from exc
+        finally:
+            # Every exit but a clean end-of-stream abandons the response
+            # mid-flight: the turn's deadline cancels the `async for`, the
+            # degeneration guard breaks out, or the caller stops consuming.
+            # Without this the httpx connection is only released whenever the
+            # generator is garbage-collected, so a burst of timed-out turns can
+            # hold the pool open. litellm's aclose() is cancellation-shielded
+            # and swallows its own errors, so it is safe here.
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except (Exception, asyncio.CancelledError):
+                    logger.debug("Closing the {} stream failed; leaving it to GC", model)
 
         tool_calls: list[ToolCall] = []
         for index in sorted(pending_tool_calls):

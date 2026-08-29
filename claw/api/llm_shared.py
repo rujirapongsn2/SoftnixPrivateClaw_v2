@@ -15,7 +15,10 @@ from claw.api.deps import AppState
 
 _PREFIX_RE = r"^[a-z0-9_]*$"
 _COST_RE = r"^(low|medium|high|very_high)$"
-_KIND_RE = r"^(chat|image)$"
+_KIND_RE = r"^(chat|image|vision)$"
+# Sanity bound on the manual context-window override: far above any real model,
+# low enough that a typo can't hand the agent loop an absurd compaction ceiling.
+_MAX_CONTEXT_WINDOW = 20_000_000
 
 
 class ProviderBody(BaseModel):
@@ -43,8 +46,12 @@ class ModelBody(BaseModel):
     cost: str = Field(default="medium", pattern=_COST_RE)
     description: str = ""
     # "chat" = agent chat picker; "image" = text-to-image only (kept out of
-    # the chat picker, offered via the separate image-generation path).
+    # the chat picker, offered via the separate image-generation path);
+    # "vision" = the reader a chat turn delegates an attached image to when the
+    # selected chat model can't accept one. Only "chat" is user-selectable.
     kind: str = Field(default="chat", pattern=_KIND_RE)
+    # Input-token window. 0/None = fall back to LiteLLM's bundled model table.
+    context_window: int | None = Field(default=None, ge=0, le=_MAX_CONTEXT_WINDOW)
 
 
 class ModelPatch(BaseModel):
@@ -55,6 +62,7 @@ class ModelPatch(BaseModel):
     cost: str | None = Field(default=None, pattern=_COST_RE)
     description: str | None = None
     kind: str | None = Field(default=None, pattern=_KIND_RE)
+    context_window: int | None = Field(default=None, ge=0, le=_MAX_CONTEXT_WINDOW)
 
 
 def provider_row(p, models: list) -> dict:
@@ -79,10 +87,12 @@ def model_row(m) -> dict:
         "cost": m.cost or "medium",
         "description": m.description or "",
         "kind": m.kind or "chat",
+        "context_window": m.context_window,
     }
 
 
 # -- handlers (owner_id=None → admin-global; owner_id=<uid> → that user's own) --
+
 
 async def list_llm(state: AppState, owner_id: str | None) -> dict:
     providers = await state.llm_config.list_providers(owner_id)
@@ -106,9 +116,7 @@ async def update_provider(
         existing = await state.llm_config.get_by_name(body.name, owner_id)
         if existing is not None and existing.id != provider_id:
             raise HTTPException(status_code=409, detail="a provider with this name already exists")
-    p = await state.llm_config.update_provider(
-        provider_id, owner_id, **body.model_dump(exclude_none=True)
-    )
+    p = await state.llm_config.update_provider(provider_id, owner_id, **body.model_dump(exclude_none=True))
     if p is None:
         raise HTTPException(status_code=404, detail="provider not found")
     models = await state.llm_config.list_models(owner_id)
@@ -122,24 +130,25 @@ async def delete_provider(state: AppState, provider_id: str, owner_id: str | Non
     return {"deleted": True}
 
 
-async def create_model(
-    state: AppState, provider_id: str, body: ModelBody, owner_id: str | None
-) -> dict:
+async def create_model(state: AppState, provider_id: str, body: ModelBody, owner_id: str | None) -> dict:
     m = await state.llm_config.create_model(
-        provider_id, body.model_id, body.label, body.enabled, body.cost, body.description,
-        kind=body.kind, owner_id=owner_id,
+        provider_id,
+        body.model_id,
+        body.label,
+        body.enabled,
+        body.cost,
+        body.description,
+        kind=body.kind,
+        owner_id=owner_id,
+        context_window=body.context_window,
     )
     if m is None:
         raise HTTPException(status_code=404, detail="provider not found")
     return model_row(m)
 
 
-async def update_model(
-    state: AppState, model_pk: str, body: ModelPatch, owner_id: str | None
-) -> dict:
-    m = await state.llm_config.update_model(
-        model_pk, owner_id, **body.model_dump(exclude_none=True)
-    )
+async def update_model(state: AppState, model_pk: str, body: ModelPatch, owner_id: str | None) -> dict:
+    m = await state.llm_config.update_model(model_pk, owner_id, **body.model_dump(exclude_none=True))
     if m is None:
         raise HTTPException(status_code=404, detail="model not found")
     return model_row(m)

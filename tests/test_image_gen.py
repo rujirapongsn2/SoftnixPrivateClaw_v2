@@ -1,5 +1,5 @@
-"""Text-to-image: model kind classification (chat models and image models are
-separate lists), provider generate_image extraction (both paths), and the
+"""Model-kind classification (chat / image / vision are separate lists and
+separate resolvers), provider generate_image extraction (both paths), and the
 one-shot /images endpoint that runs outside the agent loop."""
 
 import base64
@@ -23,6 +23,7 @@ async def _add_model(store: LLMConfigStore, model_id: str, kind: str, prefix: st
 
 # ---- store: chat vs image are separate + resolve_image gates on kind ----
 
+
 async def test_enabled_models_split_chat_vs_image(db_factory):
     store = LLMConfigStore(db_factory)
     await _add_model(store, "vendor/chatty-1", "chat")
@@ -32,6 +33,104 @@ async def test_enabled_models_split_chat_vs_image(db_factory):
     image = await store.enabled_models(kind="image")
     assert [m["model_id"] for m in chat] == ["vendor/chatty-1"]
     assert [m["model_id"] for m in image] == ["vendor/pixel-1"]
+
+
+async def test_distinct_chat_models_dedupes_and_skips_image_models(db_factory):
+    # Startup reads this to report which models it can resolve a context window
+    # for; the same model id offered by two providers must be reported once.
+    store = LLMConfigStore(db_factory)
+    await _add_model(store, "vendor/chatty-1", "chat")
+    second = await store.create_provider("other-prov", "sk-test", "", True, "openai", owner_id=None)
+    await store.create_model(second.id, "vendor/chatty-1", "", True, "medium", "", kind="chat", owner_id=None)
+    await _add_model(store, "vendor/pixel-1", "image")
+
+    assert await store.distinct_chat_models() == [("vendor/chatty-1", None)]
+
+
+async def test_resolve_vision_ignores_chat_and_image_models(db_factory):
+    # A chat or image model must never be pressed into service as the vision
+    # reader just because one wasn't configured — the operator opts in by
+    # classifying a model, and "none configured" has to stay distinguishable.
+    store = LLMConfigStore(db_factory)
+    await _add_model(store, "vendor/chatty-1", "chat")
+    await _add_model(store, "vendor/pixel-1", "image")
+
+    assert await store.resolve_vision("u1") is None
+
+
+async def test_resolve_vision_prefers_the_callers_own_key_then_the_cheaper_tier(db_factory):
+    store = LLMConfigStore(db_factory)
+    pricey = await store.create_provider("g1", "sk-global", "", True, "", owner_id=None)
+    await store.create_model(pricey.id, "global/eyes-hi", "", True, "high", "", kind="vision", owner_id=None)
+    cheap = await store.create_provider("g2", "sk-global", "", True, "", owner_id=None)
+    await store.create_model(cheap.id, "global/eyes-lo", "", True, "low", "", kind="vision", owner_id=None)
+
+    # Only global models exist → the cheap one wins; describing an image is not
+    # work worth the top tier by default.
+    assert (await store.resolve_vision("u1"))["model_id"] == "global/eyes-lo"
+
+    own = await store.create_provider("mine", "sk-mine", "", True, "", owner_id="u1")
+    await store.create_model(own.id, "byok/eyes", "", True, "very_high", "", kind="vision", owner_id="u1")
+
+    # The caller's own key wins outright, cost tier or not — they pay for it.
+    picked = await store.resolve_vision("u1")
+    assert picked["model_id"] == "byok/eyes" and picked["scope"] == "private"
+    # ...and it is still their own key, never another user's.
+    assert (await store.resolve_vision("u2"))["model_id"] == "global/eyes-lo"
+
+
+async def test_resolve_vision_ignores_the_plan_chat_cost_ceiling(db_factory):
+    store = LLMConfigStore(db_factory)
+    prov = await store.create_provider("g1", "sk-global", "", True, "", owner_id=None)
+    await store.create_model(prov.id, "global/eyes-hi", "", True, "high", "", kind="vision", owner_id=None)
+
+    # max_chat_cost gates which model a user may *converse* with. The reader is
+    # the operator's own, so the ceiling must not reach it: the seeded default
+    # plan is "low", and applying it here silently disabled delegation for
+    # exactly the users most likely to be stuck on a text-only chat model.
+    assert (await store.resolve_vision("u1"))["model_id"] == "global/eyes-hi"
+
+
+async def test_distinct_chat_models_reports_context_window_override(db_factory):
+    store = LLMConfigStore(db_factory)
+    prov = await store.create_provider("ctx-prov", "sk-test", "", True, "openai", owner_id=None)
+    await store.create_model(
+        prov.id,
+        "vendor/private-1",
+        "",
+        True,
+        "medium",
+        "",
+        kind="chat",
+        owner_id=None,
+        context_window=250_000,
+    )
+
+    assert await store.distinct_chat_models() == [("vendor/private-1", 250_000)]
+
+
+async def test_context_window_override_round_trips_and_clears(db_factory):
+    store = LLMConfigStore(db_factory)
+    prov = await store.create_provider("ctx-prov", "sk-test", "", True, "openai", owner_id=None)
+    row = await store.create_model(
+        prov.id,
+        "vendor/private-1",
+        "",
+        True,
+        "medium",
+        "",
+        kind="chat",
+        owner_id=None,
+        context_window=250_000,
+    )
+    assert row is not None
+    resolved = await store.resolve("vendor/private-1")
+    assert resolved is not None and resolved["context_window"] == 250_000
+
+    # 0 from the form means "go back to automatic lookup", stored as NULL.
+    await store.update_model(row.id, None, context_window=0)
+    resolved = await store.resolve("vendor/private-1")
+    assert resolved is not None and resolved["context_window"] is None
 
 
 async def test_resolve_image_only_matches_image_kind(db_factory):
@@ -47,6 +146,7 @@ async def test_resolve_image_only_matches_image_kind(db_factory):
 
 
 # ---- provider: both extraction paths ----
+
 
 async def test_generate_image_chat_path(monkeypatch):
     import litellm
@@ -98,6 +198,7 @@ async def test_generate_image_raises_when_no_image(monkeypatch):
 
 
 # ---- endpoint: /images (outside the agent loop) ----
+
 
 async def test_images_endpoint_generates_and_persists(db_factory, monkeypatch):
     app = build_api_app(db_factory)
@@ -199,7 +300,9 @@ async def test_images_endpoint_stores_masked_prompt(db_factory):
             return [(_PNG, "png")]
 
         app.state.claw.runtime = SimpleNamespace(provider=SimpleNamespace(generate_image=fake_generate_image))
-        masked = SimpleNamespace(matched_rules=["r"], action="mask", blocked=False, message=None, text="a [REDACTED]")
+        masked = SimpleNamespace(
+            matched_rules=["r"], action="mask", blocked=False, message=None, text="a [REDACTED]"
+        )
         app.state.claw.policy = SimpleNamespace(enforce=lambda text, scope: masked)
 
         r = await c.post(
