@@ -327,6 +327,42 @@ async def test_share_file_keeps_no_index_and_no_referrer_headers(db_factory, tmp
         assert "script-src 'none'" in resp.headers["content-security-policy"]
 
 
+async def test_share_does_not_republish_a_turns_helper_files(db_factory, tmp_path):
+    # A share link is public and unauthenticated. The turn's helper script and
+    # base64 payload must not be copied into it — and they must be dropped
+    # BEFORE the per-share file budget, or on a long turn they eat the budget
+    # ahead of the one file the user meant to show.
+    app = build_api_app(db_factory, workspaces_root=tmp_path / "ws")
+    async with client(app) as c:
+        token, uid = await _register(c)
+        sid = await _session(c, token)
+        ws = _workspace(tmp_path, uid)
+        for name in ("build_report.py", "map_b64.txt", "report.pdf"):
+            (ws / name).write_text("x", encoding="utf-8")
+
+        created = await c.post(
+            f"/api/sessions/{sid}/share",
+            json={
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "done",
+                        "artifacts": ["build_report.py", "map_b64.txt", "report.pdf"],
+                    }
+                ]
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert created.status_code == 200, created.text
+        share_token = created.json()["token"]
+        share = await app.state.claw.shares.get_active_by_token(share_token, bump=False)
+        copied = sorted(p.name for p in (tmp_path / "ws" / "_shares" / share.id / "files").iterdir())
+        assert copied == ["00-report.pdf"]
+        # Keyed by the row's own id, not a separately minted one — otherwise
+        # read_share_file looks in a directory nothing was ever written to.
+        assert (await c.get(f"/api/share/{share_token}/files/00-report.pdf")).status_code == 200
+
+
 async def test_html_preview_returns_bounded_markup_as_json(db_factory, tmp_path):
     # JSON, not text/html, so the only thing that renders agent-authored markup
     # is the sandboxed iframe the UI puts it in. nosniff is what makes that hold:

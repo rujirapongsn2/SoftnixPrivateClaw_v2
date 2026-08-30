@@ -64,7 +64,6 @@ import {
   artifactTypeMeta,
   AttachmentRef,
   ConnectorInfo,
-  isHiddenArtifact,
   KnowledgeBase,
   ModelOption,
   PREVIEWABLE_HTML_RE,
@@ -74,6 +73,7 @@ import {
   api,
   fileUrl,
   openChatSocket,
+  visibleArtifacts,
 } from "./api";
 import { HtmlPreview } from "./HtmlPreview";
 import { SoftnixLogo } from "./Logo";
@@ -1625,7 +1625,14 @@ export function Chat({
             break;
           }
         }
-        msgs.push({ role: "assistant", content: answer.content, artifacts: answer.artifacts });
+        // Share only what the strip shows. The server filters too, but a public
+        // link is the one place where over-sharing is unrecoverable, so don't
+        // hand it helper scripts and base64 payloads in the first place.
+        msgs.push({
+          role: "assistant",
+          content: answer.content,
+          artifacts: visibleArtifacts(answer.artifacts),
+        });
         const res = await api.createShare(sessionId, { messages: msgs });
         // Build the URL from the current origin so the recipient hits the same
         // host the sharer is on (works on localhost, LAN IP, or a real domain).
@@ -2287,17 +2294,15 @@ export function Chat({
                       <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
                         <Markdown>{sanitizeModelMarkdown(item.content)}</Markdown>
                       </ChatMessageBubble>
-                      {sessionId && item.artifacts && item.artifacts.length > 0 && (
+                      {/* Intermediate files (the script that built the PDF, the
+                          JSON/XML it read along the way) are not deliverables,
+                          so the strip is filtered first and only rendered if
+                          anything survives — gating on the raw list instead
+                          leaves an empty, still-margined div behind. */}
+                      {sessionId && visibleArtifacts(item.artifacts).length > 0 && (
                         <div className="claw-artifacts">
-                          {item.artifacts.map((p) => {
+                          {visibleArtifacts(item.artifacts).map((p) => {
                             const href = fileUrl(sessionId, p);
-                            // Intermediate files (the script that built the
-                            // PDF, the JSON/XML it read along the way) are not
-                            // deliverables — hide them so the download list
-                            // only shows what the user actually asked for.
-                            if (isHiddenArtifact(p)) {
-                              return null;
-                            }
                             // Show images (e.g. a generated chart) inline; keep
                             // everything else as an openable chip.
                             if (PREVIEWABLE_TABLE_RE.test(p)) {

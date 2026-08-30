@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from claw.api.deps import AppState, current_user, current_user_ws, get_state
 from claw.api.file_preview import PreviewError, preview_html, preview_table
+from claw.core.loop import visible_artifacts
 from claw.db.models import User
 
 router = APIRouter()
@@ -621,23 +622,23 @@ async def create_share(
     incoming = incoming[:_MAX_SHARE_MESSAGES]
 
     workspace = _user_workspace(state, user.id)
-    share_id = uuid.uuid4().hex
-    files_dir = _shares_root(state) / share_id / "files"
 
     snapshot_messages: list[dict] = []
-    files_copied = 0
+    pending: list[tuple[str, str]] = []  # (source path, name inside the share)
     for msg in incoming:
         files: list[dict] = []
-        for rel in msg.artifacts or []:
-            if files_copied >= _MAX_SHARE_FILES:
+        # Filter BEFORE the budget. A share is public and unauthenticated, so
+        # the turn's helper scripts and base64 payloads must not be republished
+        # — and copying them first would also let them eat the file budget
+        # ahead of the deliverable the user actually wanted to show.
+        for rel in visible_artifacts(msg.artifacts or []):
+            if len(pending) >= _MAX_SHARE_FILES:
                 break
             src = _resolve_attachment(workspace, rel)
             if src is None:
                 continue  # missing or escapes the workspace — skip silently
-            name = f"{files_copied:02d}-{_safe_name(Path(rel).name)}"
-            files_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, files_dir / name)
-            files_copied += 1
+            name = f"{len(pending):02d}-{_safe_name(Path(rel).name)}"
+            pending.append((src, name))
             files.append(
                 {
                     "name": name,
@@ -653,6 +654,16 @@ async def create_share(
         snapshot={"messages": snapshot_messages},
         ttl_days=_SHARE_TTL_DAYS,
     )
+    # Copy only once the row exists, and under ITS id: the share directory used
+    # to be keyed by a locally minted uuid while the row got a different one
+    # from the model default, so read_share_file looked in a directory that was
+    # never written and every shared attachment 404'd. Doing it in this order
+    # also means a failed insert leaves no orphaned copies behind.
+    if pending:
+        files_dir = _shares_root(state) / share.id / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        for src, name in pending:
+            shutil.copy2(src, files_dir / name)
     base = state.settings.public_base_url.rstrip("/")
     return {
         "id": share.id,

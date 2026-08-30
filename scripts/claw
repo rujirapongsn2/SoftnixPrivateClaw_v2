@@ -469,11 +469,42 @@ cmd_logs() {
   esac
 }
 
+# Rebuild the tool-sandbox image when the pull changed how it is built.
+# `claw update` used to skip this entirely (install.sh --web-only stops after
+# the web build, and a full install.sh reuses an existing image), so a new
+# system package or pip dep in the Dockerfile stayed inert on every box that
+# updated rather than reinstalled — the agent kept running the old image.
+# Conditional on the Dockerfile actually changing: an unconditional rebuild
+# would add minutes of pip install to every routine update.
+update_sandbox_image() {
+  local before="$1" after="$2" image
+  [[ "$before" != "$after" ]] || return 0
+  git diff --quiet "$before" "$after" -- docker/sandbox.Dockerfile && return 0
+  image="$(env_value CLAW_SANDBOX__IMAGE)" || image=""
+  [[ -n "$image" ]] || image="claw-sandbox:latest"
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "==> sandbox image changed but docker is unavailable — rebuild it yourself:"
+    echo "    docker build -f docker/sandbox.Dockerfile -t $image $PROJECT_DIR"
+    return 0
+  fi
+  echo "==> rebuild sandbox image ($image)"
+  if ! docker build -f docker/sandbox.Dockerfile -t "$image" "$PROJECT_DIR"; then
+    # Not fatal: the previous image is still there and still runs. Say so
+    # loudly instead of failing the whole update after code+web are already in.
+    echo "==> WARNING: sandbox rebuild failed — the agent keeps using the OLD"
+    echo "    image. Re-run: docker build -f docker/sandbox.Dockerfile -t $image $PROJECT_DIR"
+  fi
+}
+
 cmd_update() {
   cd "$PROJECT_DIR"
+  local before after
+  before="$(git rev-parse HEAD)"
   echo "==> git pull"; git pull --ff-only
+  after="$(git rev-parse HEAD)"
   echo "==> uv sync"; uv sync --frozen --no-dev
   echo "==> rebuild web"; "$PROJECT_DIR/install.sh" --web-only
+  update_sandbox_image "$before" "$after"
   echo "==> migrate"; uv run alembic upgrade head
   echo "==> restart"
   if cmd_restart; then

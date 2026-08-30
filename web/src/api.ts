@@ -1336,14 +1336,46 @@ export type TablePreview = {
 export const PREVIEWABLE_TABLE_RE = /\.(csv|tsv|xlsx)$/i;
 
 /** Intermediate files a turn produces on the way to its real deliverable (a
- * script that builds the PDF, the JSON/XML it read along the way). They stay in
- * the workspace and the backend no longer records them as artifacts; this
- * filter is what keeps OLD transcripts (saved before that) from showing them
- * either. The suffixes mirror _ARTIFACT_HIDDEN_SUFFIXES in claw/core/loop.py. */
-const HIDDEN_ARTIFACT_RE = /\.(py|json|xml)$/i;
+ * script that builds the PDF, the JSON/XML it read along the way, a base64
+ * payload it inlines). They stay in the workspace and the backend no longer
+ * records them as artifacts; this filter is what keeps OLD transcripts (saved
+ * before that) from showing them either.
+ *
+ * Deliberately conservative, because this runs over stored transcripts: a rule
+ * that is too broad doesn't just hide a chip, it retroactively erases a file
+ * that was already handed to the user, and there is no workspace browser to go
+ * find it in. Mirrors _is_artifact_hidden / _drop_shadowed_templates in
+ * claw/core/loop.py — keep the two in step. */
+const HIDDEN_ARTIFACT_RE = /\.(py|json|xml|b64)$/i;
+/** Whole `._-`-delimited tokens only. The bare substring "b64" collides with
+ * hex ids often enough to matter ("chart_9b64c1.png", "generated-a1b64f.png"). */
+const HIDDEN_ARTIFACT_TOKENS = new Set(["b64", "base64"]);
+
+function nameTokens(path: string): string[] {
+  const name = path.split("/").pop() ?? path;
+  return name.toLowerCase().replace(/\.[^.]*$/, "").split(/[._\-\s]+/);
+}
+
+function extensionOf(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot).toLowerCase() : "";
+}
 
 export function isHiddenArtifact(path: string): boolean {
-  return HIDDEN_ARTIFACT_RE.test(path);
+  if (HIDDEN_ARTIFACT_RE.test(path)) return true;
+  return nameTokens(path).some((tok) => HIDDEN_ARTIFACT_TOKENS.has(tok));
+}
+
+/** The artifacts of one turn, minus its intermediates. Templates are resolved
+ * against the rest of the turn: a "*_template.html" next to the finished report
+ * is the assembly input, but a lone template is what the user asked for. */
+export function visibleArtifacts(paths: string[] | undefined | null): string[] {
+  if (!paths || paths.length === 0) return [];
+  const kept = paths.filter((p) => !isHiddenArtifact(p));
+  const isTemplate = (p: string) => nameTokens(p).includes("template");
+  const shadowing = new Set(kept.filter((p) => !isTemplate(p)).map(extensionOf));
+  return kept.filter((p) => !isTemplate(p) || !shadowing.has(extensionOf(p)));
 }
 
 /** Icon + human label + accent color class for a downloadable artifact card, by

@@ -297,6 +297,27 @@ Both libraries support multi-page docs (call the page-adding API in a loop) and
 embedding chart images (render the chart with matplotlib/openpyxl to a PNG first,
 then `page.insert_image(rect, filename=...)` or reportlab's `Image` flowable).
 
+### Thai text
+Neither library reads system fonts: reportlab's built-in Helvetica and fitz's
+`helv` are Latin-only, so Thai comes out as blank boxes with no error. Register
+a Thai TTF explicitly — the sandbox ships the TLWG families in
+`/usr/share/fonts/truetype/tlwg/`:
+
+```python
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+TLWG = "/usr/share/fonts/truetype/tlwg"
+pdfmetrics.registerFont(TTFont("Garuda", f"{TLWG}/Garuda.ttf"))
+pdfmetrics.registerFont(TTFont("Garuda-Bold", f"{TLWG}/Garuda-Bold.ttf"))
+# then set fontName="Garuda" on every ParagraphStyle and TableStyle you use
+```
+
+With `fitz`, pass the file instead of a builtin name:
+`page.insert_text(pos, text, fontfile=f"{TLWG}/Garuda.ttf", fontname="garuda")`.
+Always render one Thai line and re-extract it (`page.get_text()`) before
+generating the full document — that is the only cheap way to catch tofu.
+
 ## Merge & Split
 ```python
 from pypdf import PdfWriter, PdfReader
@@ -1327,8 +1348,10 @@ So, in a file meant to be previewed:
   after them. If you must embed PNGs, keep each one under ~150 KB before
   encoding — `savefig(..., dpi=100)` at a modest figsize, not `dpi=300`.
 - Fonts: system stack only —
-  `system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif`
-  (that Thai family keeps Thai text from falling back to a mismatched face).
+  `system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", "Garuda", sans-serif`
+  (the Thai families keep Thai text off a mismatched face: Noto Sans Thai in
+  the user's browser, Garuda when the same HTML is rendered to PDF in the
+  sandbox, which ships the TLWG fonts rather than Noto).
 
 ## Layout
 Centered column, `max-width: 960px`, ~32px page padding. Cards are 1px
@@ -1362,7 +1385,7 @@ screen readers read it in a Thai voice and triggers a translate prompt.
   * { box-sizing: border-box; }
   body {
     margin:0; padding:32px 24px; background:var(--bg); color:var(--text);
-    font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif;
+    font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", "Garuda", sans-serif;
     font-size:15px; line-height:1.6;
   }
   .wrap { max-width:960px; margin:0 auto; }

@@ -7,6 +7,7 @@ per session and adapters consume events from the bus.
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -234,11 +235,63 @@ _ARTIFACT_IGNORE_SUFFIXES = {".pyc", ".pyo"}
 # supposed to download?". They stay in the workspace and remain reachable by
 # their direct /files/ URL (and by the agent's own tools) — only the
 # automatic artifact chips are suppressed.
-_ARTIFACT_HIDDEN_SUFFIXES = {".py", ".json", ".xml"}
+_ARTIFACT_HIDDEN_SUFFIXES = {".py", ".json", ".xml", ".b64"}
+
+# Base64 payloads the agent dumps on the way to inlining them into a report
+# ("osm_map_base64.txt", "map_b64.txt"). Matched as a whole delimiter-separated
+# token, never as a bare substring: "b64" occurs inside hex ids often enough to
+# matter — "chart_9b64c1.png" and the "generated-a1b64f.png" name the image
+# route mints are real deliverables, and hiding one leaves the user nothing at
+# all (there is no workspace browser to go find it in).
+_ARTIFACT_HIDDEN_TOKENS = {"b64", "base64"}
+_TEMPLATE_TOKEN = "template"
+_NAME_TOKEN_RE = re.compile(r"[._\-\s]+")
+
+
+def _name_tokens(path: str) -> set[str]:
+    return set(_NAME_TOKEN_RE.split(Path(path).stem.lower()))
 
 
 def _is_artifact_hidden(path: str) -> bool:
-    return Path(path).suffix.lower() in _ARTIFACT_HIDDEN_SUFFIXES
+    if Path(path).suffix.lower() in _ARTIFACT_HIDDEN_SUFFIXES:
+        return True
+    return bool(_ARTIFACT_HIDDEN_TOKENS & _name_tokens(path))
+
+
+def _drop_shadowed_templates(artifacts: list[str]) -> list[str]:
+    """Drop a "*_template.html" when the turn also produced a non-template file
+    of the same type.
+
+    A report template sitting next to the finished report rendered as two
+    near-identical preview cards and users opened the wrong one. But a template
+    is only an intermediate when something was built *from* it: "make me an
+    invoice template" hands back exactly one file, and suppressing that one is
+    indistinguishable from producing nothing.
+    """
+    shadowing = {Path(a).suffix.lower() for a in artifacts if _TEMPLATE_TOKEN not in _name_tokens(a)}
+    return [
+        a
+        for a in artifacts
+        if _TEMPLATE_TOKEN not in _name_tokens(a) or Path(a).suffix.lower() not in shadowing
+    ]
+
+
+def visible_artifacts(paths: list[str]) -> list[str]:
+    """The files of one turn that are worth handing a human: no helper scripts,
+    no base64 payloads, no template that something else was assembled from."""
+    return _drop_shadowed_templates([p for p in paths if not _is_artifact_hidden(p)])
+
+
+def _split_artifacts(written: list[str]) -> tuple[list[str], list[str]]:
+    """Partition the files a turn wrote into (surfaced as chips, suppressed).
+
+    Suppressed files stay in the workspace and remain reachable by their direct
+    /files/ URL and by the agent's own tools; they are kept here so a turn that
+    died before it could speak can still name what it produced.
+    """
+    visible = visible_artifacts(written)
+    shown = set(visible)
+    return visible, [p for p in written if p not in shown]
 
 
 def _snapshot_workspace(workspace: Path) -> dict[str, float]:
@@ -283,6 +336,10 @@ class TurnOutcome:
     # Workspace-relative paths of files the agent created/edited this turn, so
     # the UI can offer them as downloadable/openable artifacts.
     artifacts: list[str] = field(default_factory=list)
+    # The rest of what the turn wrote: helper scripts, base64 payloads and
+    # superseded templates that don't earn a chip. Recorded so a turn that ran
+    # out of budget before it could speak can still say what it produced.
+    hidden_artifacts: list[str] = field(default_factory=list)
     # Per-turn cost shape, recorded alongside tokens: how many LLM round-trips
     # the turn took, how many tools it ran, and how long the user waited for the
     # first visible character. Tokens alone can't tell a one-shot answer apart
@@ -357,10 +414,12 @@ class AgentLoop:
         base_len = len(working)
         usage_total: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         effective_model = model or self.model
-        # Files the agent wrote/edited this turn (deduped, in order), surfaced to
-        # the user as openable artifacts. `baseline` lets us also detect files an
-        # `exec` command created (e.g. a saved chart) by diffing the workspace.
-        artifacts: list[str] = []
+        # Files the agent wrote/edited this turn (deduped, in order). Split into
+        # surfaced/suppressed by _split_artifacts at each exit, since whether a
+        # template counts as an intermediate depends on what else the turn wrote.
+        # `baseline` lets us also detect files an `exec` command created (e.g. a
+        # saved chart) by diffing the workspace.
+        written: list[str] = []
         baseline = _snapshot_workspace(self.workspace) if self.workspace is not None else {}
         started = time.monotonic()
         first_text_at: float | None = None
@@ -455,13 +514,15 @@ class AgentLoop:
                 )
                 if streamed:
                     working.append({"role": "assistant", "content": streamed})
+                    shown, suppressed = _split_artifacts(written)
                     return TurnOutcome(
                         final_content=streamed,
                         finish_reason="timeout",
                         new_messages=working[base_len:],
                         usage=usage_total,
                         timed_out=True,
-                        artifacts=artifacts,
+                        artifacts=shown,
+                        hidden_artifacts=suppressed,
                         iterations=iterations,
                         tool_calls=tool_call_count,
                         ttft_ms=_elapsed_ms(started, first_text_at),
@@ -483,12 +544,14 @@ class AgentLoop:
                 # runtime surfaces it as a visible error instead.
                 if result.content:
                     working.append({"role": "assistant", "content": result.content})
+                shown, suppressed = _split_artifacts(written)
                 return TurnOutcome(
                     final_content=result.content,
                     finish_reason=result.finish_reason,
                     new_messages=working[base_len:],
                     usage=usage_total,
-                    artifacts=artifacts,
+                    artifacts=shown,
+                    hidden_artifacts=suppressed,
                     iterations=iterations,
                     tool_calls=tool_call_count,
                     ttft_ms=_elapsed_ms(started, first_text_at),
@@ -599,19 +662,15 @@ class AgentLoop:
                     and args.get("path")
                 ):
                     p = str(args["path"])
-                    if p not in artifacts and not _is_artifact_hidden(p):
-                        artifacts.append(p)
+                    if p not in written:
+                        written.append(p)
                 # Files created/modified by a shell command (e.g. matplotlib
                 # savefig) aren't captured above, so diff the workspace vs the
                 # turn's baseline and surface anything new or freshly changed.
                 elif tc.name == "exec" and self.workspace is not None and not tool_result.startswith("Error"):
                     for rel, mtime in _snapshot_workspace(self.workspace).items():
-                        if (
-                            (rel not in baseline or mtime > baseline[rel])
-                            and rel not in artifacts
-                            and not _is_artifact_hidden(rel)
-                        ):
-                            artifacts.append(rel)
+                        if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
+                            written.append(rel)
                 # Surface a plan revision to the Execution panel in real time, from
                 # the args the model just sent (already persisted by the tool).
                 elif tc.name == "update_plan" and not tool_result.startswith("Error"):
@@ -653,13 +712,15 @@ class AgentLoop:
             )
         else:
             logger.warning("Turn {} reached max iterations ({})", turn_id, self.max_iterations)
+        shown, suppressed = _split_artifacts(written)
         return TurnOutcome(
             final_content=None,
             new_messages=working[base_len:],
             usage=usage_total,
             reached_max_iterations=not timed_out,
             timed_out=timed_out,
-            artifacts=artifacts,
+            artifacts=shown,
+            hidden_artifacts=suppressed,
             iterations=iterations,
             tool_calls=tool_call_count,
             ttft_ms=_elapsed_ms(started, first_text_at),

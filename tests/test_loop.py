@@ -12,6 +12,7 @@ from claw.core.loop import (
     _STALE_TOOL_RESULT_CHARS,
     AgentLoop,
     _prompt_size,
+    visible_artifacts,
 )
 from claw.providers.base import ChatResult, TextDelta, ToolCall
 from claw.tools.base import Tool
@@ -659,6 +660,81 @@ async def test_exec_created_intermediate_files_are_not_artifacts(tmp_path):
     # The helper files stay in the workspace, reachable by direct URL / tools.
     assert (tmp_path / "build_report.py").is_file()
     assert (tmp_path / "data.json").is_file()
+
+
+async def test_template_and_b64_assembly_inputs_are_not_artifacts(tmp_path):
+    """A '*template*.html' the agent scaffolds the real report from, and a
+    base64 payload meant to be inlined, are assembly inputs — not deliverables.
+    Showing both produced two near-identical preview cards and users opened
+    the placeholder one."""
+
+    class TemplateExecTool(Tool):
+        name = "exec"
+        description = "writes template then final report"
+        parameters = {"type": "object", "properties": {"command": {"type": "string"}}}
+
+        def __init__(self, workspace):
+            self.workspace = workspace
+
+        async def execute(self, command: str, **_: Any) -> str:
+            (self.workspace / "water_report_nan_template.html").write_text("<html>placeholder map</html>")
+            (self.workspace / "map_b64.txt").write_text("AAAA")
+            (self.workspace / "map_kalasin.b64").write_text("BBBB")
+            (self.workspace / "osm_map_base64.txt").write_text("CCCC")
+            (self.workspace / "water_report_nan.html").write_text("<html>FINAL with real map</html>")
+            return "[exit code: 0]"
+
+    provider = FakeProvider(
+        [
+            [
+                ChatResult(
+                    content=None,
+                    tool_calls=[ToolCall(id="c1", name="exec", arguments={"command": "build"})],
+                )
+            ],
+            text_turn("done"),
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(TemplateExecTool(tmp_path))
+    loop = AgentLoop(provider, tools, workspace=tmp_path)
+    _, emit = collector()
+
+    outcome = await loop.run_turn("t1", [{"role": "user", "content": "report"}], emit)
+
+    assert outcome.artifacts == ["water_report_nan.html"]
+    # Suppressed, not forgotten: a turn that dies before it can speak still has
+    # to be able to name what it wrote.
+    assert sorted(outcome.hidden_artifacts) == [
+        "map_b64.txt",
+        "map_kalasin.b64",
+        "osm_map_base64.txt",
+        "water_report_nan_template.html",
+    ]
+
+
+def test_hidden_artifact_rules_do_not_swallow_deliverables():
+    """The markers are matched as whole name tokens, and a template only counts
+    as an intermediate when something else was assembled from it. Matching
+    "b64"/"template" as bare substrings hid files the user asked for outright —
+    and there is no workspace browser to recover them from."""
+    # "b64" inside a hex id — including the "generated-<hex>.png" names the
+    # image route mints, which collide roughly 1 in 680.
+    assert visible_artifacts(["chart_9b64c1.png"]) == ["chart_9b64c1.png"]
+    assert visible_artifacts(["generated-a1b64f2d.png"]) == ["generated-a1b64f2d.png"]
+    assert visible_artifacts(["db64.zip"]) == ["db64.zip"]
+    # A template with nothing built from it IS the deliverable.
+    assert visible_artifacts(["invoice_template.xlsx"]) == ["invoice_template.xlsx"]
+    assert visible_artifacts(["email_template.html"]) == ["email_template.html"]
+    assert visible_artifacts(["Template.pdf"]) == ["Template.pdf"]
+    # A template shadowed by a sibling of a *different* type is still a
+    # deliverable — the report wasn't assembled from it.
+    assert visible_artifacts(["invoice_template.xlsx", "notes.pdf"]) == [
+        "invoice_template.xlsx",
+        "notes.pdf",
+    ]
+    # Real assembly inputs still go.
+    assert visible_artifacts(["osm_map_base64.txt", "map.b64", "build.py"]) == []
 
 
 async def test_write_file_intermediate_types_are_not_artifacts(tmp_path):

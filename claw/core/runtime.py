@@ -1033,13 +1033,17 @@ class AgentRuntime:
                         final = t("error.truncated", locale)
                     else:
                         final = t("error.empty_response", locale)
-                    if outcome.artifacts:
-                        # A timed-out turn very often HAS produced something — the
-                        # files just never got a closing sentence. Naming them turns
-                        # "it failed" into "here is what got done", and the chips
-                        # attached further down make them openable.
-                        shown = outcome.artifacts[:_FALLBACK_ARTIFACTS_SHOWN]
-                        extra = len(outcome.artifacts) - len(shown)
+                    # A timed-out turn very often HAS produced something — the
+                    # files just never got a closing sentence. Naming them turns
+                    # "it failed" into "here is what got done", and the chips
+                    # attached further down make them openable. Fall back to the
+                    # files that don't earn a chip when those are all there is:
+                    # "nothing was produced" would be a lie, and their /files/
+                    # URLs still work.
+                    produced = outcome.artifacts or outcome.hidden_artifacts
+                    if produced:
+                        shown = produced[:_FALLBACK_ARTIFACTS_SHOWN]
+                        extra = len(produced) - len(shown)
                         listed = ", ".join(shown) + (f", +{extra}" if extra > 0 else "")
                         final = f"{final}\n\n{t('error.partial_artifacts', locale, files=listed)}"
                     logger.warning(
@@ -1047,7 +1051,7 @@ class AgentRuntime:
                         turn_id,
                         outcome.finish_reason,
                         outcome.iterations,
-                        len(outcome.artifacts),
+                        len(produced),
                     )
                 elif outcome.timed_out:
                     # The deadline cut the stream off mid-answer. The text is real
