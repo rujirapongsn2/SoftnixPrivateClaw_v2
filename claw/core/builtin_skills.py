@@ -20,7 +20,11 @@ kind rendered back inside the app (Chat.tsx's HtmlPreview): it carries the light
 house palette — kept in step with the token values at the top of
 web/src/styles.css — and the constraints of the preview's sandbox/CSP, so reports
 match the product instead of arriving as dark, script-driven pages that render
-blank in the card.
+blank in the card. Its description also makes it the DEFAULT skill for a bare
+"make me a report" with no format named — the other document skills each claim
+only their own named format, so nothing else competes for that case; without an
+explicit default the model tended to reach for PDF out of habit, which only
+downloads instead of rendering inline.
 """
 
 from dataclasses import dataclass, field
@@ -1298,6 +1302,21 @@ one-pager, invoice, summary). Two things drive it: the file is shown inline in t
 chat, in a locked-down frame, and it has to look like part of the product rather
 than a generic dark template.
 
+## When the user just says "report"
+If the user asks for a report/summary/dashboard/one-pager and does NOT name a
+specific file format, write HTML and use this skill — don't default to PDF or
+DOCX. HTML is the only format that renders live in the chat's preview card;
+the others are download-only chips the user has to open in another app to even
+see. Only reach for a different format when:
+- the user names it explicitly ("as a PDF", "a Word doc", "an Excel sheet",
+  "a slide deck") — then use the pdf/docx/xlsx/pptx skill instead, or
+- the content is genuinely shaped for that format regardless of what the user
+  called it: a big sortable/filterable data table is more useful as .xlsx, a
+  presentation with one idea per slide is more useful as .pptx.
+A request for something to sign, print on letterhead, or file with a
+counterparty ("send them a PDF") still means PDF even without the word
+appearing — use judgment, not a keyword match.
+
 ## Light theme, unless the user asked for dark
 Default to a LIGHT document. Do NOT emit a dark background, a dark "dashboard"
 theme, or a `@media (prefers-color-scheme: dark)` block on your own initiative —
@@ -1676,9 +1695,13 @@ _BUILTIN_SKILLS: tuple[BuiltinSkill, ...] = (
     BuiltinSkill(
         name="html-report",
         description=(
-            "House style for any .html file you write — light theme on the product's own "
-            "palette, plus what the in-chat preview actually allows (no scripts, no external "
-            "CSS/fonts/images). Read it BEFORE writing an .html report, dashboard, or page."
+            "Default choice for a report/summary/dashboard when the user hasn't named a "
+            "specific file format — HTML is the one format that renders live in the chat's "
+            "preview panel instead of only downloading, so prefer it over pdf/docx/pptx/xlsx "
+            "unless the user asked for one of those by name (or the content is genuinely "
+            "tabular/slide-shaped). House style: light theme on the product's own palette, plus "
+            "what the in-chat preview actually allows (no scripts, no external CSS/fonts/images). "
+            "Read it BEFORE writing an .html report, dashboard, or page."
         ),
         content=_HTML_REPORT_CONTENT,
         capabilities=(
