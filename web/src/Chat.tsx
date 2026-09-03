@@ -442,7 +442,9 @@ export function Chat({
   // starting auto-opens it transiently without overwriting that saved default.
   // The panel itself is opt-in (Settings > Profile > Preferences, off by
   // default) — a stale "1" from before the setting existed, or from another
-  // account on this browser, must never resurrect it on its own.
+  // account on this browser, must never resurrect it on its own. Exception:
+  // a live plan (see "plan_updated" below) forces it open regardless of the
+  // preference, since a working plan is worth surfacing either way.
   const [execOpen, setExecOpen] = useState(() => localStorage.getItem("claw_exec_open") === "1");
   const openExecIfEnabled = useCallback(() => {
     if (executionPanelEnabled) setExecOpen(true);
@@ -450,6 +452,14 @@ export function Chat({
   // The agent's live working plan (from plan_updated events), shown pinned atop
   // the Execution panel. Null until the agent sets one this session.
   const [plan, setPlan] = useState<WorkingPlan | null>(null);
+  // Mirrors `plan` for the "plan_updated" handler below, which runs inside a
+  // WebSocket effect keyed only on [sessionId] and so closes over a stale
+  // `plan` — used to detect a genuinely new/changed plan vs. a reconnect
+  // replaying the same event, so closing the panel doesn't get undone by a resend.
+  const planRef = useRef<WorkingPlan | null>(null);
+  useEffect(() => {
+    planRef.current = plan;
+  }, [plan]);
   const socketRef = useRef<WebSocket | null>(null);
   // Mirrors the `sessionId` prop for use inside async callbacks (e.g.
   // runGeneratedImage) — lets them tell, after an await, whether the user has
@@ -748,11 +758,25 @@ export function Chat({
             return prev;
           });
           break;
-        case "plan_updated":
+        case "plan_updated": {
           // The agent revised its working plan — show it pinned in the panel.
-          openExecIfEnabled();
-          setPlan({ goal: event.goal ?? "", steps: event.steps ?? [] });
+          // Unlike other auto-opens, this bypasses the execution_panel_enabled
+          // preference: a live plan is worth surfacing even for users who've
+          // opted out of the tool-activity feed. Only force the panel open for
+          // an actual change, not a reconnect replaying the same event — the
+          // backend's per-turn replay buffer resends everything sent so far
+          // this turn, and without this check that resend would undo a user's
+          // deliberate close.
+          const nextPlan = { goal: event.goal ?? "", steps: event.steps ?? [] };
+          const prev = planRef.current;
+          const changed =
+            !prev ||
+            prev.goal !== nextPlan.goal ||
+            JSON.stringify(prev.steps) !== JSON.stringify(nextPlan.steps);
+          if (changed) setExecOpen(true);
+          setPlan(nextPlan);
           break;
+        }
         case "tool_confirm_request":
           openExecIfEnabled();
           setItems((prev) => {
@@ -1656,6 +1680,15 @@ export function Chat({
 
   // Flatten every tool-call group (in order) into the execution timeline.
   const execSteps = items.flatMap((it) => (it.kind === "tools" ? it.calls : []));
+  // A plan still in progress forces the execution panel to be showable even
+  // when the user has execution_panel_enabled off — see the "plan_updated"
+  // handler above. Scoped to "in progress" (not just "a plan was ever set
+  // this session") so the bypass doesn't outlive the task it was for: once
+  // every step is done and the agent isn't busy, visibility reverts to
+  // purely following the user's saved preference.
+  const planInProgress = Boolean(
+    plan && (busy || plan.steps.some((s) => s.status !== "done")),
+  );
 
   const toggleExec = (v: boolean) => {
     setExecOpen(v);
@@ -1677,7 +1710,7 @@ export function Chat({
   return (
     <div className="claw-chat-shell">
     <div className={`claw-chat${isEmpty ? " claw-chat--empty" : ""}`}>
-      {!isEmpty && executionPanelEnabled && !execOpen && (
+      {!isEmpty && (executionPanelEnabled || planInProgress) && !execOpen && (
         <IconButton
           label={t("chat.exec.show")}
           icon={<Icon icon={PanelRight} size="sm" />}
@@ -2493,7 +2526,7 @@ export function Chat({
         )}
       </ChatLayout>
     </div>
-      {!isEmpty && executionPanelEnabled && execOpen && (
+      {!isEmpty && (executionPanelEnabled || planInProgress) && execOpen && (
         <ExecutionPanel steps={execSteps} plan={plan} running={busy} onClose={() => toggleExec(false)} />
       )}
       <Lightbox
