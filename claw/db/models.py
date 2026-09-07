@@ -55,6 +55,8 @@ class User(Base):
     # Proactive check-in cadence; 0 disables the heartbeat for this user.
     heartbeat_interval_seconds: Mapped[int] = mapped_column(Integer, default=0)
     heartbeat_next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sbot_heartbeat_interval_seconds: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    sbot_heartbeat_next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Linked Telegram account id (null = not linked). Unique so one Telegram maps to one user.
     telegram_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, unique=True)
     # Organizational group (purely for management/filtering — NOT a policy or
@@ -104,6 +106,9 @@ class User(Base):
         Index("ix_users_email_lower", func.lower(email), unique=True),
     )
 
+    project_containers_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    project_container_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
 
 class UserGroup(Base):
     """A named group of users, for organization/filtering. A group may carry a
@@ -123,6 +128,9 @@ class UserGroup(Base):
         ForeignKey("policy_plans.id", ondelete="SET NULL"), nullable=True, index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    project_containers_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    project_container_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class PolicyPlan(Base):

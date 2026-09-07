@@ -15,7 +15,7 @@ dependencies = [
     "loguru>=0.7",
     "httpx>=0.27",
     "cryptography>=43.0",
-    "mcp>=1.2",
+    "mcp>=1.2,<2",
     "croniter>=3.0",
     "alembic>=1.18.5",
     "python-multipart>=0.0.32",
@@ -41,7 +41,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["claw"]
+packages = ["claw", "sbot"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

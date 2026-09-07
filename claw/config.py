@@ -49,7 +49,10 @@ class BrowserSettings(BaseModel):
     allowed_domains: list[str] = []
 
 
-class SandboxSettings(BaseModel):
+from sbot.config import SandboxSettings as SbotSandboxSettings
+
+
+class SandboxSettings(SbotSandboxSettings):
     """Tool-ephemeral sandbox: shell commands run in short-lived containers."""
 
     enabled: bool = True
@@ -270,6 +273,9 @@ class Settings(BaseSettings):
     port: int = 8700
     # Root directory holding per-user agent workspaces.
     workspaces_root: Path = Path("workspaces")
+    sbot_enabled: bool = True
+    sbot_workspaces_root: Path | None = None
+    blueprints_root: Path = Path("blueprints")
     # Root directory holding knowledge-base OKF bundles (one subdir per base).
     knowledge_root: Path = Path("knowledge")
     # Root directory holding admin-uploaded branding assets (Control Plane >

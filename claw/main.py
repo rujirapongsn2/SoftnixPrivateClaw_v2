@@ -39,7 +39,6 @@ from claw.db.stores import (
     BrandingStore,
     ConnectorStore,
     FeedbackStore,
-    GroupStore,
     GuardrailStore,
     KnowledgeStore,
     LLMConfigStore,
@@ -54,7 +53,6 @@ from claw.db.stores import (
     SmtpConfigStore,
     TelegramConfigStore,
     UsageStore,
-    UserStore,
 )
 from claw.knowledge.service import KnowledgeService
 from claw.logging_setup import configure_logging
@@ -77,8 +75,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     bus = EventBus()
     is_postgres = "postgresql" in settings.database_url
-    users = UserStore(factory)
-    groups = GroupStore(factory)
+    from claw.modes import SharedUserStore as ModeUserStore
+    from sbot.db.stores import GroupStore as ModeGroupStore
+    users = ModeUserStore(factory)
+    groups = ModeGroupStore(factory)
     sessions = SessionStore(factory, is_postgres=is_postgres)
     messages = MessageStore(factory, is_postgres=is_postgres)
     memories = MemoryStore(factory)
@@ -177,8 +177,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 await asyncio.to_thread(run_migrations)
             except Exception:
-                logger.exception("Alembic migration failed; falling back to create_all")
-                await init_db(engine)
+                logger.exception("Database migration failed; startup aborted")
+                raise
         else:
             await init_db(engine)
         # Ensure the branding asset dir exists (admin-uploaded logos land here).
@@ -256,7 +256,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "enabled" if browser_mgr is not None else "disabled",
             "enabled" if settings.tts.api_key else "disabled (CLAW_TTS__API_KEY not set)",
         )
-        yield
+        if sbot_app is not None:
+            async with sbot_app.router.lifespan_context(sbot_app):
+                yield
+        else:
+            yield
         # Stop intake, then let in-flight turns finish before tearing down.
         await scheduler.stop()
         await heartbeat.stop()
@@ -309,8 +313,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         knowledge_service=knowledge_service,
         shares=shares,
     )
+    sbot_app = None
+    if settings.sbot_enabled:
+        from pathlib import Path
+        from sbot.config import Settings as SbotSettings
+        from sbot.main import create_app as create_sbot_app
+        values = settings.model_dump()
+        values.pop("sbot_enabled", None)
+        mode_root = values.pop("sbot_workspaces_root", None)
+        # A sibling root cannot be reached from the legacy per-user file endpoint.
+        values["workspaces_root"] = mode_root or Path(str(settings.workspaces_root) + "-sbot")
+        values["blueprints_root"] = settings.blueprints_root
+        host_root = settings.workspaces_root.resolve()
+        sbot_root = Path(values["workspaces_root"]).resolve()
+        if host_root == sbot_root or host_root in sbot_root.parents or sbot_root in host_root.parents:
+            raise ValueError("PrivateClaw and Sbot workspace roots must not overlap")
+        mode_settings = SbotSettings(_env_file=None, **values)
+        sbot_app = create_sbot_app(mode_settings, shared=app.state.claw)
+        app.state.sbot = sbot_app.state.sbot
+        app.mount("/modes/sbot", sbot_app)
+        # Shared administration, including container policy, has one endpoint.
+        from sbot.api.admin import router as mode_admin_router
+        from dataclasses import replace
+        from claw.modes import CombinedReports
+        from sbot.api.deps import get_state as get_sbot_state
+        admin_state = replace(app.state.sbot,
+            sessions=CombinedReports(sessions, app.state.sbot.sessions),
+            messages=CombinedReports(messages, app.state.sbot.messages),
+            memories=CombinedReports(memories, app.state.sbot.memories),
+            feedback=CombinedReports(feedback, app.state.sbot.feedback),
+            telegram_mgr=telegram_mgr, telegram_config=telegram_config,
+        )
+        app.dependency_overrides[get_sbot_state] = lambda: admin_state
+        app.include_router(mode_admin_router)
+
+    @app.get("/api/modes")
+    async def modes():
+        return {"privateclaw": True, "sbot": settings.sbot_enabled}
+
     app.include_router(auth_router)
-    app.include_router(admin_router)
+    if not settings.sbot_enabled:
+        app.include_router(admin_router)
     app.include_router(browser_ext_router)
     app.include_router(connector_oauth_router)
     app.include_router(knowledge_router)
@@ -334,8 +377,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         index_html = web_dist / "index.html"
 
+        @app.get("/chat/{path:path}", include_in_schema=False)
+        @app.get("/sbot/s/{token}", include_in_schema=False)
         @app.get("/s/{token}", include_in_schema=False)
-        async def _share_page(token: str) -> FileResponse:  # noqa: ARG001
+        async def _share_page(token: str = "", path: str = "") -> FileResponse:  # noqa: ARG001
             return FileResponse(index_html)
 
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="web")

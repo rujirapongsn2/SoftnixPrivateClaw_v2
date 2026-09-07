@@ -110,7 +110,7 @@ import {
   ADMIN_CONNECTOR_API,
   ADMIN_LLM_API,
   type LlmApi,
-} from "./api";
+} from "./shared-api";
 
 export type AdminSection =
   | "overview"
@@ -141,30 +141,32 @@ export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconTy
   { key: "overview", labelKey: "admin.nav.overview", icon: LayoutDashboard },
   { key: "providers", labelKey: "admin.nav.providers", icon: Cpu },
   { key: "connectors", labelKey: "admin.nav.connectors", icon: Plug },
-  { key: "plans", labelKey: "admin.nav.plans", icon: Gauge },
   { key: "guardrails", labelKey: "admin.nav.guardrails", icon: ShieldCheck },
   { key: "oauth", labelKey: "admin.nav.oauth", icon: KeyRound },
   { key: "telegram", labelKey: "admin.nav.telegram", icon: Send },
   { key: "email", labelKey: "admin.nav.email", icon: Mail },
+  { key: "users", labelKey: "admin.nav.users", icon: Users },
+  { key: "plans", labelKey: "admin.nav.plans", icon: Gauge },
   { key: "preferences", labelKey: "admin.nav.preferences", icon: Palette },
   { key: "audit", labelKey: "admin.nav.audit", icon: ScrollText },
-  { key: "users", labelKey: "admin.nav.users", icon: Users },
 ];
 
-// The Control Plane sidebar groups the sections above into collapsible
-// clusters (see App.tsx's Control Plane render) so the nav stays scannable
-// as more sections get added — "overview" and "preferences" are left out
-// here and rendered standalone instead, since a single-item group is just
-// an extra click for no organizational benefit.
 export const ADMIN_SECTION_GROUPS: { labelKey: string; icon: IconType | IconName; sections: AdminSection[] }[] = [
   { labelKey: "admin.navGroup.aiConfig", icon: Cpu, sections: ["providers", "connectors", "guardrails"] },
   { labelKey: "admin.navGroup.integrations", icon: Globe, sections: ["oauth", "telegram", "email"] },
   { labelKey: "admin.navGroup.accounts", icon: Users, sections: ["plans", "users", "audit"] },
 ];
 
-export function AdminPanel({ section, selfId }: { section: AdminSection; selfId: string }) {
+export function AdminPanel({
+  section,
+  selfId,
+  onSectionChange,
+}: {
+  section: AdminSection;
+  selfId: string;
+  onSectionChange: (section: AdminSection) => void;
+}) {
   const t = useT();
-  const meta = ADMIN_SECTIONS.find((s) => s.key === section);
   // LLM Providers is a data table (model id, cost, status, several action
   // buttons per row) — the shared 720px prose-reading column that suits every
   // other admin page (forms, prose, short lists) squeezes it into ellipsis
@@ -175,8 +177,15 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
   return (
     <div className="claw-settings-panel">
       <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
-        <Icon icon={meta?.icon ?? "check"} size="lg" color="secondary" />
-        <Text type="display-3">{meta ? t(meta.labelKey) : ""}</Text>
+        <Icon icon={Shield} size="lg" color="secondary" />
+        <Text type="display-3">{t("nav.controlPlane")}</Text>
+      </div>
+      <div className={`claw-control-plane-tabs${isWide ? " claw-panel-wide" : ""}`}>
+        <TabList value={section} onChange={(value) => onSectionChange(value as AdminSection)} hasDivider aria-label={t("nav.controlPlane")}>
+          {ADMIN_SECTIONS.map((item) => (
+            <Tab key={item.key} value={item.key} label={t(item.labelKey)} icon={<Icon icon={item.icon} size="sm" />} />
+          ))}
+        </TabList>
       </div>
       <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
         {section === "overview" && <OverviewPanel />}
@@ -374,22 +383,31 @@ function OverviewPanel() {
     void guard(async () => setData(await api.adminOverview()));
   }, [guard]);
 
-  if (error) return <ErrorText>{error}</ErrorText>;
-  if (!data) return <Text color="secondary">{t("admin.common.loading")}</Text>;
-
   return (
-    <div className="claw-panel">
-      <TabList value={tab} onChange={setTab} hasDivider aria-label={t("admin.overview.sectionsAria")}>
+    <div className="claw-overview-layout">
+      <nav className="claw-overview-tabs" aria-label={t("admin.overview.sectionsAria")}>
         {OVERVIEW_TABS.map((tabItem) => (
-          <Tab key={tabItem.key} value={tabItem.key} label={t(tabItem.labelKey)} icon={<Icon icon={tabItem.icon} size="sm" />} />
+          <button key={tabItem.key} type="button"
+            className={tab === tabItem.key ? "is-selected" : undefined}
+            aria-current={tab === tabItem.key ? "page" : undefined}
+            onClick={() => setTab(tabItem.key)}>
+            <Icon icon={tabItem.icon} size="sm" />
+            <span>{t(tabItem.labelKey)}</span>
+          </button>
         ))}
-      </TabList>
-      {tab === "summary" && <OverviewSummary data={data} />}
-      {tab === "activity" && <OverviewActivity data={data} />}
-      {tab === "models" && <OverviewModels data={data} />}
-      {tab === "tokens" && <OverviewTokens />}
-      {tab === "plans" && <OverviewPlans data={data} />}
-      {tab === "safety" && <OverviewSafety data={data} />}
+      </nav>
+      <div className="claw-overview-content">
+        {error ? <ErrorText>{error}</ErrorText>
+          : !data ? <Text color="secondary">{t("admin.common.loading")}</Text>
+          : <>
+            {tab === "summary" && <OverviewSummary data={data} />}
+            {tab === "activity" && <OverviewActivity data={data} />}
+            {tab === "models" && <OverviewModels data={data} />}
+            {tab === "tokens" && <OverviewTokens />}
+            {tab === "plans" && <OverviewPlans data={data} />}
+            {tab === "safety" && <OverviewSafety data={data} />}
+          </>}
+      </div>
     </div>
   );
 }
@@ -4325,6 +4343,88 @@ function GroupPicker({
   );
 }
 
+function UserProjectPolicyPicker({
+  enabled,
+  limit,
+  onChange,
+}: {
+  enabled: boolean | null;
+  limit: string;
+  onChange: (enabled: boolean | null, limit: string) => void;
+}) {
+  const t = useT();
+  return (
+    <div className="claw-field-group">
+      <Text size="sm" color="secondary">{t("admin.users.projectPolicy")}</Text>
+      <div className="claw-row">
+        <Button label={t("admin.users.projectPolicyInherit")} size="sm" variant={enabled === null ? "primary" : "secondary"} clickAction={() => onChange(null, "")} />
+        <Button label={t("admin.users.projectPolicyAllow")} size="sm" variant={enabled === true ? "primary" : "secondary"} clickAction={() => onChange(true, limit || "1")} />
+        <Button label={t("admin.users.projectPolicyDeny")} size="sm" variant={enabled === false ? "primary" : "secondary"} clickAction={() => onChange(false, "")} />
+      </div>
+      {enabled === true && (
+        <TextInput
+          label={t("admin.users.projectLimit")}
+          description={t("admin.users.projectLimitDesc")}
+          value={limit}
+          onChange={(value) => onChange(true, value)}
+        />
+      )}
+    </div>
+  );
+}
+
+function GroupProjectPolicy({
+  group,
+  guard,
+  reload,
+}: {
+  group: GroupInfo;
+  guard: (fn: () => Promise<void>) => Promise<void>;
+  reload: () => Promise<void>;
+}) {
+  const t = useT();
+  const [enabled, setEnabled] = useState(group.project_containers_enabled);
+  const [limit, setLimit] = useState(String(group.project_container_limit || 1));
+  const numberLimit = Number(limit);
+  const valid = !enabled || (Number.isInteger(numberLimit) && numberLimit >= 1 && numberLimit <= 100);
+
+  useEffect(() => {
+    setEnabled(group.project_containers_enabled);
+    setLimit(String(group.project_container_limit || 1));
+  }, [group.id, group.project_containers_enabled, group.project_container_limit]);
+
+  return (
+    <div className="claw-field-group">
+      <label className="claw-toggle-inline">
+        <Switch value={enabled} label={t("admin.users.projectPolicy")} isLabelHidden changeAction={setEnabled} />
+        <Text size="sm" color="secondary">{t("admin.users.projectPolicy")}</Text>
+      </label>
+      {enabled && (
+        <TextInput
+          label={t("admin.users.projectLimit")}
+          description={t("admin.users.projectLimitDesc")}
+          value={limit}
+          onChange={setLimit}
+        />
+      )}
+      <Button
+        label={t("admin.users.projectPolicySave")}
+        size="sm"
+        variant="secondary"
+        isDisabled={!valid}
+        clickAction={() =>
+          void guard(async () => {
+            await api.adminUpdateGroup(group.id, {
+              project_policy: { enabled, max_containers: enabled ? numberLimit : 0 },
+            });
+            await reload();
+          })
+        }
+      />
+    </div>
+  );
+}
+
 // Housekeeping card: create/delete groups and choose which one new self-signups
 // land in. Groups are organizational only — no permission effect.
 function GroupsManager({
@@ -4430,6 +4530,7 @@ function GroupsManager({
                 }
               />
             )}
+            <GroupProjectPolicy group={g} guard={guard} reload={reload} />
           </div>
         ))}
         {adding ? (
@@ -5288,6 +5389,8 @@ function UserRow({
   const [newPassword, setNewPassword] = useState("");
   const [groupId, setGroupId] = useState<string | null>(u.group_id);
   const [planId, setPlanId] = useState<string | null>(u.plan_id);
+  const [projectEnabled, setProjectEnabled] = useState<boolean | null>(u.project_containers_enabled);
+  const [projectLimit, setProjectLimit] = useState(u.project_container_limit?.toString() ?? "");
   const toast = useToast();
   const isSelf = u.id === selfId;
   const label = u.display_name || u.email;
@@ -5391,6 +5494,8 @@ function UserRow({
               setNewPassword("");
               setGroupId(u.group_id);
               setPlanId(u.plan_id);
+              setProjectEnabled(u.project_containers_enabled);
+              setProjectLimit(u.project_container_limit?.toString() ?? "");
               setEditing((e) => !e);
             }}
           />
@@ -5429,19 +5534,34 @@ function UserRow({
           />
           <GroupPicker groups={groups} value={groupId} onChange={setGroupId} onCreate={createGroup} />
           {plans.length > 0 && <PlanPicker plans={plans} value={planId} onChange={setPlanId} />}
+          <UserProjectPolicyPicker
+            enabled={projectEnabled}
+            limit={projectLimit}
+            onChange={(enabled, limit) => {
+              setProjectEnabled(enabled);
+              setProjectLimit(limit);
+            }}
+          />
           <div className="claw-row">
             <Button
               label={t("admin.common.saveChanges")}
               variant="primary"
               icon={<Icon icon="check" size="sm" />}
               size="sm"
-              isDisabled={newPassword.length > 0 && newPassword.length < 8}
+              isDisabled={
+                (newPassword.length > 0 && newPassword.length < 8) ||
+                (projectEnabled === true && (!Number.isInteger(Number(projectLimit)) || Number(projectLimit) < 1 || Number(projectLimit) > 100))
+              }
               clickAction={() =>
                 guard(async () => {
                   await api.adminUpdateUser(u.id, {
                     display_name: displayName.trim(),
                     group_id: groupId,
                     plan_id: planId,
+                    project_policy: {
+                      enabled: projectEnabled,
+                      max_containers: projectEnabled === true ? Number(projectLimit) : null,
+                    },
                     ...(newPassword ? { password: newPassword } : {}),
                   });
                   setEditing(false);

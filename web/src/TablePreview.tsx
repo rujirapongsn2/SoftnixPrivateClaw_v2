@@ -5,6 +5,7 @@ import { Download, FileSpreadsheet } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { fileTablePreview, previewRetryDelay, type TablePreview as TablePreviewData } from "./api";
 import { useT } from "./branding";
+import { SaveToBlueprintButton } from "./SaveToBlueprintButton";
 
 type Props = {
   sessionId: string;
@@ -135,6 +136,7 @@ export function TablePreview({ sessionId, path, href }: Props) {
         >
           <Icon icon={Download} size="xsm" color="secondary" />
         </a>
+        <SaveToBlueprintButton sessionId={sessionId} path={path} />
       </div>
 
       {!data ? (

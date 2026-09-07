@@ -1,3 +1,4 @@
+import { ModeSwitcher } from "./ModeSwitcher";
 import { Button } from "@astryxdesign/core/Button";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
@@ -570,8 +571,19 @@ export default function App() {
   const { setUserOverride } = useBranding();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [checking, setChecking] = useState(true);
+  const [sbotEnabled, setSbotEnabled] = useState(false);
+  useEffect(() => { fetch("/api/modes").then(r => r.json()).then(r => setSbotEnabled(Boolean(r.sbot))).catch(() => undefined); }, []);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [active, setActive] = useState<string | null>(null);
+  const [active, setActive] = useState<string | null>(() => {
+    const parts = window.location.pathname.split("/");
+    return parts[3] || sessionStorage.getItem("claw:last:privateclaw");
+  });
+  useEffect(() => {
+    if (active) sessionStorage.setItem("claw:last:privateclaw", active);
+    else sessionStorage.removeItem("claw:last:privateclaw");
+    if (window.location.pathname.startsWith("/chat"))
+      window.history.replaceState(null, "", "/chat/privateclaw" + (active ? "/" + encodeURIComponent(active) : ""));
+  }, [active]);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
@@ -770,6 +782,8 @@ export default function App() {
     // signing out locally, so it's fire-and-forget.
     void api.logout().catch(() => undefined);
     clearToken();
+    sessionStorage.removeItem("claw:last:privateclaw");
+    sessionStorage.removeItem("claw:last:sbot");
     setUser(null);
     setSessions([]);
     setActive(null);
@@ -829,7 +843,7 @@ export default function App() {
                 icon={SettingsIcon}
                 collapsible={{ defaultIsCollapsed: true }}
               >
-                {SETTINGS_SECTIONS.map((s) => (
+                {SETTINGS_SECTIONS.filter(s => sbotEnabled || !["projects", "blueprints"].includes(s.key)).map((s) => (
                   <SideNavItem
                     key={s.key}
                     label={t(s.labelKey)}
@@ -942,6 +956,7 @@ export default function App() {
       </SideNav>
 
       <main className="claw-main">
+        <ModeSwitcher />
         {/* Mobile top bar: only shown ≤1024px (CSS), gives a way to open the
             drawer since the sidebar is off-canvas there. */}
         <div className="claw-topbar">
@@ -964,7 +979,7 @@ export default function App() {
               </Text>
             </div>
           ) : (
-            <AdminPanel section={adminSection} selfId={user.id} />
+            <AdminPanel section={adminSection} selfId={user.id} onSectionChange={setAdminSection} />
           )
         ) : settingsSection ? (
           <SettingsPanel section={settingsSection} />
