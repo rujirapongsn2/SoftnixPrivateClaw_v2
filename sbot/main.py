@@ -116,6 +116,8 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         project_access=project_access,
         blueprints=blueprints,
     )
+    from sbot.local_workspaces import LocalWorkspaces
+    runtime.local_workspaces = LocalWorkspaces(settings.workspaces_root / '_local_workspaces')
 
     if shared is not None:
         runtime._rate_limiter = shared.runtime._rate_limiter
@@ -238,6 +240,8 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     app.include_router(manage_router)
     app.include_router(blueprints_router)
     app.include_router(bot_groups_router)
+    from sbot.api.local_workspaces import router as local_workspaces_router
+    app.include_router(local_workspaces_router)
 
     return app
 

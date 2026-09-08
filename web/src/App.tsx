@@ -1,4 +1,3 @@
-import { ModeSwitcher } from "./ModeSwitcher";
 import { Button } from "@astryxdesign/core/Button";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
@@ -76,7 +75,26 @@ function NewChatButton({ onClick }: { onClick: () => void }) {
  * and gets clipped/squeezed there. */
 function SidebarBrand() {
   const { isCollapsed } = useSideNavCollapse();
-  return <div className="claw-sidenav-brand">{isCollapsed ? <SoftnixMark size={22} /> : <Brand height={22} />}</div>;
+  const [sbotEnabled, setSbotEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    fetch("/api/modes").then(r => r.json()).then(r => setSbotEnabled(Boolean(r.sbot))).catch(() => setSbotEnabled(false));
+  }, []);
+  if (isCollapsed) return <div className="claw-sidenav-brand"><SoftnixMark size={22} /></div>;
+  const content = (
+    <div className="claw-mode-menu">
+      <a className="claw-mode-menu-item claw-mode-menu-item--active" href="/chat/privateclaw">
+        <span><strong>PrivateClaw</strong><small>Personal AI workspace</small></span><span aria-hidden="true">✓</span>
+      </a>
+      <a className="claw-mode-menu-item" href="/chat/sbot">
+        <span><strong>Bot Mode</strong><small>Work with your bot team</small></span>
+      </a>
+    </div>
+  );
+  return <div className="claw-sidenav-brand">
+    {sbotEnabled ? <Popover label="Switch mode" placement="below" alignment="start" width={272} hasAutoFocus={false} content={content}>
+      <button type="button" className="claw-mode-menu-trigger" aria-label="Switch mode"><Brand height={22} /><Icon icon={ChevronDown} size="sm" /></button>
+    </Popover> : <Brand height={22} />}
+  </div>;
 }
 
 /** Truncate a chat title for the narrow collapsed-rail popover. */
@@ -956,7 +974,6 @@ export default function App() {
       </SideNav>
 
       <main className="claw-main">
-        <ModeSwitcher />
         {/* Mobile top bar: only shown ≤1024px (CSS), gives a way to open the
             drawer since the sidebar is off-canvas there. */}
         <div className="claw-topbar">

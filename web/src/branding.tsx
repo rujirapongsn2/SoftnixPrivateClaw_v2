@@ -134,6 +134,8 @@ type Dict = Record<string, string>;
 
 const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
   en: {
+    "nav.newChat": "New chat",
+    "nav.searchChats": "Search chats",
     "nav.searchBots": "Search bots...",
     "nav.clearChat": "Clear this bot's chat",
     "nav.changeAvatar": "Change {name}'s picture",
@@ -238,6 +240,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.artifact.preview": "Preview",
     "chat.artifact.hidePreview": "Hide preview",
     "chat.artifact.saveToBlueprint": "Save to Blueprints",
+    "chat.artifact.saveToBlueprintHint": "Save a private copy to Blueprints for reuse",
     "chat.artifact.savedToBlueprint": "Saved as a private Blueprint",
     "chat.artifact.blueprintSaveFailed": "Couldn't save Blueprint",
 
@@ -300,6 +303,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "exec.generatingResponse": "Generating response…",
     "exec.response": "Response",
     "exec.plan": "Plan",
+    "exec.waitingForUser": "Waiting for you",
+    "exec.blocked": "Blocked",
+    "exec.incomplete": "Incomplete",
     "exec.empty": "No activity yet — steps appear here while Sbot works.",
     "exec.stepCounter": "step {index} of {total}",
     "exec.input": "Input",
@@ -317,7 +323,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.nav.schedules": "Schedule",
     "settings.nav.heartbeat": "Heartbeat",
     "settings.nav.telegram": "Telegram",
-    "settings.nav.browserExt": "Browser extension",
+    "settings.nav.browserExt": "Client & Extention",
 
     "settings.common.loading": "Loading…",
     "settings.common.cancel": "Cancel",
@@ -570,7 +576,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.telegram.expires": "Expires in a few minutes. Once sent, come back and refresh this page.",
 
     "settings.browserExt.mobileNotice":
-      "The browser extension pairs Sbot with Chrome on your computer, so it's set up on a desktop — not on a phone or tablet. Open Softnix Sbot on your computer, then go to Settings → Browser extension.",
+      "The browser extension pairs Sbot with Chrome on your computer, so it's set up on a desktop — not on a phone or tablet. Open Softnix Sbot on your computer, then go to Settings → Client & Extention.",
     "settings.browserExt.notEnabled":
       "The browser extension is not enabled on this server. An administrator must set CLAW_BROWSER__CLIENT_EXTENSION_ENABLED=true to allow pairing.",
     "settings.browserExt.intro":
@@ -1168,6 +1174,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.users.userUpdatedToast": "User updated",
   },
   th: {
+    "nav.newChat": "แชทใหม่",
+    "nav.searchChats": "ค้นหาแชท",
     "nav.searchBots": "ค้นหาบอท...",
     "nav.clearChat": "ล้างแชทของบอทนี้",
     "nav.changeAvatar": "เปลี่ยนรูปของ {name}",
@@ -1270,6 +1278,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.artifact.download": "ดาวน์โหลด {name}",
     "chat.artifact.downloadAction": "ดาวน์โหลด",
     "chat.artifact.saveToBlueprint": "บันทึกเป็น Blueprint",
+    "chat.artifact.saveToBlueprintHint": "บันทึกสำเนาส่วนตัวไปยัง Blueprint เพื่อใช้งานซ้ำ",
     "chat.artifact.savedToBlueprint": "บันทึกเป็น Blueprint ส่วนตัวแล้ว",
     "chat.artifact.blueprintSaveFailed": "บันทึก Blueprint ไม่สำเร็จ",
     "chat.artifact.preview": "ดูตัวอย่าง",
@@ -1330,6 +1339,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "exec.generatingResponse": "กำลังสร้างคำตอบ…",
     "exec.response": "คำตอบ",
     "exec.plan": "แผนการทำงาน",
+    "exec.waitingForUser": "รอข้อมูลจากคุณ",
+    "exec.blocked": "ติดขัด",
+    "exec.incomplete": "ยังไม่เสร็จ",
     "exec.empty": "ยังไม่มีการทำงาน — ขั้นตอนจะแสดงที่นี่ขณะที่ Sbot ทำงาน",
     "exec.stepCounter": "ขั้นตอนที่ {index} จาก {total}",
     "exec.input": "ข้อมูลนำเข้า",
@@ -1347,7 +1359,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.nav.schedules": "กำหนดเวลา",
     "settings.nav.heartbeat": "ฮาร์ตบีต",
     "settings.nav.telegram": "Telegram",
-    "settings.nav.browserExt": "ส่วนขยายเบราว์เซอร์",
+    "settings.nav.browserExt": "Client & Extention",
 
     "settings.common.loading": "กำลังโหลด…",
     "settings.common.cancel": "ยกเลิก",

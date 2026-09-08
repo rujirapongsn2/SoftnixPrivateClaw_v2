@@ -58,7 +58,7 @@ PREVIEWABLE_HTML_SUFFIXES = (".html", ".htm")
 DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
 DOCUMENT_XML_MAX_BYTES = 8 * 1024 * 1024
 DOCUMENT_TEXT_MAX_CHARS = 120_000
-PREVIEWABLE_DOCUMENT_SUFFIXES = (".docx", ".pptx", ".md", ".txt")
+PREVIEWABLE_DOCUMENT_SUFFIXES = (".docx", ".pptx", ".md", ".txt", ".json", ".xml", ".yaml", ".yml", ".log", ".py", ".js", ".ts", ".tsx", ".css", ".sql", ".sh", ".ini", ".toml")
 
 # Sandbox and CSP cover different halves, and neither substitutes for the other.
 #
@@ -646,3 +646,17 @@ def preview_table(path: str | Path) -> dict:
     if suffix in (".csv", ".tsv"):
         return _preview_csv(resolved, "\t" if suffix == ".tsv" else ",")
     raise PreviewError("preview is not supported for this file type")
+
+
+def preview_fingerprint(path: str | Path) -> dict:
+    """Bounded content identity for collapsing duplicate attachment cards."""
+    import hashlib
+    digest = hashlib.sha256()
+    size = 0
+    with Path(path).open('rb') as stream:
+        while chunk := stream.read(64 * 1024):
+            size += len(chunk)
+            if size > DOCUMENT_MAX_BYTES:
+                return {'sha256': None}
+            digest.update(chunk)
+    return {'sha256': digest.hexdigest()}

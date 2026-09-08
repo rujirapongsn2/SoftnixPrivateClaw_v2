@@ -491,6 +491,14 @@ class ClawAgent:
             "- State intent before tool calls; never claim results before receiving them.\n"
             "- Read a file before modifying it. Analyze tool errors before retrying.\n"
             "- Ask for clarification when the request is ambiguous.\n"
+            "- Complete all authorized steps before ending the turn. 'Do A first, then B' "
+            "authorizes both: do not stop after A to ask optional approval. Choose reasonable "
+            "defaults for reversible file creation. Skill suggestions to preview/review do not "
+            "require user approval unless the user or a mandatory permission rule requires it. "
+            "Before your final answer, update the plan to match actual progress. If essential "
+            "input or permission is missing, mark the affected step waiting_for_user with a "
+            "specific reason; if an external failure prevents progress, mark it blocked. "
+            "Never claim completion while required steps remain unfinished.\n"
             "- Match the user's language in your replies.\n"
             "- When a task will genuinely take several tool calls, call `update_plan` to record "
             "the goal and steps, and keep it updated as you progress. The plan stays pinned in "
@@ -719,6 +727,9 @@ class AgentRuntime:
                 else None
             ),
         )
+        if getattr(self, 'local_workspaces', None) is not None:
+            from sbot.tools.local_workspace import LocalWorkspaceTool
+            agent.tools.register(LocalWorkspaceTool(workspace, self.local_workspaces, user_id))
         if group_members is not None:
             return agent  # group membership is a per-turn snapshot; never contaminate a direct chat
         self._agents[cache_key] = agent
@@ -1251,6 +1262,21 @@ class AgentRuntime:
                         "and report results and deliverables into this conversation.\n\n" + team_summary
                     )
                 runtime_ctx = build_runtime_context(channel, locale)
+                if getattr(self, 'local_workspaces', None) is not None:
+                    selected_workspace = self.local_workspaces.selected(user_id, session_id)
+                    if selected_workspace:
+                        runtime_ctx += (
+                            '\nSelected LOCAL workspace_id: ' + selected_workspace +
+                            '\nUse local_workspace to list/read/import files from this folder. '
+                            'Host file tools and exec cannot access the local folder. Import a copy to '
+                            'the cloud workspace to edit Office documents; publish the final cloud file '
+                            'and export to a NEW local filename when requested. Never overwrite originals. '
+                            'Before delegating, import required files yourself and pass their cloud paths '
+                            'to teammates. Specialist and mission tools do not access local folders in '
+                            'this release. Perform any final local export yourself after their work. '
+                            'If the device is offline or revoked, report the blocker; do not substitute '
+                            'a cloud folder or claim delivery. Local shell execution is unavailable.'
+                        )
                 model_content, storage_text = build_user_content(content, media, agent.workspace)
                 if blueprints:
                     blueprint_lines = "\n".join(

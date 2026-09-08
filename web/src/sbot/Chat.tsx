@@ -86,8 +86,11 @@ import {
   visibleArtifacts,
 } from "./api";
 import { HtmlPreview } from "./HtmlPreview";
+import { ArtifactList } from "./ArtifactList";
 import { DocumentPreview } from "./DocumentPreview";
 import { SoftnixLogo } from "./Logo";
+import { ModeSwitcher } from "../ModeSwitcher";
+import { LocalWorkspacePicker } from './LocalWorkspacePicker';
 import { TablePreview } from "./TablePreview";
 import { SaveToBlueprintButton } from "./SaveToBlueprintButton";
 import { useBranding, useT } from "../branding";
@@ -2074,8 +2077,7 @@ export function Chat({
 
   const renderArtifacts = (paths?: string[]) => (
     sessionId && visibleArtifacts(paths).length > 0 && (
-      <div className="claw-artifacts">
-        {visibleArtifacts(paths).map((p) => {
+      <ArtifactList sessionId={sessionId} paths={paths} render={(p) => {
           const href = fileUrl(sessionId, p);
           // Show images (e.g. a generated chart) inline; keep
           // everything else as an openable chip.
@@ -2089,7 +2091,7 @@ export function Chat({
               <HtmlPreview key={p} sessionId={sessionId} path={p} href={href} />
             );
           }
-          if (PREVIEWABLE_DOCUMENT_RE.test(p)) {
+          if (PREVIEWABLE_DOCUMENT_RE.test(p) || /\.(mp3|wav|ogg|m4a|mp4|webm|mov)$/i.test(p)) {
             return (
               <DocumentPreview key={p} sessionId={sessionId} path={p} href={href} />
             );
@@ -2148,41 +2150,37 @@ export function Chat({
               <SaveToBlueprintButton sessionId={sessionId} path={p} />
             </div>
           );
-        })}
-      </div>
+        }} />
     )
   );
 
   const greeting = (
     <div className="claw-greeting">
-      <div className="claw-greeting-title">
+      <div className="sbot-greeting-identity">
         {groupName ? <Text type="display-2">{groupName}</Text> : bot ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-            <BotAvatar variant={avatarVariantFor(bot)} size={48} title={bot.name} working={busy} />
-            <div>
-              <Text type="display-2" style={{ margin: 0 }}>{bot.name}</Text>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
-                <span className="sbot-badge-cos">{bot.role_title}</span>
-                {bot.kind === "chief_of_staff" && (
-                  <Text size="sm" color="secondary">หัวหน้าทีม AI กระจายและควบคุมงาน</Text>
-                )}
-              </div>
+          <>
+            <BotAvatar variant={avatarVariantFor(bot)} size={60} title={bot.name} working={busy} />
+            <Text type="display-2" className="sbot-greeting-name">{bot.name}</Text>
+            <div className="sbot-greeting-meta">
+              <span className="sbot-badge-cos">{bot.role_title}</span>
+              {bot.kind === "chief_of_staff" && (
+                <Text size="sm" color="secondary">หัวหน้าทีม AI กระจายและควบคุมงาน</Text>
+              )}
             </div>
-          </div>
-        ) : (
-          <SoftnixLogo height={44} slot="chat" />
-        )}
-        <Text type="display-2">
-          {new Date().getHours() < 12 ? t("chat.greeting.morning") : t("chat.greeting.hello")}
-          {userName ? t("chat.greeting.withName", { name: userName }) : t("chat.greeting.anonymous")}
-        </Text>
+          </>
+        ) : <SoftnixLogo height={44} slot="chat" />}
       </div>
+      <Text type="display-2" className="sbot-greeting-message">
+          {new Date().getHours() < 12 ? t("chat.greeting.morning") : t("chat.greeting.hello")}
+        {userName ? t("chat.greeting.withName", { name: userName }) : t("chat.greeting.anonymous")}
+      </Text>
     </div>
   );
 
   return (
     <div className="claw-chat-shell">
     <div className={`claw-chat${isEmpty ? " claw-chat--empty" : ""}`}>
+      {!sessionId && <div className="claw-mode-switcher-landing"><ModeSwitcher /></div>}
       {!isEmpty && (executionPanelEnabled || planInProgress) && !execOpen && (
         <IconButton
           label={t("chat.exec.show")}
@@ -2708,6 +2706,7 @@ export function Chat({
                 ) : undefined
               }
             />
+            <LocalWorkspacePicker sessionId={sessionId} ensureSession={onRequireSession} disabled={busy || Boolean(running)} />
             {isEmpty && (() => {
               const activeCategory = SUGGESTIONS.find((c) => c.key === suggestionCategory);
               if (!activeCategory) {
@@ -2764,6 +2763,7 @@ export function Chat({
         {isEmpty ? null : (
         <div className="claw-column">
           <ChatMessageList
+            className="claw-message-list"
             density="spacious"
             // Undefined when the history is exhausted: passing a callback also
             // renders the sentinel, and a live one at the top of a fully-loaded

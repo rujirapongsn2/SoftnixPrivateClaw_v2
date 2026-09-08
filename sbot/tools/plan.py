@@ -16,7 +16,7 @@ from sbot.core.turn_context import current_session_id
 from sbot.db.stores import SessionStore
 from sbot.tools.base import Tool
 
-_STATUSES = ("pending", "in_progress", "done")
+_STATUSES = ("pending", "in_progress", "done", "waiting_for_user", "blocked")
 
 # The plan is pinned into the system prompt, which means it is never trimmed to
 # fit the context window — so the model writing it must not be able to decide how
@@ -35,7 +35,11 @@ class PlanTool(Tool):
         "messages scroll out of the context window — use it to stay on track across long "
         "sessions and autonomous runs, and to show the user what you're doing. Send the "
         "COMPLETE step list each call (it replaces the stored one); mark steps 'in_progress' "
-        "or 'done' as you go. Skip this for simple one-shot questions that need no plan."
+        "or 'done' as you go. Continue authorized steps before ending your answer. "
+        "Use 'waiting_for_user' only for essential missing input or required permission, "
+        "and 'blocked' for an external failure preventing progress; include the concrete "
+        "reason in the step text and explain it in your answer. Never invent an approval "
+        "gate for intermediate files. Skip this for simple one-shot questions that need no plan."
     )
     parameters = {
         "type": "object",

@@ -137,7 +137,7 @@ export function SettingsPanel({ section }: { section: SettingsSection }) {
         {section === "schedules" && <SchedulesPanel />}
         {section === "heartbeat" && <HeartbeatPanel />}
         {section === "telegram" && <TelegramPanel />}
-        {section === "browser-extension" && <BrowserExtensionPanel />}
+        {section === "browser-extension" && <><LocalAgentPanel /><BrowserExtensionPanel /></>}
       </div>
     </div>
   );
@@ -3051,6 +3051,23 @@ function TelegramPanel() {
 }
 
 // ---------------------------------------------------------------- Browser extension
+
+function LocalAgentPanel() {
+  return <div className="claw-panel">
+    <Text weight="semibold">Softnix Local Agent</Text>
+    <div className="claw-row">
+      <a className="sbot-local-download" href="/modes/sbot/api/local-workspaces/downloads/macos-arm64?v=2.2.3" download>
+        <Download size={16} />Download for Mac · Apple silicon
+      </a>
+    </div>
+    <Text size="sm" color="secondary">Move to Applications and open once. Then choose Open local folder in Chat.</Text>
+    <details><summary>Installation & service</summary>
+      <p>Preview build · not Apple notarized. Windows and Intel Mac builds are not available yet.</p>
+      <p>Open the app to restart the service.</p>
+      <code>~/.local/bin/softnix-local-agent restart</code>
+    </details>
+  </div>;
+}
 
 function BrowserExtensionPanel() {
   const t = useT();

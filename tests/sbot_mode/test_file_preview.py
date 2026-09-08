@@ -64,3 +64,24 @@ def test_pptx_preview_rejects_oversized_slide_xml_before_decompressing(tmp_path,
         archive.writestr('ppt/presentation.xml', 'x' * 100)
     with pytest.raises(PreviewError, match='too large'):
         preview_document(path)
+
+
+@pytest.mark.parametrize('suffix', ['.json', '.yaml', '.xml', '.log', '.py', '.js', '.sql', '.toml'])
+def test_structured_and_source_files_are_previewed_as_inert_text(tmp_path, suffix):
+    path = tmp_path / ('sample' + suffix)
+    text = '<script>alert("x")</script>\nข้อมูลทดสอบ'
+    path.write_text(text)
+    assert preview_document(path) == {'text': text, 'truncated': False}
+
+
+def test_fingerprint_matches_content_not_filename_and_is_bounded(tmp_path, monkeypatch):
+    from sbot.api import file_preview
+    source = tmp_path / 'source.md'
+    published = tmp_path / 'published.md'
+    source.write_text('same content')
+    published.write_text('same content')
+    assert file_preview.preview_fingerprint(source) == file_preview.preview_fingerprint(published)
+    published.write_text('different content')
+    assert file_preview.preview_fingerprint(source) != file_preview.preview_fingerprint(published)
+    monkeypatch.setattr(file_preview, 'DOCUMENT_MAX_BYTES', 3)
+    assert file_preview.preview_fingerprint(source) == {'sha256': None}

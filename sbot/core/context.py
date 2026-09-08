@@ -301,7 +301,7 @@ def build_user_content(
     return [*image_blocks, {"type": "text", "text": text_part}], stored
 
 
-_PLAN_MARKS = {"done": "[x]", "in_progress": "[→]", "pending": "[ ]"}
+_PLAN_MARKS = {"done": "[x]", "in_progress": "[→]", "pending": "[ ]", "waiting_for_user": "[waiting for user]", "blocked": "[blocked]"}
 
 
 def render_plan(plan: dict[str, Any] | None) -> str:

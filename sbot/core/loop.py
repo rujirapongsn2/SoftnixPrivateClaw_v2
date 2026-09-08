@@ -30,6 +30,8 @@ from sbot.core.events import (
     ToolStarted,
 )
 from sbot.providers.base import ChatResult, LLMProvider, TextDelta, ThinkingDelta
+from sbot.core.turn_context import current_turn_locale
+from sbot.i18n import t
 from sbot.providers.registry import context_window
 from sbot.tools.registry import ToolRegistry
 
@@ -436,6 +438,10 @@ class AgentLoop:
         first_text_at: float | None = None
         tool_call_count = 0
         iterations = 0
+        # Turn-local: a cached loop may serve multiple sessions concurrently.
+        active_plan: list[dict[str, Any]] = []
+        completion_reminders = 0
+        completion_instruction: str | None = None
         # Loop-breaker state: the last tool call actually executed, and how many
         # times in a row it has been executed.
         last_signature: str | None = None
@@ -469,6 +475,11 @@ class AgentLoop:
                 prompt = _prompt_messages(working, base_len, sent_results)
                 size = _prompt_size(prompt)
                 logger.info("Turn {} compacted stale tool results to {} chars", turn_id, size)
+            if completion_instruction:
+                # Runtime control, not a fabricated user message or durable history.
+                prompt = [*prompt, {"role": "system", "content": completion_instruction}]
+                completion_instruction = None
+                size = _prompt_size(prompt)
             if not tool_defs_chars:
                 tool_defs_chars = len(json.dumps(definitions, ensure_ascii=False, default=str))
             prompt_chars = max(prompt_chars, size)
@@ -555,6 +566,32 @@ class AgentLoop:
                 # runtime surfaces it as a visible error instead.
                 if result.content:
                     working.append({"role": "assistant", "content": result.content})
+                unfinished = [s for s in active_plan if s.get("status") != "done"]
+                paused = any(s.get("status") in {"blocked", "waiting_for_user"} for s in unfinished)
+                if unfinished and not paused:
+                    if completion_reminders < 2:
+                        completion_reminders += 1
+                        completion_instruction = (
+                            "Your current task plan is unfinished. Continue the authorized work now with tools; "
+                            "an intermediate artifact is not completion. Do not invent an approval gate for "
+                            "reversible work (for example HTML first, then PowerPoint). Update the plan to "
+                            "reflect actual results. If essential input/permission is truly missing, mark the "
+                            "affected step waiting_for_user and state the specific question. If an external "
+                            "failure prevents progress, mark it blocked and include the reason in the step. "
+                            "Never mark unfinished work done just to end the turn. Remaining steps: "
+                            + json.dumps(unfinished, ensure_ascii=False)
+                        )
+                        continue
+                    # A non-cooperating model must not silently report success or
+                    # consume the whole turn budget repeating the same final answer.
+                    notice = "\n\n⚠️ " + t("error.plan_incomplete", current_turn_locale.get())
+                    emit(TextDeltaEvent(turn_id=turn_id, text=notice))
+                    result.content = (result.content or "") + notice
+                    if working and working[-1].get("role") == "assistant":
+                        working[-1]["content"] = result.content
+                    else:
+                        working.append({"role": "assistant", "content": result.content})
+                    result.finish_reason = "plan_incomplete"
                 shown, suppressed = _split_artifacts(written)
                 return TurnOutcome(
                     final_content=result.content,
@@ -757,6 +794,7 @@ class AgentLoop:
                 elif tc.name == "update_plan" and not tool_result.startswith("Error"):
                     raw_steps = args.get("steps") if isinstance(args, dict) else None
                     steps = [s for s in (raw_steps or []) if isinstance(s, dict)]
+                    active_plan = [dict(s) for s in steps if str(s.get("step") or "").strip()][:40]
                     emit(
                         PlanUpdated(
                             turn_id=turn_id,

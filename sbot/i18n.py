@@ -3,6 +3,10 @@
 from typing import Any
 
 _MESSAGES: dict[str, dict[str, str]] = {
+    "error.plan_incomplete": {
+        "en": "The plan is still incomplete. The agent did not continue after two automatic reminders. Please retry to resume the remaining work.",
+        "th": "งานยังไม่เสร็จตามแผน: agent ไม่ดำเนินการต่อหลังระบบเตือนอัตโนมัติสองครั้ง กรุณาลองใหม่เพื่อทำขั้นตอนที่เหลือ",
+    },
     "error.llm": {
         "en": "The AI model could not be reached ({reason}). Please try again.",
         "th": "ไม่สามารถติดต่อโมเดล AI ได้ ({reason}) กรุณาลองใหม่อีกครั้ง",

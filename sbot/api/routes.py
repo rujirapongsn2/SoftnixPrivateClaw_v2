@@ -28,7 +28,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from sbot.api.deps import AppState, current_user, current_user_ws, get_state
-from sbot.api.file_preview import PreviewError, preview_document, preview_html, preview_table
+from sbot.api.file_preview import PreviewError, preview_document, preview_html, preview_table, preview_fingerprint
 from sbot.core.loop import visible_artifacts
 from sbot.db.models import User
 
@@ -701,6 +701,14 @@ async def get_workspace_html_preview(
     where _ACTIVE_CONTENT_CSP contains it instead.
     """
     return await _bounded_preview(state, user, session_id, path, preview_html, response)
+
+
+@router.get("/api/sessions/{session_id}/file-preview/fingerprint")
+async def get_workspace_fingerprint(
+    session_id: str, path: str, response: Response,
+    user: User = Depends(current_user), state: AppState = Depends(get_state),
+) -> dict:
+    return await _bounded_preview(state, user, session_id, path, preview_fingerprint, response)
 
 
 @router.get("/api/sessions/{session_id}/file-preview/document")

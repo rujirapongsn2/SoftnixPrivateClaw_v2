@@ -77,6 +77,7 @@ import {
 } from "./api";
 import { HtmlPreview } from "./HtmlPreview";
 import { SoftnixLogo } from "./Logo";
+import { ModeSwitcher } from "./ModeSwitcher";
 import { TablePreview } from "./TablePreview";
 import { useBranding, useT } from "./branding";
 import { sanitizeModelMarkdown, stripMarkdownForSpeech } from "./markdown";
@@ -1710,6 +1711,7 @@ export function Chat({
   return (
     <div className="claw-chat-shell">
     <div className={`claw-chat${isEmpty ? " claw-chat--empty" : ""}`}>
+      {!sessionId && <div className="claw-mode-switcher-landing"><ModeSwitcher /></div>}
       {!isEmpty && (executionPanelEnabled || planInProgress) && !execOpen && (
         <IconButton
           label={t("chat.exec.show")}

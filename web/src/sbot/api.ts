@@ -1633,7 +1633,7 @@ export function isHiddenArtifact(path: string): boolean {
  * is the assembly input, but a lone template is what the user asked for. */
 export function visibleArtifacts(paths: string[] | undefined | null): string[] {
   if (!paths || paths.length === 0) return [];
-  const kept = paths.filter((p) => !isHiddenArtifact(p));
+  const kept = [...new Set(paths)].filter((p) => !isHiddenArtifact(p));
   const isTemplate = (p: string) => nameTokens(p).includes("template");
   const shadowing = new Set(kept.filter((p) => !isTemplate(p)).map(extensionOf));
   return kept.filter((p) => p.startsWith('.deliveries/') || !isTemplate(p) || !shadowing.has(extensionOf(p)));
@@ -1733,7 +1733,7 @@ export type DocumentPreview = {
 };
 
 /** DOCX, Markdown and plain-text artifacts have a bounded text preview. */
-export const PREVIEWABLE_DOCUMENT_RE = /\.(docx|pptx|pdf|md|txt)$/i;
+export const PREVIEWABLE_DOCUMENT_RE = /\.(docx|pptx|pdf|md|txt|json|xml|yaml|yml|log|py|js|ts|tsx|css|sql|sh|ini|toml)$/i;
 
 export function fileDocumentPreview(
   sessionId: string,
@@ -1750,4 +1750,8 @@ export function fileDocumentPreview(
  * capability token in the path is the only credential. */
 export function shareFileUrl(token: string, name: string): string {
   return endpoint(`/api/share/${encodeURIComponent(token)}/files/${encodeURIComponent(name)}`);
+}
+
+export function fileFingerprint(sessionId: string, path: string, signal?: AbortSignal) {
+  return request<{ sha256: string | null }>(`/api/sessions/${sessionId}/file-preview/fingerprint?path=${encodeURIComponent(path)}`, { signal });
 }

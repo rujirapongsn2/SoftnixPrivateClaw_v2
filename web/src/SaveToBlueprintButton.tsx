@@ -1,5 +1,6 @@
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { Icon } from "@astryxdesign/core/Icon";
+import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { useToast } from "@astryxdesign/core/Toast";
 import { FilePlus2 } from "lucide-react";
 import { useState } from "react";
@@ -29,13 +30,15 @@ export function SaveToBlueprintButton({ sessionId, path }: { sessionId: string; 
   };
 
   return (
-    <IconButton
-      label={t("chat.artifact.saveToBlueprint")}
-      icon={<Icon icon={FilePlus2} size="xsm" />}
-      variant="ghost"
-      size="sm"
-      isDisabled={busy}
-      clickAction={() => void save()}
-    />
+    <Tooltip content={t("chat.artifact.saveToBlueprintHint")} placement="above">
+      <IconButton
+        label={t("chat.artifact.saveToBlueprint")}
+        icon={<Icon icon={FilePlus2} size="xsm" />}
+        variant="ghost"
+        size="sm"
+        isDisabled={busy}
+        clickAction={() => void save()}
+      />
+    </Tooltip>
   );
 }

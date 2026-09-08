@@ -78,6 +78,8 @@ const PLAN_DOT: Record<string, RowStatus> = {
   done: "complete",
   in_progress: "running",
   pending: "pending",
+  waiting_for_user: "pending",
+  blocked: "error",
 };
 
 export function ExecutionPanel({
@@ -195,7 +197,7 @@ export function ExecutionPanel({
           {planSteps.length > 0 && (
             <div className="claw-plan-steps">
               {planSteps.map((s, i) => {
-                const dot = PLAN_DOT[s.status] ?? "pending";
+                const dot = s.status === "in_progress" && !running ? "pending" : (PLAN_DOT[s.status] ?? "pending");
                 return (
                   <div key={i} className={`claw-plan-step claw-plan-step--${dot}`}>
                     {s.status === "done" ? (
@@ -203,7 +205,12 @@ export function ExecutionPanel({
                     ) : (
                       <span className={`claw-xdot claw-xdot--${dot}`} aria-hidden="true" />
                     )}
-                    <span className="claw-plan-step-label">{s.step}</span>
+                    <span className="claw-plan-step-label">
+                      {s.status === "waiting_for_user" && <strong>{t("exec.waitingForUser")} · </strong>}
+                      {s.status === "blocked" && <strong>{t("exec.blocked")} · </strong>}
+                      {s.status === "in_progress" && !running && <strong>{t("exec.incomplete")} · </strong>}
+                      {s.step}
+                    </span>
                   </div>
                 );
               })}

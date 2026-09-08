@@ -24,3 +24,4 @@ workspaces-sbot/
 blueprints/
 
 /web/node_modules
+/dist/local-agent/
