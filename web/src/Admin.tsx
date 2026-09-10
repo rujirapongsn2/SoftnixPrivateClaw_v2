@@ -5597,20 +5597,70 @@ function TeamPolicyPanel() {
     ["max_resource_adjustments", "admin.teamPolicy.extensions", 0, 1],
     ["resource_headroom", "admin.teamPolicy.headroom", 1, 0.1],
   ] as const;
-  return <Card padding={2}><details><summary>{t("admin.teamPolicy.title")}</summary>
-    {error && <div role="alert">{error}</div>}
-    {policy && <form className="claw-panel" onSubmit={async e => {
-      e.preventDefault(); setBusy(true); setError(""); setSaved(false);
-      try {
-        const next = await api.adminSaveTeamPolicy({...policy, model_output_limits: JSON.parse(models)});
-        setPolicy(next); setSaved(true);
-      } catch (e) { setError(String(e)); } finally { setBusy(false); }
-    }}>
-      <label><input type="checkbox" checked={policy.automatic_resources} onChange={e => {setPolicy({...policy, automatic_resources: e.target.checked}); setSaved(false);}} /> {t("admin.teamPolicy.automatic")}</label>
-      {fields.map(([key, label, min, step]) => <label key={key}>{t(label)}<input type="number" required min={min} step={step} value={policy[key]} onChange={e => {setPolicy({...policy, [key]: Number(e.target.value)}); setSaved(false);}} /></label>)}
-      <label>{t("admin.teamPolicy.models")}<textarea rows={4} value={models} onChange={e => {setModels(e.target.value); setSaved(false);}} style={{width: "100%", boxSizing: "border-box"}} /></label>
-      <button type="submit" disabled={busy}>{t(busy ? "admin.teamPolicy.saving" : "admin.teamPolicy.save")}</button>
-      {saved && <span role="status">{t("admin.teamPolicy.saved")}</span>}
-    </form>}
-  </details></Card>;
+  return (
+    <Card padding={2} className="claw-team-policy-card">
+      <div className="claw-team-policy-header">
+        <div className="claw-team-policy-icon"><Icon icon={Gauge} size="sm" /></div>
+        <div>
+          <Text weight="semibold">{t("admin.teamPolicy.title")}</Text>
+          <Text size="sm" color="secondary">{t("admin.teamPolicy.description")}</Text>
+        </div>
+      </div>
+      {error && <div className="claw-team-policy-error" role="alert">{error}</div>}
+      {policy && (
+        <form className="claw-team-policy-form" onSubmit={async e => {
+          e.preventDefault(); setBusy(true); setError(""); setSaved(false);
+          try {
+            const next = await api.adminSaveTeamPolicy({...policy, model_output_limits: JSON.parse(models)});
+            setPolicy(next); setSaved(true);
+          } catch (e) { setError(String(e)); } finally { setBusy(false); }
+        }}>
+          <div className="claw-team-policy-switch">
+            <CheckboxInput
+              label={t("admin.teamPolicy.automatic")}
+              description={t("admin.teamPolicy.automaticDescription")}
+              value={policy.automatic_resources}
+              onChange={(automatic_resources) => { setPolicy({...policy, automatic_resources}); setSaved(false); }}
+            />
+          </div>
+          <div className="claw-team-policy-section">
+            <div className="claw-team-policy-section-title">
+              <Text weight="semibold" size="sm">{t("admin.teamPolicy.resourceLimits")}</Text>
+              <Text size="sm" color="secondary">{t("admin.teamPolicy.resourceLimitsDescription")}</Text>
+            </div>
+            <div className="claw-team-policy-grid">
+              {fields.map(([key, label, min, step]) => (
+                <label className="claw-team-policy-field" key={key}>
+                  <span>{t(label)}</span>
+                  <input
+                    type="number"
+                    required
+                    min={min}
+                    step={step}
+                    value={policy[key]}
+                    onChange={e => { setPolicy({...policy, [key]: Number(e.target.value)}); setSaved(false); }}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="claw-team-policy-section">
+            <TextArea
+              label={t("admin.teamPolicy.models")}
+              description={t("admin.teamPolicy.modelsDescription")}
+              value={models}
+              onChange={(value) => { setModels(value); setSaved(false); }}
+              rows={4}
+              width="100%"
+              hasSpellCheck={false}
+            />
+          </div>
+          <div className="claw-team-policy-actions">
+            {saved && <Text size="sm" color="secondary" role="status">{t("admin.teamPolicy.saved")}</Text>}
+            <Button label={t(busy ? "admin.teamPolicy.saving" : "admin.teamPolicy.save")} type="submit" isDisabled={busy} />
+          </div>
+        </form>
+      )}
+    </Card>
+  );
 }
