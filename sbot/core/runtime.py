@@ -267,11 +267,12 @@ class ClawAgent:
 
             self.tools.register(ScheduleTool(schedules, scheduler, user_id))
         if (is_cos or group_members is not None) and bot_store is not None:
-            from sbot.tools.cos import CreateBotTool, DelegateManyTool, DelegateTool, ListBotsTool
+            from sbot.tools.cos import CreateBotTool, CreateBotsTool, DelegateManyTool, DelegateTool, ListBotsTool
 
             self.tools.register(ListBotsTool(bot_store, user_id, member_ids=group_members))
             if group_members is None:
                 self.tools.register(CreateBotTool(bot_store, user_id, creator_bot_id=bot_id or "cos", connectors=connectors))
+                self.tools.register(CreateBotsTool(bot_store, user_id, creator_bot_id=bot_id or "cos", connectors=connectors))
             delegate = DelegateTool(
                 bot_store=bot_store,
                 owner_id=user_id,
@@ -435,7 +436,8 @@ class ClawAgent:
                 "delegations. Do not schedule external actions beyond the user's authorization. "
                 "File creation, publication and local delivery are distinct; report only confirmed outcomes."
                 "\n\nCreating a team member is a bounded administrative request. When the user asks "
-                "to create a bot, call create_bot once and stop. Do not create a plan, update memory, "
+                "to create one bot, call create_bot once and stop. If the user explicitly requests two or more, "
+                "call create_bots once with the complete roster. Do not create a plan, update memory, "
                 "delegate a smoke test, message the new bot, create files, or begin its work unless the "
                 "user explicitly asks for that additional action."
                 + (f"\n{team_summary}" if team_summary else "")
@@ -459,7 +461,8 @@ class ClawAgent:
             "- The user is asking about you, the team, or the conversation, or is just "
             "chatting → answer. Never delegate a greeting.\n\n"
             "Creating a member is an administrative request, not a project. When the user asks "
-            "to create a bot, call create_bot once and stop; do not plan, test, delegate to, "
+            "to create one bot, call create_bot once; when they explicitly ask for several, call create_bots once "
+            "with every requested member. Then stop; do not plan, test, delegate to, "
             "or otherwise use it unless the user explicitly asks for that extra work.\n\n"
             "Handing work out does not end your turn. You still own the report and coordination:\n"
             "- Every specialist can publish_artifact and read documents in addition to its configured "

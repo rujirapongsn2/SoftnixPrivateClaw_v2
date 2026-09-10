@@ -35,7 +35,9 @@ class PlanTool(Tool):
         "messages scroll out of the context window — use it to stay on track across long "
         "sessions and autonomous runs, and to show the user what you're doing. Send the "
         "COMPLETE step list each call (it replaces the stored one); mark steps 'in_progress' "
-        "or 'done' as you go. Continue authorized steps before ending your answer. "
+        "or 'done' as you go. Set continue_work=true only when the current user request "
+        "asks you to perform or resume this work. For status questions or summaries, "
+        "leave it false: recording pending steps must not restart the old task. "
         "Use 'waiting_for_user' only for essential missing input or required permission, "
         "and 'blocked' for an external failure preventing progress; include the concrete "
         "reason in the step text and explain it in your answer. Never invent an approval "
@@ -44,6 +46,11 @@ class PlanTool(Tool):
     parameters = {
         "type": "object",
         "properties": {
+            "continue_work": {
+                "type": "boolean",
+                "description": "Continue unfinished steps in this turn only for a current execution request; false for status/summary requests.",
+                "default": False,
+            },
             "goal": {
                 "type": "string",
                 "description": "One concise line stating the overall objective of the current task.",

@@ -93,6 +93,41 @@ async def test_cos_creates_bot_via_tool(stores, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cos_creates_requested_roster_in_one_terminal_turn(stores, tmp_path):
+    user = await stores["users"].get_or_create_by_email("cos_roster@sbot.ai")
+    cos = await stores["bots"].get_or_create_cos(user.id)
+    session = await stores["sessions"].create(user.id, bot_id=cos.id, kind="direct")
+    provider = FakeProvider([tool_call_turn("create_bots", {"bots": [
+        {"name": "นักวิจัย", "role_title": "Researcher", "charter": "Find primary sources."},
+        {"name": "นักวิเคราะห์", "role_title": "Analyst", "charter": "Synthesize evidence."},
+        {"name": "นักเขียน", "role_title": "Academic Writer", "charter": "Write cited reports."},
+    ]})])
+    runtime = make_runtime(stores, provider, tmp_path)
+
+    answer = await runtime.handle_message(user.id, session.id, "สร้างบอททั้งสามคน")
+
+    assert "สร้างบอทครบ 3 คน" in answer
+    assert len(provider.calls) == 1
+    for name in ("นักวิจัย", "นักวิเคราะห์", "นักเขียน"):
+        assert await stores["bots"].get_by_name(user.id, name) is not None
+
+
+@pytest.mark.asyncio
+async def test_create_bots_preflight_prevents_partial_roster(stores):
+    from sbot.tools.cos import CreateBotsTool
+
+    user = await stores["users"].get_or_create_by_email("cos_batch_invalid@sbot.ai")
+    tool = CreateBotsTool(stores["bots"], user.id, creator_bot_id="cos")
+    result = await tool.execute(bots=[
+        {"name": "Researcher", "role_title": "Research", "charter": "Find sources."},
+        {"name": "Researcher", "role_title": "Analyst", "charter": "Analyze sources."},
+    ])
+
+    assert "duplicate bot name" in result
+    assert await stores["bots"].get_by_name(user.id, "Researcher") is None
+
+
+@pytest.mark.asyncio
 async def test_creating_a_bot_skips_unsolicited_bundled_work(stores, tmp_path):
     """A model may emit several calls at once; creation must still be bounded."""
     user = await stores["users"].get_or_create_by_email("bounded_create@sbot.ai")

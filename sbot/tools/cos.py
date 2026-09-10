@@ -3,6 +3,7 @@
 Enables the Chief of Staff bot to orchestrate the team:
 - list_bots: list specialist bots available in the team
 - create_bot: create a new specialist bot configuration
+- create_bots: create a bounded set of specialist bot configurations
 - delegate: delegate a task to a specialist bot synchronously
 """
 
@@ -34,6 +35,7 @@ __all__ = [
     "MAX_BOTS_PER_OWNER",
     "MAX_PARALLEL_DELEGATIONS",
     "CreateBotTool",
+    "CreateBotsTool",
     "DelegateManyTool",
     "DelegateTool",
     "ListBotsTool",
@@ -202,6 +204,117 @@ class CreateBotTool(Tool):
             f"สร้างบอท '{bot.name}' เรียบร้อยแล้ว "
             f"(บทบาท: {bot.role_title}, รหัส: {bot.id}). "
             "ยังไม่ได้มอบหมายหรือทดสอบงานให้บอทนี้."
+        )
+
+
+class CreateBotsTool(CreateBotTool):
+    """Create several explicitly requested specialists as one bounded action.
+
+    The single-bot tool ends the turn by design.  Reusing that behavior for a
+    user-requested roster used to silently discard every bundled call after the
+    first one.  This tool validates the full batch before writing anything, so
+    a malformed or duplicate member never leaves a partial team behind.
+    """
+
+    name = "create_bots"
+    ends_turn_on_success = True
+    _MAX_BATCH_SIZE = 10
+    description = (
+        "Create multiple specialist bots in one requested roster. Use this instead of repeated "
+        "create_bot calls when the user explicitly names two or more bots. This completes only "
+        "the creation request; do not test, delegate to, plan work for, or otherwise use them."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "bots": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": _MAX_BATCH_SIZE,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "role_title": {"type": "string"},
+                        "charter": {"type": "string"},
+                        "tool_allowlist": {"type": "array", "items": {"type": "string"}},
+                        "skill_ids": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["name", "role_title", "charter"],
+                },
+            },
+        },
+        "required": ["bots"],
+    }
+
+    async def execute(self, bots: Any, **_: Any) -> str:
+        if not isinstance(bots, list) or not 2 <= len(bots) <= self._MAX_BATCH_SIZE:
+            return f"Error: provide between 2 and {self._MAX_BATCH_SIZE} bots."
+        if not all(isinstance(item, dict) for item in bots):
+            return "Error: every bot must include name, role_title, and charter."
+
+        normalized: list[dict[str, Any]] = []
+        names: set[str] = set()
+        for item in bots:
+            name = str(item.get("name") or "").strip()
+            role_title = str(item.get("role_title") or "").strip()
+            charter = str(item.get("charter") or "").strip()
+            if not name or not role_title or not charter:
+                return "Error: every bot needs a non-empty name, role_title, and charter."
+            key = name.casefold()
+            if key in names:
+                return f"Error: duplicate bot name '{name}' in this request."
+            names.add(key)
+            normalized.append({
+                "name": name,
+                "role_title": role_title,
+                "charter": charter,
+                "tool_allowlist": item.get("tool_allowlist"),
+                "skill_ids": item.get("skill_ids"),
+            })
+
+        existing_count = await self.bot_store.count_for_user(self.owner_id)
+        if existing_count + len(normalized) > MAX_BOTS_PER_OWNER:
+            return (
+                f"Error: creating {len(normalized)} bots would exceed the maximum of "
+                f"{MAX_BOTS_PER_OWNER} bots for this team."
+            )
+        for item in normalized:
+            existing = await self.bot_store.get_by_name(self.owner_id, item["name"])
+            if existing:
+                return f"Error: bot with name '{item['name']}' already exists (id: {existing.id})."
+
+        available = set(DELEGATABLE_TOOLS)
+        if self.connectors is not None:
+            from sbot.tools.registry import ToolRegistry
+            connected = ToolRegistry()
+            await self.connectors.sync_tools(self.owner_id, connected)
+            available.update(connected.tool_names)
+        for item in normalized:
+            allowed = item["tool_allowlist"]
+            if allowed is not None:
+                unknown = sorted(set(allowed) - available)
+                if unknown:
+                    return f"Error: cannot grant {unknown} to '{item['name']}'."
+            skills = item["skill_ids"]
+            if skills is not None:
+                item["skill_ids"] = [str(skill).strip() for skill in skills if str(skill).strip()]
+
+        created = []
+        for item in normalized:
+            bot = await self.bot_store.create(
+                owner_id=self.owner_id,
+                name=item["name"],
+                role_title=item["role_title"],
+                charter=item["charter"],
+                tool_allowlist=item["tool_allowlist"],
+                skill_ids=item["skill_ids"],
+                kind="specialist",
+                created_by=f"bot:{self.creator_bot_id}",
+            )
+            created.append(f"- {bot.name} ({bot.role_title}, รหัส: {bot.id})")
+        return "สร้างบอทครบ {} คนเรียบร้อยแล้ว:\n{}\nยังไม่ได้มอบหมายหรือทดสอบงานให้บอทเหล่านี้.".format(
+            len(created), "\n".join(created)
         )
 
 

@@ -55,6 +55,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
     # a reasoning model that spends the whole budget on hidden thinking. Saying
     # "could not reach the model" would be wrong: it answered, and the answer
     # was cut off. Retrying is worth it (the next attempt may think less).
+    "error.continuation_stopped": {
+        "en": "The follow-up produced no answer. The earlier response is preserved; remaining work is still pending.",
+        "th": "รอบทำงานต่อไม่มีคำตอบ จึงแสดงคำตอบก่อนหน้าไว้ งานที่เหลือยังไม่เสร็จ",
+    },
     "error.truncated": {
         "en": (
             "The answer hit the response-length limit before it could be written out. "

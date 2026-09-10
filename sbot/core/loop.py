@@ -444,6 +444,8 @@ class AgentLoop:
         iterations = 0
         # Turn-local: a cached loop may serve multiple sessions concurrently.
         active_plan: list[dict[str, Any]] = []
+        continue_plan_work = False
+        last_plan_answer: str | None = None
         completion_reminders = 0
         completion_instruction: str | None = None
         finalize_only = False
@@ -606,6 +608,9 @@ class AgentLoop:
                 # bubble, and it comes back as a content-less assistant turn in
                 # the next prompt's history, which some providers reject. The
                 # runtime surfaces it as a visible error instead.
+                if not result.content and last_plan_answer:
+                    notice = t("error.continuation_stopped", current_turn_locale.get())
+                    result.content = last_plan_answer + "\n\n" + notice
                 if result.content:
                     working.append({"role": "assistant", "content": result.content})
                 completion_tool = self.tools.get('finish_step')
@@ -623,9 +628,10 @@ class AgentLoop:
                     continue
                 unfinished = [s for s in active_plan if s.get("status") != "done"]
                 paused = any(s.get("status") in {"blocked", "waiting_for_user"} for s in unfinished)
-                if unfinished and not paused and result.finish_reason not in ('length', 'max_tokens'):
+                if continue_plan_work and unfinished and not paused and result.finish_reason not in ('length', 'max_tokens'):
                     if completion_reminders < 2:
                         completion_reminders += 1
+                        last_plan_answer = result.content or last_plan_answer
                         completion_instruction = (
                             "Your current task plan is unfinished. Continue the authorized work now with tools; "
                             "an intermediate artifact is not completion. Do not invent an approval gate for "
@@ -852,6 +858,7 @@ class AgentLoop:
                 elif tc.name == "update_plan" and not tool_result.startswith("Error"):
                     raw_steps = args.get("steps") if isinstance(args, dict) else None
                     steps = [s for s in (raw_steps or []) if isinstance(s, dict)]
+                    continue_plan_work = args.get("continue_work") is True
                     active_plan = [dict(s) for s in steps if str(s.get("step") or "").strip()][:40]
                     emit(
                         PlanUpdated(

@@ -11,10 +11,11 @@ from sbot.tools.registry import ToolRegistry
 from tests.sbot_mode.conftest import FakeProvider, text_turn
 
 
-def plan(status):
+def plan(status, continue_work=True):
     return [ChatResult(content=None, tool_calls=[ToolCall(
         id=f"plan-{status}", name="update_plan", arguments={
             "goal": "HTML then PowerPoint",
+            "continue_work": continue_work,
             "steps": [{"step": "HTML", "status": "done"},
                       {"step": "PowerPoint", "status": status}],
         },
@@ -76,3 +77,25 @@ async def test_no_current_plan_does_not_force_unrelated_work():
     outcome, provider, _ = await run([text_turn("Here is the status")])
     assert outcome.final_content == "Here is the status"
     assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize("explicit", [False, None])
+async def test_status_plan_update_does_not_resume_old_work(explicit):
+    update = plan("in_progress", explicit)
+    if explicit is None:
+        del update[0].tool_calls[0].arguments["continue_work"]
+    outcome, provider, store = await run([update, text_turn("Today's summary; export is pending")])
+    assert outcome.final_content == "Today's summary; export is pending"
+    assert len(provider.calls) == 2
+    assert store.set_plan.call_args.args[2][-1]["status"] == "in_progress"
+
+
+async def test_empty_length_limited_continuation_preserves_previous_answer():
+    outcome, provider, _ = await run([
+        plan("pending"), text_turn("HTML saved; export pending"),
+        [ChatResult(content=None, finish_reason="length")],
+    ])
+    assert outcome.final_content.startswith("HTML saved; export pending")
+    assert "remaining work is still pending" in outcome.final_content
+    assert outcome.finish_reason == "length"
+    assert len(provider.calls) == 3

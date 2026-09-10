@@ -25,6 +25,7 @@ ALWAYS_AVAILABLE_TOOLS = frozenset({
     "publish_artifact",
     "list_bots",
     "create_bot",
+    "create_bots",
     "delegate",
     "delegate_many",
     "mission_plan",
