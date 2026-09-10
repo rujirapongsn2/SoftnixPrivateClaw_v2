@@ -20,7 +20,5 @@ export function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-// Shared breakpoints. Sidebar becomes a drawer at/below the tablet width;
-// heaviest surfaces (Admin console, Execution panel) are hidden on phones.
+// Shared breakpoint. Sidebar becomes a drawer at/below the tablet width.
 export const MOBILE_QUERY = "(max-width: 1024px)";
-export const PHONE_QUERY = "(max-width: 640px)";

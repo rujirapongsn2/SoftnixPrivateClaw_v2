@@ -25,7 +25,7 @@ import { useBranding, useT } from "../branding";
 import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "../Settings";
 import { ActiveMission, ApiError, AuthUser, BotGroupInfo, BotInfo, SessionInfo, api, clearToken, getToken, setToken } from "./api";
-import { MOBILE_QUERY, PHONE_QUERY, useMediaQuery } from "./useMediaQuery";
+import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 const PROVIDER_LABELS: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
 const PROVIDER_LOGO: Record<string, string> = {
@@ -696,10 +696,8 @@ export default function App() {
   const [activationToken, setActivationToken] = useState("");
   const [resetToken, setResetToken] = useState("");
   // Responsive shell. Below the tablet width the sidebar becomes an off-canvas
-  // drawer (navOpen); on desktop `collapsed` drives the rail. Control Plane is
-  // hidden on phones (see the trade-off note in the render).
+  // drawer (navOpen); on desktop `collapsed` drives the rail.
   const isMobile = useMediaQuery(MOBILE_QUERY);
-  const isPhone = useMediaQuery(PHONE_QUERY);
   const [navOpen, setNavOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   // Per-session "last read" timestamps (id -> epoch ms), persisted to
@@ -1035,7 +1033,7 @@ export default function App() {
 
   // Selecting anything in the drawer should close it on mobile.
   const closeDrawer = () => setNavOpen(false);
-  const showAdmin = user.is_admin && !isPhone; // aggressive: no admin console on phones
+  const showAdmin = user.is_admin;
   const settingsSectionMeta = settingsSection
     ? SETTINGS_SECTIONS.find((s) => s.key === settingsSection)
     : undefined;
@@ -1161,21 +1159,11 @@ export default function App() {
           <SoftnixMark size={20} />
         </div>
         {adminSection ? (
-          isPhone ? (
-            <div className="claw-mobile-blocked">
-              <Text weight="semibold">Control Plane isn't available on phones</Text>
-              <Text color="secondary" as="p">
-                It's built for wide screens (charts, tables, audit logs). Please open it on a
-                tablet in landscape or a desktop.
-              </Text>
-            </div>
-          ) : (
-            <AdminPanel
-              section={adminSection}
-              selfId={user.id}
-              onSectionChange={(section) => setAdminSection(section)}
-            />
-          )
+          <AdminPanel
+            section={adminSection}
+            selfId={user.id}
+            onSectionChange={(section) => setAdminSection(section)}
+          />
         ) : settingsSection ? (
           <SettingsPanel section={settingsSection} />
         ) : openingBotId ? (

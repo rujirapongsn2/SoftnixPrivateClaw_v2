@@ -3125,8 +3125,8 @@ html[data-chat-bg="grid"] .claw-chat {
 /* ============================================================
    Responsive: tablet & phone (iPad / iPhone).
    ≤1024px: sidebar becomes an off-canvas drawer + mobile top bar.
-   ≤640px (phone): aggressive — hide the execution panel (see Chat) and
-   keep only the daily-use surfaces; Admin console is gated in App.tsx.
+   ≤640px (phone): hide the execution panel (see Chat) while keeping the
+   administration surfaces available to admin users.
    Desktop (≥1025px) is untouched by everything below.
    ============================================================ */
 @media (max-width: 1024px) {
@@ -3164,6 +3164,28 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 
 @media (max-width: 640px) {
+  /* Control Plane remains available on phones. Tighten the outer gutters and
+     let dense admin cards scroll horizontally when their data needs more room. */
+  .claw-settings-panel {
+    padding: 20px 12px 32px;
+    gap: 14px;
+  }
+  .claw-settings-panel-header,
+  .claw-settings-panel > .claw-panel,
+  .claw-control-plane-tabs {
+    max-width: 100%;
+  }
+  .claw-settings-panel > .claw-panel {
+    overflow-x: auto;
+  }
+  .claw-control-plane-tabs {
+    overflow-x: auto;
+  }
+  .claw-control-plane-tabs nav {
+    flex-wrap: nowrap;
+    width: max-content;
+    min-width: 100%;
+  }
   /* Phone: the execution panel + its toggle are hidden (agent still runs; the
      step-by-step view is a desktop/tablet affordance). */
   .claw-exec-panel,
@@ -3225,17 +3247,6 @@ html[data-chat-bg="grid"] .claw-chat {
   .claw-artifact-image img {
     max-width: 100% !important;
   }
-}
-
-/* "This feature needs a bigger screen" placeholder (e.g. Admin on phone). */
-.claw-mobile-blocked {
-  max-width: 420px;
-  margin: 12vh auto 0;
-  padding: 0 20px;
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }
 
 /* ---- artifact chips: files the agent created (open/download) ---- */

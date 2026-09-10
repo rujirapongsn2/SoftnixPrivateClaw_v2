@@ -151,12 +151,6 @@ export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconTy
   { key: "audit", labelKey: "admin.nav.audit", icon: ScrollText },
 ];
 
-export const ADMIN_SECTION_GROUPS: { labelKey: string; icon: IconType | IconName; sections: AdminSection[] }[] = [
-  { labelKey: "admin.navGroup.aiConfig", icon: Cpu, sections: ["providers", "connectors", "guardrails"] },
-  { labelKey: "admin.navGroup.integrations", icon: Globe, sections: ["oauth", "telegram", "email"] },
-  { labelKey: "admin.navGroup.accounts", icon: Users, sections: ["plans", "users", "audit"] },
-];
-
 export function AdminPanel({
   section,
   selfId,
