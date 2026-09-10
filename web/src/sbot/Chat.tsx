@@ -60,7 +60,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BotAvatar, avatarVariantFor, type BotAvatarVariant } from "./BotAvatar";
 import { ErrorText } from "./ErrorText";
 import { ExecutionPanel } from "./ExecutionPanel";
@@ -504,6 +504,11 @@ export function Chat({
   const t = useT();
   const { executionPanelEnabled } = useBranding();
   const [items, setItems] = useState<TranscriptItem[]>([]);
+  // The session whose initial transcript page has finished loading. Keeping
+  // this separate from `items` prevents the previous session (or an empty
+  // intermediate frame) from being painted during a bot switch.
+  const [loadedSessionId, setLoadedSessionId] = useState<string | null>(null);
+  const chatLayoutRef = useRef<HTMLDivElement | null>(null);
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState(false);
   // When the current busy period started (for the "Thinking… 12s" counter) —
@@ -715,6 +720,7 @@ export function Chat({
     // evaluate an as-yet-undeclared const at this point in the render.
     stopSpeaking();
     setItems([]);
+    setLoadedSessionId(null);
     setStreaming("");
     setError("");
     connectionErrorRef.current = null;
@@ -1232,6 +1238,7 @@ export function Chat({
 
     if (skipMessageFetch) {
       // Fresh draft session — connect immediately to flush the pending message.
+      setLoadedSessionId(sessionId);
       openSocket();
     } else {
       // Seed the persisted transcript FIRST, then open the socket. The bus
@@ -1250,9 +1257,13 @@ export function Chat({
           setItems(page.messages.map(toTranscriptItem));
           setHasOlder(page.has_more);
           setOlderCursor(page.next_before_seq);
+          setLoadedSessionId(sessionId);
         })
         .catch((e) => {
-          if (!cancelled) setError(String(e));
+          if (!cancelled) {
+            setError(String(e));
+            setLoadedSessionId(sessionId);
+          }
         })
         .finally(() => openSocket());
     }
@@ -1277,6 +1288,17 @@ export function Chat({
       }
     };
   }, [sessionId]);
+
+  // Initial history restoration must be an instant placement, not the spring
+  // animation ChatLayout uses for newly streaming content. This layout effect
+  // runs after the populated transcript is committed but before it is painted,
+  // so the first visible frame is already anchored at the latest message.
+  useLayoutEffect(() => {
+    if (!sessionId || loadedSessionId !== sessionId) return;
+    const container = chatLayoutRef.current;
+    if (!container) return;
+    container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+  }, [sessionId, loadedSessionId]);
 
   // Load the model picker options + the admin-configured default once.
   useEffect(() => {
@@ -2068,6 +2090,7 @@ export function Chat({
   // Keeping the message surface mounted lets ChatMessageList anchor directly
   // to the restored transcript instead.
   const isEmpty = sessionId === null && items.length === 0 && !hasOlder && !streaming && !busy && !imageBusy;
+  const isRestoringTranscript = sessionId !== null && loadedSessionId !== sessionId;
 
   // Flatten every tool-call group (in order) into the execution timeline.
   const execSteps = items.flatMap((it) => (it.kind === "tools" ? it.calls : []));
@@ -2202,6 +2225,7 @@ export function Chat({
         />
       )}
       <ChatLayout
+        ref={chatLayoutRef}
         emptyState={isEmpty ? greeting : undefined}
         composer={
           <div className="claw-composer">
@@ -2771,7 +2795,7 @@ export function Chat({
           </div>
         }
       >
-        {isEmpty ? null : (
+        {isEmpty || isRestoringTranscript ? null : (
         <div className="claw-column">
           <ChatMessageList
             className="claw-message-list"
