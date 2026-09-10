@@ -117,12 +117,20 @@ class MissionStartTool(Tool):
     name = "mission_start"
     ends_turn_on_success = True
     description = (
-        "Start (or resume) a planned mission. It runs in the background, so tell the user it has "
-        "started and that you will report back — do not wait for it. Use mission_status to check on it."
+        "Start or resume a mission. It checks remaining budget before scheduling. "
+        "If paused, report the blocker; never say it started or repeatedly retry. "
+        "Optional budget sets cumulative ceilings (historical spend is retained). "
+        "Supply increased ceilings only after the user explicitly approves the new budget; "
+        "a generic request to continue does not authorize a budget increase."
     )
     parameters = {
         "type": "object",
-        "properties": {"mission_id": {"type": "string"}},
+        "properties": {"mission_id": {"type": "string"}, "budget": {
+            "type": "object", "additionalProperties": False, "properties": {
+                "max_tokens": {"type": "number", "exclusiveMinimum": 0},
+                "max_wall_seconds": {"type": "number", "exclusiveMinimum": 0},
+                "max_node_attempts": {"type": "integer", "minimum": 1},
+            }}},
         "required": ["mission_id"],
     }
 
@@ -130,12 +138,25 @@ class MissionStartTool(Tool):
         self.missions = missions
         self.owner_id = owner_id
 
-    async def execute(self, mission_id: str, **_: Any) -> str:
-        status = await self.missions.start(str(mission_id).strip(), self.owner_id)
+    async def execute(self, mission_id: str, budget: dict | None = None, **_: Any) -> str:
+        try:
+            if budget is None:
+                status = await self.missions.start(str(mission_id).strip(), self.owner_id)
+            else:
+                status = await self.missions.start(str(mission_id).strip(), self.owner_id, budget=budget)
+        except (InvalidGraphError, TypeError) as exc:
+            return f"Error: {exc}"
         if status == "not_found":
             return f"Error: no mission {mission_id!r} belongs to this user."
         if status in ('completed', 'cancelled'):
             return f"Mission {mission_id} is already {status}; no work was restarted."
+        if status == 'paused':
+            detail = await self.missions.status(str(mission_id).strip(), self.owner_id)
+            return json.dumps({
+                'mission_id': mission_id, 'status': 'paused', 'started': False,
+                'reason': detail.get('resume_blocker'), 'budget': detail['budget'], 'spent': detail['spent'],
+                'message': 'งานยังไม่เริ่มต่อ เพราะงบที่ใช้ไปถึงขีดจำกัดแล้ว ต้องอนุมัติงบใหม่ก่อน การสั่งเริ่มซ้ำไม่เพิ่มงบ',
+            }, ensure_ascii=False)
         return (
             f"Mission {mission_id} is {status} in the background. "
             "Check mission_status for progress; do not block waiting for it."

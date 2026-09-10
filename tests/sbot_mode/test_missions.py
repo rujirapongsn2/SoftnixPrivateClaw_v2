@@ -932,3 +932,36 @@ async def test_active_missions_are_owner_scoped(stores, tmp_path):
 
     assert len(await _active(stores, user.id)) == 1
     assert await _active(stores, attacker.id) == []
+
+@pytest.mark.asyncio
+async def test_resume_exhausted_budget_never_claims_running_or_calls_model(stores, tmp_path):
+    user, researcher, _ = await _two_specialists(stores, 'resume-budget@sbot.ai')
+    provider = FakeProvider([])
+    service = make_service(stores, provider, tmp_path)
+    mission = await service.plan(user.id, 'Resume', [
+        {'id': 'read', 'bot_id': researcher.id, 'instruction': 'Read'}], budget={'max_tokens': 100})
+    await stores['missions'].update_mission(mission.id, status='paused', spent={'tokens': 120})
+    tool = MissionStartTool(service, user.id)
+    for _ in range(2):
+        result = json.loads(await tool.execute(mission.id))
+        assert result['status'] == 'paused' and result['started'] is False
+        assert result['reason'] == 'max_tokens'
+        assert result['spent']['tokens'] == 120
+    assert not provider.calls and mission.id not in service._running
+    saved = await stores['missions'].get_mission(mission.id, user.id)
+    assert saved.status == 'paused' and saved.budget['max_tokens'] == 100
+
+
+@pytest.mark.asyncio
+async def test_explicit_resume_budget_preserves_spend_and_other_limits(stores, tmp_path):
+    user, researcher, _ = await _two_specialists(stores, 'resume-explicit@sbot.ai')
+    service = make_service(stores, FakeProvider([text_turn('done')]), tmp_path)
+    mission = await service.plan(user.id, 'Resume', [
+        {'id': 'read', 'bot_id': researcher.id, 'instruction': 'Read'}], budget={'max_tokens': 100, 'max_wall_seconds': 900})
+    await stores['missions'].update_mission(mission.id, status='paused', spent={'tokens': 120})
+    assert await service.start(mission.id, user.id, budget={'max_tokens': 500}) == 'running'
+    assert await service._running[mission.id] == 'completed'
+    saved = await stores['missions'].get_mission(mission.id, user.id)
+    assert saved.spent['tokens'] >= 120
+    assert saved.budget['max_tokens'] == 500
+    assert saved.budget['max_wall_seconds'] == 900

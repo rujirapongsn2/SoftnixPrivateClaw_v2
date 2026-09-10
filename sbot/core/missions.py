@@ -296,7 +296,7 @@ class MissionService:
         return mission
 
     # ------------------------------------------------------------------ running
-    async def start(self, mission_id: str, owner_id: str) -> str:
+    async def start(self, mission_id: str, owner_id: str, budget: dict | None = None) -> str:
         """Begin (or resume) a mission in the background. Returns its status."""
         async with self._start_locks.get(mission_id):
             mission = await self.missions.get_mission(mission_id, owner_id)
@@ -308,6 +308,16 @@ class MissionService:
             if mission.status == 'completed' or (mission.status == 'cancelled' and
                     await self.missions.blackboard_read(mission.id, 'scope:background')):
                 return mission.status
+            if budget is not None:
+                # Explicitly supplied ceilings only; ordinary resume never grants
+                # new spend or resets historical accounting.
+                resolved = self._resolve_budget({**(mission.budget or {}), **budget})
+                mission = await self.missions.update_mission(mission_id, budget=resolved)
+            nodes = await self.missions.get_nodes(mission_id)
+            if MissionEngine._budget_exceeded(mission, mission.spent or {}, 0, nodes):
+                if mission.status != 'paused':
+                    await self.missions.update_mission(mission_id, status='paused')
+                return 'paused'
             await self.missions.update_mission(mission_id, status="running")
             self._spawn(mission_id)
             return "running"
@@ -855,6 +865,7 @@ class MissionService:
                 "steps": [{"id": n.id, "title": n.title, "bot_name": names.get(n.bot_id or '', ''),
                            "state": activity[n.id], "depends_on": n.depends_on or []} for n in nodes],
             },
+            "resume_blocker": MissionEngine._budget_exceeded(mission, mission.spent or {}, 0, nodes),
             "budget": mission.budget or {},
             "spent": mission.spent or {},
             "created_at": mission.created_at.isoformat() if mission.created_at else None,
