@@ -12,7 +12,7 @@ import {
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useToast } from "@astryxdesign/core/Toast";
-import { AlarmClock, ChevronDown, Loader2, LogOut, Menu, MessageCircle, MessageSquare, MoreVertical, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
+import { AlarmClock, ChevronDown, Loader2, LogOut, Menu, MessageCircle, MessageSquare, MoreVertical, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "../Admin";
 import { BOT_AVATARS, BotAvatar, avatarVariantFor, type BotAvatarVariant } from "./BotAvatar";
@@ -152,7 +152,6 @@ function TeamNav({
   const { isCollapsed } = useSideNavCollapse();
   const t = useT();
   const [isOpen, setIsOpen] = useState(false);
-  const [query, setQuery] = useState("");
   const [visible, setVisible] = useState(OTHER_INITIAL);
   // The bot whose face is being picked, if any.
   const [picking, setPicking] = useState<string | null>(null);
@@ -165,25 +164,18 @@ function TeamNav({
     onBotUpdated();
   };
 
-  // A new search starts from the top of its (usually short) result set.
-  useEffect(() => setVisible(OTHER_INITIAL), [query]);
-
-  const q = query.trim().toLowerCase();
-  const shownBots = q
-    ? bots.filter((b) => `${b.name} ${b.role_title}`.toLowerCase().includes(q))
-    : bots;
+  const shownBots = bots;
 
   // Everything the bot rows don't already stand for. Excluded by id rather than
   // by `!s.bot_id` so an extra thread on a bot still shows up somewhere. The
-  // full `bots` list drives the exclusion — filtering by `bots` and not
-  // `shownBots` keeps a search from spilling bot threads down into "Other".
+  // The full `bots` list drives the exclusion so a bot thread never appears
+  // again below its own team row.
   const others = useMemo(() => {
     const threads = new Set(bots.map((b) => botThread(sessions, b.id)?.id).filter(Boolean));
     return sessions.filter((s) => !threads.has(s.id));
   }, [bots, sessions]);
-  const matchedOthers = q ? others.filter((s) => s.title.toLowerCase().includes(q)) : others;
-  const shownOthers = matchedOthers.slice(0, visible);
-  const hasMore = matchedOthers.length > shownOthers.length;
+  const shownOthers = others.slice(0, visible);
+  const hasMore = others.length > shownOthers.length;
 
   // Running spinner (turn processing) or a "new response" dot (finished while
   // you were elsewhere). The dot comes from the bot's own thread only: any
@@ -210,21 +202,6 @@ function TeamNav({
   const sessionStatus = (s: SessionInfo) =>
     s.running ? runningIcon : done.has(s.id) ? doneIcon : null;
 
-  const search = (
-    <div className="claw-recents-search">
-      <TextInput
-        label={t("nav.searchBots")}
-        isLabelHidden
-        size="sm"
-        startIcon={<Icon icon={Search} size="sm" color="secondary" />}
-        placeholder={t("nav.searchBots")}
-        value={query}
-        onChange={setQuery}
-        hasClear
-      />
-    </div>
-  );
-
   const showMore = hasMore && (
     <button type="button" className="claw-recents-more" onClick={() => setVisible((v) => v + OTHER_STEP)}>
       <Icon icon={ChevronDown} size="sm" />
@@ -235,11 +212,10 @@ function TeamNav({
   if (!isCollapsed) {
     return (
       <>
-        {search}
         {shownBots.length === 0 && shownOthers.length === 0 ? (
           <div className="claw-recents-empty">
             <Text size="sm" color="secondary">
-              {q ? "Nothing matches your search." : "No bots yet."}
+              No bots yet.
             </Text>
           </div>
         ) : null}
@@ -368,10 +344,9 @@ function TeamNav({
         hasAutoFocus={false}
         content={
           <div className="claw-recents-popover">
-            {search}
             {shownBots.length === 0 && shownOthers.length === 0 && (
               <Text size="sm" color="secondary">
-                {q ? "Nothing matches your search." : "No bots yet."}
+                No bots yet.
               </Text>
             )}
             {shownBots.length > 0 && (

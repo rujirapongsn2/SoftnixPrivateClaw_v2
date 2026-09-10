@@ -136,7 +136,6 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
   en: {
     "nav.newChat": "New chat",
     "nav.searchChats": "Search chats",
-    "nav.searchBots": "Search bots...",
     "nav.clearChat": "Clear this bot's chat",
     "nav.changeAvatar": "Change {name}'s picture",
     "nav.settings": "Settings",
@@ -1202,7 +1201,6 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
   th: {
     "nav.newChat": "แชทใหม่",
     "nav.searchChats": "ค้นหาแชท",
-    "nav.searchBots": "ค้นหาบอท...",
     "nav.clearChat": "ล้างแชทของบอทนี้",
     "nav.changeAvatar": "เปลี่ยนรูปของ {name}",
     "nav.settings": "ตั้งค่า",

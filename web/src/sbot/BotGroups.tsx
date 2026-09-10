@@ -10,7 +10,18 @@ export function BotGroupNav({ groups, sessions, active, done, onSelect, onCreate
   groups: BotGroupInfo[]; sessions: SessionInfo[]; active: string | null; done: Set<string>;
   onSelect: (group: BotGroupInfo) => void; onCreate: () => void;
 }) {
-  return <SideNavSection title="Group Bots">
+  return <SideNavSection
+    title="Group Bots"
+    endContent={
+      <IconButton
+        label="Add group"
+        icon={<Icon icon={Plus} size="sm" />}
+        variant="ghost"
+        size="sm"
+        clickAction={onCreate}
+      />
+    }
+  >
     {groups.map(group => <div className="sbot-group-nav-row" key={group.id}>
       <SideNavItem label={group.name} icon={Users} isSelected={active === group.session_id}
         onClick={() => onSelect(group)} />
@@ -18,7 +29,6 @@ export function BotGroupNav({ groups, sessions, active, done, onSelect, onCreate
         ? <Loader2 size={14} className="sbot-group-spin" aria-label="Group working" />
         : done.has(group.session_id) && <span className="sbot-group-unread" aria-label="Unread messages" />}
     </div>)}
-    <SideNavItem label="New group" icon={Plus} onClick={onCreate} />
   </SideNavSection>;
 }
 
