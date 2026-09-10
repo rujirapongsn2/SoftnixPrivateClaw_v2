@@ -52,6 +52,53 @@ async def test_read_skill_tool(db_factory, stores):
     assert (await tool.execute(name="missing")).startswith("Error")
 
 
+async def test_read_skill_pages_large_content_and_can_resume(db_factory, stores):
+    skills = SkillStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("skill-pages@x.y")
+    await skills.upsert(user.id, "large", description="", content="A" * 12_500)
+    tool = ReadSkillTool(skills, user.id)
+
+    first = await tool.execute(name="large", limit=8_000)
+    second = await tool.execute(name="large", offset=8_000, limit=8_000)
+
+    assert "A" * 8_000 in first
+    assert "offset=8000" in first
+    assert "A" * 4_500 in second
+    assert "More available" not in second
+
+
+async def test_read_skill_can_select_markdown_section(db_factory, stores):
+    skills = SkillStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("skill-section@x.y")
+    await skills.upsert(
+        user.id,
+        "structured",
+        description="",
+        content="# Start\nfirst\n\n## Child\nstill first\n\n# Next\nsecond",
+    )
+    out = await ReadSkillTool(skills, user.id).execute(name="structured", section="Start")
+
+    assert "first" in out and "still first" in out
+    assert "second" not in out
+    assert "Section: Start" in out
+
+
+async def test_read_skill_ignores_heading_like_comments_in_fenced_code(db_factory, stores):
+    skills = SkillStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("skill-fence@x.y")
+    await skills.upsert(
+        user.id,
+        "fenced",
+        description="",
+        content="```sh\n# Deploy\nunsafe-example\n```\n\n# Deploy\nreal instructions",
+    )
+
+    out = await ReadSkillTool(skills, user.id).execute(name="fenced", section="Deploy")
+
+    assert "real instructions" in out
+    assert "unsafe-example" not in out
+
+
 async def test_skill_isolation_between_users(db_factory, stores):
     skills = SkillStore(db_factory)
     alice = await stores["users"].get_or_create_by_email("alice@x.y")

@@ -48,7 +48,7 @@ from sbot.core.memory import MemoryService, memory_scope
 from sbot.core.scheduler import SchedulerService
 from sbot.core.specialist import DelegationMirror
 from sbot.core.subagent import SubagentManager
-from sbot.core.turn_context import current_session_id, current_turn_deadline, current_turn_locale
+from sbot.core.turn_context import current_session_id, current_turn_id, current_turn_deadline, current_turn_locale
 from sbot.db.stores import (
     AuditStore,
     BlueprintStore,
@@ -288,6 +288,7 @@ class ClawAgent:
                 connectors=connectors,
                 project_access=project_access,
                 arg_guard=self._guard_tool_args if policy is not None else None,
+                reliability=settings.reliability,
             )
             self.tools.register(delegate)
             self.tools.register(DelegateManyTool(delegate))
@@ -305,6 +306,14 @@ class ClawAgent:
                              MissionStartTool(missions, user_id), MissionStatusTool(missions, user_id),
                              MissionGateTool(missions, user_id), MissionReplanTool(missions, user_id)]:
                     self.tools.register(GroupMissionTool(tool, missions, user_id) if group_members is not None else tool)
+                if settings.team_work.enabled:
+                    from sbot.tools.team_work import TeamSubmitTool, BackgroundDelegateTool, TeamStatusTool, TeamCancelTool
+                    submit = TeamSubmitTool(missions, user_id, bot_id, group_members)
+                    self.tools.register(submit)
+                    self.tools.register(BackgroundDelegateTool(submit, delegate))
+                    self.tools.register(BackgroundDelegateTool(submit, delegate, many=True))
+                    self.tools.register(TeamStatusTool(missions, user_id, group_members is not None))
+                    self.tools.register(TeamCancelTool(missions, user_id, group_members is not None))
         if group_members is not None:
             # Group work is delegated only to selected named members.
             self.tools.unregister("spawn")
@@ -403,6 +412,33 @@ class ClawAgent:
         """
         if not self.is_cos:
             return ""
+        if self.tools.has("team_submit"):
+            return (
+                "# Leading your team\n\n"
+                "Keep the conversation available while your team works. For specialist work use "
+                "team_submit to save and start a separate background job. delegate and delegate_many "
+                "also hand off in the background here; their receipt is NOT a completed result. "
+                "Submit all steps of one request together. Use depends_on whenever a step needs another's "
+                "verified result (e.g. research before a travel post); never invent missing upstream results. "
+                "Independent requests are separate jobs. Each job with multiple steps gets a final "
+                "coordinator synthesis step; results will be delivered to this conversation. "
+                "Provide self-contained instructions, input_files and required_files; chat history is not "
+                "worker context. Workers use separate file folders, and inputs are copied under inputs/. "
+                "Use team_status when asked about progress or pending work; read real status before "
+                "claiming there is no pending work. Use its mission id with mission_status for full results. "
+                "A follow-up changes an existing job only when explicitly requested; otherwise create a new one. "
+                "Use team_cancel only when asked to stop that job. Failed work stays failed: explain the "
+                "blocker and do not resubmit repeatedly or take over a long assignment inside this chat. "
+                "For greetings, team questions and brief answers, respond directly. "
+                "If nobody fits, you may assign a background step to yourself. Do not create recursive "
+                "delegations. Do not schedule external actions beyond the user's authorization. "
+                "File creation, publication and local delivery are distinct; report only confirmed outcomes."
+                "\n\nCreating a team member is a bounded administrative request. When the user asks "
+                "to create a bot, call create_bot once and stop. Do not create a plan, update memory, "
+                "delegate a smoke test, message the new bot, create files, or begin its work unless the "
+                "user explicitly asks for that additional action."
+                + (f"\n{team_summary}" if team_summary else "")
+            )
         return (
             "# Leading your team\n\n"
             f"You are the user's {'group coordinator' if self.is_group else 'Chief of Staff'}. "
@@ -421,12 +457,16 @@ class ClawAgent:
             "- Nobody on the team fits, or you have no team → do it yourself, and say so.\n"
             "- The user is asking about you, the team, or the conversation, or is just "
             "chatting → answer. Never delegate a greeting.\n\n"
-            "Handing work out does not end your turn. You still own the outcome:\n"
+            "Creating a member is an administrative request, not a project. When the user asks "
+            "to create a bot, call create_bot once and stop; do not plan, test, delegate to, "
+            "or otherwise use it unless the user explicitly asks for that extra work.\n\n"
+            "Handing work out does not end your turn. You still own the report and coordination:\n"
             "- Every specialist can publish_artifact and read documents in addition to its configured "
             "tools. Use the runtime attachment manifest in delegate results as delivery evidence. "
             "Those files already appear in the specialist's reply; do not republish them.\n"
-            "- Check what comes back against what the user actually asked for. If it misses, "
-            "send it back with what to fix rather than passing the miss along.\n"
+            "- Check what comes back against what the user actually asked for. If it is incomplete, "
+            "report the recorded status and blocker. Do not repeat the full delegation or take over "
+            "a long specialist assignment inside this chat unless the user explicitly asks you to.\n"
             "- Report in your own voice: what was done, by whom, what it means, what is next. "
             "A specialist's reply pasted verbatim is not a report.\n"
             "- Decide what is yours to decide, and say that you decided it.\n"
@@ -730,6 +770,9 @@ class AgentRuntime:
         if getattr(self, 'local_workspaces', None) is not None:
             from sbot.tools.local_workspace import LocalWorkspaceTool
             agent.tools.register(LocalWorkspaceTool(workspace, self.local_workspaces, user_id))
+            delegate = agent.tools.get("delegate")
+            if delegate is not None:
+                delegate.local_broker = self.local_workspaces
         if group_members is not None:
             return agent  # group membership is a per-turn snapshot; never contaminate a direct chat
         self._agents[cache_key] = agent
@@ -1423,6 +1466,8 @@ class AgentRuntime:
                             pending["content"] = text
                             if ev.artifacts:
                                 pending["meta"]["artifacts"] = ev.artifacts
+                            if ev.result is not None:
+                                pending["meta"]["task_result"] = ev.result
                             if ev.is_error:
                                 pending["meta"]["speaker_error"] = True
                     self.bus.publish(session_id, ev)
@@ -1430,6 +1475,7 @@ class AgentRuntime:
                 # Expose the active session to session-scoped tools (update_plan) for
                 # the duration of the turn; reset after so it never leaks to another.
                 _session_token = current_session_id.set(session_id)
+                _turn_token = current_turn_id.set(turn_id)
                 # Same idea for the wall-clock deadline, read by tools that start a
                 # nested agent so they can't hand themselves a fresh budget on top
                 # of this turn's. Set from the same value the loop enforces.
@@ -1485,6 +1531,7 @@ class AgentRuntime:
                     return message
                 finally:
                     current_session_id.reset(_session_token)
+                    current_turn_id.reset(_turn_token)
                     current_turn_deadline.reset(_deadline_token)
                     current_turn_locale.reset(_locale_token)
 

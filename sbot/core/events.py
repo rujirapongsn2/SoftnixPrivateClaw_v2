@@ -119,6 +119,7 @@ class DelegationFinished(AgentEvent):
     # including after a reload.
     artifacts: list[str] = field(default_factory=list)
     is_error: bool = False
+    result: dict[str, Any] | None = None
     type: str = field(default="delegation_finished", init=False)
 
 

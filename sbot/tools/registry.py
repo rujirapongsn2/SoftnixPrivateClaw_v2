@@ -30,6 +30,9 @@ ALWAYS_AVAILABLE_TOOLS = frozenset({
     "mission_plan",
     "mission_start",
     "mission_status",
+    "team_submit",
+    "team_status",
+    "team_cancel",
 })
 
 AuditHook = Callable[[str, dict[str, Any], str], None]

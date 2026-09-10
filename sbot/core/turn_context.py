@@ -16,6 +16,10 @@ current_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "claw_current_session_id", default=None
 )
 
+current_turn_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "sbot_current_turn_id", default=None
+)
+
 # `time.monotonic()` value past which the turn that is running has no time left.
 # The agent loop only checks its own budget *between* iterations, so a tool that
 # starts a nested agent (spawn, workflow) would otherwise be free to run its own

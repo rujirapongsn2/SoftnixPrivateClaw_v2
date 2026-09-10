@@ -12,6 +12,7 @@ from typing import Any
 from sbot.core.mission_engine import InvalidGraphError
 from sbot.core.missions import MissionService
 from sbot.core.turn_context import current_session_id
+from sbot.tools.cos import DelegateTool
 from sbot.tools.base import Tool
 
 _OUTPUT_PREVIEW_CHARS = 400
@@ -133,8 +134,10 @@ class MissionStartTool(Tool):
         status = await self.missions.start(str(mission_id).strip(), self.owner_id)
         if status == "not_found":
             return f"Error: no mission {mission_id!r} belongs to this user."
+        if status in ('completed', 'cancelled'):
+            return f"Mission {mission_id} is already {status}; no work was restarted."
         return (
-            f"Mission {mission_id} is running in the background. "
+            f"Mission {mission_id} is {status} in the background. "
             "Check mission_status for progress; do not block waiting for it."
         )
 
@@ -338,3 +341,9 @@ class MissionReplanTool(Tool):
             )
         except InvalidGraphError as exc:
             return f"Error: {exc}. Fix the patch and call mission_replan again."
+
+# Additive assignment contract shared with direct delegation.
+MissionPlanTool.parameters['properties']['nodes']['items']['properties'].update({
+    key: DelegateTool.parameters['properties'][key]
+    for key in ('input_files', 'delivery_target', 'acceptance_criteria', 'verification')
+})

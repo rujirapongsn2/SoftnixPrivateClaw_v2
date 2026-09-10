@@ -1,3 +1,4 @@
+import type { TaskResult } from "./api";
 import {
   ChatComposer,
   ChatComposerInput,
@@ -271,6 +272,7 @@ type TranscriptItem =
       delegatedTask?: string;
       delegationId?: string;
       speakerError?: boolean;
+      taskResult?: TaskResult;
       // On a user row in a specialist's own thread: the leader that gave the
       // instruction. Without it the bubble reads as something the user typed
       // in this thread, which is the one thing it is not.
@@ -302,6 +304,7 @@ function toTranscriptItem(m: ChatMessageRow): TranscriptItem {
     delegatedTask: m.meta?.delegated_task,
     delegationId: m.meta?.delegation_id,
     speakerError: m.meta?.speaker_error,
+    taskResult: m.meta?.task_result,
     delegatedBy: m.meta?.delegated_by ?? undefined,
   };
 }
@@ -1027,6 +1030,7 @@ export function Chat({
                 content: event.text ?? "",
                 artifacts: event.artifacts,
                 speakerError: event.is_error,
+                taskResult: event.result,
               };
               return next;
             }
@@ -1043,6 +1047,7 @@ export function Chat({
                 delegationId: event.delegation_id,
                 artifacts: event.artifacts,
                 speakerError: event.is_error,
+                taskResult: event.result,
               },
             ];
           });
@@ -2889,11 +2894,17 @@ export function Chat({
                             </span>
                           }
                         >
-                          {item.content && item.speakerError && (
+                          {item.content && (item.speakerError || item.taskResult) && (
                             // The reply is real but was cut short. Unmarked it
                             // reads as a specialist that simply trailed off.
                             <Text size="sm" color="secondary">
-                              {t("chat.delegation.partial")}
+                              {t(item.taskResult
+                                ? item.taskResult.failure_reason === "waiting_for_user"
+                                  ? "chat.result.waiting"
+                                  : `chat.result.${item.taskResult.status}`
+                                : "chat.delegation.partial")}
+                              {item.taskResult?.verification_status === "passed" &&
+                                ` · ${t("chat.result.verified")}`}
                             </Text>
                           )}
                           {item.content ? (
@@ -3158,11 +3169,14 @@ export function Chat({
               // than something the user needs to act on.
               const waitingOnGate = m.awaiting.length > 0;
               const stalled = m.status === "blocked" && !waitingOnGate;
+              const queued = m.status === "queued";
+              const paused = m.status === "paused";
               return (
               <ChatMessage key={m.id} sender="assistant">
                 <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
+                  <Text size="sm" weight="semibold">{m.goal}</Text>
                   <span className="claw-thinking">
-                    {waitingOnGate ? (
+                    {waitingOnGate || queued || paused ? (
                       <Icon icon={Hourglass} size="sm" color="secondary" />
                     ) : stalled ? (
                       <Icon icon={ShieldAlert} size="sm" color="secondary" />
@@ -3170,7 +3184,7 @@ export function Chat({
                       <Spinner size="sm" shade="subtle" />
                     )}{" "}
                     {t(
-                      waitingOnGate
+                      queued ? "chat.mission.queued" : paused ? "chat.mission.paused" : waitingOnGate
                         ? "chat.mission.blocked"
                         : stalled
                           ? "chat.mission.stalled"
@@ -3209,7 +3223,17 @@ export function Chat({
                         {t("chat.mission.awaiting", { title: gate.title })}
                       </Text>
                     ))}
-                    {m.running.length === 0 && m.awaiting.length === 0 && (
+                    {Boolean(m.queued?.length) && (
+                      <details>
+                        <summary>{t("chat.mission.pending", { count: String(m.queued?.length) })}</summary>
+                        {m.queued?.map((step) => (
+                          <Text key={step.node_id} size="sm" color="secondary">
+                            {step.bot_name} · {step.title}
+                          </Text>
+                        ))}
+                      </details>
+                    )}
+                    {m.running.length === 0 && m.awaiting.length === 0 && !m.queued?.length && !queued && !paused && (
                       <Text size="sm" color="secondary">{t("chat.mission.idle")}</Text>
                     )}
                   </div>

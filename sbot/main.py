@@ -139,6 +139,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     mission_service = MissionService(
         missions,
         bots,
+        local_broker=runtime.local_workspaces,
         provider=provider,
         sandbox=runtime.sandbox,
         settings=settings,
@@ -146,6 +147,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         skills=skills,
         memory=memory_service,
         notifier=_mission_report,
+        max_parallel_nodes=settings.team_work.max_parallel_total,
         messages=messages,
         bus=runtime.bus,
         sessions=sessions,

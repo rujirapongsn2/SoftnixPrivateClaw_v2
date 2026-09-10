@@ -298,6 +298,7 @@ class DelegationMirror:
         text: str,
         is_error: bool,
         artifacts: list[str] | None = None,
+        result: dict | None = None,
     ) -> None:
         """End the mirrored turn, whatever happened to the run.
 
@@ -314,7 +315,9 @@ class DelegationMirror:
                         [{
                             "role": "assistant",
                             "content": text,
-                            "meta": {"delegated": True, "artifacts": artifacts or []},
+                            "meta": {"delegated": True, "artifacts": artifacts or [],
+                                     "speaker_error": is_error,
+                                     **({"task_result": result} if result is not None else {})},
                         }],
                     )
                 )
@@ -349,11 +352,12 @@ class SpecialistOutcome:
     # dropping this flag made an exhausted specialist indistinguishable from a
     # successful one — the caller then reported success and redid the work.
     reached_max_iterations: bool = False
+    output_truncated: bool = False
 
     @property
     def cut_off(self) -> bool:
         """True when the run stopped without the specialist getting to answer."""
-        return self.timed_out or self.reached_max_iterations
+        return self.timed_out or self.reached_max_iterations or self.output_truncated
 
 
 class SpecialistRunner:
@@ -554,4 +558,5 @@ class SpecialistRunner:
             artifacts=list(outcome.artifacts or []),
             timed_out=outcome.timed_out,
             reached_max_iterations=outcome.reached_max_iterations,
+            output_truncated=getattr(outcome, 'finish_reason', 'stop') in ('length', 'max_tokens', 'plan_incomplete'),
         )

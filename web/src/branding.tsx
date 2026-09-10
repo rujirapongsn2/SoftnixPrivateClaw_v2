@@ -256,6 +256,12 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
 
     "chat.delegation.assigned": "Assigned to {name}",
     "chat.delegation.working": "Working on it…",
+    "chat.result.completed": "Completed",
+    "chat.result.partial": "Delivery incomplete",
+    "chat.result.blocked": "Blocked",
+    "chat.result.failed": "Failed",
+    "chat.result.verified": "Verified",
+    "chat.result.waiting": "Waiting for input",
     "chat.delegation.partial": "This reply didn't finish — it may be incomplete.",
     "chat.delegation.work": "What {name} is doing",
     "chat.delegation.workDone": "What {name} did",
@@ -279,6 +285,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.msg.generatingImage": "Generating image…",
 
     "chat.mission.running": "Mission in progress — {done} of {total} steps done",
+    "chat.mission.queued": "Queued",
+    "chat.mission.paused": "Paused — check the job budget",
+    "chat.mission.pending": "{count} steps waiting",
     "chat.mission.blocked": "Mission waiting on you — {done} of {total} steps done",
     // `blocked` also covers a stalled mission with no gate open at all (e.g. a
     // stuck step recovering after a restart) — that is not "waiting on you".
@@ -1296,6 +1305,12 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
 
     "chat.delegation.assigned": "มอบงานให้ {name}",
     "chat.delegation.working": "กำลังทำงาน…",
+    "chat.result.completed": "เสร็จแล้ว",
+    "chat.result.partial": "ส่งมอบไม่ครบ",
+    "chat.result.blocked": "ติดขัด",
+    "chat.result.failed": "ไม่สำเร็จ",
+    "chat.result.verified": "ตรวจสอบแล้ว",
+    "chat.result.waiting": "รอข้อมูล",
     "chat.delegation.partial": "คำตอบนี้ยังไม่จบ อาจไม่ครบถ้วน",
     "chat.delegation.work": "{name} กำลังทำอะไรอยู่",
     "chat.delegation.workDone": "{name} ทำอะไรไปบ้าง",
@@ -1319,6 +1334,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.msg.generatingImage": "กำลังสร้างภาพ…",
 
     "chat.mission.running": "ภารกิจกำลังดำเนินอยู่ — เสร็จ {done} จาก {total} ขั้น",
+    "chat.mission.queued": "อยู่ในคิว",
+    "chat.mission.paused": "พักงาน — ตรวจสอบงบของงาน",
+    "chat.mission.pending": "รอดำเนินการ {count} ขั้น",
     "chat.mission.blocked": "ภารกิจรอคุณตัดสินใจ — เสร็จ {done} จาก {total} ขั้น",
     "chat.mission.stalled": "ภารกิจติดขัด — เสร็จ {done} จาก {total} ขั้น",
     "chat.mission.step": "{bot} · {title}",

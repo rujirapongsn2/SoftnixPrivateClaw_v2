@@ -1,3 +1,13 @@
+export interface TaskResult {
+  status: "completed" | "partial" | "blocked" | "failed";
+  summary: string;
+  verification_status: "passed" | "failed" | "not_verified" | "not_required";
+  failure_reason?: string | null;
+  artifacts: string[];
+  evidence: Record<string, unknown>[];
+  delivery: Record<string, string>;
+}
+
 
 const MODE_LOCAL = /^\/api\/(sessions|bots|bot-groups|missions|memory|schedules|feedback|heartbeat|projects|blueprints|shares|share)(?:[/?]|$)/;
 function endpoint(path: string): string {
@@ -75,6 +85,7 @@ export interface ActiveMission {
   done: number;
   /** Steps executing right now — this is what marks a bot busy in the sidebar. */
   running: { node_id: string; title: string; bot_id: string; bot_name: string }[];
+  queued?: { node_id: string; title: string; bot_id: string; bot_name: string; depends_on: string[] }[];
   /** Gates parked for the user's decision. */
   awaiting: { node_id: string; title: string }[];
 }
@@ -94,6 +105,7 @@ export interface ChatMessage {
     delegation_id?: string;
     // The specialist errored or was cut off mid-answer; the text is real but partial.
     speaker_error?: boolean;
+    task_result?: TaskResult;
     // On a user message: the bot that gave this instruction, when it was
     // delegated rather than typed by the user in this thread.
     delegated_by?: string | null;
@@ -224,6 +236,7 @@ export interface AgentEvent {
   // once done; `index` numbers the steps within one assignment (not across
   // them, unlike tool_progress's shared `index`).
   detail?: string;
+  result?: TaskResult;
   delegation_id?: string;
   // delegated_task: the instruction a leader handed this bot, shown in the
   // bot's own thread. No other user message arrives as an event — the client

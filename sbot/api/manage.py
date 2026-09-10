@@ -207,6 +207,12 @@ async def list_active_missions(
     if not active:
         return []
     names = {b.id: b.name for b in await state.bots.list_for_user(user.id)}
+    phases = {}
+    for mission, nodes in active:
+        for node in nodes:
+            if node.status == 'running':
+                activity = await state.missions.blackboard_read(mission.id, f'scope:activity:{node.id}')
+                phases[(mission.id, node.id)] = (activity or {}).get('phase', 'running')
     return [
         {
             "id": mission.id,
@@ -225,7 +231,13 @@ async def list_active_missions(
                     "bot_name": names.get(n.bot_id or "", ""),
                 }
                 for n in nodes
-                if n.status == "running"
+                if n.status == "running" and phases.get((mission.id, n.id)) != 'queued'
+            ],
+            "queued": [
+                {"node_id": n.id, "title": n.title, "bot_id": n.bot_id or "",
+                 "bot_name": names.get(n.bot_id or "", ""), "depends_on": n.depends_on or []}
+                for n in nodes if n.status in ('pending', 'ready') or (
+                    n.status == 'running' and phases.get((mission.id, n.id)) == 'queued')
             ],
             "awaiting": [
                 {"node_id": n.id, "title": n.title} for n in nodes if n.status == "awaiting_human"

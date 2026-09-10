@@ -7,8 +7,10 @@ the mission budget.
 """
 
 import asyncio
+import time
 import hashlib
 import json
+import re
 from typing import Any
 
 from loguru import logger
@@ -22,6 +24,8 @@ from sbot.core.mission_engine import (
     ReplanOutcome,
 )
 from sbot.core.specialist import SpecialistRunner
+from sbot.core.keyed_locks import KeyedLocks
+from sbot.core.keyed_slots import KeyedSlots
 from sbot.core.turn_context import current_turn_deadline
 from sbot.db.models import Mission, MissionNode
 from sbot.db.stores import BotStore, MissionStore
@@ -75,6 +79,7 @@ class MissionService:
         project_access: Any = None,
         arg_guard_for_owner: Any = None,
         require_verified_results: bool = True,
+        local_broker: Any = None,
         messages: Any = None,
         bus: Any = None,
         sessions: Any = None,
@@ -84,6 +89,7 @@ class MissionService:
         # outlives the turn that planned it, so without this its result reaches
         # nobody: `session_id` was recorded on the row and then never read, and
         # the user had to think to ask.
+        self.local_broker = local_broker
         self.notifier = notifier
         self.messages = messages
         self.bus = bus
@@ -110,6 +116,80 @@ class MissionService:
         # holds its in-flight node tasks: asyncio keeps only a weak reference, so
         # a dropped handle lets a whole mission be garbage-collected mid-run.
         self._running: dict[str, asyncio.Task[str]] = {}
+        self._admission_lock = asyncio.Lock()
+        self._start_locks = KeyedLocks()
+        self._bot_slots = KeyedSlots(1)
+        self._owner_slots = KeyedSlots(settings.team_work.max_parallel_per_owner)
+
+    async def submit_work(self, owner_id, session_id, mission_id, goal, nodes, coordinator_id, member_ids=None):
+        """Persist a bounded job before acknowledging it. One application worker.
+
+        No automatic replan or action replay: each node has one execution
+        attempt. Recovery after an uncertain worker death needs inspection.
+        """
+        limits = self.settings.team_work
+        if not limits.enabled:
+            raise InvalidGraphError("background team work is disabled")
+        if not isinstance(nodes, list) or not 1 <= len(nodes) <= limits.max_steps:
+            raise InvalidGraphError(f"provide 1–{limits.max_steps} steps")
+        if not isinstance(goal, str) or not goal.strip() or len(goal) > 2000:
+            raise InvalidGraphError('job goal must contain 1–2000 characters')
+        safe = []
+        for node in nodes:
+            if not isinstance(node, dict) or not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", str(node.get('id', ''))):
+                raise InvalidGraphError("step ids must be 1–48 letters, digits, underscores or hyphens")
+            if node['id'] == '__summary':
+                raise InvalidGraphError("__summary is reserved for the coordinator")
+            if not str(node.get('instruction') or '').strip():
+                raise InvalidGraphError("every step needs self-contained instructions")
+            if not isinstance(node['instruction'], str) or len(node['instruction']) > 50_000:
+                raise InvalidGraphError('step instructions must be text of at most 50000 characters')
+            for key in ('required_files', 'input_files', 'depends_on'):
+                values = node.get(key, [])
+                if not isinstance(values, list) or len(values) > 50 or any(
+                    not isinstance(value, str) or not value.strip() for value in values
+                ):
+                    raise InvalidGraphError(f'{key} must contain at most 50 nonempty strings')
+            safe.append({key: node[key] for key in (
+                'id', 'bot_id', 'title', 'instruction', 'depends_on', 'kind',
+                'required_files', 'input_files', 'acceptance_criteria', 'verification', 'delivery_target'
+            ) if key in node})
+            safe[-1]['max_attempts'] = 1
+            if safe[-1].get('kind', 'task') not in ('task', 'gate'):
+                raise InvalidGraphError("step kind must be task or gate")
+        if len(safe) > 1:
+            if not coordinator_id or await self.bots.get(coordinator_id, owner_id) is None:
+                raise InvalidGraphError("a coordinator is required to combine results")
+            safe.append({
+                'id': '__summary', 'title': 'รวมผล / Final report', 'bot_id': coordinator_id,
+                'depends_on': [n['id'] for n in safe], 'required_files': [], 'max_attempts': 1,
+                'instruction': (
+                    'Combine the completed steps into the final answer for this job in the language of its goal. '
+                    'Read full result:<step> and contract:<step> blackboard entries as needed. '
+                    'Check coverage of the original request; distinguish verified facts, assumptions and limitations. '
+                    'Do not redo specialist work, invent missing results or perform new external actions. '
+                    'Reference existing deliverables; do not recreate or republish them. '
+                    'Put the complete user-facing report in finish_step.summary, with concrete evidence. '
+                    'If essential work is missing, record blocked or failed, never completed.'
+                ),
+            })
+        MissionEngine.validate_dag(safe)
+        async with self._admission_lock:
+            existing = await self.missions.get_mission(mission_id, owner_id)
+            if existing is not None:
+                if existing.status == 'planned':
+                    raise InvalidGraphError(f'job {mission_id} was not fully submitted; inspect it before retrying')
+                return existing
+            pending = await self.missions.pending_counts(owner_id)
+            if pending['owner'] >= limits.max_pending_per_owner or pending['total'] >= limits.max_pending_total:
+                raise InvalidGraphError("background queue is full; finish or cancel a pending job before submitting more")
+            mission = await self.plan(owner_id, goal, safe, session_id=session_id,
+                                      member_ids=member_ids, mission_id=mission_id)
+            await self.missions.blackboard_write(mission.id, 'scope:background', True)
+            await self.missions.update_mission(mission.id, status='queued')
+            self._spawn(mission.id)
+            mission.status = 'queued'
+            return mission
 
     # ------------------------------------------------------------------ planning
     async def _current_members(self, owner_id: str, session_id: str | None) -> frozenset[str] | None:
@@ -160,6 +240,7 @@ class MissionService:
         session_id: str | None = None,
         budget: dict | None = None,
         member_ids: frozenset[str] | None = None,
+        mission_id: str | None = None,
     ) -> Mission:
         """Persist a mission and its graph, or raise InvalidGraphError.
 
@@ -181,6 +262,9 @@ class MissionService:
         if current_members is not None:
             member_ids = current_members if member_ids is None else member_ids & current_members
 
+        nodes = [{**node, 'budget': {**(node.get('budget') or {}), **{
+            key: node[key] for key in ('input_files', 'delivery_target', 'acceptance_criteria', 'verification') if key in node
+        }}} for node in nodes]
         for node in nodes:
             bot_id = node.get("bot_id")
             if node.get("kind", "task") == "gate":
@@ -198,6 +282,7 @@ class MissionService:
             session_id=session_id,
             budget=budget,
             status="planned",
+            mission_id=mission_id,
         )
         try:
             if member_ids is not None:
@@ -212,20 +297,32 @@ class MissionService:
     # ------------------------------------------------------------------ running
     async def start(self, mission_id: str, owner_id: str) -> str:
         """Begin (or resume) a mission in the background. Returns its status."""
-        mission = await self.missions.get_mission(mission_id, owner_id)
-        if mission is None:
-            return "not_found"
-        task = self._running.get(mission_id)
-        if task is not None and not task.done():
+        async with self._start_locks.get(mission_id):
+            mission = await self.missions.get_mission(mission_id, owner_id)
+            if mission is None:
+                return "not_found"
+            task = self._running.get(mission_id)
+            if task is not None and not task.done():
+                return mission.status
+            if mission.status == 'completed' or (mission.status == 'cancelled' and
+                    await self.missions.blackboard_read(mission.id, 'scope:background')):
+                return mission.status
+            await self.missions.update_mission(mission_id, status="running")
+            self._spawn(mission_id)
             return "running"
-        await self.missions.update_mission(mission_id, status="running")
-        self._spawn(mission_id)
-        return "running"
 
     def _spawn(self, mission_id: str) -> asyncio.Task[str]:
         async def drive():
             # Queue before starting the engine's wall-clock budget or claiming leases.
             async with self._mission_slots:
+                mission = await self.missions.get_mission_unchecked(mission_id)
+                if mission is None:
+                    return 'not_found'
+                if mission.status not in ('queued', 'running'):
+                    return mission.status
+                if mission.status == 'queued':
+                    if not await self.missions.begin_queued(mission_id):
+                        return 'cancelled'
                 return await self._run(mission_id)
 
         task = asyncio.create_task(drive(), name=f"mission:{mission_id}")
@@ -280,7 +377,8 @@ class MissionService:
             task = self._running.get(mission.id)
             if task is not None and not task.done():
                 continue
-            await self.missions.update_mission(mission.id, status="running")
+            if mission.status != 'queued':
+                await self.missions.update_mission(mission.id, status="running")
             self._spawn(mission.id)
             resumed += 1
         if resumed:
@@ -308,7 +406,8 @@ class MissionService:
             node_executor=self._executor_for(mission),
             max_parallel_nodes=self.max_parallel_nodes,
             worker_id=f"mission-service:{mission_id[:8]}",
-            replan_hook=self._replan_hook_for(mission),
+            replan_hook=(None if await self.missions.blackboard_read(mission.id, 'scope:background')
+                         else self._replan_hook_for(mission)),
         )
         try:
             status = await engine.run_mission(mission_id)
@@ -338,10 +437,13 @@ class MissionService:
                 nodes = await self.missions.get_nodes(mission.id)
                 snapshot = [(n.id, n.status, n.output, n.artifacts, n.attempts) for n in nodes]
                 key = hashlib.sha256(json.dumps([mission.id, status, snapshot], sort_keys=True).encode()).hexdigest()[:32]
-                artifacts = list(dict.fromkeys(p for n in nodes if n.status == 'done' for p in (n.artifacts or [])))
-                content = f"Mission: {mission.goal}\nStatus: {status}\n\n" + '\n\n'.join(
+                artifacts = list(dict.fromkeys(p for n in nodes for p in (n.artifacts or [])))
+                final_node = next((n for n in nodes if n.id == '__summary' and n.status == 'done'), None)
+                content = f"Mission: {mission.goal}\nJob ID: {mission.id}\nStatus: {status}\n\n" + '\n\n'.join(
                     f"### {n.title} · {n.status}\n{(n.output or '')[:8000]}" for n in nodes
                 )
+                if final_node and status == 'completed':
+                    content = f"{mission.goal}\nJob ID: {mission.id}\n\n{final_node.output or ''}"
                 seq = await self.messages.append(mission.session_id, [{
                     'role': 'assistant', 'content': content,
                     'meta': {'artifacts': artifacts, 'mission_id': mission.id, 'delivery_id': key},
@@ -731,10 +833,26 @@ class MissionService:
         # has to cross-reference the roster itself to answer — and Chief of Staff
         # spent a whole extra tool round on `list_bots` doing exactly that.
         names = {b.id: b.name for b in await self.bots.list_for_user(mission.owner_id)}
+        contracts = {}
+        activity = {}
+        for node in nodes:
+            record = await self.missions.blackboard_read(mission_id, f'scope:activity:{node.id}')
+            activity[node.id] = (record or {}).get('phase', 'running') if node.status == 'running' else node.status
+            record = await self.missions.blackboard_read(mission_id, f'contract:{node.id}')
+            if isinstance(record, dict):
+                contracts[node.id] = {key: record.get(key) for key in (
+                    'status', 'verification_status', 'failure_reason', 'delivery', 'attempts', 'duration_seconds')}
+                contracts[node.id]['evidence_ref'] = f'contract:{node.id}'
+
         return {
             "id": mission.id,
             "goal": mission.goal,
             "status": mission.status,
+            "progress": {
+                "done": sum(n.status == 'done' for n in nodes), "total": len(nodes),
+                "steps": [{"id": n.id, "title": n.title, "bot_name": names.get(n.bot_id or '', ''),
+                           "state": activity[n.id], "depends_on": n.depends_on or []} for n in nodes],
+            },
             "budget": mission.budget or {},
             "spent": mission.spent or {},
             "created_at": mission.created_at.isoformat() if mission.created_at else None,
@@ -748,11 +866,13 @@ class MissionService:
                     # been archived — the id stays, so the step is still traceable.
                     "bot_name": names.get(n.bot_id or "", ""),
                     "status": n.status,
+                    "execution_state": activity[n.id],
                     "depends_on": n.depends_on or [],
                     "attempts": n.attempts,
                     "max_attempts": n.max_attempts,
                     "output": n.output or "",
                     "artifacts": n.artifacts or [],
+                    **({"task_result": contracts[n.id]} if n.id in contracts else {}),
                 }
                 for n in nodes
             ],
@@ -775,8 +895,19 @@ class MissionService:
         )
 
         async def execute(node: MissionNode, context: NodeContext) -> NodeResult:
-            async with self._node_slots:
-                return await self._execute_node(mission, runner, node, context)
+            background = await self.missions.blackboard_read(mission.id, 'scope:background')
+            if not background:
+                async with self._node_slots:
+                    return await self._execute_node(mission, runner, node, context)
+            await self.missions.blackboard_write(mission.id, f'scope:activity:{node.id}', {'phase': 'queued'})
+            # Waiting for a busy bot must not consume a global execution slot.
+            async with self._bot_slots.hold(f'{mission.owner_id}:{node.bot_id}'):
+                async with self._owner_slots.hold(mission.owner_id), self._node_slots:
+                    current = await self.missions.get_mission_unchecked(mission.id)
+                    if current is None or current.status != 'running':
+                        return NodeResult(status='error', output='Job stopped before this step began.')
+                    await self.missions.blackboard_write(mission.id, f'scope:activity:{node.id}', {'phase': 'running'})
+                    return await self._execute_node(mission, runner, node, context)
 
         return execute
 
@@ -797,49 +928,102 @@ class MissionService:
             )
 
         from sbot.tools.finish_step import FinishStepTool
-        completion = FinishStepTool(runner.workspace, (node.budget or {}).get('required_files'))
+        from sbot.config import ReliabilitySettings
+        from sbot.core.deep_verification import TaskVerifier
+        policy = getattr(self.settings, 'reliability', ReliabilitySettings())
+        mode = policy.verification_mode if policy.enabled_for(mission.owner_id) else 'off'
+        root_workspace = runner.workspace
+        input_manifest = {}
+        background = await self.missions.blackboard_read(mission.id, 'scope:background')
+        if background:
+            from sbot.core.team_workspace import scope_runner
+            inputs = list((node.budget or {}).get('input_files') or [])
+            for dep in node.depends_on or []:
+                contract = await self.missions.blackboard_read(mission.id, f'contract:{dep}')
+                if isinstance(contract, dict):
+                    inputs.extend(contract.get('artifacts') or [])
+            try:
+                if policy.isolated_assignments and policy.enabled_for(mission.owner_id):
+                    from sbot.core.assignment_workspace import isolate_runner
+                    runner, input_manifest = isolate_runner(runner, inputs)
+                else:
+                    runner, input_manifest = scope_runner(runner, mission.id, node.id, inputs)
+            except (ValueError, OSError) as exc:
+                return NodeResult(status='error', output=f'Cannot prepare job inputs: {exc}')
+        elif policy.isolated_assignments and policy.enabled_for(mission.owner_id):
+            from sbot.core.assignment_workspace import isolate_runner
+            inputs = list((node.budget or {}).get('input_files') or [])
+            for dep in node.depends_on or []:
+                contract = await self.missions.blackboard_read(mission.id, f'contract:{dep}')
+                if isinstance(contract, dict):
+                    inputs.extend(contract.get('artifacts') or [])
+            try:
+                runner, input_manifest = isolate_runner(runner, inputs)
+            except (ValueError, OSError) as exc:
+                return NodeResult(status='error', output=f'Cannot isolate assignment: {exc}')
+        if background and node.id == '__summary':
+            parent_guard = runner.arg_guard
+
+            def summary_guard(name, args):
+                readable = {'read_file', 'list_dir', 'read_docx', 'read_pdf', 'read_excel', 'read_csv'}
+                allowed = name in readable or (name == 'blackboard' and args.get('action') in ('read', 'list'))
+                allowed = allowed or (name == 'finish_step' and not args.get('files'))
+                if not allowed:
+                    return args, 'The coordinator may only read existing results and record its final report.'
+                return parent_guard(name, args) if parent_guard else (args, None)
+
+            runner.arg_guard = summary_guard
+            runner.connectors = None
+        verifier = TaskVerifier(runner, policy, bot, node.instruction,
+                                    (node.budget or {}).get('acceptance_criteria', ''),
+                                    (node.budget or {}).get('verification')) if mode != 'off' else None
+        if verifier is not None:
+            verifier.task_deadline = time.monotonic() + _NODE_SECONDS
+        from sbot.core.delivery import LocalDelivery
+        target = (node.budget or {}).get('delivery_target')
+        delivery = LocalDelivery(self.local_broker, mission.owner_id, target, runner.arg_guard) if target else None
+        completion = FinishStepTool(runner.workspace, (node.budget or {}).get('required_files'), verifier, mode, delivery)
+        completion.require_record = bool(background)
+        started = time.monotonic()
         outcome = await runner.run(
             bot,
             await self._system_prompt(mission, bot, runner),
-            self._user_prompt(node, context),
+            self._user_prompt(node, context) + ("\nInput snapshots (keep unchanged): " + str(input_manifest) if input_manifest else ""),
             lambda _event: None,
-            turn_id=f"mn_{node.id[:8]}",
+            turn_id=f"mn_{mission.id[:8]}_{node.id}",
             max_seconds=_NODE_SECONDS,
             extra_tools=[BlackboardTool(self.missions, mission.id, node.id), completion],
         )
-        # Stripped, not just falsy-checked: a reply of "\n\n" is truthy and
-        # would mark the node done, then hand whitespace to its dependents.
-        node_output = outcome.text.strip()
-        if self.require_verified_results:
-            recorded = completion.result
-            if recorded is None or recorded['status'] != 'completed':
-                return NodeResult(status='error', output=(recorded['summary'] if recorded else
-                    'Step has no verified completion. Call finish_step with status, evidence and deliverable paths.'), cost=outcome.cost)
-            node_output = recorded['summary'] + '\n\nEvidence: ' + recorded['evidence']
-            outcome.artifacts = recorded['artifacts']
-        # A validated finish_step is the terminal contract. Losing the optional
-        # closing prose afterwards must not repeat already completed work.
-        if not node_output or (outcome.cut_off and not self.require_verified_results):
-            # A node that reports "done" with nothing to hand downstream would
-            # satisfy its dependents with an empty result.
-            if outcome.timed_out:
-                why = " before running out of time."
-            elif outcome.reached_max_iterations:
-                why = " before running out of steps."
-            else:
-                why = "."
-            return NodeResult(
-                status="error",
-                output=(f"The assigned bot produced no output{why}" if not node_output
-                        else f"The assigned bot did not finish{why}\n{node_output}"),
-                cost=outcome.cost,
-            )
-        return NodeResult(
-            status="done",
-            output=node_output,
-            artifacts=outcome.artifacts,
-            cost=outcome.cost,
+        from sbot.core.task_result import TaskResult
+        if runner.workspace != root_workspace:
+            from sbot.core.assignment_workspace import rebase_result
+            outcome.artifacts = rebase_result({'artifacts': outcome.artifacts}, runner.workspace, root_workspace)['artifacts']
+            if completion.result:
+                completion.result = rebase_result(completion.result, runner.workspace, root_workspace)
+        result = TaskResult.from_outcome(
+            outcome, completion.result if self.require_verified_results or background else None,
+            require_completion=self.require_verified_results or bool(background),
         )
+        result.attempts = context.attempt
+        result.duration_seconds = round(time.monotonic() - started, 3)
+        logger.info('Task reliability {}', json.dumps({
+            'kind': 'mission_node', 'task_id': node.id, 'status': result.status,
+            'failure_reason': result.failure_reason, 'verification_status': result.verification_status,
+            'attempts': result.attempts, 'duration_seconds': result.duration_seconds,
+            'tokens': result.cost.get('tokens', 0),
+        }))
+        output = result.summary
+        if completion.result and completion.result.get('evidence'):
+            output += '\n\nEvidence: ' + completion.result['evidence']
+        if result.failure_reason:
+            output = f"Task incomplete: {result.failure_reason}. " + output
+        if result.failure_reason == 'empty_output':
+            output += 'The assigned bot produced no output.'
+        if result.failure_reason == 'missing_completion_record':
+            output += ' Call finish_step with status, evidence and deliverable paths.'
+        return NodeResult(status=result.scheduler_status, output=output,
+                          artifacts=result.artifacts, cost=result.cost,
+                          task_result=result.as_dict())
 
     async def _system_prompt(self, mission: Mission, bot: Any, runner: SpecialistRunner) -> str:
         prompt = (

@@ -54,7 +54,7 @@ ConfirmFn = Callable[[str, str, str], Awaitable[bool]]
 # the model calling it is only ever relaying — and in ask mode the user gets to
 # see the relay before it lands.
 UNSAFE_TOOLS = {
-    "exec", "project", "delegate", "delegate_many", "workflow", "spawn", "mission_start", "create_bot", "send_external", "mission_gate",
+    "exec", "project", "delegate", "delegate_many", "team_submit", "workflow", "spawn", "mission_start", "create_bot", "send_external", "mission_gate",
 }
 
 _PREVIEW_CHARS = 200
@@ -442,6 +442,8 @@ class AgentLoop:
         active_plan: list[dict[str, Any]] = []
         completion_reminders = 0
         completion_instruction: str | None = None
+        finalize_only = False
+        finalization_rounds = 0
         # Loop-breaker state: the last tool call actually executed, and how many
         # times in a row it has been executed.
         last_signature: str | None = None
@@ -458,6 +460,10 @@ class AgentLoop:
         ceiling = _compaction_ceiling_chars(effective_model, self.max_tokens, context_window)
 
         for _iteration in range(self.max_iterations):
+            if finalize_only:
+                if finalization_rounds >= 1:
+                    break
+                finalization_rounds += 1
             # Checked between iterations, so an in-flight tool always finishes;
             # the first iteration always runs, however long the turn is over.
             if iterations and self.max_turn_seconds > 0:
@@ -467,6 +473,8 @@ class AgentLoop:
             iterations += 1
             result: ChatResult | None = None
             definitions = self.tools.get_definitions()
+            if finalize_only:
+                definitions = [d for d in definitions if d['function']['name'] == 'finish_step']
             prompt = _prompt_messages(working, base_len, sent_results)
             size = _prompt_size(prompt)
             if size > ceiling and _compact_sent_tool_results(sent_order, sent_results):
@@ -559,6 +567,11 @@ class AgentLoop:
             for key in usage_total:
                 usage_total[key] += result.usage.get(key, 0)
 
+            if result.finish_reason in ('length', 'max_tokens'):
+                # Repaired JSON from a cut-off tool call is not authorization
+                # to execute an incomplete command or record a partial report.
+                result.tool_calls = []
+
             if not result.has_tool_calls:
                 # An empty final message is never stored: it renders as a blank
                 # bubble, and it comes back as a content-less assistant turn in
@@ -566,9 +579,22 @@ class AgentLoop:
                 # runtime surfaces it as a visible error instead.
                 if result.content:
                     working.append({"role": "assistant", "content": result.content})
+                completion_tool = self.tools.get('finish_step')
+                if (getattr(completion_tool, 'require_record', False)
+                        and completion_tool.result is None and not finalize_only
+                        and result.finish_reason not in ('length', 'max_tokens')):
+                    finalize_only = True
+                    completion_instruction = (
+                        'Record the outcome of the existing work with finish_step now. '
+                        'Only this completion tool is available; do not repeat earlier actions. '
+                        'Include the full deliverable text in summary for a text task. '
+                        'If there is no usable output, record failed and say why; do not claim completion. '
+                        'You have one final model call within the original time budget.'
+                    )
+                    continue
                 unfinished = [s for s in active_plan if s.get("status") != "done"]
                 paused = any(s.get("status") in {"blocked", "waiting_for_user"} for s in unfinished)
-                if unfinished and not paused:
+                if unfinished and not paused and result.finish_reason not in ('length', 'max_tokens'):
                     if completion_reminders < 2:
                         completion_reminders += 1
                         completion_instruction = (
@@ -633,6 +659,8 @@ class AgentLoop:
                 logger.info("Tool call: {}({})", tc.name, args_preview)
                 args = tc.arguments
                 block_message: str | None = None
+                if finalize_only and tc.name != 'finish_step':
+                    block_message = 'Only recording the existing result is allowed during output recovery.'
                 # Loop-breaker identity: only back-to-back repeats count — any
                 # different call in between may have changed the state this one
                 # reads (edit a script, then re-run it), which makes the repeat
@@ -745,6 +773,7 @@ class AgentLoop:
                                     text=str(payload.get("text") or ""),
                                     artifacts=[str(path) for path in payload.get("artifacts") or []],
                                     is_error=bool(payload.get("is_error")),
+                                    result=payload.get("result"),
                                 )
                             )
                             return
@@ -824,6 +853,9 @@ class AgentLoop:
                 tool = self.tools.get(tc.name)
                 if tool and tool.ends_turn_on_success and not tool_result.startswith('Error'):
                     terminal_results.append(tool_result)
+                    # Do not execute a later, bundled tool call after a durable
+                    # completion such as create_bot or team_submit.
+                    break
 
             if terminal_results:
                 final = '\n\n'.join(terminal_results)

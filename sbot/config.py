@@ -83,6 +83,21 @@ class SandboxSettings(BaseModel):
     # (kept modest to bound worst-case; raise if agents do heavy builds)
 
 
+class ReliabilitySettings(BaseModel):
+    """Staged rollout. Empty pilot list applies the chosen modes to all owners."""
+
+    verification_mode: str = Field(default='off', pattern='^(off|shadow|enforce)$')
+    pilot_owner_ids: list[str] = Field(default_factory=list)
+    verifier_image: str = 'sbot-verifier:latest'
+    verifier_model: str | None = None
+    verification_seconds: int = Field(default=60, ge=1, le=120)
+    retry_empty_output: bool = False
+    isolated_assignments: bool = False
+
+    def enabled_for(self, owner_id: str | None) -> bool:
+        return not self.pilot_owner_ids or owner_id in self.pilot_owner_ids
+
+
 class MemorySettings(BaseModel):
     """Continuous-learning memory consolidation: the agent folds a session into
     durable per-user memory once enough new messages accumulate."""
@@ -240,6 +255,17 @@ class LogSettings(BaseModel):
     compress: bool = True
 
 
+class TeamWorkSettings(BaseModel):
+    """Bounded background work for a single application worker."""
+
+    enabled: bool = True
+    max_pending_per_owner: int = Field(default=12, ge=1, le=100)
+    max_pending_total: int = Field(default=128, ge=1, le=1000)
+    max_parallel_total: int = Field(default=4, ge=1, le=32)
+    max_parallel_per_owner: int = Field(default=2, ge=1, le=16)
+    max_steps: int = Field(default=12, ge=1, le=40)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SBOT_", env_nested_delimiter="__", env_file=".env", extra="ignore"
@@ -314,6 +340,8 @@ class Settings(BaseSettings):
     log: LogSettings = LogSettings()
     llm: LLMSettings = LLMSettings()
     sandbox: SandboxSettings = SandboxSettings()
+    reliability: ReliabilitySettings = ReliabilitySettings()
+    team_work: TeamWorkSettings = TeamWorkSettings()
     browser: BrowserSettings = BrowserSettings()
     memory: MemorySettings = MemorySettings()
     scheduler: SchedulerSettings = SchedulerSettings()

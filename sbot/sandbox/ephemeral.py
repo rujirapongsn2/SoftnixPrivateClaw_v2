@@ -38,8 +38,9 @@ class SandboxResult:
 
 
 class EphemeralSandbox:
-    def __init__(self, settings: SandboxSettings):
+    def __init__(self, settings: SandboxSettings, readonly_inputs: bool = False):
         self.settings = settings
+        self.readonly_inputs = readonly_inputs
         from sbot.sandbox.projects import ProjectEnvironments
         self.projects = ProjectEnvironments(settings)
 
@@ -83,6 +84,8 @@ class EphemeralSandbox:
             "--pids-limit", str(s.pids_limit),
             "--workdir", "/workspace",
             "--mount", f"type=bind,source={workspace.resolve()},target=/workspace",
+            *(['--mount', f'type=bind,source={workspace.resolve() / "inputs"},target=/workspace/inputs,readonly']
+              if self.readonly_inputs else []),
             s.image,
             "/bin/sh", "-lc", command,
         ]

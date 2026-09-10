@@ -47,6 +47,14 @@ _MAX_IDLE_SLEEP = 5.0
 _PARENT_SUMMARY_CHARS = 400
 
 
+def dependency_satisfied(node: MissionNode) -> bool:
+    if node.status == 'done':
+        return True
+    # Preserve legacy skips of non-delivery steps, but never waive a requested
+    # deliverable merely because a replanner changed the step status.
+    return node.status == 'skipped' and not (node.budget or {}).get('required_files')
+
+
 class InvalidGraphError(Exception):
     """The graph is not executable as given (dangling edge, duplicate id, …)."""
 
@@ -75,6 +83,7 @@ class NodeResult:
     artifacts: list[str] = field(default_factory=list)
     # {"tokens": int, "cost": float} — charged against the mission budget.
     cost: dict[str, float] = field(default_factory=dict)
+    task_result: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -263,11 +272,18 @@ class MissionEngine:
                             continue
                     deps = node.depends_on or []
                     if all(
-                        by_id.get(d) is not None and by_id[d].status in SATISFIES_DEPENDENTS
+                        by_id.get(d) is not None and dependency_satisfied(by_id[d])
                         for d in deps
                     ):
                         ready.append(node)
 
+                if unsettled == 0 and any(
+                    n.status == 'skipped' and not dependency_satisfied(n) for n in nodes
+                ):
+                    await self._drain(inflight, spent)
+                    await self._persist_spent(mission_id, spent, time.monotonic() - started)
+                    await self.store.update_mission(mission_id, status='failed')
+                    return 'failed'
                 if unsettled == 0:
                     # Drained before the spend is written, not after. A node task
                     # can have committed itself `done` — so it no longer counts as
@@ -410,6 +426,18 @@ class MissionEngine:
         for dep in parents:
             key = f"result:{dep}"
             parents[dep] += f"\nFull result: blackboard key {key}"
+            metadata = await self.store.blackboard_read(mission_id, f'contract:{dep}')
+            if isinstance(metadata, dict):
+                # Preserve status, references and evidence independently of the
+                # prose preview. Evidence payloads remain lazily retrievable.
+                import json
+                parents[dep] += '\nResult metadata: ' + json.dumps({
+                    'status': metadata.get('status'),
+                    'verification_status': metadata.get('verification_status', 'not_verified'),
+                    'failure_reason': metadata.get('failure_reason'),
+                    'evidence_ref': f'contract:{dep}',
+                    'delivery': metadata.get('delivery', {}),
+                }, ensure_ascii=False)
         context = NodeContext(
             manifest=manifest,
             parent_outputs=parents,
@@ -428,11 +456,11 @@ class MissionEngine:
             result = NodeResult(status="error", output=f"Error: {exc}")
 
         try:
-            # Blackboard first, then the node's status. A crash in between leaves
-            # the blackboard ahead of the node, which the retry overwrites by key —
-            # the reverse order would mark the node done with its output missing.
-            await self.store.blackboard_write(mission_id, f'result:{node.id}', result.output or '', node_id=node.id)
+            # Runtime result/contract keys are committed atomically with the
+            # lease-checked node transition below, never by a stale worker.
             for key, value in (result.blackboard_updates or {}).items():
+                if key.startswith(('result:', 'contract:', 'scope:', 'delivery:')):
+                    raise ValueError('runtime blackboard namespace is reserved')
                 await self.store.blackboard_write(mission_id, key, value, node_id=node.id)
 
             status = result.status if result.status in EXECUTOR_STATUSES else "error"
@@ -450,6 +478,7 @@ class MissionEngine:
                 artifacts=result.artifacts,
                 cost=result.cost,
                 lease_owner=self.worker_id, attempt=node.attempts,
+                task_result=result.task_result,
             )
         except asyncio.CancelledError:
             raise

@@ -776,3 +776,32 @@ def test_wall_budget_includes_time_before_restart():
     from types import SimpleNamespace
     mission = SimpleNamespace(budget={'max_wall_seconds': 100})
     assert MissionEngine._budget_exceeded(mission, {'seconds': 90}, 11, []) == 'max_wall_seconds'
+
+
+@pytest.mark.asyncio
+async def test_runtime_contract_is_fenced_with_node_completion(stores):
+    store = stores['missions']
+    mission = await _mission(stores, email='contract-fencing@sbot.ai')
+    await store.add_nodes(mission.id, [{'id': 'n', 'title': 'n', 'instruction': 'build'}])
+    old = await store.claim_node(mission.id, 'n', 'old', -1)
+    await store.reclaim_expired_leases(mission.id)
+    new = await store.claim_node(mission.id, 'n', 'new', 60)
+    await store.finish_node(mission.id, 'n', status='done', output='current',
+                            lease_owner='new', attempt=new.attempts,
+                            task_result={'status': 'completed', 'verification_status': 'not_verified'})
+    await store.finish_node(mission.id, 'n', status='done', output='stale',
+                            lease_owner='old', attempt=old.attempts,
+                            task_result={'status': 'completed', 'verification_status': 'passed'})
+    assert await store.blackboard_read(mission.id, 'result:n') == 'current'
+    assert (await store.blackboard_read(mission.id, 'contract:n'))['verification_status'] == 'not_verified'
+
+
+@pytest.mark.asyncio
+async def test_agent_cannot_forge_runtime_contract(stores):
+    from sbot.tools.blackboard import BlackboardTool
+    mission = await _mission(stores, email='reserved-contract@sbot.ai')
+    tool = BlackboardTool(stores['missions'], mission.id, 'n')
+    for key in ('result:n', 'contract:n', 'scope:members', 'delivery:status'):
+        answer = await tool.execute('write', key=key, value='completed')
+        assert answer.startswith('Error:')
+        assert await stores['missions'].blackboard_read(mission.id, key) is None

@@ -10,6 +10,7 @@ import asyncio
 import difflib
 import itertools
 import json
+import time
 import uuid
 from typing import Any
 
@@ -21,7 +22,9 @@ from sbot.core.specialist import (
     SpecialistRunner,
     specialist_progress,
 )
-from sbot.core.turn_context import current_turn_locale
+from sbot.core.task_result import TaskResult
+from sbot.tools.finish_step import FinishStepTool
+from sbot.core.turn_context import current_turn_locale, current_turn_deadline
 from sbot.db.stores import BotStore
 from sbot.i18n import t
 from sbot.tools.base import Tool
@@ -95,9 +98,15 @@ class ListBotsTool(Tool):
 
 class CreateBotTool(Tool):
     name = "create_bot"
+    # Creating a team member is itself the requested action. Ending the turn
+    # here prevents a model from treating the new bot as an invitation to plan,
+    # delegate a smoke test, create files, or mutate the user's plan.
+    ends_turn_on_success = True
     description = (
         "Create a new specialist bot for the user's team. "
-        "Chief of Staff uses this when a new role or domain expert is required to handle specialized work."
+        "Use only when the user asked to create a member. This completes that request: "
+        "do not test, delegate to, plan work for, or otherwise use the new bot unless the "
+        "user explicitly requested that as a separate action."
     )
     parameters = {
         "type": "object",
@@ -189,14 +198,21 @@ class CreateBotTool(Tool):
             kind="specialist",
             created_by=f"bot:{self.creator_bot_id}",
         )
-        return f"Successfully created bot '{bot.name}' (id: {bot.id}, role: {bot.role_title})."
+        return (
+            f"สร้างบอท '{bot.name}' เรียบร้อยแล้ว "
+            f"(บทบาท: {bot.role_title}, รหัส: {bot.id}). "
+            "ยังไม่ได้มอบหมายหรือทดสอบงานให้บอทนี้."
+        )
 
 
 class DelegateTool(Tool):
     name = "delegate"
     description = (
         "Delegate a specific task to a specialist bot synchronously and wait for their response. "
-        "Use this for tasks that require the specialist's expertise, charter, or domain knowledge."
+        "Use this for tasks that require the specialist's expertise, charter, or domain knowledge. "
+        "For file tasks list every required_file and the requested delivery_target. Supply input_files "
+        "for existing files. Use verification for code tests or important sourced research. "
+        "Report incomplete results explicitly; do not repeat the whole assignment."
     )
     parameters = {
         "type": "object",
@@ -205,6 +221,18 @@ class DelegateTool(Tool):
             "bot_id": {"type": "string", "description": "Optional: exact bot id if known"},
             "task": {"type": "string", "description": "Clear and self-contained instructions for the specialist"},
             "context": {"type": "string", "description": "Optional context or background information"},
+            "verification": {"type": "object", "properties": {
+                "kind": {"type": "string", "enum": ["code", "research"]},
+                "test_command": {"type": "array", "items": {"type": "string"}},
+                "source_urls": {"type": "array", "items": {"type": "string"}},
+            }, "required": ["kind"]},
+            "input_files": {"type": "array", "items": {"type": "string"}},
+            "required_files": {"type": "array", "items": {"type": "string"}},
+            "acceptance_criteria": {"type": "string"},
+            "delivery_target": {"type": "object", "properties": {
+                "workspace_id": {"type": "string"},
+                "paths": {"type": "object", "additionalProperties": {"type": "string"}},
+            }, "required": ["workspace_id"]},
         },
         "required": ["task"],
     }
@@ -231,12 +259,16 @@ class DelegateTool(Tool):
         connectors: Any = None,
         project_access: Any = None,
         arg_guard: Any = None,
+        reliability: Any = None,
     ):
         self.bot_store = bot_store
         self.owner_id = owner_id
+        from sbot.config import ReliabilitySettings
+        self.reliability = reliability or ReliabilitySettings()
         # Optional on purpose: a delegation is delivered through `progress`, and
         # the mirror is only a second view of it. Missions and tests run the
         # same tool with no session to mirror into.
+        self.local_broker = None
         self.mirror = mirror
         self.leader_bot_id = leader_bot_id
         self.member_ids = member_ids
@@ -332,8 +364,22 @@ class DelegateTool(Tool):
         context: str = "",
         progress: Any = None,
         next_substep: Any = None,
+        required_files: list[str] | None = None,
+        acceptance_criteria: str = "",
+        delivery_target: dict | None = None,
+        input_files: list[str] | None = None,
+        verification: dict | None = None,
         **_: Any,
     ) -> str:
+        if required_files is not None and (not isinstance(required_files, list) or
+                any(not isinstance(path, str) or not path.strip() for path in required_files)):
+            return "Error: required_files must be a list of nonempty paths."
+        if delivery_target is not None and (not isinstance(delivery_target, dict) or not required_files):
+            return "Error: delivery_target requires an object and explicit required_files."
+        if verification is not None and (not isinstance(verification, dict) or
+                verification.get('kind') not in {'code', 'research'}):
+            return 'Error: verification.kind must be code or research.'
+        runner = self.runner
         target_bot = await self._resolve_target(bot_id, bot_name)
 
         if target_bot is None:
@@ -356,6 +402,14 @@ class DelegateTool(Tool):
                 f"Delegate to one of these instead: {available}"
             )
 
+        input_manifest = {}
+        root_workspace = runner.workspace
+        if self.reliability.isolated_assignments and self.reliability.enabled_for(self.owner_id):
+            from sbot.core.assignment_workspace import isolate_runner
+            try:
+                runner, input_manifest = isolate_runner(runner, input_files or [])
+            except (ValueError, OSError) as exc:
+                return f'Error: cannot isolate assignment: {exc}'
         # The handoff is rendered as bot-to-bot communication, not as a tool
         # call, so the UI needs the bot that was actually resolved rather than
         # the name the model typed. Emitted before the run so the card can show
@@ -383,11 +437,33 @@ class DelegateTool(Tool):
             "For file deliverables, use publish_artifact to attach every requested file, even when it already existed. "
             "This tool and document-reading tools are available independently of your configured tool allowlist."
         )
-        specialist_context = await self.runner.context_block(target_bot)
+        specialist_context = await runner.context_block(target_bot)
         if specialist_context:
             system_prompt = f"{system_prompt}\n\n{specialist_context}"
 
         user_prompt = task if not context else f"{task}\n\nContext:\n{context}"
+
+        if input_manifest:
+            user_prompt += '\nRead-only input snapshots (original path -> available path): ' + json.dumps(input_manifest)
+        from sbot.core.delivery import LocalDelivery
+        delivery = LocalDelivery(self.local_broker, self.owner_id, delivery_target, runner.arg_guard) if delivery_target else None
+        mode = self.reliability.verification_mode if self.reliability.enabled_for(self.owner_id) else 'off'
+        from sbot.core.deep_verification import TaskVerifier
+        verifier = TaskVerifier(runner, self.reliability, target_bot, task, acceptance_criteria, verification) if mode != 'off' else None
+        completion = FinishStepTool(runner.workspace, required_files, verifier, mode, delivery) if required_files or verification else None
+        if completion is not None:
+            # A delegated artifact is not complete merely because the worker
+            # wrote a file or emitted some prose.  Require the structured
+            # completion record so AgentLoop can recover the common case where
+            # a worker finishes its tool work and then returns an empty final
+            # message.  Recovery keeps the same conversation/history and
+            # exposes only finish_step, so it cannot replay writes, commands,
+            # uploads, or other side effects.
+            completion.require_record = True
+            system_prompt += "\nReserve the final 60 seconds for validation and delivery. Call finish_step to record completion with every required file and evidence before ending."
+            user_prompt += "\nRequired deliverables: " + json.dumps(required_files)
+        if acceptance_criteria:
+            user_prompt += "\nAcceptance criteria: " + acceptance_criteria
 
         logger.info("Delegating task to bot {} ({})", target_bot.name, target_bot.id)
         # Per delegation, not per bot: `delegate_many` can hand the same
@@ -413,13 +489,16 @@ class DelegateTool(Tool):
                 self.mirror.relay(mirrored, event)
 
             specialist_sink = emit_to_both
+        started = time.monotonic()
+        attempts = 1
         try:
-            outcome = await self.runner.run(
+            outcome = await runner.run(
                 target_bot,
                 system_prompt,
                 user_prompt,
                 specialist_sink,
                 turn_id=turn_id,
+                **({"extra_tools": [completion]} if completion is not None else {}),
             )
         except BaseException as exc:
             # The nested loop can raise (a re-raised TimeoutError, a provider
@@ -442,6 +521,8 @@ class DelegateTool(Tool):
                     "text": f"Error: {detail}",
                     "artifacts": [],
                     "is_error": True,
+                    "result": TaskResult("failed", summary=f"Error: {detail}",
+                                         failure_reason=type(exc).__name__).as_dict(),
                 }
             )
             if mirrored is not None:
@@ -463,8 +544,62 @@ class DelegateTool(Tool):
         # `.strip()` on every path, not just the cut-off one: a reply of "\n\n"
         # is truthy, so it used to pass through as the specialist's stored
         # message and render as a blank bubble under its name.
+        # One output-recovery attempt only. No new full task/clock allowance,
+        # no retries after cutoff or after a terminal completion record.
+        if (completion is None and self.reliability.retry_empty_output
+                and self.reliability.enabled_for(self.owner_id)
+                and not outcome.text.strip() and not outcome.artifacts and not outcome.cut_off):
+            remaining = 300 - (time.monotonic() - started)
+            deadline = current_turn_deadline.get()
+            if deadline is not None:
+                remaining = min(remaining, deadline - time.monotonic())
+            if remaining >= 5:
+                attempts = 2
+                previous_cost = dict(outcome.cost)
+                try:
+                    recovered = await runner.run(
+                        target_bot, system_prompt,
+                        user_prompt + '\nPrevious attempt ended without an answer. Inspect existing work and '
+                        'return the missing result only; do not repeat completed actions. If no work exists, '
+                        'report failure rather than restarting the whole assignment.',
+                        specialist_sink, turn_id=turn_id + '_recovery',
+                        max_seconds=min(remaining, 30), max_iterations=2,
+                        **({'extra_tools': [completion]} if completion else {}),
+                    )
+                except Exception as exc:
+                    # Keep the first attempt's usage and still close the card.
+                    recovered = outcome
+                    previous_cost = {}
+                    logger.warning('Delegation output recovery failed: {}', type(exc).__name__)
+                except BaseException:
+                    emit_event({'kind': 'delegation_finished', 'delegation_id': delegation_id,
+                                'bot_id': target_bot.id, 'text': 'Output recovery cancelled.',
+                                'is_error': True, 'artifacts': [],
+                                'result': TaskResult('failed', failure_reason='cancelled',
+                                                     cost=previous_cost).as_dict()})
+                    if mirrored is not None:
+                        await self.mirror.close(mirrored, turn_id, 'Output recovery cancelled.', is_error=True)
+                    raise
+                for key, value in previous_cost.items():
+                    recovered.cost[key] = recovered.cost.get(key, 0) + value
+                outcome = recovered
+        if runner.workspace != root_workspace:
+            from sbot.core.assignment_workspace import rebase_result
+            outcome.artifacts = rebase_result({'artifacts': outcome.artifacts}, runner.workspace, root_workspace)['artifacts']
+            if completion and completion.result:
+                completion.result = rebase_result(completion.result, runner.workspace, root_workspace)
+        result = TaskResult.from_outcome(outcome, completion.result if completion else None,
+                                         require_completion=completion is not None)
+        result.attempts = attempts
+        result.duration_seconds = round(time.monotonic() - started, 3)
+        logger.info('Task reliability {}', json.dumps({
+            'kind': 'delegate', 'task_id': delegation_id, 'status': result.status,
+            'failure_reason': result.failure_reason, 'verification_status': result.verification_status,
+            'attempts': result.attempts, 'duration_seconds': result.duration_seconds,
+            'tokens': result.cost.get('tokens', 0),
+        }))
         locale = current_turn_locale.get()
-        text = outcome.text.strip()
+        text = result.summary
         if not text:
             if outcome.timed_out:
                 key = "delegate.no_output_timeout"
@@ -484,8 +619,9 @@ class DelegateTool(Tool):
                 "delegation_id": delegation_id,
                 "bot_id": target_bot.id,
                 "text": text,
-                "artifacts": outcome.artifacts,
-                "is_error": outcome.cut_off,
+                "artifacts": result.artifacts,
+                "is_error": result.status != "completed",
+                "result": result.as_dict(),
             }
         )
         if mirrored is not None:
@@ -493,9 +629,10 @@ class DelegateTool(Tool):
             # delegating model is handed below — read there, it is a reply to
             # the instruction above it, from the bot whose thread it is.
             await self.mirror.close(
-                mirrored, turn_id, text, is_error=outcome.cut_off, artifacts=outcome.artifacts
+                mirrored, turn_id, text, is_error=result.status != "completed", artifacts=result.artifacts,
+                result=result.as_dict(),
             )
-        if outcome.cut_off:
+        if outcome.cut_off and result.status != "completed":
             # The instruction leads, ahead of the specialist's text. Tool
             # results are head-truncated (12k on the wire, 800 once stale, 4k
             # in the store) and the truncation footer tells the model to re-run
@@ -508,12 +645,15 @@ class DelegateTool(Tool):
                 "ให้รายงานผลเท่าที่ได้ต่อผู้ใช้ หรือมอบหมายใหม่ด้วยขอบเขตที่แคบลง\n\n"
                 f"{text}"
             )
+        if result.status != 'completed':
+            return ('[Task incomplete: ' + (result.failure_reason or result.status) + ']\n'
+                    'Report the missing result; do not claim success or redo the entire assignment.\n' + text)
         manifest = ''
-        if outcome.artifacts:
+        if result.artifacts:
             manifest = ('[Runtime attachment manifest: these files were attached to the specialist reply. '
                         'They are system-recorded, not a claim from the specialist. Do not republish them or '
                         'claim the specialist lacked the publication tool.]\n'
-                        + '\n'.join(outcome.artifacts) + '\n\n')
+                        + '\n'.join(result.artifacts) + '\n\n')
         return f"{manifest}[{target_bot.name} ({target_bot.role_title}) ตอบกลับ]:\n\n{text}"
 
 
@@ -549,6 +689,7 @@ class DelegateManyTool(Tool):
                 "items": {
                     "type": "object",
                     "properties": {
+                        "id": {"type": "string"},
                         "bot_name": {
                             "type": "string",
                             "description": "The name of the target bot, e.g. 'นักวิจัย'",
@@ -558,6 +699,8 @@ class DelegateManyTool(Tool):
                             "type": "string",
                             "description": "Clear and self-contained instructions for the specialist",
                         },
+                        "required_files": {"type": "array", "items": {"type": "string"}},
+                        "acceptance_criteria": {"type": "string"},
                         "context": {
                             "type": "string",
                             "description": "Optional context or background information",
@@ -575,6 +718,11 @@ class DelegateManyTool(Tool):
         self.delegate = delegate
 
     async def execute(self, assignments: Any = None, progress: Any = None, **_: Any) -> str:
+        if not isinstance(assignments, list) or any(
+            not isinstance(item, dict) or not str(item.get("task") or "").strip()
+            for item in assignments
+        ):
+            return "Error: every assignment must be an object with a nonempty task."
         wanted = [
             item
             for item in (assignments or [])
@@ -594,9 +742,25 @@ class DelegateManyTool(Tool):
                 f"{MAX_PARALLEL_DELEGATIONS} and delegate the rest afterwards."
             )
 
+        assignment_ids = [str(item.get('id') or f'assignment-{i + 1}') for i, item in enumerate(wanted)]
+        if len(set(assignment_ids)) != len(assignment_ids):
+            return 'Error: assignment IDs must be unique.'
         # One numbering across all of them: they report their steps into the
         # same tool row, which keys a substep by its index alone.
         substeps = itertools.count(1)
+        completed = {}
+
+        def assignment_progress(index):
+            def receive(event):
+                if event.get('kind') == 'delegation_finished':
+                    completed[index] = event.get('result') or {
+                        'status': 'failed' if event.get('is_error') else 'partial',
+                        'failure_reason': 'missing_result_contract',
+                    }
+                if callable(progress):
+                    progress(event)
+            return receive
+
         results = await asyncio.gather(
             *(
                 self.delegate.execute(
@@ -604,21 +768,35 @@ class DelegateManyTool(Tool):
                     bot_name=item.get("bot_name"),
                     bot_id=item.get("bot_id"),
                     context=str(item.get("context") or ""),
-                    progress=progress,
+                    progress=assignment_progress(index),
+                    verification=item.get("verification"),
+                    input_files=item.get("input_files"),
+                    required_files=item.get("required_files"),
+                    delivery_target=item.get("delivery_target"),
+                    acceptance_criteria=str(item.get("acceptance_criteria") or ""),
                     next_substep=lambda: next(substeps),
                 )
-                for item in wanted
+                for index, item in enumerate(wanted)
             ),
             # One specialist raising must not take the others' finished work
             # down with it: they already ran, and the leader needs what it got
             # to report anything at all.
             return_exceptions=True,
         )
-        sections = []
-        for item, result in zip(wanted, results):
+        counts = {assignment_ids[i]: completed.get(i, {"status": "failed", "failure_reason": "missing_result"})
+                  for i in range(len(wanted))}
+        successful = sum(value["status"] == "completed" for value in counts.values())
+        sections = [json.dumps({"expected": len(wanted), "completed": successful,
+                              "incomplete_ids": [key for key, value in counts.items() if value["status"] != "completed"]})]
+        for assignment_id, item, result in zip(assignment_ids, wanted, results):
             if isinstance(result, BaseException):
                 who = item.get("bot_name") or item.get("bot_id") or "?"
                 sections.append(f"[{who} ล้มเหลว]: {result}")
             else:
-                sections.append(str(result))
+                sections.append(f"[Assignment {assignment_id}]\n{result}")
         return "\n\n---\n\n".join(sections)
+
+DelegateManyTool.parameters["properties"]["assignments"]["items"]["properties"].update({
+    key: DelegateTool.parameters["properties"][key]
+    for key in ("required_files", "input_files", "acceptance_criteria", "delivery_target", "verification")
+})

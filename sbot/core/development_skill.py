@@ -11,8 +11,14 @@ Use a persisted mission for long work, with small implementation, test and
 integration nodes. Record architecture, acceptance criteria and handoffs in
 repository files and the shared blackboard. For parallel edits, create git
 worktrees INSIDE /workspace (trees/api, trees/web), with distinct branches; tell
-each worker its directory. Never concurrently edit one checkout. Put integration
-and review after implementation dependencies, then test the merged result.
+each worker its directory. Never concurrently edit one checkout. In the project container use
+`sbot-worktree create <assignment-slug>` and give the returned directory to that
+worker. Commit completed changes in that worktree. Put integration after all
+implementation dependencies; run `sbot-worktree integrate <assignment-slug> --
+<test-command> <arguments>` for each result. It tests the combined candidate before
+fast-forwarding the main checkout; conflicts/test failures retain a candidate for
+inspection and do not promote it. On an older image without sbot-worktree, report
+that the developer image needs rebuilding; do not silently edit the shared checkout.
 
 Write compose.yaml with healthchecks, restart: unless-stopped and named database
 volumes. Use project compose_up, compose_ps and compose_logs. Bind service ports

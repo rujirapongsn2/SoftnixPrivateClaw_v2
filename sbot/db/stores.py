@@ -68,6 +68,26 @@ def _day_key(bucket_value: Any) -> str:
     return bucket_value.date().isoformat() if hasattr(bucket_value, "date") else str(bucket_value)
 
 
+def _is_transient_tool_narration(tool_calls: Any) -> bool:
+    """Whether assistant text attached to tool calls is only progress narration.
+
+    A delegation is the exception: its leader's short introduction gives the
+    specialist reply that follows a human-readable origin. All other tool-call
+    text is transient progress already represented in the Execution panel.
+    """
+    if not tool_calls:
+        return False
+    if not isinstance(tool_calls, list):
+        return True
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        if isinstance(function, dict) and function.get("name") in {"delegate", "delegate_many"}:
+            return False
+    return True
+
+
 class MessageStore:
     def __init__(self, factory: async_sessionmaker[AsyncSession], is_postgres: bool = True):
         self.factory = factory
@@ -200,35 +220,49 @@ class MessageStore:
         turn's messages for a provider, where the `seq` a pager needs is an
         unrecognized key and a 400.
 
-        Tool traffic is excluded here rather than by the caller so that `seq`
-        stays a usable cursor — most rows in an agentic transcript are tool
-        messages, and a page of those filtered away afterwards would be a page
-        the reader has to ask for again.
+        Tool traffic and transient assistant narration attached to a tool call
+        are excluded here rather than by the caller. The latter is status text
+        (for example, "I will check that first") and becomes a confusing
+        permanent chat bubble after reload. Delegation narration stays visible
+        so a specialist's reply retains its origin. All rows remain in the
+        database and in `recent()` so the model retains tool-call/result pairs.
 
-        What is NOT excluded here is the tool-call stub (an assistant message
-        whose text is empty because its content is the call). Recognizing it
-        needs `tool_calls`, and `meta`/`tool_calls` are JSON columns that store
-        Python None as the JSON text `null`, never as SQL NULL — `IS NULL` on
-        them silently matches nothing, and the JSON comparison that would work
-        differs between SQLite and Postgres. So the caller drops those, and a
-        page can come back holding fewer than `limit` messages.
+        `tool_calls` is a JSON column and its SQL null semantics differ between
+        SQLite and Postgres, so filtering happens in Python. Fetch raw chunks
+        until we have one extra *visible* row; that keeps pagination exact even
+        when a turn produced many tool calls.
         """
         window = [
             Message.session_id == session_id,
             Message.role.in_(("user", "assistant")),
         ]
-        if before_seq is not None:
-            window.append(Message.seq < before_seq)
-        async with self.factory() as db:
-            rows = (
-                await db.scalars(
-                    select(Message).where(*window).order_by(Message.seq.desc()).limit(limit + 1)
-                )
-            ).all()
-        # Reading one row past the page is what makes `has_more` exact. Treating
-        # a full page as "there is more" instead would promise a next page that
-        # comes back empty whenever the history divides evenly.
-        has_more = len(rows) > limit
+        visible: list[Message] = []
+        cursor = before_seq
+        # This is an internal chunk, not a user-visible page size. A generous
+        # minimum avoids N+1 queries for ordinary tool-heavy turns while still
+        # keeping a pathological all-tool transcript bounded in memory.
+        chunk_size = max(limit + 1, 128)
+        while len(visible) <= limit:
+            conditions = [*window]
+            if cursor is not None:
+                conditions.append(Message.seq < cursor)
+            async with self.factory() as db:
+                rows = (
+                    await db.scalars(
+                        select(Message).where(*conditions).order_by(Message.seq.desc()).limit(chunk_size)
+                    )
+                ).all()
+            if not rows:
+                break
+            visible.extend(
+                row for row in rows
+                if not (row.role == "assistant" and _is_transient_tool_narration(row.tool_calls))
+            )
+            cursor = rows[-1].seq
+            if len(rows) < chunk_size:
+                break
+        # Reading one visible row past the page is what makes `has_more` exact.
+        has_more = len(visible) > limit
         return [
             {
                 "seq": r.seq,
@@ -239,7 +273,7 @@ class MessageStore:
             }
             # Descending, so the surplus row is the oldest — trim before
             # reversing or the page slides one message away from the cursor.
-            for r in reversed(rows[:limit])
+            for r in reversed(visible[:limit])
         ], has_more
 
     async def oldest_for_consolidation(
@@ -498,6 +532,7 @@ class MissionStore:
         session_id: str | None = None,
         budget: dict | None = None,
         status: str = "running",
+        mission_id: str | None = None,
     ) -> Mission:
         async with self.factory() as db:
             mission = Mission(
@@ -508,6 +543,8 @@ class MissionStore:
                 spent={},
                 status=status,
             )
+            if mission_id is not None:
+                mission.id = mission_id
             db.add(mission)
             await db.commit()
             return mission
@@ -523,6 +560,21 @@ class MissionStore:
         from a model-supplied id must use `get_mission`."""
         async with self.factory() as db:
             return await db.get(Mission, mission_id)
+
+    async def pending_counts(self, owner_id: str) -> dict[str, int]:
+        async with self.factory() as db:
+            pending = Mission.status.in_(['queued', 'running', 'blocked', 'paused'])
+            total = await db.scalar(select(func.count()).select_from(Mission).where(pending))
+            own = await db.scalar(select(func.count()).select_from(Mission).where(pending, Mission.owner_id == owner_id))
+            return {'owner': own or 0, 'total': total or 0}
+
+    async def begin_queued(self, mission_id: str) -> bool:
+        async with self.factory() as db:
+            result = await db.execute(update(Mission).where(
+                Mission.id == mission_id, Mission.status == 'queued'
+            ).values(status='running'))
+            await db.commit()
+            return result.rowcount == 1
 
     async def reportable_missions(self, offset: int = 0, limit: int = 100) -> list[Mission]:
         """Scheduler-only scan; committed outcomes are the durable delivery queue."""
@@ -545,7 +597,7 @@ class MissionStore:
             return list(await db.scalars(query))
 
     async def active_missions(
-        self, owner_id: str, limit: int = 20
+        self, owner_id: str, limit: int = 20, session_id: str | None = None
     ) -> list[tuple[Mission, list[MissionNode]]]:
         """A user's in-flight missions together with their nodes, newest first.
 
@@ -563,7 +615,8 @@ class MissionStore:
                     select(Mission)
                     .where(
                         Mission.owner_id == owner_id,
-                        Mission.status.in_(("running", "blocked")),
+                        Mission.status.in_(("queued", "running", "blocked", "paused")),
+                        *([Mission.session_id == session_id] if session_id is not None else []),
                     )
                     .order_by(Mission.created_at.desc())
                     .limit(max(1, min(limit, 100)))
@@ -617,7 +670,7 @@ class MissionStore:
                     select(Mission)
                     .where(
                         or_(
-                            Mission.status == "running",
+                            Mission.status.in_(("queued", "running")),
                             and_(Mission.status == "blocked", orphaned_node),
                         )
                     )
@@ -779,6 +832,7 @@ class MissionStore:
         cost: dict[str, float] | None = None,
         lease_owner: str | None = None,
         attempt: int | None = None,
+        task_result: dict | None = None,
     ) -> None:
         """Record a node's outcome and release its lease."""
         values: dict[str, Any] = {
@@ -798,11 +852,27 @@ class MissionStore:
             conditions += [MissionNode.status == "running", MissionNode.lease_owner == lease_owner,
                            MissionNode.attempts == attempt]
         async with self.factory() as db:
-            await db.execute(
+            changed = await db.execute(
                 update(MissionNode)
                 .where(*conditions)
                 .values(**values)
             )
+            if changed.rowcount:
+                records = {}
+                if output is not None:
+                    records[f'result:{node_id}'] = output
+                if task_result is not None:
+                    records[f'contract:{node_id}'] = task_result
+                for key, value in records.items():
+                    record = await db.scalar(select(MissionBlackboard).where(
+                        MissionBlackboard.mission_id == mission_id, MissionBlackboard.key == key))
+                    if record is None:
+                        db.add(MissionBlackboard(mission_id=mission_id, key=key, value=value,
+                                                 written_by_node=node_id))
+                    else:
+                        record.value = value
+                        record.written_by_node = node_id
+                        record.updated_at = datetime.now(timezone.utc)
             await db.commit()
 
     async def resolve_gate(

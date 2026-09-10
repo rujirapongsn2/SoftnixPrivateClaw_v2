@@ -106,6 +106,7 @@ async def test_the_chief_of_staff_is_told_to_lead_and_who_it_leads(stores, tmp_p
     system_prompt = provider.calls[0][0]["content"]
     assert "# Leading your team" in system_prompt
     assert "delegate_many" in system_prompt
+    assert "Do not repeat the full delegation or take over" in system_prompt
     assert "นักวิจัย" in system_prompt
     assert researcher.id in system_prompt
     assert "ค้นหาและสรุปข้อมูลตลาด" in system_prompt

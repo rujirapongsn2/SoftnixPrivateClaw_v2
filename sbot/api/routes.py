@@ -423,9 +423,8 @@ async def list_messages(
         session_id, before_seq=before_seq, limit=limit
     )
     return {
-        # Drops the tool-call stub the store cannot recognize in SQL, while
-        # keeping a message whose only content is an artifact (a generated
-        # image with no caption) — that one would otherwise vanish on reload.
+        # Keep a message whose only content is an artifact (a generated image
+        # with no caption) — that one would otherwise vanish on reload.
         "messages": [m for m in page if m["content"] or (m["meta"] or {}).get("artifacts")],
         "has_more": has_more,
         # Read before that filter, so a dropped message still advances the walk.

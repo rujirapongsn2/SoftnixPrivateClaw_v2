@@ -111,6 +111,33 @@ async def test_an_artifact_only_message_survives_a_reload(stores):
 
 
 @pytest.mark.asyncio
+async def test_tool_call_narration_is_hidden_but_retained_for_agent_history(stores):
+    user, session = await _session(stores, tools=False)
+    await stores["messages"].append(
+        session.id,
+        [
+            {"role": "user", "content": "สร้างเอกสาร"},
+            {
+                "role": "assistant",
+                "content": "ผมจะตรวจข้อมูลก่อนครับ",
+                "tool_calls": [{"id": "read-1", "function": {"name": "read_skill"}}],
+            },
+            {"role": "tool", "content": "skill content", "tool_call_id": "read-1"},
+            {"role": "assistant", "content": "สร้างเอกสารเสร็จแล้ว"},
+        ],
+    )
+
+    page = await _page(stores, user, session.id)
+    assert [m["content"] for m in page["messages"]] == ["สร้างเอกสาร", "สร้างเอกสารเสร็จแล้ว"]
+
+    # The display filter must not alter the durable model history: the next
+    # turn still receives the assistant tool call and its matching result.
+    history = await stores["messages"].recent(session.id)
+    assert history[1]["content"] == "ผมจะตรวจข้อมูลก่อนครับ"
+    assert history[1]["tool_calls"]
+
+
+@pytest.mark.asyncio
 async def test_another_users_session_is_not_readable(stores):
     _, session = await _session(stores, email="owner@sbot.ai", turns=1)
     intruder = await stores["users"].get_or_create_by_email("intruder@sbot.ai")

@@ -13,16 +13,25 @@ from typing import Any
 from claw.core.builtin_skills import builtin_skills, get_builtin_skill
 from claw.db.stores import SkillStore
 from claw.tools.base import Tool
+from claw.tools.skill_reader import DEFAULT_READ_LIMIT, MAX_READ_LIMIT, page_skill_content, select_section
 
 _MAX_NAME_LEN = 64
 
 
 class ReadSkillTool(Tool):
     name = "read_skill"
-    description = "Read the full content of one of your available skills by name."
+    description = (
+        "Read one available skill by name. Large skills are paginated: use offset and limit to "
+        "continue, or section to read one Markdown heading and its contents."
+    )
     parameters = {
         "type": "object",
-        "properties": {"name": {"type": "string", "description": "Skill name from the skills list"}},
+        "properties": {
+            "name": {"type": "string", "description": "Skill name from the skills list"},
+            "section": {"type": "string", "description": "Optional Markdown heading to read."},
+            "offset": {"type": "integer", "minimum": 0, "description": "Character offset within the selected content."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_READ_LIMIT, "description": "Characters to return (default 8000; maximum 10000)."},
+        },
         "required": ["name"],
     }
 
@@ -30,15 +39,27 @@ class ReadSkillTool(Tool):
         self.store = store
         self.user_id = user_id
 
-    async def execute(self, name: str, **_: Any) -> str:
+    async def execute(self, name: str, section: str | None = None, offset: int = 0, limit: int = DEFAULT_READ_LIMIT, **_: Any) -> str:
         name = name.strip()
         skill = await self.store.get_by_name(self.user_id, name)
         if skill is not None and skill.enabled:
-            return f"# Skill: {skill.name}\n\n{skill.content}"
-        builtin = get_builtin_skill(name)
-        if builtin is not None:
-            return f"# Skill: {builtin.name}\n\n{builtin.content}"
-        return f"Error: skill '{name}' not found or disabled"
+            resolved_name, content = skill.name, skill.content
+        else:
+            builtin = get_builtin_skill(name)
+            if builtin is None:
+                return f"Error: skill '{name}' not found or disabled"
+            resolved_name, content = builtin.name, builtin.content
+        selected, selected_section = select_section(content, section)
+        if section and selected_section is None:
+            return f"Error: section '{section}' was not found in skill '{resolved_name}'."
+        try:
+            page_limit = min(max(1, int(limit)), MAX_READ_LIMIT)
+            page_offset = max(0, int(offset))
+        except (TypeError, ValueError):
+            return "Error: offset and limit must be integers."
+        return page_skill_content(
+            selected, name=resolved_name, section=selected_section, offset=page_offset, limit=page_limit
+        )
 
 
 class ManageSkillTool(Tool):
@@ -138,7 +159,9 @@ def build_skills_summary(skills: list, tool_names_by_skill: dict[str, list[str]]
         "",
         "These skills extend your capabilities. To use one, read its full content "
         "with the read_skill tool first — but only when you are actually going to do "
-        "the thing it describes. Writing content in the chat never needs a skill; the "
+        "the thing it describes. If it says more content is available, call read_skill "
+        "again with the offset shown there. "
+        "Writing content in the chat never needs a skill; the "
         "document skills apply when the user asked for a real file, not when they "
         "asked for the text that would go in one.",
         "",

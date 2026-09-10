@@ -79,6 +79,10 @@ async def test_cos_creates_bot_via_tool(stores, tmp_path):
 
     answer = await runtime.handle_message(user.id, session.id, "สร้างบอทการเงินให้หน่อย")
     assert "เรียบร้อยแล้ว" in answer
+    # A request to create a member ends at creation. The model must not get a
+    # second turn in which it might invent a smoke test or a work plan.
+    assert len(turn1_provider.calls) == 1
+    assert len(turn1_provider.turns) == 1
 
     # Verify bot is created in DB
     fin_bot = await stores["bots"].get_by_name(user.id, "นักวิเคราะห์การเงิน")
@@ -86,6 +90,33 @@ async def test_cos_creates_bot_via_tool(stores, tmp_path):
     assert fin_bot.role_title == "Financial Analyst"
     assert fin_bot.kind == "specialist"
     assert fin_bot.created_by == f"bot:{cos.id}"
+
+
+@pytest.mark.asyncio
+async def test_creating_a_bot_skips_unsolicited_bundled_work(stores, tmp_path):
+    """A model may emit several calls at once; creation must still be bounded."""
+    user = await stores["users"].get_or_create_by_email("bounded_create@sbot.ai")
+    cos = await stores["bots"].get_or_create_cos(user.id)
+    session = await stores["sessions"].create(user.id, bot_id=cos.id, kind="direct")
+    provider = FakeProvider([[
+        ChatResult(content=None, tool_calls=[
+            ToolCall(id="create", name="create_bot", arguments={
+                "name": "TOR", "role_title": "TOR specialist", "charter": "Draft TOR only.",
+            }),
+            ToolCall(id="unsolicited", name="delegate", arguments={
+                "bot_name": "TOR", "task": "Run a smoke test and create a file.",
+            }),
+        ]),
+    ]])
+    runtime = make_runtime(stores, provider, tmp_path)
+
+    answer = await runtime.handle_message(user.id, session.id, "สร้างบอท TOR")
+
+    assert "สร้างบอท 'TOR' เรียบร้อยแล้ว" in answer
+    assert await stores["bots"].get_by_name(user.id, "TOR") is not None
+    assert len(provider.calls) == 1
+    history = await stores["messages"].recent(session.id)
+    assert not any("smoke test" in str(message.get("content")) for message in history)
 
 
 @pytest.mark.asyncio
@@ -773,7 +804,8 @@ async def test_a_blank_specialist_reply_is_replaced_rather_than_stored(stores, t
     assert seen[1]["text"]
     # Nothing stopped it, so there is no limit to name and nothing for the user
     # to make smaller — this must not claim it ran out of time.
-    assert seen[1]["is_error"] is False
+    assert seen[1]["is_error"] is True
+    assert seen[1]["result"]["failure_reason"] == "empty_output"
 
 
 @pytest.mark.asyncio
@@ -905,3 +937,125 @@ async def test_cos_cannot_choose_a_new_bots_model(stores, tmp_path):
 
     bot = await stores["bots"].get_by_name(user.id, "ผู้ช่วย")
     assert bot.model is None
+
+
+@pytest.mark.asyncio
+async def test_delegation_recovery_is_bounded_and_preserves_cost(stores, tmp_path):
+    from sbot.core.specialist import SpecialistOutcome
+    tool = await _delegate_tool(stores, tmp_path, 'recovery@test.local')
+    tool.reliability.retry_empty_output = True
+    calls = []
+
+    async def run(*args, **kwargs):
+        calls.append(kwargs)
+        return SpecialistOutcome(text='' if len(calls) == 1 else 'Recovered result', cost={'tokens': 11})
+
+    tool.runner.run = run
+    seen = []
+    await tool.execute(task='Research', bot_name='นักวิจัย', progress=seen.append)
+    final = next(e for e in seen if e.get('kind') == 'delegation_finished')
+    assert len(calls) == 2
+    assert calls[1]['max_iterations'] == 2
+    assert calls[1]['max_seconds'] <= 30
+    assert final['result']['status'] == 'completed'
+    assert final['result']['cost']['tokens'] == 22
+
+
+@pytest.mark.asyncio
+async def test_batch_reports_missing_assignment_by_id(stores, tmp_path):
+    from sbot.core.specialist import SpecialistOutcome
+    from sbot.tools.cos import DelegateManyTool
+    tool = await _delegate_tool(stores, tmp_path, 'batch_contract@test.local')
+
+    async def run(bot, system, task, emit, **kwargs):
+        if task == 'one':
+            await asyncio.sleep(0.01)
+        return SpecialistOutcome(text='first result' if task == 'one' else '')
+
+    tool.runner.run = run
+    result = await DelegateManyTool(tool).execute(assignments=[
+        {'id': 'first', 'task': 'one', 'bot_name': 'นักวิจัย'},
+        {'id': 'second', 'task': 'two', 'bot_name': 'นักวิจัย'},
+    ])
+    counts = json.loads(result.split('\n\n---\n\n')[0])
+    assert counts == {'expected': 2, 'completed': 1, 'incomplete_ids': ['second']}
+    assert '[Assignment first]' in result
+
+
+@pytest.mark.asyncio
+async def test_declared_file_requires_recorded_completion(stores, tmp_path):
+    from sbot.core.specialist import SpecialistOutcome
+    tool = await _delegate_tool(stores, tmp_path, 'required_file@test.local')
+
+    async def run(*args, **kwargs):
+        assert kwargs['extra_tools'][0].name == 'finish_step'
+        assert kwargs['extra_tools'][0].require_record is True
+        return SpecialistOutcome(text='I created the file!')
+
+    tool.runner.run = run
+    seen = []
+    await tool.execute(task='Write a report', bot_name='นักวิจัย', required_files=['report.docx'], progress=seen.append)
+    final = next(e for e in seen if e['kind'] == 'delegation_finished')
+    assert final['is_error']
+    assert final['result']['failure_reason'] == 'missing_completion_record'
+
+
+@pytest.mark.asyncio
+async def test_declared_file_does_not_restart_full_task_after_empty_output(stores, tmp_path):
+    """Artifact work gets one finish-only recovery inside AgentLoop.  Delegate
+    must not also launch its older whole-task recovery, which could repeat file
+    writes or external actions after useful work already happened."""
+    from sbot.core.specialist import SpecialistOutcome
+    tool = await _delegate_tool(stores, tmp_path, 'no-replay@test.local')
+    tool.reliability.retry_empty_output = True
+    calls = []
+
+    async def run(*args, **kwargs):
+        calls.append(kwargs)
+        completion = kwargs['extra_tools'][0]
+        assert completion.require_record is True
+        return SpecialistOutcome(text='')
+
+    tool.runner.run = run
+    seen = []
+    await tool.execute(
+        task='Build the TOR document', bot_name='นักวิจัย',
+        required_files=['tor.docx'], progress=seen.append,
+    )
+
+    final = next(e for e in seen if e['kind'] == 'delegation_finished')
+    assert len(calls) == 1
+    assert final['is_error']
+    assert final['result']['attempts'] == 1
+    assert final['result']['failure_reason'] == 'missing_completion_record'
+
+
+@pytest.mark.asyncio
+async def test_declared_file_empty_reply_gets_finish_only_recovery(stores, tmp_path):
+    """The synchronous compatibility path must use the same safe completion
+    recovery as background jobs: keep history, offer only finish_step, and
+    record a truthful terminal status rather than replaying the assignment."""
+    provider = FakeProvider([
+        [ChatResult(content='')],
+        tool_call_turn('finish_step', {
+            'status': 'failed',
+            'summary': 'The document could not be completed.',
+            'evidence': 'No valid output file was produced.',
+            'files': [],
+        }, call_id='finish'),
+    ])
+    tool = await _delegate_tool(stores, tmp_path, 'finish-only@test.local')
+    tool.runner.provider = provider
+
+    seen = []
+    await tool.execute(
+        task='Build the TOR document', bot_name='นักวิจัย',
+        required_files=['tor.docx'], progress=seen.append,
+    )
+
+    final = next(e for e in seen if e.get('kind') == 'delegation_finished')
+    assert len(provider.calls) == 2
+    assert provider.offered_tools[-1] == ['finish_step']
+    assert final['is_error']
+    assert final['result']['status'] == 'failed'
+    assert final['result']['failure_reason'] == 'failed'
