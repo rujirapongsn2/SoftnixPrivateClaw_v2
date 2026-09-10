@@ -394,12 +394,14 @@ class AgentLoop:
         arg_guard: ArgGuard | None = None,
         workspace: Path | None = None,
         max_turn_seconds: float = 600,
+        max_context_chars: int | None = None,
     ):
         self.provider = provider
         self.tools = tools
         self.model = model
         self.max_iterations = max_iterations
         self.max_turn_seconds = max_turn_seconds
+        self.max_context_chars = max_context_chars
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.arg_guard = arg_guard
@@ -444,6 +446,7 @@ class AgentLoop:
         completion_instruction: str | None = None
         finalize_only = False
         finalization_rounds = 0
+        output_continuations = 0
         # Loop-breaker state: the last tool call actually executed, and how many
         # times in a row it has been executed.
         last_signature: str | None = None
@@ -458,6 +461,9 @@ class AgentLoop:
         sent_results: dict[str, str] = {}
         sent_order: list[str] = []
         ceiling = _compaction_ceiling_chars(effective_model, self.max_tokens, context_window)
+
+        if self.max_context_chars:
+            ceiling = min(ceiling, self.max_context_chars)
 
         for _iteration in range(self.max_iterations):
             if finalize_only:
@@ -570,7 +576,26 @@ class AgentLoop:
             if result.finish_reason in ('length', 'max_tokens'):
                 # Repaired JSON from a cut-off tool call is not authorization
                 # to execute an incomplete command or record a partial report.
+                discarded_tools = [tc.name for tc in result.tool_calls]
                 result.tool_calls = []
+                completion_tool = self.tools.get('finish_step')
+                if (getattr(completion_tool, 'require_record', False)
+                        and completion_tool.result is None and not finalize_only
+                        and output_continuations < 2):
+                    # Continue the existing conversation, never replay the node.
+                    # Incomplete arguments are discarded, not repaired/executed.
+                    output_continuations += 1
+                    if result.content:
+                        working.append({"role": "assistant", "content": result.content})
+                    completion_instruction = (
+                        'The last response hit its output limit. Its tool calls were NOT executed: '
+                        + ', '.join(discarded_tools) + '. Continue from the successful tool results above. '
+                        'Do not repeat completed actions. Generate a smaller complete call; split long '
+                        'file content into sections and save progress incrementally. Do not repeat the '
+                        'whole analysis in your reply. Finish the remaining work and call finish_step '
+                        'with evidence and paths. The original time and iteration limits still apply.'
+                    )
+                    continue
 
             if not result.has_tool_calls:
                 # An empty final message is never stored: it renders as a blank

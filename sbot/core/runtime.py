@@ -289,6 +289,7 @@ class ClawAgent:
                 project_access=project_access,
                 arg_guard=self._guard_tool_args if policy is not None else None,
                 reliability=settings.reliability,
+                llm_settings=settings.llm,
             )
             self.tools.register(delegate)
             self.tools.register(DelegateManyTool(delegate))

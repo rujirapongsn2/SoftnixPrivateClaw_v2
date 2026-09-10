@@ -260,6 +260,7 @@ class DelegateTool(Tool):
         project_access: Any = None,
         arg_guard: Any = None,
         reliability: Any = None,
+        llm_settings: Any = None,
     ):
         self.bot_store = bot_store
         self.owner_id = owner_id
@@ -277,6 +278,7 @@ class DelegateTool(Tool):
             sandbox=sandbox,
             workspace=workspace,
             model=model,
+            llm_settings=llm_settings,
             llm_config=llm_config,
             owner_id=owner_id,
             skills=skills,

@@ -131,19 +131,38 @@ class ReadPdfTool(_WorkspaceDocTool):
 
 class ReadDocxTool(_WorkspaceDocTool):
     name = "read_docx"
-    description = "Extract text from a Word (.docx) file in the workspace."
-    parameters = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+    description = "Read Word paragraphs and tables in document order, with character paging for long files."
+    parameters = {"type": "object", "properties": {
+        "path": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0, "description": "Character offset; initially 0"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 10000},
+    }, "required": ["path"]}
 
-    async def execute(self, path: str, **_: Any) -> str:
+    async def execute(self, path: str, offset: int = 0, limit: int = 10000, **_: Any) -> str:
+        if not isinstance(offset, int) or offset < 0 or not isinstance(limit, int) or not 1 <= limit <= 10000:
+            return "Error: offset must be nonnegative and limit must be 1–10000."
         target = self._resolve(path)
         if target is None:
             return f"Error: file not found: {path}"
         try:
             import docx
+            from docx.table import Table
+            from docx.text.paragraph import Paragraph
         except ImportError:
             return "Error: Word support is not installed (pip install python-docx)."
         document = docx.Document(str(target))
-        return self._cap("\n".join(p.text for p in document.paragraphs).strip() or "(empty document)")
+        blocks = []
+        for element in document.element.body.iterchildren():
+            if element.tag.endswith('}p'):
+                blocks.append(Paragraph(element, document).text)
+            elif element.tag.endswith('}tbl'):
+                table = Table(element, document)
+                blocks.append("[Table]\n" + "\n".join(
+                    " | ".join(cell.text for cell in row.cells) for row in table.rows))
+        text = "\n".join(blocks).strip() or "(empty document)"
+        end = min(len(text), offset + limit)
+        page = text[offset:end]
+        return page + (f"\n[Next offset: {end}; total characters: {len(text)}]" if end < len(text) else "\n[End of document]")
 
 
 def build_document_tools(workspace: Path) -> list[Tool]:

@@ -49,7 +49,7 @@ _DEFAULT_BUDGET_SECONDS = 300.0
 _DELTA_FLUSH_CHARS = 200
 
 
-def _budget_notice(seconds: float, iterations: int) -> str:
+def _budget_notice(seconds: float, iterations: int, structured: bool = False) -> str:
     """Tell the specialist what it is spending.
 
     Without this a specialist plans as if time were free: one run spent its
@@ -64,7 +64,7 @@ def _budget_notice(seconds: float, iterations: int) -> str:
     # the loop falls through with no content, which is the failure this notice
     # exists to prevent.
     tool_rounds = max(1, iterations - 1)
-    return (
+    notice = (
         "# Budget\n"
         f"You have about {int(seconds)} seconds of wall-clock time, and at most "
         f"{tool_rounds} rounds of tool calls before you must give your reply "
@@ -77,6 +77,16 @@ def _budget_notice(seconds: float, iterations: int) -> str:
         "context. Only write a file if the task asked for one, and put the findings "
         "in your reply too."
     )
+    if structured:
+        notice = notice[:notice.index("- Always finish")]
+        notice += (
+            "Save requested deliverables incrementally and reserve time to verify them. "
+            "Call finish_step with evidence and file paths. For file tasks, keep its summary "
+            "brief rather than copying the deliverable into the reply. For text tasks, "
+            "include the actual result in summary. Report unfinished work honestly."
+        )
+    return notice
+
 
 
 @dataclass(slots=True)
@@ -374,7 +384,10 @@ class SpecialistRunner:
         connectors: Any = None,
         project_access: Any = None,
         arg_guard: Any = None,
+        llm_settings: Any = None,
     ):
+        from sbot.config import LLMSettings
+        self.llm_settings = llm_settings or LLMSettings()
         self.provider = provider
         self.sandbox = sandbox
         self.workspace = workspace
@@ -501,10 +514,11 @@ class SpecialistRunner:
         emit: Any,
         turn_id: str,
         max_seconds: float = _DEFAULT_BUDGET_SECONDS,
-        max_iterations: int = 20,
+        max_iterations: int | None = None,
         extra_tools: list[Any] | None = None,
         budget_notice: bool = True,
     ) -> SpecialistOutcome:
+        max_iterations = max_iterations or self.llm_settings.max_iterations
         model = await self._resolve_model(getattr(bot, "model", None))
         budget = self._budget(max_seconds)
         tools = self.build_tools(bot.tool_allowlist, extra_tools, bot=bot)
@@ -522,7 +536,8 @@ class SpecialistRunner:
             tools=tools,
             model=model["model"],
             max_iterations=max_iterations,
-            max_tokens=4096,
+            max_tokens=self.llm_settings.max_tokens,
+            max_context_chars=self.llm_settings.max_context_tokens,
             # Delegated bots use the same user workspace as their leader. Pass
             # it into the loop as well as their tools so files created by an
             # `exec` or `project` command are detected and returned as
@@ -536,7 +551,8 @@ class SpecialistRunner:
         # carry the notice's "always finish with your findings in your reply"
         # (see the mission replan prompt) — the two instructions contradict.
         if budget_notice:
-            system_prompt = f"{system_prompt}\n\n{_budget_notice(budget, max_iterations)}"
+            structured = getattr(tools.get("finish_step"), "require_record", False)
+            system_prompt = f"{system_prompt}\n\n{_budget_notice(budget, max_iterations, structured)}"
         outcome = await loop.run_turn(
             turn_id,
             [

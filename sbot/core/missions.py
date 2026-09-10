@@ -184,7 +184,8 @@ class MissionService:
             if pending['owner'] >= limits.max_pending_per_owner or pending['total'] >= limits.max_pending_total:
                 raise InvalidGraphError("background queue is full; finish or cancel a pending job before submitting more")
             mission = await self.plan(owner_id, goal, safe, session_id=session_id,
-                                      member_ids=member_ids, mission_id=mission_id)
+                                      member_ids=member_ids, mission_id=mission_id,
+                                      budget={"max_tokens": DEFAULT_BUDGET["max_tokens"] * len(safe)})
             await self.missions.blackboard_write(mission.id, 'scope:background', True)
             await self.missions.update_mission(mission.id, status='queued')
             self._spawn(mission.id)
@@ -675,6 +676,7 @@ class MissionService:
             workspace=self.settings.workspaces_root / mission.owner_id,
             model=self.settings.llm.model,
             llm_config=self.llm_config,
+            llm_settings=self.settings.llm,
             owner_id=mission.owner_id,
             project_access=self.project_access,
             arg_guard=self.arg_guard_for_owner(mission.owner_id) if self.arg_guard_for_owner else None,
@@ -886,6 +888,7 @@ class MissionService:
             workspace=self.settings.workspaces_root / mission.owner_id,
             model=self.settings.llm.model,
             llm_config=self.llm_config,
+            llm_settings=self.settings.llm,
             owner_id=mission.owner_id,
             skills=self.skills,
             memory=self.memory,
@@ -1038,7 +1041,12 @@ class MissionService:
             "the assigned acceptance criteria; include concrete evidence and every requested "
             "deliverable path in files. File delivery is validated and published by that tool. "
             "If you cannot satisfy the task, report blocked or failed with the reason. "
-            "A reply without finish_step is not a completed step."
+            "A reply without finish_step is not a completed step. "
+            "For document work, write findings incrementally to workspace files as you inspect sections. "
+            "Keep each write or edit small; split long reports or scripts into sections. "
+            "Use targeted reads and retain source references in your notes before reading more. "
+            "Do not wait until all reading is finished to write one enormous tool call. "
+            "Dependent steps receive validated files as input snapshots; summarize the handoff briefly."
         )
         # Appended rather than prepended so the bot's identity still leads. A
         # node used to run on charter alone, which made an assigned skill

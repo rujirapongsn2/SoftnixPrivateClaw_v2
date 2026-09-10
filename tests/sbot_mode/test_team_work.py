@@ -386,3 +386,72 @@ async def test_ask_mode_gates_background_submission(stores, tmp_path):
         'ask', [{'role': 'user', 'content': 'A'}], lambda e: None, permission_mode='ask', confirm=deny)
     assert confirmations == ['team_submit']
     assert not await stores['missions'].list_missions(user.id)
+
+@pytest.mark.asyncio
+async def test_output_limit_continues_same_step_and_delivers_to_dependents(stores, tmp_path):
+    provider = FakeProvider([
+        [call('write_file', path='notes.txt', content='checked source')],
+        [ChatResult(content='', finish_reason='length', tool_calls=[
+            ToolCall(id='cut', name='write_file', arguments={'path': 'bad.txt', 'content': 'partial'})])],
+        [call('read_file', path='notes.txt')],
+        [finish('Review complete')], [finish('Rewrite complete')], [finish('Final report')],
+    ])
+    user, cos, a, b, session, runtime, service = await setup_team(stores, provider, tmp_path)
+    job = await service.submit_work(user.id, session.id, 'continue-job', 'Review and rewrite', [
+        node(a), node(b, 'Rewrite', id='b', depends_on=['a'])], cos.id)
+    assert await service._running[job.id] == 'completed'
+    assert not list(service.settings.workspaces_root.rglob('bad.txt'))
+    assert len(list(service.settings.workspaces_root.rglob('notes.txt'))) == 1
+    assert len(provider.calls) == 6
+    continuation = provider.calls[2]
+    assert any(m.get('role') == 'tool' and 'Wrote' in str(m.get('content')) for m in continuation)
+    assert any('NOT executed' in str(m.get('content')) for m in continuation)
+    result = await service.status(job.id, user.id)
+    assert all(n['attempts'] == 1 for n in result['nodes'])
+    assert job.budget['max_tokens'] == 3 * 400_000
+
+
+@pytest.mark.asyncio
+async def test_output_limit_recovery_is_bounded_and_never_unblocks_writer(stores, tmp_path):
+    provider = FakeProvider([[ChatResult(content='', finish_reason='length')]] * 3)
+    user, cos, a, b, session, runtime, service = await setup_team(stores, provider, tmp_path)
+    job = await service.submit_work(user.id, session.id, 'bounded-limit', 'Review and rewrite', [
+        node(a), node(b, 'Rewrite', id='b', depends_on=['a'])], cos.id)
+    assert await service._running[job.id] == 'failed'
+    assert len(provider.calls) == 3
+    result = await service.status(job.id, user.id)
+    assert next(n for n in result['nodes'] if n['id'] == 'b')['attempts'] == 0
+
+
+@pytest.mark.asyncio
+async def test_specialist_honours_configured_output_budget(stores, tmp_path):
+    from sbot.config import LLMSettings
+    class RecordingProvider(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            self.output_limit = kwargs['max_tokens']
+            async for event in super().stream_chat(messages, **kwargs):
+                yield event
+    provider = RecordingProvider([text_turn('done')])
+    user, cos, a, b, session, runtime, service = await setup_team(stores, provider, tmp_path)
+    runner = SpecialistRunner(provider, None, tmp_path, llm_settings=LLMSettings(max_tokens=12345))
+    await runner.run(a, 'A', 'Task', lambda e: None, 'configured')
+    assert provider.output_limit == 12345
+
+@pytest.mark.asyncio
+async def test_docx_reader_pages_tables_in_document_order(tmp_path):
+    from docx import Document
+    from sbot.tools.documents import ReadDocxTool
+    document = Document()
+    document.add_paragraph('Before')
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = 'EPS requirement'
+    table.cell(0, 1).text = '5000'
+    document.add_paragraph('After')
+    document.save(tmp_path / 'source.docx')
+    reader = ReadDocxTool(tmp_path)
+    text = await reader.execute('source.docx')
+    assert text.index('Before') < text.index('EPS requirement') < text.index('After')
+    assert '5000' in text
+    first = await reader.execute('source.docx', limit=8)
+    second = await reader.execute('source.docx', offset=8)
+    assert first.split('\n[Next')[0] + second == text
