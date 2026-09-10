@@ -185,7 +185,8 @@ class MissionService:
                 raise InvalidGraphError("background queue is full; finish or cancel a pending job before submitting more")
             mission = await self.plan(owner_id, goal, safe, session_id=session_id,
                                       member_ids=member_ids, mission_id=mission_id,
-                                      budget={"max_tokens": DEFAULT_BUDGET["max_tokens"] * len(safe)})
+                                      budget={"max_tokens": min(DEFAULT_BUDGET["max_tokens"] * len(safe), limits.max_job_tokens),
+                                              "max_wall_seconds": min(DEFAULT_BUDGET["max_wall_seconds"], limits.max_job_seconds)})
             await self.missions.blackboard_write(mission.id, 'scope:background', True)
             await self.missions.update_mission(mission.id, status='queued')
             self._spawn(mission.id)
@@ -295,6 +296,28 @@ class MissionService:
             raise
         return mission
 
+    async def _automatic_resources(self, mission_id: str) -> bool:
+        from sbot.core.resource_policy import resource_decision
+        mission = await self.missions.get_mission_unchecked(mission_id)
+        if not mission or mission.status == 'cancelled':
+            return False
+        history = await self.missions.blackboard_read(mission_id, 'policy:resources') or {}
+        nodes = await self.missions.get_nodes(mission_id)
+        budget, reason = resource_decision(self.settings.team_work, mission, nodes, history)
+        event = {'reason': reason, 'spent': mission.spent, 'previous_budget': mission.budget,
+                 'budget': budget, 'completed': sum(n.status == 'done' for n in nodes)}
+        events = [*(history.get('events') or []), event]
+        await self.missions.blackboard_write(mission_id, 'policy:resources', {
+            'adjustments': history.get('adjustments', 0) + bool(budget),
+            'completed': event['completed'] if budget else history.get('completed', 0),
+            'events': events[-(self.settings.team_work.max_resource_adjustments + 1):],
+            'operator_attention': budget is None,
+        })
+        if budget is None:
+            return False
+        await self.missions.update_mission(mission_id, budget=budget)
+        return True
+
     # ------------------------------------------------------------------ running
     async def start(self, mission_id: str, owner_id: str, budget: dict | None = None) -> str:
         """Begin (or resume) a mission in the background. Returns its status."""
@@ -312,12 +335,22 @@ class MissionService:
                 # Explicitly supplied ceilings only; ordinary resume never grants
                 # new spend or resets historical accounting.
                 resolved = self._resolve_budget({**(mission.budget or {}), **budget})
+                if self.settings.team_work.automatic_resources and await self.missions.blackboard_read(mission.id, 'scope:background'):
+                    policy = self.settings.team_work
+                    if resolved['max_tokens'] > policy.max_job_tokens or resolved['max_wall_seconds'] > policy.max_job_seconds:
+                        raise InvalidGraphError('Requested budget exceeds organization policy; operator configuration is required.')
                 mission = await self.missions.update_mission(mission_id, budget=resolved)
             nodes = await self.missions.get_nodes(mission_id)
             if MissionEngine._budget_exceeded(mission, mission.spent or {}, 0, nodes):
-                if mission.status != 'paused':
-                    await self.missions.update_mission(mission_id, status='paused')
-                return 'paused'
+                automatic = self.settings.team_work.automatic_resources and await self.missions.blackboard_read(mission.id, 'scope:background')
+                if automatic:
+                    if not await self._automatic_resources(mission.id):
+                        await self.missions.update_mission(mission_id, status='failed')
+                        return 'failed'
+                else:
+                    if mission.status != 'paused':
+                        await self.missions.update_mission(mission_id, status='paused')
+                    return 'paused'
             await self.missions.update_mission(mission_id, status="running")
             self._spawn(mission_id)
             return "running"
@@ -417,6 +450,8 @@ class MissionService:
             node_executor=self._executor_for(mission),
             max_parallel_nodes=self.max_parallel_nodes,
             worker_id=f"mission-service:{mission_id[:8]}",
+            resource_hook=(self._automatic_resources if self.settings.team_work.automatic_resources
+                           and await self.missions.blackboard_read(mission.id, 'scope:background') else None),
             replan_hook=(None if await self.missions.blackboard_read(mission.id, 'scope:background')
                          else self._replan_hook_for(mission)),
         )
@@ -865,6 +900,7 @@ class MissionService:
                 "steps": [{"id": n.id, "title": n.title, "bot_name": names.get(n.bot_id or '', ''),
                            "state": activity[n.id], "depends_on": n.depends_on or []} for n in nodes],
             },
+            "resource_policy": await self.missions.blackboard_read(mission_id, "policy:resources"),
             "resume_blocker": MissionEngine._budget_exceeded(mission, mission.spent or {}, 0, nodes),
             "budget": mission.budget or {},
             "spent": mission.spent or {},

@@ -395,12 +395,14 @@ class AgentLoop:
         workspace: Path | None = None,
         max_turn_seconds: float = 600,
         max_context_chars: int | None = None,
+        max_recovery_output_tokens: int | None = None,
     ):
         self.provider = provider
         self.tools = tools
         self.model = model
         self.max_iterations = max_iterations
         self.max_turn_seconds = max_turn_seconds
+        self.max_recovery_output_tokens = max(max_tokens, max_recovery_output_tokens or max_tokens)
         self.max_context_chars = max_context_chars
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -447,6 +449,7 @@ class AgentLoop:
         finalize_only = False
         finalization_rounds = 0
         output_continuations = 0
+        request_output_tokens = self.max_tokens
         # Loop-breaker state: the last tool call actually executed, and how many
         # times in a row it has been executed.
         last_signature: str | None = None
@@ -460,7 +463,7 @@ class AgentLoop:
         # appending rather than by being rewritten.
         sent_results: dict[str, str] = {}
         sent_order: list[str] = []
-        ceiling = _compaction_ceiling_chars(effective_model, self.max_tokens, context_window)
+        ceiling = _compaction_ceiling_chars(effective_model, self.max_recovery_output_tokens, context_window)
 
         if self.max_context_chars:
             ceiling = min(ceiling, self.max_context_chars)
@@ -517,7 +520,7 @@ class AgentLoop:
                         prompt,
                         tools=definitions,
                         model=effective_model,
-                        max_tokens=self.max_tokens,
+                        max_tokens=request_output_tokens,
                         temperature=self.temperature,
                         api_key=api_key,
                         api_base=api_base,
@@ -585,6 +588,7 @@ class AgentLoop:
                     # Continue the existing conversation, never replay the node.
                     # Incomplete arguments are discarded, not repaired/executed.
                     output_continuations += 1
+                    request_output_tokens = min(self.max_recovery_output_tokens, request_output_tokens * 2)
                     if result.content:
                         working.append({"role": "assistant", "content": result.content})
                     completion_instruction = (

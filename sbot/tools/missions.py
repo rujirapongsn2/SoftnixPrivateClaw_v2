@@ -119,9 +119,9 @@ class MissionStartTool(Tool):
     description = (
         "Start or resume a mission. It checks remaining budget before scheduling. "
         "If paused, report the blocker; never say it started or repeatedly retry. "
-        "Optional budget sets cumulative ceilings (historical spend is retained). "
-        "Supply increased ceilings only after the user explicitly approves the new budget; "
-        "a generic request to continue does not authorize a budget increase."
+        "Background jobs manage resources automatically under organization policy. "
+        "Do not ask end users to approve tokens or infrastructure limits. "
+        "Optional budget is for operator-specified cumulative ceilings; historical spend is retained."
     )
     parameters = {
         "type": "object",
@@ -150,6 +150,10 @@ class MissionStartTool(Tool):
             return f"Error: no mission {mission_id!r} belongs to this user."
         if status in ('completed', 'cancelled'):
             return f"Mission {mission_id} is already {status}; no work was restarted."
+        if status == 'failed':
+            return json.dumps({'mission_id': mission_id, 'status': 'failed', 'started': False,
+                'message': 'ระบบยังดำเนินงานต่อไม่ได้ ผลงานเดิมถูกเก็บไว้สำหรับตรวจสอบและกู้คืน',
+                'operator_action': 'Inspect resource_policy and failed steps; do not ask the end user to approve tokens.'}, ensure_ascii=False)
         if status == 'paused':
             detail = await self.missions.status(str(mission_id).strip(), self.owner_id)
             return json.dumps({

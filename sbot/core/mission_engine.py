@@ -128,7 +128,9 @@ class MissionEngine:
         max_replans: int = 3,
         lease_seconds: float = _DEFAULT_LEASE_SECONDS,
         retry_base_delay: float = _RETRY_BASE_DELAY,
+        resource_hook: Callable[[str], Awaitable[bool]] | None = None,
     ):
+        self.resource_hook = resource_hook
         self.store = mission_store
         self.node_executor = node_executor
         self.max_parallel_nodes = max_parallel_nodes
@@ -351,6 +353,11 @@ class MissionEngine:
 
                 if over_budget:
                     await self._persist_spent(mission_id, spent, time.monotonic() - started)
+                    if self.resource_hook is not None:
+                        if await self.resource_hook(mission_id):
+                            continue
+                        await self.store.update_mission(mission_id, status='failed')
+                        return 'failed'
                     await self.store.update_mission(mission_id, status="paused")
                     logger.warning("Mission {} paused: budget {} exhausted", mission_id, over_budget)
                     return "paused"

@@ -531,12 +531,20 @@ class SpecialistRunner:
         budget = self._budget(max_seconds)
         if current_turn_deadline.get() is not None and current_turn_deadline.get() <= time.monotonic():
             return SpecialistOutcome(text="Parent turn deadline expired.", timed_out=True)
+        from sbot.providers.registry import output_window
+        known_limit = self.llm_settings.model_output_limits.get(model['model']) or output_window(model['model'])
+        output_limit = min(self.llm_settings.max_tokens, known_limit or self.llm_settings.max_tokens)
+        recovery_limit = min(known_limit or output_limit, self.llm_settings.max_tokens * 2)
+        if model.get('context_window'):
+            recovery_limit = min(recovery_limit, max(1, model['context_window'] // 2))
+            output_limit = min(output_limit, recovery_limit)
         loop = AgentLoop(
             provider=self.provider,
             tools=tools,
             model=model["model"],
             max_iterations=max_iterations,
-            max_tokens=self.llm_settings.max_tokens,
+            max_tokens=output_limit,
+            max_recovery_output_tokens=recovery_limit,
             max_context_chars=self.llm_settings.max_context_tokens,
             # Delegated bots use the same user workspace as their leader. Pass
             # it into the loop as well as their tools so files created by an

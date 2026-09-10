@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import PositiveInt, BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +16,7 @@ class LLMSettings(BaseModel):
     # rather than a short one — 4096 was low enough to do that on a single
     # tool-using turn.
     max_tokens: int = 16384
+    model_output_limits: dict[str, PositiveInt] = Field(default_factory=dict)
     temperature: float = 0.1
     max_iterations: int = 60
     # Wall-clock budget for one turn, checked between steps (0 disables it).
@@ -264,6 +265,11 @@ class TeamWorkSettings(BaseModel):
     max_parallel_total: int = Field(default=4, ge=1, le=32)
     max_parallel_per_owner: int = Field(default=2, ge=1, le=16)
     max_steps: int = Field(default=12, ge=1, le=40)
+    automatic_resources: bool = True
+    max_job_tokens: int = Field(default=5_000_000, ge=1000)
+    max_job_seconds: int = Field(default=21600, ge=60)
+    max_resource_adjustments: int = Field(default=4, ge=0, le=20)
+    resource_headroom: float = Field(default=1.5, ge=1, le=3)
 
 
 class Settings(BaseSettings):

@@ -134,3 +134,16 @@ def apply_model_overrides(model: str, kwargs: dict) -> None:
         if pattern in lowered:
             kwargs.update(overrides)
             return
+
+
+@lru_cache(maxsize=256)
+def output_window(model: str | None) -> int | None:
+    """Known provider output capacity; unknown private models use operator config."""
+    from litellm import model_cost
+    parts = (model or '').split('/')
+    for start in range(len(parts)):
+        info = model_cost.get('/'.join(parts[start:])) or {}
+        value = info.get('max_output_tokens')
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
