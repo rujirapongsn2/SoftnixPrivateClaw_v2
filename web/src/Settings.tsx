@@ -9,6 +9,7 @@ import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { MoreMenu } from "@astryxdesign/core/MoreMenu";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { Switch } from "@astryxdesign/core/Switch";
+import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
@@ -2219,6 +2220,7 @@ export function ApiOperationsEditor({
 
 function ConnectorsPanel() {
   const t = useT();
+  const [tab, setTab] = useState<"catalog" | "yours" | "organization">("catalog");
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
   const [globalConnectors, setGlobalConnectors] = useState<ConnectorGlobalSummary[]>([]);
@@ -2491,19 +2493,25 @@ function ConnectorsPanel() {
 
   return (
     <div className="claw-panel">
-      <div className="claw-row claw-row-between">
-        <Text color="secondary">{t("settings.connectors.intro")}</Text>
-        <Button
-          label={t("settings.connectors.addCustom")}
-          icon={<Icon icon={Plus} size="sm" />}
-          size="sm"
-          variant="secondary"
-          clickAction={() => setEditing({ transport: isAdmin ? "stdio" : "http", enabled: true })}
-        />
+      <div className="claw-connectors-tabs">
+        <TabList
+          value={tab}
+          onChange={(value) => setTab(value as "catalog" | "yours" | "organization")}
+          hasDivider
+          aria-label={t("settings.nav.connectors")}
+        >
+          <Tab value="catalog" label={t("settings.connectors.catalog")} icon={<Icon icon={Puzzle} size="sm" />} />
+          <Tab value="yours" label={t("settings.connectors.yourConnectors")} icon={<Icon icon={UserIcon} size="sm" />} />
+          <Tab
+            value="organization"
+            label={t("settings.connectors.globalTitle")}
+            icon={<Icon icon={Users} size="sm" />}
+          />
+        </TabList>
       </div>
       {error && <ErrorText>{error}</ErrorText>}
 
-      {categories.map((cat) => (
+      {tab === "catalog" && categories.map((cat) => (
         <div key={cat} className="claw-connector-category">
           <Text type="label" color="secondary" className="claw-connector-cat-title">
             {cat}
@@ -2591,13 +2599,24 @@ function ConnectorsPanel() {
         </div>
       ))}
 
-      {connectors.length > 0 && (
+      {tab === "yours" && (
         <div className="claw-connector-category">
-          <Text type="label" color="secondary" className="claw-connector-cat-title">
-            {t("settings.connectors.yourConnectors")}
-          </Text>
-          <Divider />
-          {connectors.map((c) => (
+          <div className="claw-row claw-row-between">
+            <Text color="secondary">{t("settings.connectors.intro")}</Text>
+            <Button
+              label={t("settings.connectors.addCustom")}
+              icon={<Icon icon={Plus} size="sm" />}
+              size="sm"
+              variant="secondary"
+              clickAction={() => setEditing({ transport: isAdmin ? "stdio" : "http", enabled: true })}
+            />
+          </div>
+          {connectors.length === 0 ? (
+            <EmptyState
+              title={t("settings.connectors.yourEmptyTitle")}
+              description={t("settings.connectors.yourEmptyDesc")}
+            />
+          ) : connectors.map((c) => (
             <Card key={c.id} padding={2}>
               <div className="claw-row claw-row-between">
                 <div>
@@ -2676,16 +2695,17 @@ function ConnectorsPanel() {
         </div>
       )}
 
-      {globalConnectors.length > 0 && (
+      {tab === "organization" && (
         <div className="claw-connector-category">
-          <Text type="label" color="secondary" className="claw-connector-cat-title">
-            {t("settings.connectors.globalTitle")}
-          </Text>
-          <Divider />
           <Text size="sm" color="secondary" as="p">
             {t("settings.connectors.globalDesc")}
           </Text>
-          {globalConnectors.map((c) => (
+          {globalConnectors.length === 0 ? (
+            <EmptyState
+              title={t("settings.connectors.organizationEmptyTitle")}
+              description={t("settings.connectors.organizationEmptyDesc")}
+            />
+          ) : globalConnectors.map((c) => (
             <Card key={c.id} padding={2}>
               <div className="claw-row">
                 <Text weight="semibold">{c.name}</Text>

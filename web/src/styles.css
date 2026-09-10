@@ -1265,6 +1265,17 @@ html[data-chat-bg="grid"] .claw-chat {
   flex-wrap: wrap;
   row-gap: 4px;
 }
+.claw-connectors-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 8px 0;
+  background: var(--color-background, #fff);
+}
+.claw-connectors-tabs nav {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
 .claw-overview-layout {
   display: grid;
   grid-template-columns: minmax(152px, 180px) minmax(0, 1fr);
@@ -3202,7 +3213,15 @@ html[data-chat-bg="grid"] .claw-chat {
   .claw-control-plane-tabs {
     overflow-x: auto;
   }
+  .claw-connectors-tabs {
+    overflow-x: auto;
+  }
   .claw-control-plane-tabs nav {
+    flex-wrap: nowrap;
+    width: max-content;
+    min-width: 100%;
+  }
+  .claw-connectors-tabs nav {
     flex-wrap: nowrap;
     width: max-content;
     min-width: 100%;

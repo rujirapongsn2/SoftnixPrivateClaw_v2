@@ -547,6 +547,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.saveConnector": "Save connector",
     "settings.connectors.intro":
       "Add a connector to give Sbot access to your apps. You supply your own keys — stored encrypted.",
+    "settings.connectors.catalog": "Available connectors",
     "settings.connectors.addCustom": "Add custom",
     "settings.connectors.viewDocs": "View docs",
     "settings.connectors.remove": "Remove",
@@ -554,10 +555,14 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.error": "Error",
     "settings.connectors.add": "Add",
     "settings.connectors.yourConnectors": "Your connectors",
+    "settings.connectors.yourEmptyTitle": "No personal connectors",
+    "settings.connectors.yourEmptyDesc": "Add one here, or choose a connector from the catalog.",
     "settings.connectors.optionsFor": "{label} options",
     "settings.connectors.globalTitle": "Provided by your organization",
     "settings.connectors.globalDesc":
       "Your administrator has set these up — they're already available to you as tools, no setup needed.",
+    "settings.connectors.organizationEmptyTitle": "No organization connectors",
+    "settings.connectors.organizationEmptyDesc": "Your administrator has not shared any connectors with you.",
 
     "settings.schedules.name": "Name",
     "settings.schedules.prompt": "Prompt to send to Sbot",
@@ -1610,6 +1615,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.saveConnector": "บันทึกตัวเชื่อมต่อ",
     "settings.connectors.intro":
       "เพิ่มตัวเชื่อมต่อเพื่อให้ Sbot เข้าถึงแอปของคุณ คุณเป็นผู้ระบุคีย์ของคุณเอง — จัดเก็บแบบเข้ารหัส",
+    "settings.connectors.catalog": "ตัวเชื่อมต่อที่มีให้",
     "settings.connectors.addCustom": "เพิ่มแบบกำหนดเอง",
     "settings.connectors.viewDocs": "ดูเอกสาร",
     "settings.connectors.remove": "ลบ",
@@ -1617,9 +1623,13 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.error": "ข้อผิดพลาด",
     "settings.connectors.add": "เพิ่ม",
     "settings.connectors.yourConnectors": "ตัวเชื่อมต่อของคุณ",
+    "settings.connectors.yourEmptyTitle": "ยังไม่มีตัวเชื่อมต่อส่วนตัว",
+    "settings.connectors.yourEmptyDesc": "เพิ่มตัวเชื่อมต่อที่นี่ หรือเลือกจากรายการตัวเชื่อมต่อที่มีให้",
     "settings.connectors.optionsFor": "ตัวเลือกของ {label}",
     "settings.connectors.globalTitle": "จัดเตรียมโดยองค์กรของคุณ",
     "settings.connectors.globalDesc": "ผู้ดูแลระบบได้ตั้งค่าสิ่งเหล่านี้ไว้แล้ว — พร้อมใช้งานเป็นเครื่องมือให้คุณทันทีโดยไม่ต้องตั้งค่าเพิ่ม",
+    "settings.connectors.organizationEmptyTitle": "ยังไม่มีตัวเชื่อมต่อจากองค์กร",
+    "settings.connectors.organizationEmptyDesc": "ผู้ดูแลระบบยังไม่ได้แชร์ตัวเชื่อมต่อให้คุณ",
 
     "settings.schedules.name": "ชื่อ",
     "settings.schedules.prompt": "ข้อความที่จะส่งให้ Sbot",
