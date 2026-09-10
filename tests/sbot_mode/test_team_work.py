@@ -368,7 +368,7 @@ async def test_queue_limits_and_job_controls_are_owner_scoped(stores, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_ask_mode_gates_background_submission(stores, tmp_path):
+async def test_ask_mode_does_not_gate_background_submission(stores, tmp_path):
     from sbot.core.loop import AgentLoop
     from sbot.tools.registry import ToolRegistry
 
@@ -384,7 +384,7 @@ async def test_ask_mode_gates_background_submission(stores, tmp_path):
 
     await AgentLoop(provider, tools, model='fake').run_turn(
         'ask', [{'role': 'user', 'content': 'A'}], lambda e: None, permission_mode='ask', confirm=deny)
-    assert confirmations == ['team_submit']
+    assert confirmations == []
     assert not await stores['missions'].list_missions(user.id)
 
 @pytest.mark.asyncio

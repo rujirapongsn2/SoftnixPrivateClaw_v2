@@ -196,7 +196,7 @@ export function AdminPanel({
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
         {section === "email" && <EmailConfigPanel />}
-        {section === "preferences" && <PreferencesPanel />}
+        {section === "preferences" && <><TeamPolicyPanel /><PreferencesPanel /></>}
         {section === "audit" && <AuditPanel />}
         {section === "users" && <UsersPanel selfId={selfId} />}
       </div>
@@ -5577,4 +5577,40 @@ function UserRow({
       )}
     </div>
   );
+}
+
+
+function TeamPolicyPanel() {
+  const t = useT();
+  const [policy, setPolicy] = useState<import("./api").TeamPolicy | null>(null);
+  const [models, setModels] = useState("{}");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    api.adminTeamPolicy().then(p => { setPolicy(p); setModels(JSON.stringify(p.model_output_limits, null, 2)); }).catch(e => setError(String(e)));
+  }, []);
+  const fields = [
+    ["max_job_tokens", "admin.teamPolicy.tokens", 1000, 1000],
+    ["max_job_seconds", "admin.teamPolicy.seconds", 60, 60],
+    ["max_step_recoveries", "admin.teamPolicy.recoveries", 0, 1],
+    ["max_resource_adjustments", "admin.teamPolicy.extensions", 0, 1],
+    ["resource_headroom", "admin.teamPolicy.headroom", 1, 0.1],
+  ] as const;
+  return <Card padding={2}><details><summary>{t("admin.teamPolicy.title")}</summary>
+    {error && <div role="alert">{error}</div>}
+    {policy && <form className="claw-panel" onSubmit={async e => {
+      e.preventDefault(); setBusy(true); setError(""); setSaved(false);
+      try {
+        const next = await api.adminSaveTeamPolicy({...policy, model_output_limits: JSON.parse(models)});
+        setPolicy(next); setSaved(true);
+      } catch (e) { setError(String(e)); } finally { setBusy(false); }
+    }}>
+      <label><input type="checkbox" checked={policy.automatic_resources} onChange={e => {setPolicy({...policy, automatic_resources: e.target.checked}); setSaved(false);}} /> {t("admin.teamPolicy.automatic")}</label>
+      {fields.map(([key, label, min, step]) => <label key={key}>{t(label)}<input type="number" required min={min} step={step} value={policy[key]} onChange={e => {setPolicy({...policy, [key]: Number(e.target.value)}); setSaved(false);}} /></label>)}
+      <label>{t("admin.teamPolicy.models")}<textarea rows={4} value={models} onChange={e => {setModels(e.target.value); setSaved(false);}} style={{width: "100%", boxSizing: "border-box"}} /></label>
+      <button type="submit" disabled={busy}>{t(busy ? "admin.teamPolicy.saving" : "admin.teamPolicy.save")}</button>
+      {saved && <span role="status">{t("admin.teamPolicy.saved")}</span>}
+    </form>}
+  </details></Card>;
 }

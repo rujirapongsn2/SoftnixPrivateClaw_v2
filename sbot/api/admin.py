@@ -1602,3 +1602,15 @@ def _unlink_quietly(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+# Resource settings are administrator-owned and persisted across restarts.
+from sbot.core.organization_policy import OrganizationPolicy, load_policy, save_policy
+
+@router.get('/team-policy')
+async def get_team_policy(state: AppState = Depends(get_state), admin: User = Depends(require_admin)):
+    return await load_policy(state.users.factory, state.settings)
+
+@router.put('/team-policy')
+async def put_team_policy(body: OrganizationPolicy, state: AppState = Depends(get_state), admin: User = Depends(require_admin)):
+    return await save_policy(state.users.factory, state.settings, body, admin.id)

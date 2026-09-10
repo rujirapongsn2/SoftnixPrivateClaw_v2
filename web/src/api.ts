@@ -792,7 +792,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return resp.json();
 }
 
+export interface TeamPolicy {
+  automatic_resources: boolean;
+  max_job_tokens: number;
+  max_job_seconds: number;
+  max_resource_adjustments: number;
+  resource_headroom: number;
+  max_step_recoveries: number;
+  model_output_limits: Record<string, number>;
+}
+
 export const api = {
+  adminTeamPolicy: () => request<TeamPolicy>("/api/admin/team-policy"),
+  adminSaveTeamPolicy: (policy: TeamPolicy) => request<TeamPolicy>("/api/admin/team-policy", {method: "PUT", body: JSON.stringify(policy)}),
   register: (email: string, password: string, display_name = "") =>
     request<{ access_token: string; user: AuthUser }>("/api/auth/register", {
       method: "POST",

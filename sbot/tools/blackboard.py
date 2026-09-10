@@ -83,7 +83,7 @@ class BlackboardTool(Tool):
                 return "Error: write requires a 'key'."
             if len(key) > MAX_KEY_CHARS:
                 return f"Error: key must be at most {MAX_KEY_CHARS} characters."
-            if key.startswith(("result:", "contract:", "scope:", "delivery:")):
+            if key.startswith(("result:", "contract:", "scope:", "delivery:", "policy:", "checkpoint:")):
                 return "Error: runtime result and scope keys are read-only."
             value = kwargs.get("value")
             if value is None or value == "":

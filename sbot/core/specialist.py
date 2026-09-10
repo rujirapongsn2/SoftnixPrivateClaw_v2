@@ -363,6 +363,7 @@ class SpecialistOutcome:
     # successful one — the caller then reported success and redid the work.
     reached_max_iterations: bool = False
     output_truncated: bool = False
+    messages: list[dict] = field(default_factory=list)
 
     @property
     def cut_off(self) -> bool:
@@ -517,6 +518,7 @@ class SpecialistRunner:
         max_iterations: int | None = None,
         extra_tools: list[Any] | None = None,
         budget_notice: bool = True,
+        resume_messages: list[dict] | None = None,
     ) -> SpecialistOutcome:
         max_iterations = max_iterations or self.llm_settings.max_iterations
         model = await self._resolve_model(getattr(bot, "model", None))
@@ -566,6 +568,8 @@ class SpecialistRunner:
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
+                *(resume_messages or []),
+                *([{"role": "user", "content": "Continue the unfinished step from these completed actions. Read existing files first. Split large writes into small sections. Do not repeat completed actions. Finish with finish_step."}] if resume_messages else []),
             ],
             emit,
             model=model["model"],
@@ -575,6 +579,7 @@ class SpecialistRunner:
         )
         usage = outcome.usage or {}
         return SpecialistOutcome(
+            messages=[*(resume_messages or []), *getattr(outcome, 'new_messages', [])],
             text=outcome.final_content or "",
             cost={
                 "tokens": usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0),

@@ -2,7 +2,7 @@
 import math
 
 
-def resource_decision(policy, mission, nodes, history):
+def resource_decision(policy, mission, nodes, history, recovery_count=0):
     spent = mission.spent or {}
     budget = dict(mission.budget or {})
     completed = [n for n in nodes if n.status == 'done']
@@ -11,7 +11,7 @@ def resource_decision(policy, mission, nodes, history):
     # and a model saying 'nearly done' cannot authorize another allocation.
     if not remaining:
         return None, 'no_remaining_work'
-    if len(completed) <= history.get('completed', 0):
+    if len(completed) <= history.get('completed', 0) and recovery_count <= history.get('recovery_count', 0):
         return None, 'no_verified_progress'
     if history.get('adjustments', 0) >= policy.max_resource_adjustments:
         return None, 'adjustment_limit'
@@ -24,7 +24,7 @@ def resource_decision(policy, mission, nodes, history):
     ):
         used = spent.get(metric, 0)
         if budget.get(key) and used >= budget[key]:
-            estimate = math.ceil(used / len(completed) * len(remaining) * policy.resource_headroom)
+            estimate = math.ceil(used / max(1, len(completed)) * len(remaining) * policy.resource_headroom)
             proposed = min(cap, math.ceil(used + max(1, estimate)))
             if proposed <= used:
                 return None, 'organization_limit'

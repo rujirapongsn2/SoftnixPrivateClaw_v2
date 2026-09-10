@@ -159,7 +159,7 @@ class MissionStartTool(Tool):
             return json.dumps({
                 'mission_id': mission_id, 'status': 'paused', 'started': False,
                 'reason': detail.get('resume_blocker'), 'budget': detail['budget'], 'spent': detail['spent'],
-                'message': 'งานยังไม่เริ่มต่อ เพราะงบที่ใช้ไปถึงขีดจำกัดแล้ว ต้องอนุมัติงบใหม่ก่อน การสั่งเริ่มซ้ำไม่เพิ่มงบ',
+                'message': 'งานหยุดที่ขีดจำกัดของระบบ ผลงานเดิมยังอยู่ ผู้ดูแลระบบสามารถตรวจสอบและปรับนโยบายได้',
             }, ensure_ascii=False)
         return (
             f"Mission {mission_id} is {status} in the background. "

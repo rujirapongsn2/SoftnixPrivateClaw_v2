@@ -124,9 +124,11 @@ class MissionService:
     async def submit_work(self, owner_id, session_id, mission_id, goal, nodes, coordinator_id, member_ids=None):
         """Persist a bounded job before acknowledging it. One application worker.
 
-        No automatic replan or action replay: each node has one execution
-        attempt. Recovery after an uncertain worker death needs inspection.
+        Recoverable model limits continue from retained messages.
+        Recovery after an uncertain worker death needs inspection.
         """
+        from sbot.core.organization_policy import load_policy
+        await load_policy(self.missions.factory, self.settings)
         limits = self.settings.team_work
         if not limits.enabled:
             raise InvalidGraphError("background team work is disabled")
@@ -155,8 +157,8 @@ class MissionService:
                 'required_files', 'input_files', 'acceptance_criteria', 'verification', 'delivery_target'
             ) if key in node})
             safe[-1]['max_attempts'] = 1
-            if safe[-1].get('kind', 'task') not in ('task', 'gate'):
-                raise InvalidGraphError("step kind must be task or gate")
+            if safe[-1].get('kind', 'task') != 'task':
+                raise InvalidGraphError("background steps must be tasks; obtain missing business input before submission")
         if len(safe) > 1:
             if not coordinator_id or await self.bots.get(coordinator_id, owner_id) is None:
                 raise InvalidGraphError("a coordinator is required to combine results")
@@ -296,14 +298,41 @@ class MissionService:
             raise
         return mission
 
+    async def _recover_background(self, mission_id: str, exhausted: list[MissionNode]) -> ReplanOutcome:
+        from sbot.core.organization_policy import load_policy
+        await load_policy(self.missions.factory, self.settings)
+        changed = False
+        for node in exhausted:
+            checkpoint = await self.missions.blackboard_read(mission_id, f'checkpoint:{node.id}')
+            if checkpoint is None and 'Task incomplete: output_limit' in (node.output or ''):
+                # Legacy jobs did not retain conversations. Keep their output as
+                # unverified context and inspect the existing workspace first.
+                checkpoint = {'recoverable': True, 'messages': [{'role': 'assistant', 'content': node.output}], 'reason': 'output_limit'}
+                await self.missions.blackboard_write(mission_id, f'checkpoint:{node.id}', checkpoint)
+            if not isinstance(checkpoint, dict) or not checkpoint.get('recoverable'):
+                continue
+            if node.attempts > self.settings.team_work.max_step_recoveries:
+                continue
+            revised = await self.missions.revise_node(mission_id, node.id)
+            if revised is not None:
+                history = await self.missions.blackboard_read(mission_id, 'policy:recovery') or {'count': 0}
+                await self.missions.blackboard_write(mission_id, 'policy:recovery', {'count': history['count'] + 1})
+                changed = True
+        return ReplanOutcome(changed=changed)
+
     async def _automatic_resources(self, mission_id: str) -> bool:
+        from sbot.core.organization_policy import load_policy
+        await load_policy(self.missions.factory, self.settings)
         from sbot.core.resource_policy import resource_decision
         mission = await self.missions.get_mission_unchecked(mission_id)
         if not mission or mission.status == 'cancelled':
             return False
         history = await self.missions.blackboard_read(mission_id, 'policy:resources') or {}
         nodes = await self.missions.get_nodes(mission_id)
-        budget, reason = resource_decision(self.settings.team_work, mission, nodes, history)
+        await self._recover_background(mission_id, [n for n in nodes if n.status == 'error'])
+        nodes = await self.missions.get_nodes(mission_id)
+        recovery = await self.missions.blackboard_read(mission_id, 'policy:recovery') or {}
+        budget, reason = resource_decision(self.settings.team_work, mission, nodes, history, recovery.get('count', 0))
         event = {'reason': reason, 'spent': mission.spent, 'previous_budget': mission.budget,
                  'budget': budget, 'completed': sum(n.status == 'done' for n in nodes)}
         events = [*(history.get('events') or []), event]
@@ -312,6 +341,7 @@ class MissionService:
             'completed': event['completed'] if budget else history.get('completed', 0),
             'events': events[-(self.settings.team_work.max_resource_adjustments + 1):],
             'operator_attention': budget is None,
+            'recovery_count': recovery.get('count', 0) if budget else history.get('recovery_count', 0),
         })
         if budget is None:
             return False
@@ -321,6 +351,8 @@ class MissionService:
     # ------------------------------------------------------------------ running
     async def start(self, mission_id: str, owner_id: str, budget: dict | None = None) -> str:
         """Begin (or resume) a mission in the background. Returns its status."""
+        from sbot.core.organization_policy import load_policy
+        await load_policy(self.missions.factory, self.settings)
         async with self._start_locks.get(mission_id):
             mission = await self.missions.get_mission(mission_id, owner_id)
             if mission is None:
@@ -335,12 +367,15 @@ class MissionService:
                 # Explicitly supplied ceilings only; ordinary resume never grants
                 # new spend or resets historical accounting.
                 resolved = self._resolve_budget({**(mission.budget or {}), **budget})
-                if self.settings.team_work.automatic_resources and await self.missions.blackboard_read(mission.id, 'scope:background'):
+                if await self.missions.blackboard_read(mission.id, 'scope:background'):
                     policy = self.settings.team_work
                     if resolved['max_tokens'] > policy.max_job_tokens or resolved['max_wall_seconds'] > policy.max_job_seconds:
                         raise InvalidGraphError('Requested budget exceeds organization policy; operator configuration is required.')
                 mission = await self.missions.update_mission(mission_id, budget=resolved)
             nodes = await self.missions.get_nodes(mission_id)
+            if await self.missions.blackboard_read(mission.id, 'scope:background'):
+                await self._recover_background(mission.id, [n for n in nodes if n.status == 'error'])
+                nodes = await self.missions.get_nodes(mission_id)
             if MissionEngine._budget_exceeded(mission, mission.spent or {}, 0, nodes):
                 automatic = self.settings.team_work.automatic_resources and await self.missions.blackboard_read(mission.id, 'scope:background')
                 if automatic:
@@ -450,9 +485,10 @@ class MissionService:
             node_executor=self._executor_for(mission),
             max_parallel_nodes=self.max_parallel_nodes,
             worker_id=f"mission-service:{mission_id[:8]}",
+            max_replans=max(1, self.settings.team_work.max_step_recoveries * self.settings.team_work.max_steps),
             resource_hook=(self._automatic_resources if self.settings.team_work.automatic_resources
                            and await self.missions.blackboard_read(mission.id, 'scope:background') else None),
-            replan_hook=(None if await self.missions.blackboard_read(mission.id, 'scope:background')
+            replan_hook=(self._recover_background if await self.missions.blackboard_read(mission.id, 'scope:background')
                          else self._replan_hook_for(mission)),
         )
         try:
@@ -559,7 +595,8 @@ class MissionService:
         elif status == "paused":
             lines.append(
                 "It ran out of budget rather than finishing. Say what is left undone, and what "
-                "it would take to finish."
+                "it would take to finish. Do not ask the end user to approve technical budgets; "
+                "resource policy is managed by the administrator."
             )
         lines.append(
             "This is a report: do not plan another mission, delegate, or start new work."
@@ -793,6 +830,8 @@ class MissionService:
         # The roster is inlined because a replan runs outside a chat turn and is
         # not granted `list_bots` — without this, reassigning a failed step to a
         # better-suited specialist would mean guessing at bot ids.
+        from sbot.core.organization_policy import load_policy
+        await load_policy(self.missions.factory, self.settings)
         members = await self.missions.blackboard_read(mission.id, 'scope:members')
         current_members = await self._current_members(mission.owner_id, mission.session_id)
         if current_members is not None:
@@ -964,6 +1003,8 @@ class MissionService:
     async def _execute_node(
         self, mission: Mission, runner: SpecialistRunner, node: MissionNode, context: NodeContext
     ) -> NodeResult:
+        from sbot.core.organization_policy import load_policy
+        await load_policy(self.missions.factory, self.settings)
         members = await self.missions.blackboard_read(mission.id, 'scope:members')
         current_members = await self._current_members(mission.owner_id, mission.session_id)
         if current_members is not None:
@@ -1034,6 +1075,18 @@ class MissionService:
         delivery = LocalDelivery(self.local_broker, mission.owner_id, target, runner.arg_guard) if target else None
         completion = FinishStepTool(runner.workspace, (node.budget or {}).get('required_files'), verifier, mode, delivery)
         completion.require_record = bool(background)
+        checkpoint = await self.missions.blackboard_read(mission.id, f'checkpoint:{node.id}') if background else None
+        resume_messages = checkpoint.get('messages', []) if isinstance(checkpoint, dict) and node.attempts > 1 else []
+        if resume_messages:
+            # External actions cannot be replayed by a repair turn. File creation
+            # stays in the same workspace and still passes the owner's guard.
+            recovery_parent_guard = runner.arg_guard
+            def recovery_guard(name, args):
+                if name.startswith('mcp_') or name in {'send_external', 'project'} or (name == 'exec' and any(c.get('function', {}).get('name') == 'exec' for m in resume_messages for c in m.get('tool_calls', []))):
+                    return args, 'External actions are unavailable during automatic recovery.'
+                return recovery_parent_guard(name, args) if recovery_parent_guard else (args, None)
+            runner.arg_guard = recovery_guard
+            runner.connectors = None
         started = time.monotonic()
         outcome = await runner.run(
             bot,
@@ -1043,6 +1096,7 @@ class MissionService:
             turn_id=f"mn_{mission.id[:8]}_{node.id}",
             max_seconds=_NODE_SECONDS,
             extra_tools=[BlackboardTool(self.missions, mission.id, node.id), completion],
+            resume_messages=resume_messages,
         )
         from sbot.core.task_result import TaskResult
         if runner.workspace != root_workspace:
@@ -1054,6 +1108,18 @@ class MissionService:
             outcome, completion.result if self.require_verified_results or background else None,
             require_completion=self.require_verified_results or bool(background),
         )
+        if background:
+            messages = outcome.messages
+            # A timeout or an interrupted tool may have an unknown external effect.
+            # Only normal boundaries with paired tool results can be continued.
+            calls = {c['id'] for m in messages for c in m.get('tool_calls', [])}
+            replies = {m.get('tool_call_id') for m in messages if m.get('role') == 'tool'}
+            recoverable = ((result.failure_reason == 'output_limit' or (result.failure_reason == 'iteration_limit' and any(m.get('role') == 'tool' and not str(m.get('content', '')).startswith(('Error', 'Only recording')) for m in messages)))
+                           and calls <= replies and bool(messages)
+                           and not (policy.isolated_assignments and policy.enabled_for(mission.owner_id)))
+            await self.missions.blackboard_write(mission.id, f'checkpoint:{node.id}', {
+                'messages': messages, 'recoverable': recoverable, 'reason': result.failure_reason,
+            })
         result.attempts = context.attempt
         result.duration_seconds = round(time.monotonic() - started, 3)
         logger.info('Task reliability {}', json.dumps({

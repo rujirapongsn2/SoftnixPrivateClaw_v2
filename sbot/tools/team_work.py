@@ -20,12 +20,13 @@ class TeamSubmitTool(Tool):
         "of a request together; independent steps run concurrently, depends_on steps wait for "
         "successful results. A coordinator combines multi-step results automatically. Workers "
         "do not see chat history. Set input_files and required_files explicitly. No automatic "
-        "replay of failed assignments; inspect their result before authorizing another attempt. "
+        "replay of external actions. Recoverable steps continue under organization policy. "
         "Technical resource decisions belong to the organization policy, not the end user. "
         "Do not create approval gates for token budgets, model limits, routine file creation or "
         "internal verification. Ask only for missing business information or decisions reserved by the user."
     )
     parameters = copy.deepcopy(MissionPlanTool.parameters)
+    parameters["properties"]["nodes"]["items"]["properties"]["kind"] = {"type": "string", "enum": ["task"]}
 
     def __init__(self, service, owner_id, coordinator_id, member_ids=None):
         self.service = service

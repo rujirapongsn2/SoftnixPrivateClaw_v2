@@ -965,6 +965,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  adminTeamPolicy: () => request<import("./api").TeamPolicy>("/api/admin/team-policy"),
+  adminSaveTeamPolicy: (policy: import("./api").TeamPolicy) => request<import("./api").TeamPolicy>("/api/admin/team-policy", {method: "PUT", body: JSON.stringify(policy)}),
   register: (email: string, password: string, display_name = "") =>
     request<{ access_token: string; user: AuthUser }>("/api/auth/register", {
       method: "POST",

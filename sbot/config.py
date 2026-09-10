@@ -265,6 +265,7 @@ class TeamWorkSettings(BaseModel):
     max_parallel_total: int = Field(default=4, ge=1, le=32)
     max_parallel_per_owner: int = Field(default=2, ge=1, le=16)
     max_steps: int = Field(default=12, ge=1, le=40)
+    max_step_recoveries: int = Field(default=2, ge=0, le=5)
     automatic_resources: bool = True
     max_job_tokens: int = Field(default=5_000_000, ge=1000)
     max_job_seconds: int = Field(default=21600, ge=60)

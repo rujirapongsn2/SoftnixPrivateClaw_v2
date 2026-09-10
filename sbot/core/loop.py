@@ -54,7 +54,7 @@ ConfirmFn = Callable[[str, str, str], Awaitable[bool]]
 # the model calling it is only ever relaying — and in ask mode the user gets to
 # see the relay before it lands.
 UNSAFE_TOOLS = {
-    "exec", "project", "delegate", "delegate_many", "team_submit", "workflow", "spawn", "mission_start", "create_bot", "send_external", "mission_gate",
+    "exec", "project", "delegate", "delegate_many", "workflow", "spawn", "create_bot", "send_external", "mission_gate",
 }
 
 _PREVIEW_CHARS = 200
