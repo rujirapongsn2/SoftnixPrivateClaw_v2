@@ -76,9 +76,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     bus = EventBus()
     is_postgres = "postgresql" in settings.database_url
     from claw.modes import SharedUserStore as ModeUserStore
-    from sbot.db.stores import GroupStore as ModeGroupStore
+    from sbot.db.stores import BlueprintStore, GroupStore as ModeGroupStore
     users = ModeUserStore(factory)
     groups = ModeGroupStore(factory)
+    blueprints = BlueprintStore(factory)
     sessions = SessionStore(factory, is_postgres=is_postgres)
     messages = MessageStore(factory, is_postgres=is_postgres)
     memories = MemoryStore(factory)
@@ -128,6 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         policy=policy,
     )
     runtime = AgentRuntime(
+        blueprints=blueprints,
         settings=settings,
         provider=provider,
         bus=bus,
@@ -313,6 +315,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         knowledge_service=knowledge_service,
         shares=shares,
     )
+    app.state.claw.blueprints = blueprints
+    from sbot.api.blueprints import router as blueprint_router
+    app.include_router(blueprint_router)
     sbot_app = None
     if settings.sbot_enabled:
         from pathlib import Path

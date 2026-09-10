@@ -8,6 +8,8 @@ that produces the outcome data self-improvement has to learn from, could
 neither open the skill it was assigned nor write down what it learned.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from sbot.config import LLMSettings, SandboxSettings, Settings
@@ -18,6 +20,7 @@ from sbot.db.stores import SkillStore
 from sbot.providers.base import ChatResult, ToolCall
 from sbot.sandbox.ephemeral import EphemeralSandbox
 from sbot.tools.cos import DelegateTool
+from sbot.tools.skills import scope_skills
 from tests.sbot_mode.conftest import FakeProvider, text_turn
 
 
@@ -37,6 +40,17 @@ def make_settings(tmp_path) -> Settings:
 
 def make_memory(stores, provider) -> MemoryService:
     return MemoryService(stores["memories"], stores["messages"], stores["sessions"], provider)
+
+
+def test_skill_scope_distinguishes_all_selected_and_none():
+    """The editor persists these three values, so their prompt scope must stay distinct."""
+    market = SimpleNamespace(id="market-id", name="market-research")
+    payroll = SimpleNamespace(id="payroll-id", name="payroll")
+    available = [market, payroll]
+
+    assert scope_skills(available, None) == available
+    assert scope_skills(available, [market.id]) == [market]
+    assert scope_skills(available, []) == []
 
 
 def make_service(stores, provider, tmp_path, skills=None, memory=None) -> MissionService:

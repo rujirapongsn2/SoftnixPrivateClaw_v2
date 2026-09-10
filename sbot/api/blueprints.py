@@ -13,15 +13,30 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from sbot.api.deps import AppState, current_user, get_state
+from sbot.api.deps import AppState
 from sbot.db.models import Blueprint, BlueprintVersion, User
 from sbot.filenames import safe_filename
 
 router = APIRouter(prefix="/api/blueprints")
+
+
+def get_state(request: Request):
+    """Share the library while resolving sessions and files in the active mode."""
+    if hasattr(request.app.state, "claw"):
+        return request.app.state.claw
+    return request.app.state.sbot
+
+
+async def current_user(request: Request, state=Depends(get_state)):
+    if hasattr(request.app.state, "claw"):
+        from claw.api.deps import current_user as authenticate
+    else:
+        from sbot.api.deps import current_user as authenticate
+    return await authenticate(request, state)
 
 Visibility = Literal["private", "group", "public"]
 _SUPPORTED_SUFFIXES = {".docx", ".xlsx", ".pptx"}

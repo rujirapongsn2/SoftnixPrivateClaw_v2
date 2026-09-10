@@ -59,6 +59,30 @@ async def test_mode_session_and_file_authorization(integrated):
     assert (await c.get(f"/modes/sbot/api/sessions/{b}/files/report.txt")).text == "team"
 
 
+async def test_blueprint_routes_share_library_and_use_host_workspace(integrated):
+    app, c, u = integrated
+    created = await c.post("/modes/sbot/api/blueprints", data={"name": "Template"},
+                           files={"file": ("template.docx", b"template bytes")})
+    assert created.status_code == 200, created.text
+    bp = created.json()
+    assert (await c.get("/api/blueprints")).json()[0]["id"] == bp["id"]
+    materialized = await c.post(f"/api/blueprints/{bp['id']}/materialize", json={})
+    assert materialized.status_code == 200, materialized.text
+    ref = materialized.json()
+    host = app.state.claw
+    workspace = host.settings.workspaces_root / u.id
+    copy = workspace / ref["path"]
+    assert copy.read_bytes() == b"template bytes"
+    assert not (app.state.sbot.settings.workspaces_root / u.id / ref["path"]).exists()
+    from claw.core.context import build_user_content
+    content, _ = build_user_content("Fill the template", [str(copy)], workspace)
+    assert "[Blueprint templates]" in content
+    tool = host.runtime.get_agent(u.id).tools.get("save_blueprint")
+    assert tool is not None
+    assert "Saved Blueprint" in await tool.execute(path=ref["path"], name="Saved in PrivateClaw")
+    assert len((await c.get("/modes/sbot/api/blueprints")).json()) == 2
+
+
 async def test_core_and_search_history_isolation(integrated):
     app, c, u = integrated
     a, b = app.state.claw, app.state.sbot

@@ -399,7 +399,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.projects.unavailableTitle": "Project containers are unavailable",
     "settings.projects.unavailableDesc": "This Sbot installation has not enabled persistent project environments.",
 
-    "settings.blueprints.intro": "Reusable DOCX, XLSX, and PPTX templates for Sbot.",
+    "settings.blueprints.intro": "Reusable DOCX, XLSX, and PPTX templates for both chat modes.",
     "settings.blueprints.upload": "Upload Blueprint",
     "settings.blueprints.chooseFile": "Choose file",
     "settings.blueprints.name": "Name",
@@ -1460,7 +1460,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.projects.unavailableTitle": "คอนเทนเนอร์โปรเจกต์ไม่พร้อมใช้งาน",
     "settings.projects.unavailableDesc": "Sbot เครื่องนี้ยังไม่ได้เปิด persistent project environment",
 
-    "settings.blueprints.intro": "จัดเก็บ template DOCX, XLSX และ PPTX เพื่อให้ Sbot นำกลับมาใช้ซ้ำ",
+    "settings.blueprints.intro": "เทมเพลต DOCX, XLSX และ PPTX สำหรับใช้ซ้ำในทั้งสองโหมด",
     "settings.blueprints.upload": "อัปโหลด Blueprint",
     "settings.blueprints.chooseFile": "เลือกไฟล์",
     "settings.blueprints.name": "ชื่อ",

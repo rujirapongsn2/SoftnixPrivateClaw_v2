@@ -162,11 +162,15 @@ class ClawAgent:
         memory: MemoryService | None = None,
         knowledge: "KnowledgeStore | None" = None,
         sessions: SessionStore | None = None,
+        blueprints: "BlueprintStore | None" = None,
     ):
         self.user_id = user_id
         self.workspace = workspace
         self.policy = policy
         self.tools = ToolRegistry(on_execute=self._audit_tool)
+        if blueprints is not None:
+            from sbot.tools.blueprint import SaveBlueprintTool
+            self.tools.register(SaveBlueprintTool(blueprints, settings.blueprints_root, workspace, user_id))
         self._audit_store = audit
         # Network mode of the sandbox exec runs, recorded in the security audit
         # trail so admins can see when a command had internet access.
@@ -378,8 +382,10 @@ class AgentRuntime:
         plans: "PolicyPlanStore | None" = None,
         browser_broker: BrowserBrokerStore | None = None,
         knowledge: "KnowledgeStore | None" = None,
+        blueprints: "BlueprintStore | None" = None,
     ):
         self.settings = settings
+        self.blueprints = blueprints
         self.provider = provider
         self.llm_config = llm_config
         self.plans = plans
@@ -499,6 +505,7 @@ class AgentRuntime:
             memory=self.memory,
             knowledge=self.knowledge,
             sessions=self.sessions,
+            blueprints=self.blueprints,
         )
         self._agents[user_id] = agent
         self._agents.move_to_end(user_id)

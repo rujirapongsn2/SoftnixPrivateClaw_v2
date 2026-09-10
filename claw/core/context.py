@@ -149,6 +149,7 @@ def build_user_content(
     image_blocks: list[dict[str, Any]] = []
     file_notes: list[str] = []
     stored_names: list[str] = []
+    blueprint_paths: list[str] = []
 
     for raw in media:
         path = Path(raw)
@@ -167,6 +168,8 @@ def build_user_content(
             )
         else:
             file_notes.append(f"- {path.name} (at `{rel}`, type {mime})")
+            if rel.startswith("blueprints/"):
+                blueprint_paths.append(rel)
 
     if not image_blocks and not file_notes:
         return text, text
@@ -178,6 +181,13 @@ def build_user_content(
         grounding.append(
             "\n[Attached files — available in your workspace; open them with read_file if needed]\n"
             + "\n".join(file_notes)
+        )
+    if blueprint_paths:
+        grounding.append(
+            "\n[Blueprint templates]\nUse the attached Blueprint working copies as templates. "
+            "Preserve their layout and structure and save the finished deliverable under a new filename. "
+            "The library originals are stored separately.\n"
+            + "\n".join(f"- {path}" for path in blueprint_paths)
         )
     text_part = "\n".join(grounding)
 

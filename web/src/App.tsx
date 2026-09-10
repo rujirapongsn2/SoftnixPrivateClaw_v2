@@ -859,7 +859,7 @@ export default function App() {
                 icon={SettingsIcon}
                 collapsible={{ defaultIsCollapsed: true }}
               >
-                {SETTINGS_SECTIONS.filter(s => sbotEnabled || !["projects", "blueprints"].includes(s.key)).map((s) => (
+                {SETTINGS_SECTIONS.filter(s => sbotEnabled || s.key !== "projects").map((s) => (
                   <SideNavItem
                     key={s.key}
                     label={t(s.labelKey)}

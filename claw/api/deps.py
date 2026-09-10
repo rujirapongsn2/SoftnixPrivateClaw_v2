@@ -77,6 +77,7 @@ class AppState:
     # Per-user throttle for the /tts endpoint, same rationale as image_rate_limiter.
     tts_rate_limiter: RateLimiter = None  # type: ignore[assignment]
     telegram: "TelegramChannel | None" = None
+    blueprints: "BlueprintStore | None" = None
 
 
 def get_state(request: Request) -> AppState:

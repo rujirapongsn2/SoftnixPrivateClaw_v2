@@ -11,7 +11,7 @@ export interface TaskResult {
 
 const MODE_LOCAL = /^\/api\/(sessions|bots|bot-groups|missions|memory|schedules|feedback|heartbeat|projects|blueprints|shares|share)(?:[/?]|$)/;
 function endpoint(path: string): string {
-  return (MODE_LOCAL.test(path) && (window.location.pathname.startsWith("/chat/sbot") || /^\/api\/(projects|blueprints)/.test(path))) ? `/modes/sbot${path}` : path;
+  return (MODE_LOCAL.test(path) && (window.location.pathname.startsWith("/chat/sbot") || /^\/api\/projects(?:[/?]|$)/.test(path))) ? `/modes/sbot${path}` : path;
 }
 import type { LucideIcon } from "lucide-react";
 import {

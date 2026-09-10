@@ -29,6 +29,7 @@ export interface ChatMessage {
 }
 
 export interface AttachmentRef {
+  blueprint?: { id: string; name: string; version: number };
   name: string;
   path: string;
   mime: string;

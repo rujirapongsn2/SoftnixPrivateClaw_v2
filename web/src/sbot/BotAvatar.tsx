@@ -253,19 +253,31 @@ export function BotAvatar({
   size?: number;
   className?: string;
   title?: string;
-  /** Shows a subtle live-work indicator while the bot is processing a turn. */
+  /** Shows orbiting rings while the bot is processing a turn. */
   working?: boolean;
 }) {
   // The heads are drawn past the circle on purpose — a body cropped by the
   // badge is what stops them reading as stickers floating on a dot.
   const clip = useId();
   const Face = FACES[variant];
+  const orbit = (front: boolean) => (
+    <svg
+      className={`sbot-avatar-orbit sbot-avatar-orbit--${front ? "front" : "back"}`}
+      viewBox="0 0 64 64"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path className="sbot-avatar-orbit-track" d={front ? "M 4 32 A 28 12 0 0 0 60 32" : "M 60 32 A 28 12 0 0 0 4 32"} />
+      <path className="sbot-avatar-orbit-comet" pathLength="100" d={front ? "M 4 32 A 28 12 0 0 0 60 32" : "M 60 32 A 28 12 0 0 0 4 32"} />
+    </svg>
+  );
   return (
     <span
       className={`sbot-avatar-shell${working ? " sbot-avatar-shell--working" : ""}`}
       style={{ width: size, height: size }}
       title={working ? `${title ?? "Bot"} is working` : undefined}
     >
+      {working && orbit(false)}
       <svg
         className={className}
         width={size}
@@ -285,6 +297,7 @@ export function BotAvatar({
           <Face simple={size < SIMPLE_BELOW_PX} />
         </g>
       </svg>
+      {working && orbit(true)}
       {working && <span className="sbot-avatar-working-dot" aria-label="Working" />}
     </span>
   );

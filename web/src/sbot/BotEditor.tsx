@@ -16,6 +16,13 @@ const BOT_TOOLS = [
   ["web_search", "Search the web"],
 ] as const;
 
+type SkillScope = "all" | "selected" | "none";
+
+function initialSkillScope(skillIds: string[] | null | undefined): SkillScope {
+  if (skillIds == null) return "all";
+  return skillIds.length > 0 ? "selected" : "none";
+}
+
 export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
   bot: BotInfo;
   onClose: () => void;
@@ -32,7 +39,9 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
   const [tools, setTools] = useState<string[]>(bot.tool_allowlist ?? []);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [skillIds, setSkillIds] = useState<string[]>(bot.skill_ids ?? []);
+  const [skillScope, setSkillScope] = useState<SkillScope>(() => initialSkillScope(bot.skill_ids));
   const [loadingSkills, setLoadingSkills] = useState(true);
+  const [skillsLoadFailed, setSkillsLoadFailed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -43,7 +52,10 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
     api.listSkills().then(items => {
       if (!cancelled) setSkills(items.filter(item => item.enabled));
     }).catch(() => {
-      if (!cancelled) setError("Could not load skills. You can still save other fields.");
+      if (!cancelled) {
+        setSkillsLoadFailed(true);
+        setError("Could not load skills. Use all enabled skills or no skill shortlist before saving.");
+      }
     }).finally(() => {
       if (!cancelled) setLoadingSkills(false);
     });
@@ -51,6 +63,10 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
   }, []);
 
   const selectedSkillSet = useMemo(() => new Set(skillIds), [skillIds]);
+  const hasSelectedEnabledSkill = useMemo(
+    () => skills.some(skill => selectedSkillSet.has(skill.id) || selectedSkillSet.has(skill.name)),
+    [skills, selectedSkillSet],
+  );
   const toggleTool = (id: string) => setTools(previous => previous.includes(id)
     ? previous.filter(item => item !== id)
     : [...previous, id]);
@@ -64,8 +80,23 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     if (saving || !name.trim() || !roleTitle.trim()) return;
+    if (skillScope === "selected") {
+      if (loadingSkills) {
+        setError("Wait for skills to finish loading before saving selected skills.");
+        return;
+      }
+      if (skillsLoadFailed) {
+        setError("Could not verify selected skills. Use all enabled skills or no skill shortlist.");
+        return;
+      }
+      if (!hasSelectedEnabledSkill) {
+        setError("Choose at least one enabled skill, or use all enabled skills.");
+        return;
+      }
+    }
     setSaving(true);
     setError("");
+    const savedSkillIds = skillScope === "all" ? null : skillScope === "none" ? [] : skillIds;
     try {
       await api.updateBot(bot.id, {
         name: name.trim(),
@@ -73,7 +104,7 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
         charter: charter.trim(),
         model: model.trim() || null,
         avatar: { ...(bot.avatar || {}), variant: avatar },
-        skill_ids: skillIds,
+        skill_ids: savedSkillIds,
         tool_allowlist: restricted ? tools : null,
       });
       onSaved(await api.getBot(bot.id));
@@ -140,12 +171,28 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
 
       <fieldset className="sbot-bot-tools-field">
         <legend>Skills</legend>
-        {loadingSkills ? <span className="sbot-bot-muted"><Loader2 size={14} className="sbot-bot-spin" /> Loading skills…</span>
-          : skills.length === 0 ? <span className="sbot-bot-muted">No enabled skills</span>
-          : <div className="sbot-bot-check-grid">{skills.map(skill => <label key={skill.id} className="sbot-bot-check">
-            <input type="checkbox" checked={selectedSkillSet.has(skill.id) || selectedSkillSet.has(skill.name)} onChange={() => toggleSkill(skill)} />
-            <span><strong>{skill.name}</strong><small>{skill.description}</small></span>
-          </label>)}</div>}
+        <div className="sbot-bot-skill-scopes" role="radiogroup" aria-label="Skill scope">
+          <label className={`sbot-bot-skill-scope${skillScope === "all" ? " sbot-bot-skill-scope--selected" : ""}`}>
+            <input type="radio" name="skill-scope" checked={skillScope === "all"} onChange={() => setSkillScope("all")} />
+            <span><strong>Use all enabled skills</strong><small>Default. The bot can discover every available skill.</small></span>
+          </label>
+          <label className={`sbot-bot-skill-scope${skillScope === "selected" ? " sbot-bot-skill-scope--selected" : ""}`}>
+            <input type="radio" name="skill-scope" checked={skillScope === "selected"} onChange={() => setSkillScope("selected")} />
+            <span><strong>Use selected skills</strong><small>Keep the bot focused on the skills below.</small></span>
+          </label>
+          <label className={`sbot-bot-skill-scope${skillScope === "none" ? " sbot-bot-skill-scope--selected" : ""}`}>
+            <input type="radio" name="skill-scope" checked={skillScope === "none"} onChange={() => setSkillScope("none")} />
+            <span><strong>No skill shortlist</strong><small>Do not preload skill guidance for this bot.</small></span>
+          </label>
+        </div>
+        {skillScope === "selected" && (
+          loadingSkills ? <span className="sbot-bot-muted"><Loader2 size={14} className="sbot-bot-spin" /> Loading skills…</span>
+            : skills.length === 0 ? <span className="sbot-bot-muted">No enabled skills</span>
+            : <div className="sbot-bot-check-grid">{skills.map(skill => <label key={skill.id} className="sbot-bot-check">
+              <input type="checkbox" checked={selectedSkillSet.has(skill.id) || selectedSkillSet.has(skill.name)} onChange={() => toggleSkill(skill)} />
+              <span><strong>{skill.name}</strong><small>{skill.description}</small></span>
+            </label>)}</div>
+        )}
       </fieldset>
 
       {error && <p className="sbot-bot-editor-error" role="alert">{error}</p>}
