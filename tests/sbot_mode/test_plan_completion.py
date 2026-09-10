@@ -79,15 +79,17 @@ async def test_no_current_plan_does_not_force_unrelated_work():
     assert len(provider.calls) == 1
 
 
-@pytest.mark.parametrize("explicit", [False, None])
-async def test_status_plan_update_does_not_resume_old_work(explicit):
-    update = plan("in_progress", explicit)
-    if explicit is None:
-        del update[0].tool_calls[0].arguments["continue_work"]
+async def test_status_plan_update_does_not_resume_old_work():
+    update = plan("in_progress", False)
     outcome, provider, store = await run([update, text_turn("Today's summary; export is pending")])
     assert outcome.final_content == "Today's summary; export is pending"
     assert len(provider.calls) == 2
     assert store.set_plan.call_args.args[2][-1]["status"] == "in_progress"
+
+
+def test_plan_requires_explicit_continuation_intent():
+    tool = PlanTool(AsyncMock())
+    assert tool.validate_params({"goal": "status only"}) == ["missing required continue_work"]
 
 
 async def test_empty_length_limited_continuation_preserves_previous_answer():
@@ -99,3 +101,9 @@ async def test_empty_length_limited_continuation_preserves_previous_answer():
     assert "remaining work is still pending" in outcome.final_content
     assert outcome.finish_reason == "length"
     assert len(provider.calls) == 3
+    assistant_messages = [
+        m for m in outcome.new_messages
+        if m["role"] == "assistant" and not m.get("tool_calls")
+    ]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0]["content"] == outcome.final_content

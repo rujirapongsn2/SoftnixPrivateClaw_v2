@@ -46,6 +46,17 @@ class Bot(Base):
     __tablename__ = "sbot_bots"
     __table_args__ = (
         Index("ix_sbot_bots_owner_name", "owner_id", "name"),
+        # A retired member may be recreated, but two active members with the
+        # same visible name make delegation ambiguous.  The partial unique
+        # index is also the cross-process guard for roster creation.
+        Index(
+            "uq_sbot_bots_owner_name_active",
+            "owner_id",
+            "name",
+            unique=True,
+            postgresql_where=text("is_archived = false"),
+            sqlite_where=text("is_archived = 0"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)

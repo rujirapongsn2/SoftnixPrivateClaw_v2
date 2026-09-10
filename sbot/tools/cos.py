@@ -16,6 +16,7 @@ import uuid
 from typing import Any
 
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from sbot.core.specialist import (
     DELEGATABLE_TOOLS,
@@ -273,17 +274,6 @@ class CreateBotsTool(CreateBotTool):
                 "skill_ids": item.get("skill_ids"),
             })
 
-        existing_count = await self.bot_store.count_for_user(self.owner_id)
-        if existing_count + len(normalized) > MAX_BOTS_PER_OWNER:
-            return (
-                f"Error: creating {len(normalized)} bots would exceed the maximum of "
-                f"{MAX_BOTS_PER_OWNER} bots for this team."
-            )
-        for item in normalized:
-            existing = await self.bot_store.get_by_name(self.owner_id, item["name"])
-            if existing:
-                return f"Error: bot with name '{item['name']}' already exists (id: {existing.id})."
-
         available = set(DELEGATABLE_TOOLS)
         if self.connectors is not None:
             from sbot.tools.registry import ToolRegistry
@@ -300,19 +290,21 @@ class CreateBotsTool(CreateBotTool):
             if skills is not None:
                 item["skill_ids"] = [str(skill).strip() for skill in skills if str(skill).strip()]
 
-        created = []
         for item in normalized:
-            bot = await self.bot_store.create(
-                owner_id=self.owner_id,
-                name=item["name"],
-                role_title=item["role_title"],
-                charter=item["charter"],
-                tool_allowlist=item["tool_allowlist"],
-                skill_ids=item["skill_ids"],
-                kind="specialist",
-                created_by=f"bot:{self.creator_bot_id}",
+            item["kind"] = "specialist"
+            item["created_by"] = f"bot:{self.creator_bot_id}"
+        try:
+            bots_created = await self.bot_store.create_batch(
+                self.owner_id, normalized, max_bots=MAX_BOTS_PER_OWNER
             )
-            created.append(f"- {bot.name} ({bot.role_title}, รหัส: {bot.id})")
+        except ValueError as exc:
+            return f"Error: {exc}."
+        except IntegrityError:
+            # A separate worker may have created a member after our local
+            # preflight. The transaction was rolled back in BotStore, so this
+            # roster is all-or-nothing and the model can refresh the team.
+            return "Error: the team changed while this roster was being created; no bots from this request were added. Refresh the team and try again."
+        created = [f"- {bot.name} ({bot.role_title}, รหัส: {bot.id})" for bot in bots_created]
         return "สร้างบอทครบ {} คนเรียบร้อยแล้ว:\n{}\nยังไม่ได้มอบหมายหรือทดสอบงานให้บอทเหล่านี้.".format(
             len(created), "\n".join(created)
         )

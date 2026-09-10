@@ -359,6 +359,82 @@ class MessageStore:
 class BotStore:
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
         self.factory = factory
+        # A roster must be checked and written as one critical section.  The
+        # database constraint below is the cross-process backstop; this lock
+        # keeps concurrent turns in this worker from needlessly racing first.
+        self._create_locks = KeyedLocks()
+
+    async def create_batch(
+        self,
+        owner_id: str,
+        bots: Sequence[dict[str, Any]],
+        *,
+        max_bots: int,
+    ) -> list[Bot]:
+        """Atomically add a validated roster for one owner.
+
+        The caller validates generated fields such as the charter and tool
+        allowlist.  This method repeats the quota/name checks inside the
+        transaction because those facts can change between tool validation and
+        the write.  It intentionally leaves an archived bot's name reusable.
+        """
+        if not bots:
+            return []
+        async with self._create_locks.get(owner_id):
+            async with self.factory() as db:
+                # Lock the owner row before counting.  KeyedLocks covers this
+                # process; this row lock makes quota validation serialize
+                # across web workers that share the same PostgreSQL database.
+                owner = await db.scalar(select(User.id).where(User.id == owner_id).with_for_update())
+                if owner is None:
+                    raise ValueError("team owner no longer exists")
+                active = list(
+                    await db.scalars(
+                        select(Bot).where(Bot.owner_id == owner_id, Bot.is_archived.is_(False))
+                    )
+                )
+                if len(active) + len(bots) > max_bots:
+                    raise ValueError(
+                        f"creating {len(bots)} bots would exceed the maximum of {max_bots} bots for this team"
+                    )
+
+                existing_names = {bot.name.casefold() for bot in active}
+                requested_names: set[str] = set()
+                for item in bots:
+                    name = str(item["name"]).strip()
+                    key = name.casefold()
+                    if key in existing_names:
+                        raise ValueError(f"bot with name '{name}' already exists")
+                    if key in requested_names:
+                        raise ValueError(f"duplicate bot name '{name}' in this request")
+                    requested_names.add(key)
+
+                created = [
+                    Bot(
+                        owner_id=owner_id,
+                        name=str(item["name"]).strip(),
+                        role_title=str(item.get("role_title") or "Specialist"),
+                        charter=str(item.get("charter") or ""),
+                        model=item.get("model"),
+                        tool_allowlist=item.get("tool_allowlist"),
+                        skill_ids=item.get("skill_ids"),
+                        kind=str(item.get("kind") or "specialist"),
+                        avatar=item.get("avatar")
+                        or {"color": "#4b6bfb", "emoji": "🤖", "initial": str(item["name"]).strip()[:1].upper()},
+                        created_by=str(item.get("created_by") or "user"),
+                    )
+                    for item in bots
+                ]
+                db.add_all(created)
+                try:
+                    # Flush first so a constraint error rolls back the whole
+                    # roster before anything can be observed as created.
+                    await db.flush()
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    raise
+                return created
 
     async def create(
         self,

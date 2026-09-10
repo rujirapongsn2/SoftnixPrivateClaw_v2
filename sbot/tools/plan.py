@@ -49,7 +49,6 @@ class PlanTool(Tool):
             "continue_work": {
                 "type": "boolean",
                 "description": "Continue unfinished steps in this turn only for a current execution request; false for status/summary requests.",
-                "default": False,
             },
             "goal": {
                 "type": "string",
@@ -69,7 +68,11 @@ class PlanTool(Tool):
                 },
             },
         },
-        "required": ["goal"],
+        # This must be explicit.  An omitted flag used to make the loop choose
+        # between prematurely ending requested work and reviving a status-only
+        # request based on a schema default that is not applied to raw tool
+        # arguments.
+        "required": ["goal", "continue_work"],
     }
 
     def __init__(self, sessions: SessionStore):

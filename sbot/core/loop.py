@@ -608,11 +608,27 @@ class AgentLoop:
                 # bubble, and it comes back as a content-less assistant turn in
                 # the next prompt's history, which some providers reject. The
                 # runtime surfaces it as a visible error instead.
+                recovered_plan_answer = False
                 if not result.content and last_plan_answer:
                     notice = t("error.continuation_stopped", current_turn_locale.get())
                     result.content = last_plan_answer + "\n\n" + notice
+                    recovered_plan_answer = True
                 if result.content:
-                    working.append({"role": "assistant", "content": result.content})
+                    if recovered_plan_answer:
+                        # The intermediate answer is already in history.  Keep
+                        # a single authoritative assistant message rather than
+                        # appending it again with the recovery notice.
+                        for message in reversed(working):
+                            if (
+                                message.get("role") == "assistant"
+                                and message.get("content") == last_plan_answer
+                            ):
+                                message["content"] = result.content
+                                break
+                        else:
+                            working.append({"role": "assistant", "content": result.content})
+                    else:
+                        working.append({"role": "assistant", "content": result.content})
                 completion_tool = self.tools.get('finish_step')
                 if (getattr(completion_tool, 'require_record', False)
                         and completion_tool.result is None and not finalize_only

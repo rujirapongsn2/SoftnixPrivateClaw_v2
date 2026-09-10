@@ -128,6 +128,44 @@ async def test_create_bots_preflight_prevents_partial_roster(stores):
 
 
 @pytest.mark.asyncio
+async def test_create_bots_existing_member_rolls_back_entire_roster(stores):
+    """A valid first member must not survive a later duplicate failure."""
+    from sbot.tools.cos import CreateBotsTool
+
+    user = await stores["users"].get_or_create_by_email("cos_batch_existing@sbot.ai")
+    await stores["bots"].create(owner_id=user.id, name="Existing", role_title="Existing")
+    tool = CreateBotsTool(stores["bots"], user.id, creator_bot_id="cos")
+
+    result = await tool.execute(bots=[
+        {"name": "New member", "role_title": "Researcher", "charter": "Find sources."},
+        {"name": "Existing", "role_title": "Analyst", "charter": "Analyse sources."},
+    ])
+
+    assert "already exists" in result
+    assert await stores["bots"].get_by_name(user.id, "New member") is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rosters_do_not_create_duplicate_active_members(stores):
+    """The per-owner lock serializes competing turns before the DB backstop."""
+    from sbot.tools.cos import CreateBotsTool
+
+    user = await stores["users"].get_or_create_by_email("cos_batch_race@sbot.ai")
+    first = CreateBotsTool(stores["bots"], user.id, creator_bot_id="cos")
+    second = CreateBotsTool(stores["bots"], user.id, creator_bot_id="cos")
+    roster = [
+        {"name": "Researcher", "role_title": "Research", "charter": "Find sources."},
+        {"name": "Analyst", "role_title": "Analysis", "charter": "Analyse sources."},
+    ]
+
+    outcomes = await asyncio.gather(first.execute(bots=roster), second.execute(bots=roster))
+
+    assert sum("สร้างบอทครบ 2 คน" in outcome for outcome in outcomes) == 1
+    assert sum(outcome.startswith("Error:") for outcome in outcomes) == 1
+    assert len(await stores["bots"].list_for_user(user.id)) == 2
+
+
+@pytest.mark.asyncio
 async def test_creating_a_bot_skips_unsolicited_bundled_work(stores, tmp_path):
     """A model may emit several calls at once; creation must still be bounded."""
     user = await stores["users"].get_or_create_by_email("bounded_create@sbot.ai")
