@@ -699,6 +699,11 @@ export default function App() {
   const [botGroups, setBotGroups] = useState<BotGroupInfo[]>([]);
   const [groupEditor, setGroupEditor] = useState<BotGroupInfo | null | undefined>(undefined);
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
+  // A bot row can arrive before the session list on first load. Keep that
+  // short reconciliation state distinct from a real draft so users never see
+  // the chat landing while an existing transcript is being located.
+  const [openingBotId, setOpeningBotId] = useState<string | null>(null);
+  const botSelectionRequestRef = useRef(0);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [active, setActive] = useState<string | null>(() => {
     const parts = window.location.pathname.split("/");
@@ -926,7 +931,10 @@ export default function App() {
   useEffect(() => {
     if (active !== null || !selectedBotId) return;
     const thread = botThread(sessions, selectedBotId);
-    if (thread) setActive(thread.id);
+    if (thread) {
+      setActive(thread.id);
+      setOpeningBotId(null);
+    }
   }, [active, selectedBotId, sessions]);
 
   // One bot, one thread: a bot's chat is a single continuous conversation, so
@@ -981,6 +989,8 @@ export default function App() {
     // would make this call 401. A failure here (e.g. offline) shouldn't block
     // signing out locally, so it's fire-and-forget.
     void api.logout().catch(() => undefined);
+    // Ignore an in-flight bot-thread lookup after leaving the workspace.
+    botSelectionRequestRef.current += 1;
     clearToken();
     sessionStorage.removeItem("claw:last:privateclaw");
     sessionStorage.removeItem("claw:last:sbot");
@@ -990,6 +1000,7 @@ export default function App() {
     setBotEditor(null);
     setGroupEditor(undefined);
     setSelectedBotId(null);
+    setOpeningBotId(null);
     setActiveMissions([]);
     setActive(null);
     setSettingsSection(null);
@@ -998,11 +1009,42 @@ export default function App() {
 
   const activeGroup = botGroups.find(g => g.session_id === active);
   const openGroup = (group: BotGroupInfo) => {
+    botSelectionRequestRef.current += 1;
+    setOpeningBotId(null);
     setSelectedBotId(null);
     setActive(group.session_id);
     setSettingsSection(null);
     setAdminSection(null);
     setNavOpen(false);
+  };
+
+  const openBot = (bot: BotInfo) => {
+    const request = ++botSelectionRequestRef.current;
+    const thread = botThread(sessions, bot.id);
+    setSelectedBotId(bot.id);
+    setSettingsSection(null);
+    setAdminSection(null);
+    setNavOpen(false);
+    if (thread) {
+      setOpeningBotId(null);
+      setActive(thread.id);
+      return;
+    }
+
+    // Do not show the draft landing until the server confirms this bot has no
+    // existing thread. This handles a click during the initial parallel bot /
+    // session requests, and avoids a visible landing-to-transcript jump.
+    setOpeningBotId(bot.id);
+    setActive(null);
+    void api.listSessions().then((known) => {
+      if (botSelectionRequestRef.current !== request) return;
+      setSessions(known);
+      setActive(botThread(known, bot.id)?.id ?? null);
+    }).catch(() => {
+      if (botSelectionRequestRef.current === request) setActive(null);
+    }).finally(() => {
+      if (botSelectionRequestRef.current === request) setOpeningBotId(null);
+    });
   };
 
   if (checking) return <div className="claw-login"><Text color="secondary">Loading…</Text></div>;
@@ -1098,14 +1140,7 @@ export default function App() {
           done={doneSessions}
           working={workingBotIds}
           onSelectBot={(b) => {
-            setSelectedBotId(b.id);
-            // The bot's thread, or a fresh draft if it has none yet.
-            setActive(botThread(sessions, b.id)?.id ?? null);
-            // Without these the click is a no-op while a panel is open: the
-            // main area renders the panel, not the chat it just selected.
-            setSettingsSection(null);
-            setAdminSection(null);
-            closeDrawer();
+            openBot(b);
           }}
           onSelectSession={(id) => {
             setActive(id);
@@ -1168,6 +1203,11 @@ export default function App() {
           )
         ) : settingsSection ? (
           <SettingsPanel section={settingsSection} />
+        ) : openingBotId ? (
+          <div className="sbot-transcript-opening" role="status" aria-live="polite">
+            <Icon icon={Loader2} size="sm" className="sbot-bot-spin" />
+            <Text color="secondary">{t("chat.loadingTranscript")}</Text>
+          </div>
         ) : (
           <>
           {activeGroup && (

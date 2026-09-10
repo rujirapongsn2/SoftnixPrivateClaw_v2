@@ -2061,7 +2061,13 @@ export function Chat({
   // yet, and treating that as an empty session would hide the message list —
   // and with it the scroll-to-top sentinel that is the only way to reach the
   // rest of the history.
-  const isEmpty = items.length === 0 && !hasOlder && !streaming && !busy && !imageBusy;
+  // The welcome landing belongs only to an actual draft (no session id). A
+  // persisted session starts with an empty in-memory transcript while its
+  // newest page is fetched; treating that short loading state as "empty" made
+  // the landing flash, then the viewport raced down to the latest message.
+  // Keeping the message surface mounted lets ChatMessageList anchor directly
+  // to the restored transcript instead.
+  const isEmpty = sessionId === null && items.length === 0 && !hasOlder && !streaming && !busy && !imageBusy;
 
   // Flatten every tool-call group (in order) into the execution timeline.
   const execSteps = items.flatMap((it) => (it.kind === "tools" ? it.calls : []));

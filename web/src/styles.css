@@ -327,6 +327,14 @@ html[data-font-size="large"] {
   flex-direction: column;
   min-width: 0;
 }
+.sbot-transcript-opening {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 14px;
+}
 
 /* Mobile top bar (hamburger + current section + logo). Hidden on desktop;
    shown by the responsive block below when the sidebar is a drawer. */
