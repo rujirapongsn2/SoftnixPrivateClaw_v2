@@ -367,6 +367,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.profile.newPasswordDesc": "At least 8 characters.",
     "settings.profile.updatePassword": "Update password",
     "settings.profile.preferencesSaved": "Preferences saved",
+    "settings.profile.languageAppearance": "Language and appearance",
     "settings.profile.language": "Language",
     "settings.profile.languageDesc":
       "Applies to key interface surfaces and the AI's replies. English is the default.",
@@ -383,6 +384,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.profile.executionPanel": "Execution panel",
     "settings.profile.executionPanelDesc":
       "Show the live tool-call timeline while the agent works. Off by default.",
+    "settings.profile.chatExperience": "Chat experience",
+    "settings.profile.chatExperienceDesc": "Choose which live activity details appear while you work.",
     "settings.profile.savePreferences": "Save preferences",
 
     "settings.projects.title": "Project containers",
@@ -1428,6 +1431,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.profile.newPasswordDesc": "อย่างน้อย 8 ตัวอักษร",
     "settings.profile.updatePassword": "อัปเดตรหัสผ่าน",
     "settings.profile.preferencesSaved": "บันทึกการตั้งค่าที่ต้องการแล้ว",
+    "settings.profile.languageAppearance": "ภาษาและการแสดงผล",
     "settings.profile.language": "ภาษา",
     "settings.profile.languageDesc":
       "มีผลกับหน้าจอหลักของระบบและคำตอบของ AI ค่าเริ่มต้นคือภาษาอังกฤษ",
@@ -1444,6 +1448,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.profile.executionPanel": "แผงแสดงการทำงาน",
     "settings.profile.executionPanelDesc":
       "แสดงรายการขั้นตอนการทำงานของเอเจนต์แบบเรียลไทม์ขณะทำงาน ปิดไว้เป็นค่าเริ่มต้น",
+    "settings.profile.chatExperience": "ประสบการณ์การใช้งานแชท",
+    "settings.profile.chatExperienceDesc": "เลือกข้อมูลสถานะระหว่างทำงานที่ต้องการให้แสดงในแชท",
     "settings.profile.savePreferences": "บันทึกการตั้งค่า",
 
     "settings.projects.title": "คอนเทนเนอร์โปรเจกต์",

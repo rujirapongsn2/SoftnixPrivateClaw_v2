@@ -628,68 +628,77 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
   };
 
   return (
-    <Card padding={2}>
-      <div className="claw-panel">
-        <div>
-          <Text weight="semibold">{t("settings.profile.language")}</Text>
-          <Text size="sm" color="secondary">
-            {t("settings.profile.languageDesc")}
-          </Text>
-          <SegmentedControl
-            value={language}
-            onChange={(v) => setLanguage(v as BrandingLanguage)}
-            label={t("settings.profile.language")}
-          >
-            {/* Language names are shown as endonyms (in their own language), not
-                translated per the current UI language — same convention as any
-                language picker. */}
-            <SegmentedControlItem value="en" label="English" />
-            <SegmentedControlItem value="th" label="ไทย (Thai)" />
-          </SegmentedControl>
+    <>
+      <Card padding={2}>
+        <div className="claw-panel">
+          <div>
+            <Text weight="semibold">{t("settings.profile.languageAppearance")}</Text>
+          </div>
+          <div>
+            <Text weight="semibold">{t("settings.profile.language")}</Text>
+            <Text size="sm" color="secondary">
+              {t("settings.profile.languageDesc")}
+            </Text>
+            <SegmentedControl
+              value={language}
+              onChange={(v) => setLanguage(v as BrandingLanguage)}
+              label={t("settings.profile.language")}
+            >
+              {/* Language names are shown as endonyms (in their own language), not
+                  translated per the current UI language — same convention as any
+                  language picker. */}
+              <SegmentedControlItem value="en" label="English" />
+              <SegmentedControlItem value="th" label="ไทย (Thai)" />
+            </SegmentedControl>
+          </div>
+          <div>
+            <Text weight="semibold">{t("settings.profile.fontSize")}</Text>
+            <SegmentedControl
+              value={fontSize}
+              onChange={(v) => setFontSize(v as BrandingFontSize)}
+              label={t("settings.profile.fontSize")}
+            >
+              <SegmentedControlItem value="small" label={t("settings.profile.fontSize.small")} />
+              <SegmentedControlItem value="medium" label={t("settings.profile.fontSize.medium")} />
+              <SegmentedControlItem value="large" label={t("settings.profile.fontSize.large")} />
+            </SegmentedControl>
+          </div>
+          <div>
+            <Text weight="semibold">{t("settings.profile.chatBackground")}</Text>
+            <Text size="sm" color="secondary">
+              {t("settings.profile.chatBackgroundDesc")}
+            </Text>
+            <SegmentedControl
+              value={chatBg}
+              onChange={(v) => setChatBg(v as BrandingChatBackground)}
+              label={t("settings.profile.chatBackground")}
+            >
+              <SegmentedControlItem value="solid" label={t("settings.profile.bg.solid")} />
+              <SegmentedControlItem value="dots" label={t("settings.profile.bg.dots")} />
+              <SegmentedControlItem value="grid" label={t("settings.profile.bg.grid")} />
+            </SegmentedControl>
+          </div>
         </div>
-        <div>
-          <Text weight="semibold">{t("settings.profile.fontSize")}</Text>
-          <SegmentedControl
-            value={fontSize}
-            onChange={(v) => setFontSize(v as BrandingFontSize)}
-            label={t("settings.profile.fontSize")}
-          >
-            <SegmentedControlItem value="small" label={t("settings.profile.fontSize.small")} />
-            <SegmentedControlItem value="medium" label={t("settings.profile.fontSize.medium")} />
-            <SegmentedControlItem value="large" label={t("settings.profile.fontSize.large")} />
-          </SegmentedControl>
-        </div>
-        <div>
-          <Text weight="semibold">{t("settings.profile.chatBackground")}</Text>
-          <Text size="sm" color="secondary">
-            {t("settings.profile.chatBackgroundDesc")}
-          </Text>
-          <SegmentedControl
-            value={chatBg}
-            onChange={(v) => setChatBg(v as BrandingChatBackground)}
-            label={t("settings.profile.chatBackground")}
-          >
-            <SegmentedControlItem value="solid" label={t("settings.profile.bg.solid")} />
-            <SegmentedControlItem value="dots" label={t("settings.profile.bg.dots")} />
-            <SegmentedControlItem value="grid" label={t("settings.profile.bg.grid")} />
-          </SegmentedControl>
-        </div>
-        <div>
+      </Card>
+      <Card padding={2}>
+        <div className="claw-panel">
+          <div>
+            <Text weight="semibold">{t("settings.profile.chatExperience")}</Text>
+            <Text size="sm" color="secondary">{t("settings.profile.chatExperienceDesc")}</Text>
+          </div>
           <Switch
             value={execPanel}
             label={t("settings.profile.executionPanel")}
+            description={t("settings.profile.executionPanelDesc")}
             changeAction={setExecPanel}
           />
-          <Text size="sm" color="secondary">
-            {t("settings.profile.executionPanelDesc")}
-          </Text>
         </div>
-        {saveError && <ErrorText>{saveError}</ErrorText>}
-        <div>
-          <Button label={t("settings.profile.savePreferences")} isDisabled={!dirty || saving} clickAction={save} />
-        </div>
+      </Card>
+      {saveError && <ErrorText>{saveError}</ErrorText>}
+      <div className="claw-row">
+        <Button label={t("settings.profile.savePreferences")} isDisabled={!dirty || saving} clickAction={save} />
       </div>
-    </Card>
+    </>
   );
 }
 
