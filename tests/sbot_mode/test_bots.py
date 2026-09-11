@@ -1,5 +1,7 @@
 """Tests for sbot Bot Registry, Chief of Staff seeding, and CRUD operations."""
 
+import asyncio
+
 import pytest
 from sbot.db.stores import BotStore, MAX_BOTS_PER_OWNER, UserStore
 
@@ -22,6 +24,17 @@ async def test_cos_auto_seeding(stores):
     # Calling again returns same instance
     cos_again = await bot_store.get_or_create_cos(user.id)
     assert cos_again.id == cos.id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cos_seeding_creates_one_active_team_lead(stores):
+    bot_store: BotStore = stores["bots"]
+    user = await stores["users"].get_or_create_by_email("concurrent-cos@sbot.ai", "concurrent")
+
+    bots = await asyncio.gather(*[bot_store.get_or_create_cos(user.id) for _ in range(8)])
+
+    assert len({bot.id for bot in bots}) == 1
+    assert len(await bot_store.list_for_user(user.id)) == 1
 
 
 @pytest.mark.asyncio

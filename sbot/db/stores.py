@@ -542,49 +542,71 @@ class BotStore:
 
     async def get_or_create_cos(self, owner_id: str) -> Bot:
         """Ensure Chief of Staff exists for this owner."""
-        async with self.factory() as db:
-            cos = await db.scalar(
-                select(Bot).where(
-                    Bot.owner_id == owner_id,
-                    Bot.kind == "chief_of_staff",
-                    Bot.is_archived.is_(False),
+        # New users can open the mode in several tabs or submit two creation
+        # requests at once. Serialize the read-then-insert locally and lock the
+        # owner row for other web workers before looking for the default bot.
+        async with self._create_locks.get(owner_id):
+            async with self.factory() as db:
+                owner = await db.scalar(select(User.id).where(User.id == owner_id).with_for_update())
+                if owner is None:
+                    raise ValueError("team owner no longer exists")
+                cos = await db.scalar(
+                    select(Bot).where(
+                        Bot.owner_id == owner_id,
+                        Bot.kind == "chief_of_staff",
+                        Bot.is_archived.is_(False),
+                    )
                 )
-            )
-            if cos is not None:
-                # Upgrade only the system-created legacy default. A Chief of
-                # Staff renamed by its owner keeps that chosen name. Check for
-                # an existing active "Default" specialist first because bot
-                # names are unique within an owner's active roster.
-                if cos.name in self.LEGACY_COS_NAMES and cos.created_by == "system":
-                    conflict = await db.scalar(
-                        select(Bot.id).where(
+                if cos is not None:
+                    # Upgrade only the system-created legacy default. A Chief of
+                    # Staff renamed by its owner keeps that chosen name. Check for
+                    # an existing active "Default" specialist first because bot
+                    # names are unique within an owner's active roster.
+                    if cos.name in self.LEGACY_COS_NAMES and cos.created_by == "system":
+                        conflict = await db.scalar(
+                            select(Bot.id).where(
+                                Bot.owner_id == owner_id,
+                                Bot.name == self.DEFAULT_COS_NAME,
+                                Bot.id != cos.id,
+                                Bot.is_archived.is_(False),
+                            )
+                        )
+                        if conflict is None:
+                            cos.name = self.DEFAULT_COS_NAME
+                            if cos.charter in self.LEGACY_COS_CHARTERS:
+                                cos.charter = self.DEFAULT_COS_CHARTER
+                            if cos.avatar in self.LEGACY_COS_AVATARS:
+                                cos.avatar = dict(self.DEFAULT_COS_AVATAR)
+                            await db.commit()
+                    return cos
+
+                cos = Bot(
+                    owner_id=owner_id,
+                    name=self.DEFAULT_COS_NAME,
+                    role_title="Chief of Staff",
+                    charter=self.DEFAULT_COS_CHARTER,
+                    kind="chief_of_staff",
+                    avatar=dict(self.DEFAULT_COS_AVATAR),
+                    created_by="system",
+                )
+                db.add(cos)
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    # The unique active-name index protects SQLite deployments
+                    # where row locks are not available across processes.
+                    await db.rollback()
+                    existing = await db.scalar(
+                        select(Bot).where(
                             Bot.owner_id == owner_id,
-                            Bot.name == self.DEFAULT_COS_NAME,
-                            Bot.id != cos.id,
+                            Bot.kind == "chief_of_staff",
                             Bot.is_archived.is_(False),
                         )
                     )
-                    if conflict is None:
-                        cos.name = self.DEFAULT_COS_NAME
-                        if cos.charter in self.LEGACY_COS_CHARTERS:
-                            cos.charter = self.DEFAULT_COS_CHARTER
-                        if cos.avatar in self.LEGACY_COS_AVATARS:
-                            cos.avatar = dict(self.DEFAULT_COS_AVATAR)
-                        await db.commit()
+                    if existing is not None:
+                        return existing
+                    raise
                 return cos
-
-            cos = Bot(
-                owner_id=owner_id,
-                name=self.DEFAULT_COS_NAME,
-                role_title="Chief of Staff",
-                charter=self.DEFAULT_COS_CHARTER,
-                kind="chief_of_staff",
-                avatar=dict(self.DEFAULT_COS_AVATAR),
-                created_by="system",
-            )
-            db.add(cos)
-            await db.commit()
-            return cos
 
     async def update(self, bot_id: str, owner_id: str, **fields: Any) -> Bot | None:
         async with self.factory() as db:
