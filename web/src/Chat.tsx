@@ -76,6 +76,7 @@ import {
   openChatSocket,
   visibleArtifacts,
 } from "./api";
+import { isSkillEnabledForCurrentUser } from "./skill-access";
 import { HtmlPreview } from "./HtmlPreview";
 import { SoftnixLogo } from "./Logo";
 import { ModeSwitcher } from "./ModeSwitcher";
@@ -1076,7 +1077,7 @@ export function Chat({
   useEffect(() => {
     if (running) return;
     api.listSkills()
-      .then((s) => setSkills(s.filter((x) => x.enabled && (!x.read_only || x.subscription_enabled))))
+      .then((s) => setSkills(s.filter(isSkillEnabledForCurrentUser)))
       .catch(() => setSkills([]));
     api
       .listConnectors()

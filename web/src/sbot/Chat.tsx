@@ -1,4 +1,5 @@
 import type { TaskResult } from "./api";
+import { isSkillEnabledForCurrentUser } from "../skill-access";
 import {
   ChatComposer,
   ChatComposerInput,
@@ -1439,7 +1440,7 @@ export function Chat({
   useEffect(() => {
     if (running) return;
     api.listSkills()
-      .then((s) => setSkills(s.filter((x) => x.enabled && (!x.read_only || x.subscription_enabled))))
+      .then((s) => setSkills(s.filter(isSkillEnabledForCurrentUser)))
       .catch(() => setSkills([]));
     api
       .listConnectors()

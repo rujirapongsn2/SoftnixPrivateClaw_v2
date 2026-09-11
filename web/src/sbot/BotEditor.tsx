@@ -4,6 +4,7 @@ import { Loader2, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BOT_AVATARS, BotAvatar, avatarVariantFor, type BotAvatarVariant } from "./BotAvatar";
 import { api, type BotInfo, type SkillInfo } from "./api";
+import { isSkillEnabledForCurrentUser } from "../skill-access";
 
 const BOT_TOOLS = [
   ["project", "Project environment"],
@@ -50,7 +51,7 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
     dialog.current?.querySelector<HTMLInputElement>("#bot-name")?.focus();
     let cancelled = false;
     api.listSkills().then(items => {
-      if (!cancelled) setSkills(items.filter(item => item.enabled && (!item.read_only || item.subscription_enabled)));
+      if (!cancelled) setSkills(items.filter(isSkillEnabledForCurrentUser));
     }).catch(() => {
       if (!cancelled) {
         setSkillsLoadFailed(true);
