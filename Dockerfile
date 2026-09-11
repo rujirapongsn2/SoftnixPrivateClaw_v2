@@ -32,6 +32,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project --python /usr/local/bin/python
 
 COPY claw/ ./claw/
+COPY sbot/ ./sbot/
 COPY migrations/ ./migrations/
 COPY alembic.ini ./
 COPY --from=web /web/dist ./web/dist

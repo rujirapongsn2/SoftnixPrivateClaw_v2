@@ -9,6 +9,7 @@ import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { MoreMenu } from "@astryxdesign/core/MoreMenu";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { Switch } from "@astryxdesign/core/Switch";
+import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
@@ -27,6 +28,7 @@ import {
   FileText,
   FileType,
   Globe,
+  GitBranch,
   HeartPulse,
   Library,
   LineChart,
@@ -40,7 +42,9 @@ import {
   Plus,
   Scale,
   Send,
+  Server,
   Sparkles,
+  Square,
   Trash2,
   Upload,
   User as UserIcon,
@@ -55,6 +59,8 @@ import {
   ApiOperation,
   ApiOperationParam,
   AuthUser,
+  BlueprintInfo,
+  BlueprintVersion,
   BrandingChatBackground,
   BrandingFontSize,
   BrandingLanguage,
@@ -65,15 +71,19 @@ import {
   KnowledgeDoc,
   MemoryInfo,
   ScheduleInfo,
+  ProjectInventory,
   SimpleGroup,
   SkillInfo,
   USER_LLM_API,
   api,
-} from "./api";
+  blueprintFileUrl,
+} from "./shared-api";
 import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 export type SettingsSection =
   | "profile"
+  | "projects"
+  | "blueprints"
   | "skills"
   | "knowledge"
   | "memory"
@@ -90,6 +100,8 @@ export type SettingsSection =
 // `t(s.labelKey)` at render time so the label follows the current language.
 export const SETTINGS_SECTIONS: { key: SettingsSection; labelKey: string; icon: IconType | IconName }[] = [
   { key: "profile", labelKey: "settings.nav.profile", icon: UserIcon },
+  { key: "projects", labelKey: "settings.nav.projects", icon: Server },
+  { key: "blueprints", labelKey: "settings.nav.blueprints", icon: FileType },
   { key: "skills", labelKey: "settings.nav.skills", icon: Sparkles },
   { key: "knowledge", labelKey: "settings.nav.knowledge", icon: Library },
   { key: "memory", labelKey: "settings.nav.memory", icon: Brain },
@@ -116,6 +128,8 @@ export function SettingsPanel({ section }: { section: SettingsSection }) {
       </div>
       <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
         {section === "profile" && <ProfilePanel />}
+        {section === "projects" && <ProjectsPanel />}
+        {section === "blueprints" && <BlueprintsPanel />}
         {section === "skills" && <SkillsPanel />}
         {section === "knowledge" && <KnowledgePanel />}
         {section === "memory" && <MemoryPanel />}
@@ -124,7 +138,7 @@ export function SettingsPanel({ section }: { section: SettingsSection }) {
         {section === "schedules" && <SchedulesPanel />}
         {section === "heartbeat" && <HeartbeatPanel />}
         {section === "telegram" && <TelegramPanel />}
-        {section === "browser-extension" && <BrowserExtensionPanel />}
+        {section === "browser-extension" && <><LocalAgentPanel /><BrowserExtensionPanel /></>}
       </div>
     </div>
   );
@@ -232,6 +246,337 @@ function ProfilePanel() {
   );
 }
 
+// ---------------------------------------------------------------- Projects
+
+function ProjectsPanel() {
+  const t = useT();
+  const [inventory, setInventory] = useState<ProjectInventory | null>(null);
+  const [busyProject, setBusyProject] = useState<string | null>(null);
+  const { error, guard } = useAsyncError();
+  const toast = useToast();
+  const reload = useCallback(() => api.listProjects().then(setInventory), []);
+
+  useEffect(() => {
+    void guard(async () => await reload());
+  }, [guard, reload]);
+
+  const act = (project: string, action: "start" | "stop") =>
+    void guard(async () => {
+      setBusyProject(project);
+      try {
+        setInventory(action === "start" ? await api.startProject(project) : await api.stopProject(project));
+        toast({
+          body: t(action === "start" ? "settings.projects.started" : "settings.projects.stopped", { project }),
+          type: "info",
+          autoHideDuration: 2500,
+        });
+      } finally {
+        setBusyProject(null);
+      }
+    });
+
+  if (error) return <ErrorText>{error}</ErrorText>;
+  if (!inventory) return <Text color="secondary">{t("settings.common.loading")}</Text>;
+  if (!inventory.available) {
+    return <EmptyState title={t("settings.projects.unavailableTitle")} description={t("settings.projects.unavailableDesc")} />;
+  }
+
+  const policy = inventory.allowed
+    ? t("settings.projects.policyAllowed", { count: String(inventory.max_containers) })
+    : t("settings.projects.policyDenied");
+
+  return (
+    <div className="claw-panel">
+      <div className="claw-row claw-row-between">
+        <div>
+          <Text weight="semibold">{t("settings.projects.title")}</Text>
+          <Text size="sm" color="secondary">{policy}</Text>
+        </div>
+        <Button label={t("settings.projects.refresh")} size="sm" variant="secondary" clickAction={() => void guard(async () => await reload())} />
+      </div>
+      {inventory.projects.length === 0 ? (
+        <EmptyState title={t("settings.projects.emptyTitle")} description={t("settings.projects.emptyDesc")} />
+      ) : (
+        inventory.projects.map((item) => {
+          const running = item.state === "running";
+          const ports = Object.entries(item.ports).flatMap(([containerPort, bindings]) =>
+            (bindings ?? []).map((binding) => `${binding.HostIp}:${binding.HostPort} → ${containerPort}`),
+          );
+          return (
+            <Card key={item.project} padding={2}>
+              <div className="claw-panel">
+                <div className="claw-row claw-row-between">
+                  <div>
+                    <Text weight="semibold">{item.project}</Text>
+                    <Text size="xsm" color="secondary">{item.container}</Text>
+                  </div>
+                  <Badge
+                    variant={running ? "success" : "neutral"}
+                    label={running ? t("settings.projects.running") : t("settings.projects.stopped")}
+                  />
+                </div>
+                {ports.length > 0 && <Text size="xsm" color="secondary">{ports.join(" · ")}</Text>}
+                <div className="claw-row">
+                  {running ? (
+                    <Button
+                      label={t("settings.projects.stop")}
+                      icon={<Icon icon={Square} size="xsm" />}
+                      size="sm"
+                      variant="secondary"
+                      isLoading={busyProject === item.project}
+                      clickAction={() => act(item.project, "stop")}
+                    />
+                  ) : (
+                    <Button
+                      label={t("settings.projects.start")}
+                      icon={<Icon icon={Play} size="xsm" />}
+                      size="sm"
+                      isDisabled={!inventory.allowed || busyProject === item.project}
+                      isLoading={busyProject === item.project}
+                      clickAction={() => act(item.project, "start")}
+                    />
+                  )}
+                </div>
+              </div>
+            </Card>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Blueprints
+
+type BlueprintVisibility = BlueprintInfo["visibility"];
+
+function BlueprintVisibilityPicker({
+  value,
+  onChange,
+}: {
+  value: BlueprintVisibility;
+  onChange: (value: BlueprintVisibility) => void;
+}) {
+  const t = useT();
+  return (
+    <SegmentedControl value={value} onChange={(next) => onChange(next as BlueprintVisibility)} label={t("settings.blueprints.visibility")}>
+      <SegmentedControlItem value="private" label={t("settings.blueprints.private")} />
+      <SegmentedControlItem value="group" label={t("settings.blueprints.group")} />
+      <SegmentedControlItem value="public" label={t("settings.blueprints.public")} />
+    </SegmentedControl>
+  );
+}
+
+function blueprintSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function BlueprintsPanel() {
+  const t = useT();
+  const toast = useToast();
+  const [items, setItems] = useState<BlueprintInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [visibility, setVisibility] = useState<BlueprintVisibility>("private");
+  const [saving, setSaving] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const reload = useCallback(() => {
+    setLoading(true);
+    setError("");
+    return api.listBlueprints().then(setItems).catch((e) => setError(String(e))).finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  const choose = (selected: File | null) => {
+    setFile(selected);
+    if (selected && !name.trim()) setName(selected.name.replace(/\.[^.]+$/, ""));
+  };
+
+  const create = async () => {
+    if (!file || !name.trim()) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.createBlueprint(file, { name: name.trim(), description: description.trim(), visibility });
+      setCreating(false);
+      setFile(null);
+      setName("");
+      setDescription("");
+      setVisibility("private");
+      if (fileRef.current) fileRef.current.value = "";
+      await reload();
+      toast({ body: t("settings.blueprints.created"), type: "info", autoHideDuration: 2500 });
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="claw-panel">
+      <div className="claw-row claw-row-between">
+        <Text size="sm" color="secondary">{t("settings.blueprints.intro")}</Text>
+        {!creating && <Button label={t("settings.blueprints.upload")} icon={<Icon icon={Upload} size="sm" />} size="sm" clickAction={() => setCreating(true)} />}
+      </div>
+      {error && <ErrorText>{error}</ErrorText>}
+      {creating && (
+        <Card padding={3}>
+          <div className="claw-panel">
+            <input ref={fileRef} type="file" accept=".docx,.xlsx,.pptx" hidden onChange={(e) => choose(e.target.files?.[0] ?? null)} />
+            <div className="claw-row">
+              <Button label={t("settings.blueprints.chooseFile")} variant="secondary" icon={<Icon icon={FileType} size="sm" />} clickAction={() => fileRef.current?.click()} />
+              {file && <Text size="sm">{file.name} · {blueprintSize(file.size)}</Text>}
+            </div>
+            <TextInput label={t("settings.blueprints.name")} value={name} onChange={setName} />
+            <TextArea label={t("settings.blueprints.description")} value={description} onChange={setDescription} rows={2} />
+            <BlueprintVisibilityPicker value={visibility} onChange={setVisibility} />
+            <div className="claw-row">
+              <Button label={saving ? "…" : t("settings.blueprints.save")} isDisabled={saving || !file || !name.trim()} clickAction={create} />
+              <Button label={t("settings.common.cancel")} variant="ghost" clickAction={() => setCreating(false)} />
+            </div>
+          </div>
+        </Card>
+      )}
+      {loading ? (
+        <Text color="secondary">{t("settings.common.loading")}</Text>
+      ) : items.length === 0 && !creating ? (
+        <EmptyState icon={<Icon icon={FileType} size="lg" />} title={t("settings.blueprints.emptyTitle")} description={t("settings.blueprints.emptyDesc")} />
+      ) : (
+        items.map((item) => <BlueprintCard key={item.id} item={item} onChanged={reload} />)
+      )}
+    </div>
+  );
+}
+
+function BlueprintCard({ item, onChanged }: { item: BlueprintInfo; onChanged: () => Promise<void> }) {
+  const t = useT();
+  const toast = useToast();
+  const [versions, setVersions] = useState<BlueprintVersion[] | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(item.name);
+  const [description, setDescription] = useState(item.description);
+  const [visibility, setVisibility] = useState<BlueprintVisibility>(item.visibility);
+  const [busy, setBusy] = useState(false);
+  const versionRef = useRef<HTMLInputElement | null>(null);
+
+  const loadVersions = useCallback(() => api.listBlueprintVersions(item.id).then(setVersions), [item.id]);
+  const toggleVersions = () => {
+    setExpanded((value) => !value);
+    if (!expanded && versions === null) void loadVersions();
+  };
+  const visibilityIcon = item.visibility === "public" ? Globe : item.visibility === "group" ? Users : Lock;
+
+  const addVersion = async (file: File | null) => {
+    if (!file) return;
+    setBusy(true);
+    try {
+      await api.addBlueprintVersion(item.id, file);
+      await Promise.all([loadVersions(), onChanged()]);
+      setExpanded(true);
+      toast({ body: t("settings.blueprints.versionAdded"), type: "info", autoHideDuration: 2500 });
+    } catch (e) {
+      toast({ body: String(e), type: "error" });
+    } finally {
+      setBusy(false);
+      if (versionRef.current) versionRef.current.value = "";
+    }
+  };
+
+  const saveMetadata = async () => {
+    setBusy(true);
+    try {
+      await api.updateBlueprint(item.id, { name: name.trim(), description: description.trim(), visibility });
+      setEditing(false);
+      await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!window.confirm(t("settings.blueprints.confirmDelete", { name: item.name }))) return;
+    setBusy(true);
+    try {
+      await api.deleteBlueprint(item.id);
+      await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card padding={2}>
+      <div className="claw-panel">
+        <div className="claw-row claw-row-between">
+          <div className="claw-blueprint-title">
+            <Icon icon={FileType} size="md" color="secondary" />
+            <div>
+              <div className="claw-row">
+                <Text weight="semibold">{item.name}</Text>
+                <Badge variant={item.visibility === "public" ? "success" : item.visibility === "group" ? "info" : "neutral"} icon={<Icon icon={visibilityIcon} size="xsm" />} label={t(`settings.blueprints.${item.visibility}`)} />
+              </div>
+              <Text size="xsm" color="secondary">{item.filename} · v{item.current_version} · {blueprintSize(item.size)}</Text>
+              {!item.is_owner && <Text size="xsm" color="secondary">{t("settings.blueprints.sharedBy", { owner: item.owner_name || "—" })}</Text>}
+            </div>
+          </div>
+          <div className="claw-row">
+            <a className="claw-blueprint-action" href={blueprintFileUrl(item.id, item.current_version)} download={item.filename} title={t("settings.blueprints.download")}><Icon icon={Download} size="sm" /></a>
+            <Button label={t("settings.blueprints.versions")} size="sm" variant="ghost" icon={<Icon icon={GitBranch} size="sm" />} clickAction={toggleVersions} />
+            {item.is_owner && <Button label={t("settings.common.edit")} size="sm" variant="ghost" icon={<Icon icon={Pencil} size="sm" />} clickAction={() => setEditing((value) => !value)} />}
+            {item.is_owner && <Button label={t("settings.common.delete")} size="sm" variant="destructive" icon={<Icon icon={Trash2} size="sm" />} isDisabled={busy} clickAction={remove} />}
+          </div>
+        </div>
+        {item.description && !editing && <Text size="sm" color="secondary">{item.description}</Text>}
+        {editing && (
+          <Card padding={2} variant="muted">
+            <div className="claw-panel">
+              <TextInput label={t("settings.blueprints.name")} value={name} onChange={setName} />
+              <TextArea label={t("settings.blueprints.description")} value={description} onChange={setDescription} rows={2} />
+              <BlueprintVisibilityPicker value={visibility} onChange={setVisibility} />
+              <div className="claw-row">
+                <Button label={t("settings.blueprints.save")} isDisabled={busy || !name.trim()} clickAction={saveMetadata} />
+                <Button label={t("settings.common.cancel")} variant="ghost" clickAction={() => setEditing(false)} />
+              </div>
+            </div>
+          </Card>
+        )}
+        {expanded && (
+          <div className="claw-blueprint-versions">
+            {item.is_owner && (
+              <>
+                <input ref={versionRef} type="file" accept=".docx,.xlsx,.pptx" hidden onChange={(e) => void addVersion(e.target.files?.[0] ?? null)} />
+                <Button label={t("settings.blueprints.newVersion")} size="sm" variant="secondary" icon={<Icon icon={Upload} size="sm" />} isDisabled={busy} clickAction={() => versionRef.current?.click()} />
+              </>
+            )}
+            {versions === null ? <Text size="sm" color="secondary">{t("settings.common.loading")}</Text> : versions.map((version) => (
+              <div key={version.id} className="claw-blueprint-version-row">
+                <div>
+                  <Text size="sm" weight="semibold">v{version.version} {version.is_current ? `· ${t("settings.blueprints.current")}` : ""}</Text>
+                  <Text size="xsm" color="secondary">{version.filename} · {blueprintSize(version.size)} · {new Date(version.created_at).toLocaleString()}</Text>
+                </div>
+                <div className="claw-row">
+                  <a className="claw-blueprint-action" href={blueprintFileUrl(item.id, version.version)} download={version.filename} title={t("settings.blueprints.download")}><Icon icon={Download} size="sm" /></a>
+                  {item.is_owner && !version.is_current && <Button label={t("settings.blueprints.makeCurrent")} size="sm" variant="ghost" clickAction={() => void (async () => { await api.activateBlueprintVersion(item.id, version.version); await Promise.all([loadVersions(), onChanged()]); })()} />}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 /** Settings > Profile > Preferences — a personal override of the Control
  * Plane's global branding defaults (Admin.tsx's PreferencesPanel). Unset
  * fields (me.language/font_size/chat_background === null) show whichever
@@ -284,68 +629,77 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
   };
 
   return (
-    <Card padding={2}>
-      <div className="claw-panel">
-        <div>
-          <Text weight="semibold">{t("settings.profile.language")}</Text>
-          <Text size="sm" color="secondary">
-            {t("settings.profile.languageDesc")}
-          </Text>
-          <SegmentedControl
-            value={language}
-            onChange={(v) => setLanguage(v as BrandingLanguage)}
-            label={t("settings.profile.language")}
-          >
-            {/* Language names are shown as endonyms (in their own language), not
-                translated per the current UI language — same convention as any
-                language picker. */}
-            <SegmentedControlItem value="en" label="English" />
-            <SegmentedControlItem value="th" label="ไทย (Thai)" />
-          </SegmentedControl>
+    <>
+      <Card padding={2}>
+        <div className="claw-panel">
+          <div>
+            <Text weight="semibold">{t("settings.profile.languageAppearance")}</Text>
+          </div>
+          <div>
+            <Text weight="semibold">{t("settings.profile.language")}</Text>
+            <Text size="sm" color="secondary">
+              {t("settings.profile.languageDesc")}
+            </Text>
+            <SegmentedControl
+              value={language}
+              onChange={(v) => setLanguage(v as BrandingLanguage)}
+              label={t("settings.profile.language")}
+            >
+              {/* Language names are shown as endonyms (in their own language), not
+                  translated per the current UI language — same convention as any
+                  language picker. */}
+              <SegmentedControlItem value="en" label="English" />
+              <SegmentedControlItem value="th" label="ไทย (Thai)" />
+            </SegmentedControl>
+          </div>
+          <div>
+            <Text weight="semibold">{t("settings.profile.fontSize")}</Text>
+            <SegmentedControl
+              value={fontSize}
+              onChange={(v) => setFontSize(v as BrandingFontSize)}
+              label={t("settings.profile.fontSize")}
+            >
+              <SegmentedControlItem value="small" label={t("settings.profile.fontSize.small")} />
+              <SegmentedControlItem value="medium" label={t("settings.profile.fontSize.medium")} />
+              <SegmentedControlItem value="large" label={t("settings.profile.fontSize.large")} />
+            </SegmentedControl>
+          </div>
+          <div>
+            <Text weight="semibold">{t("settings.profile.chatBackground")}</Text>
+            <Text size="sm" color="secondary">
+              {t("settings.profile.chatBackgroundDesc")}
+            </Text>
+            <SegmentedControl
+              value={chatBg}
+              onChange={(v) => setChatBg(v as BrandingChatBackground)}
+              label={t("settings.profile.chatBackground")}
+            >
+              <SegmentedControlItem value="solid" label={t("settings.profile.bg.solid")} />
+              <SegmentedControlItem value="dots" label={t("settings.profile.bg.dots")} />
+              <SegmentedControlItem value="grid" label={t("settings.profile.bg.grid")} />
+            </SegmentedControl>
+          </div>
         </div>
-        <div>
-          <Text weight="semibold">{t("settings.profile.fontSize")}</Text>
-          <SegmentedControl
-            value={fontSize}
-            onChange={(v) => setFontSize(v as BrandingFontSize)}
-            label={t("settings.profile.fontSize")}
-          >
-            <SegmentedControlItem value="small" label={t("settings.profile.fontSize.small")} />
-            <SegmentedControlItem value="medium" label={t("settings.profile.fontSize.medium")} />
-            <SegmentedControlItem value="large" label={t("settings.profile.fontSize.large")} />
-          </SegmentedControl>
-        </div>
-        <div>
-          <Text weight="semibold">{t("settings.profile.chatBackground")}</Text>
-          <Text size="sm" color="secondary">
-            {t("settings.profile.chatBackgroundDesc")}
-          </Text>
-          <SegmentedControl
-            value={chatBg}
-            onChange={(v) => setChatBg(v as BrandingChatBackground)}
-            label={t("settings.profile.chatBackground")}
-          >
-            <SegmentedControlItem value="solid" label={t("settings.profile.bg.solid")} />
-            <SegmentedControlItem value="dots" label={t("settings.profile.bg.dots")} />
-            <SegmentedControlItem value="grid" label={t("settings.profile.bg.grid")} />
-          </SegmentedControl>
-        </div>
-        <div>
+      </Card>
+      <Card padding={2}>
+        <div className="claw-panel">
+          <div>
+            <Text weight="semibold">{t("settings.profile.chatExperience")}</Text>
+            <Text size="sm" color="secondary">{t("settings.profile.chatExperienceDesc")}</Text>
+          </div>
           <Switch
             value={execPanel}
             label={t("settings.profile.executionPanel")}
+            description={t("settings.profile.executionPanelDesc")}
             changeAction={setExecPanel}
           />
-          <Text size="sm" color="secondary">
-            {t("settings.profile.executionPanelDesc")}
-          </Text>
         </div>
-        {saveError && <ErrorText>{saveError}</ErrorText>}
-        <div>
-          <Button label={t("settings.profile.savePreferences")} isDisabled={!dirty || saving} clickAction={save} />
-        </div>
+      </Card>
+      {saveError && <ErrorText>{saveError}</ErrorText>}
+      <div className="claw-row">
+        <Button label={t("settings.profile.savePreferences")} isDisabled={!dirty || saving} clickAction={save} />
       </div>
-    </Card>
+    </>
   );
 }
 
@@ -1866,6 +2220,7 @@ export function ApiOperationsEditor({
 
 function ConnectorsPanel() {
   const t = useT();
+  const [tab, setTab] = useState<"catalog" | "yours" | "organization">("catalog");
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
   const [globalConnectors, setGlobalConnectors] = useState<ConnectorGlobalSummary[]>([]);
@@ -2138,19 +2493,25 @@ function ConnectorsPanel() {
 
   return (
     <div className="claw-panel">
-      <div className="claw-row claw-row-between">
-        <Text color="secondary">{t("settings.connectors.intro")}</Text>
-        <Button
-          label={t("settings.connectors.addCustom")}
-          icon={<Icon icon={Plus} size="sm" />}
-          size="sm"
-          variant="secondary"
-          clickAction={() => setEditing({ transport: isAdmin ? "stdio" : "http", enabled: true })}
-        />
+      <div className="claw-connectors-tabs">
+        <TabList
+          value={tab}
+          onChange={(value) => setTab(value as "catalog" | "yours" | "organization")}
+          hasDivider
+          aria-label={t("settings.nav.connectors")}
+        >
+          <Tab value="catalog" label={t("settings.connectors.catalog")} icon={<Icon icon={Puzzle} size="sm" />} />
+          <Tab value="yours" label={t("settings.connectors.yourConnectors")} icon={<Icon icon={UserIcon} size="sm" />} />
+          <Tab
+            value="organization"
+            label={t("settings.connectors.globalTitle")}
+            icon={<Icon icon={Users} size="sm" />}
+          />
+        </TabList>
       </div>
       {error && <ErrorText>{error}</ErrorText>}
 
-      {categories.map((cat) => (
+      {tab === "catalog" && categories.map((cat) => (
         <div key={cat} className="claw-connector-category">
           <Text type="label" color="secondary" className="claw-connector-cat-title">
             {cat}
@@ -2238,13 +2599,24 @@ function ConnectorsPanel() {
         </div>
       ))}
 
-      {connectors.length > 0 && (
+      {tab === "yours" && (
         <div className="claw-connector-category">
-          <Text type="label" color="secondary" className="claw-connector-cat-title">
-            {t("settings.connectors.yourConnectors")}
-          </Text>
-          <Divider />
-          {connectors.map((c) => (
+          <div className="claw-row claw-row-between">
+            <Text color="secondary">{t("settings.connectors.intro")}</Text>
+            <Button
+              label={t("settings.connectors.addCustom")}
+              icon={<Icon icon={Plus} size="sm" />}
+              size="sm"
+              variant="secondary"
+              clickAction={() => setEditing({ transport: isAdmin ? "stdio" : "http", enabled: true })}
+            />
+          </div>
+          {connectors.length === 0 ? (
+            <EmptyState
+              title={t("settings.connectors.yourEmptyTitle")}
+              description={t("settings.connectors.yourEmptyDesc")}
+            />
+          ) : connectors.map((c) => (
             <Card key={c.id} padding={2}>
               <div className="claw-row claw-row-between">
                 <div>
@@ -2323,16 +2695,17 @@ function ConnectorsPanel() {
         </div>
       )}
 
-      {globalConnectors.length > 0 && (
+      {tab === "organization" && (
         <div className="claw-connector-category">
-          <Text type="label" color="secondary" className="claw-connector-cat-title">
-            {t("settings.connectors.globalTitle")}
-          </Text>
-          <Divider />
           <Text size="sm" color="secondary" as="p">
             {t("settings.connectors.globalDesc")}
           </Text>
-          {globalConnectors.map((c) => (
+          {globalConnectors.length === 0 ? (
+            <EmptyState
+              title={t("settings.connectors.organizationEmptyTitle")}
+              description={t("settings.connectors.organizationEmptyDesc")}
+            />
+          ) : globalConnectors.map((c) => (
             <Card key={c.id} padding={2}>
               <div className="claw-row">
                 <Text weight="semibold">{c.name}</Text>
@@ -2707,6 +3080,23 @@ function TelegramPanel() {
 }
 
 // ---------------------------------------------------------------- Browser extension
+
+function LocalAgentPanel() {
+  return <div className="claw-panel">
+    <Text weight="semibold">Softnix Local Agent</Text>
+    <div className="claw-row">
+      <a className="sbot-local-download" href="/modes/sbot/api/local-workspaces/downloads/macos-arm64?v=2.2.3" download>
+        <Download size={16} />Download for Mac · Apple silicon
+      </a>
+    </div>
+    <Text size="sm" color="secondary">Move to Applications and open once. Then choose Open local folder in Chat.</Text>
+    <details><summary>Installation & service</summary>
+      <p>Preview build · not Apple notarized. Windows and Intel Mac builds are not available yet.</p>
+      <p>Open the app to restart the service.</p>
+      <code>~/.local/bin/softnix-local-agent restart</code>
+    </details>
+  </div>;
+}
 
 function BrowserExtensionPanel() {
   const t = useT();

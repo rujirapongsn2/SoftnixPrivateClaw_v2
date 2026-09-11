@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Softnix Local Agent</string>
+<key>CFBundleIdentifier</key><string>ai.softnix.local-agent.app</string>
+<key>CFBundleExecutable</key><string>SoftnixLocalAgent</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>2.2.3</string>
+<key>CFBundleVersion</key><string>7</string>
+<key>LSMinimumSystemVersion</key><string>12.0</string>
+<key>LSUIElement</key><true/>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSDownloadsFolderUsageDescription</key><string>Access files in the folder you connect to Softnix.</string>
+<key>NSDocumentsFolderUsageDescription</key><string>Access files in the folder you connect to Softnix.</string>
+<key>NSDesktopFolderUsageDescription</key><string>Access files in the folder you connect to Softnix.</string>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>Softnix local folder connection</string>
+<key>CFBundleURLSchemes</key><array><string>softnix-local-agent</string></array>
+</dict></array>
+</dict></plist>

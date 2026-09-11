@@ -2090,6 +2090,15 @@ class LLMConfigStore:
                 row.api_base = fields["api_base"]
             if "enabled" in fields and fields["enabled"] is not None:
                 row.enabled = fields["enabled"]
+                if not row.enabled:
+                    # A disabled provider cannot serve as a live failover route.
+                    # Clear the marker in the same transaction so the Control
+                    # Plane never advertises a fallback the runtime will ignore.
+                    await db.execute(
+                        LLMModel.__table__.update()
+                        .where(LLMModel.provider_id == provider_id)
+                        .values(is_fallback=False)
+                    )
             if "model_prefix" in fields and fields["model_prefix"] is not None:
                 row.model_prefix = fields["model_prefix"]
             # Only overwrite the key when a non-empty value is supplied.
@@ -2189,6 +2198,9 @@ class LLMConfigStore:
             # would find no default and the deployment loses its chat default.
             if row.kind != "chat":
                 row.is_default = False
+                row.is_fallback = False
+            elif not row.enabled:
+                row.is_fallback = False
             # The auto-selected default is an admin-global concept only; private
             # models are never the global default (owner_id=None gates it).
             elif owner_id is None and fields.get("is_default"):
@@ -2196,13 +2208,31 @@ class LLMConfigStore:
                 await db.execute(
                     LLMModel.__table__.update()
                     .where(
-                        LLMModel.provider_id.in_(select(LLMProvider.id).where(LLMProvider.owner_id.is_(None)))
+                        LLMModel.provider_id.in_(select(LLMProvider.id).where(LLMProvider.owner_id.is_(None))),
+                        LLMModel.id != row.id,
                     )
                     .values(is_default=False)
                 )
                 row.is_default = True
+                # The normal route and its backstop must be different models.
+                row.is_fallback = False
             elif owner_id is None and fields.get("is_default") is False:
                 row.is_default = False
+            if owner_id is None and fields.get("is_fallback"):
+                if row.enabled and row.kind == "chat" and not row.is_default:
+                    await db.execute(
+                        LLMModel.__table__.update()
+                        .where(
+                            LLMModel.provider_id.in_(
+                                select(LLMProvider.id).where(LLMProvider.owner_id.is_(None))
+                            ),
+                            LLMModel.id != row.id,
+                        )
+                        .values(is_fallback=False)
+                    )
+                    row.is_fallback = True
+            elif owner_id is None and fields.get("is_fallback") is False:
+                row.is_fallback = False
             await db.commit()
             return row
 
@@ -2334,6 +2364,29 @@ class LLMConfigStore:
             return default.model_id
         # No allowed default → most capable allowed tier wins.
         return max(allowed, key=lambda m: cost_rank(m.cost)).model_id
+
+    async def fallback_model_for(self, max_cost: str | None = None) -> str | None:
+        """Return the configured global fallback when it is enabled, is a chat
+        model, and fits the caller's plan. There is no implicit substitute: an
+        admin who leaves fallback unset has explicitly disabled failover."""
+        async with self.factory() as db:
+            row = (
+                await db.execute(
+                    select(LLMModel)
+                    .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+                    .where(
+                        LLMModel.enabled.is_(True),
+                        LLMProvider.enabled.is_(True),
+                        LLMProvider.owner_id.is_(None),
+                        LLMModel.kind == "chat",
+                        LLMModel.is_fallback.is_(True),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if row is None or not cost_allowed(max_cost, row.cost):
+            return None
+        return row.model_id
 
     async def resolve(
         self, model_id: str, user_id: str | None = None, max_cost: str | None = None

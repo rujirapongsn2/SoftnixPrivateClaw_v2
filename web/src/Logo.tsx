@@ -37,12 +37,12 @@ export function SoftnixMark({ size = 24 }: { size?: number }) {
   );
 }
 
-/** Full product lockup: Softnix logo + "PrivateClaw". */
-export function Brand({ height = 24 }: { height?: number }) {
+/** Full product lockup shown in the sidebar. */
+export function Brand({ height = 24, name = "PrivateClaw" }: { height?: number; name?: string }) {
   return (
     <span className="claw-brand">
       <SoftnixLogo height={height} slot="sidebar" />
-      <span className="claw-brand-name">PrivateClaw</span>
+      <span className="claw-brand-name">{name}</span>
     </span>
   );
 }

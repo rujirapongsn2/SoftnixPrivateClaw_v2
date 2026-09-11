@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from claw.config import load_settings
 from claw.db.models import Base
+import sbot.db.models  # register isolated mode tables
 from claw.db.types import render_migration_type
 
 config = context.config

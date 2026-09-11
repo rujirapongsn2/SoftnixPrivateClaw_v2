@@ -34,6 +34,7 @@ import {
   Download as DownloadIcon,
   ExternalLink,
   File as FileIcon,
+  FileType,
   GitBranch,
   Image as ImageIcon,
   Library,
@@ -77,7 +78,10 @@ import {
 } from "./api";
 import { HtmlPreview } from "./HtmlPreview";
 import { SoftnixLogo } from "./Logo";
+import { ModeSwitcher } from "./ModeSwitcher";
 import { TablePreview } from "./TablePreview";
+import { SaveToBlueprintButton } from "./SaveToBlueprintButton";
+import { api as blueprintApi, type BlueprintInfo } from "./shared-api";
 import { useBranding, useT } from "./branding";
 import { sanitizeModelMarkdown, stripMarkdownForSpeech } from "./markdown";
 
@@ -355,7 +359,7 @@ interface ChatProps {
    * menu or the model picker) so Skills/Connectors/Knowledge/My Models stay one
    * click away from where the user actually uses them, instead of a dead end
    * when the list is empty. */
-  onOpenSettings?: (section: "skills" | "connectors" | "knowledge" | "models") => void;
+  onOpenSettings?: (section: "skills" | "connectors" | "knowledge" | "blueprints" | "models") => void;
 }
 
 // Cap on WebSocket reconnect attempts before giving up retrying — a
@@ -404,7 +408,20 @@ export function Chat({
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeBase[]>([]);
   const [plusOpen, setPlusOpen] = useState(false);
-  const [plusView, setPlusView] = useState<"root" | "skills" | "connectors" | "knowledge">("root");
+  const [plusView, setPlusView] = useState<"root" | "skills" | "connectors" | "knowledge" | "blueprints">("root");
+  const [blueprints, setBlueprints] = useState<BlueprintInfo[]>([]);
+  const [loadingBlueprints, setLoadingBlueprints] = useState(false);
+  useEffect(() => {
+    if (!plusOpen || plusView !== "blueprints") return;
+    let cancelled = false;
+    setLoadingBlueprints(true);
+    blueprintApi.listBlueprints().then(items => {
+      if (!cancelled) setBlueprints(items);
+    }).catch(e => {
+      if (!cancelled) setError(`${t("chat.error.blueprintFailed")}: ${String(e)}`);
+    }).finally(() => { if (!cancelled) setLoadingBlueprints(false); });
+    return () => { cancelled = true; };
+  }, [plusOpen, plusView, t]);
   // Text-to-image (composer "Create image" mode): separate from chat, a
   // one-shot REST call. imageMode swaps the SAME composer shell into an
   // image-prompt input rather than opening a separate floating panel.
@@ -1206,7 +1223,7 @@ export function Chat({
   // Jump from the "+" menu straight to the matching Settings section — keeps
   // the "where do I manage this?" answer one click away instead of a dead end.
   const manageSettings = useCallback(
-    (section: "skills" | "connectors" | "knowledge") => {
+    (section: "skills" | "connectors" | "knowledge" | "blueprints") => {
       setPlusOpen(false);
       setPlusView("root");
       onOpenSettings?.(section);
@@ -1405,6 +1422,23 @@ export function Chat({
     },
     [attachments, sessionId, onRequireSession, rawSend, model, toast, queueOfflineMessage, t],
   );
+
+  const selectBlueprint = async (blueprint: BlueprintInfo) => {
+    setPlusOpen(false);
+    setPlusView("root");
+    setUploading(true);
+    setError("");
+    try {
+      const sid = sessionId ?? (await onRequireSession?.());
+      if (!sid) throw new Error("No session");
+      const ref = await blueprintApi.materializeBlueprint(blueprint.id);
+      setAttachments(previous => [...previous, ref]);
+    } catch (e) {
+      setError(`${t("chat.error.blueprintFailed")}: ${String(e)}`);
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const onPickFiles = useCallback(
     async (files: FileList | null) => {
@@ -1710,6 +1744,7 @@ export function Chat({
   return (
     <div className="claw-chat-shell">
     <div className={`claw-chat${isEmpty ? " claw-chat--empty" : ""}`}>
+      {!sessionId && <div className="claw-mode-switcher-landing"><ModeSwitcher /></div>}
       {!isEmpty && (executionPanelEnabled || planInProgress) && !execOpen && (
         <IconButton
           label={t("chat.exec.show")}
@@ -1728,8 +1763,9 @@ export function Chat({
               <div className="claw-attach-row">
                 {attachments.map((a, i) => (
                   <span key={a.path} className="claw-attach-chip">
-                    <Icon icon={a.is_image ? ImageIcon : FileIcon} size="sm" color="secondary" />
+                    <Icon icon={a.blueprint ? FileType : a.is_image ? ImageIcon : FileIcon} size="sm" color="secondary" />
                     {a.name}
+                    {a.blueprint && <span className="claw-attach-kind">{t("chat.composer.blueprint")} · v{a.blueprint.version}</span>}
                     <IconButton
                       label={t("chat.composer.removeAttachment")}
                       icon={<Icon icon="close" size="xsm" />}
@@ -1807,6 +1843,11 @@ export function Chat({
                               <span>{t("chat.composer.addFiles")}</span>
                             </button>
                             <div className="claw-plus-divider" />
+                            <button type="button" className="claw-plus-item" onClick={() => setPlusView("blueprints")}>
+                              <Icon icon={FileType} size="sm" color="secondary" />
+                              <span>{t("chat.composer.blueprints")}</span>
+                              <Icon icon={ChevronRight} size="sm" color="secondary" />
+                            </button>
                             <button
                               type="button"
                               className="claw-plus-item"
@@ -1851,6 +1892,29 @@ export function Chat({
                             >
                               <Icon icon={ImageIcon} size="sm" color="secondary" />
                               <span>{t("chat.composer.createImage")}</span>
+                            </button>
+                          </>
+                        )}
+                        {plusView === "blueprints" && (
+                          <>
+                            <button type="button" className="claw-plus-item claw-plus-back" onClick={() => setPlusView("root")}>
+                              <Icon icon={ArrowLeft} size="sm" color="secondary" />
+                              <span>{t("chat.composer.blueprints")}</span>
+                            </button>
+                            <div className="claw-plus-divider" />
+                            {loadingBlueprints ? <Spinner /> : blueprints.length === 0 ? (
+                              <div className="claw-plus-empty"><Text size="sm" color="secondary">{t("chat.composer.noBlueprints")}</Text></div>
+                            ) : blueprints.map(blueprint => (
+                              <button key={blueprint.id} type="button" className="claw-plus-item" disabled={uploading} onClick={() => void selectBlueprint(blueprint)}>
+                                <Icon icon={FileType} size="sm" color="secondary" />
+                                <span>{blueprint.name}</span>
+                                <span className="claw-plus-count">v{blueprint.current_version}</span>
+                              </button>
+                            ))}
+                            <div className="claw-plus-divider" />
+                            <button type="button" className="claw-plus-item claw-plus-manage" onClick={() => manageSettings("blueprints")}>
+                              <Icon icon={ExternalLink} size="sm" color="secondary" />
+                              <span>{t("chat.composer.manageBlueprints")}</span>
                             </button>
                           </>
                         )}
@@ -2380,27 +2444,29 @@ export function Chat({
                             const meta = artifactTypeMeta(p);
                             const name = p.split("/").pop() ?? p;
                             return (
-                              <a
-                                key={p}
-                                className={`claw-artifact-card claw-artifact-card--${meta.className}`}
-                                href={href}
-                                download={name}
-                                title={t("chat.artifact.download", { name: p })}
-                              >
-                                <span className="claw-artifact-card-icon">
-                                  <Icon icon={meta.icon} size="md" color="secondary" />
-                                </span>
-                                <span className="claw-artifact-card-body">
-                                  <span className="claw-artifact-name">{name}</span>
-                                  <span className="claw-artifact-card-type">
-                                    <span className="claw-artifact-card-badge">{meta.label}</span>
-                                    <span className="claw-artifact-card-action">
-                                      {t("chat.artifact.downloadAction")}
+                              <div key={p} className="claw-artifact-blueprint-actions">
+                                <a
+                                  className={`claw-artifact-card claw-artifact-card--${meta.className}`}
+                                  href={href}
+                                  download={name}
+                                  title={t("chat.artifact.download", { name: p })}
+                                >
+                                  <span className="claw-artifact-card-icon">
+                                    <Icon icon={meta.icon} size="md" color="secondary" />
+                                  </span>
+                                  <span className="claw-artifact-card-body">
+                                    <span className="claw-artifact-name">{name}</span>
+                                    <span className="claw-artifact-card-type">
+                                      <span className="claw-artifact-card-badge">{meta.label}</span>
+                                      <span className="claw-artifact-card-action">
+                                        {t("chat.artifact.downloadAction")}
+                                      </span>
                                     </span>
                                   </span>
-                                </span>
-                                <Icon icon={DownloadIcon} size="sm" color="secondary" />
-                              </a>
+                                  <Icon icon={DownloadIcon} size="sm" color="secondary" />
+                                </a>
+                                <SaveToBlueprintButton sessionId={sessionId} path={p} />
+                              </div>
                             );
                           })}
                         </div>

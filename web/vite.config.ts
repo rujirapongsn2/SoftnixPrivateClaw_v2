@@ -15,6 +15,7 @@ export default defineConfig({
       ...(process.env.CLAW_ALLOWED_HOSTS?.split(",").map((h) => h.trim()).filter(Boolean) ?? []),
     ],
     proxy: {
+      "/modes": { target: "http://127.0.0.1:8700", ws: true },
       "/api": "http://127.0.0.1:8700",
       "/ws": { target: "ws://127.0.0.1:8700", ws: true },
     },

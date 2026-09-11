@@ -1,0 +1,1770 @@
+export interface TaskResult {
+  status: "completed" | "partial" | "blocked" | "failed";
+  summary: string;
+  verification_status: "passed" | "failed" | "not_verified" | "not_required";
+  failure_reason?: string | null;
+  artifacts: string[];
+  evidence: Record<string, unknown>[];
+  delivery: Record<string, string>;
+}
+
+
+const MODE_LOCAL = /^\/api\/(sessions|bots|bot-groups|missions|memory|schedules|feedback|heartbeat|projects|blueprints|shares|share)(?:[/?]|$)/;
+function endpoint(path: string): string {
+  return (MODE_LOCAL.test(path) && (window.location.pathname.startsWith("/chat/sbot") || /^\/api\/projects(?:[/?]|$)/.test(path))) ? `/modes/sbot${path}` : path;
+}
+import type { LucideIcon } from "lucide-react";
+import {
+  File,
+  FileArchive,
+  FileAudio,
+  FileBox,
+  FileCode,
+  FileCog,
+  FileSpreadsheet,
+  FileText,
+  FileVideo,
+} from "lucide-react";
+
+export interface BotInfo {
+  id: string;
+  name: string;
+  role_title: string;
+  charter: string;
+  model?: string | null;
+  tool_allowlist?: string[] | null;
+  skill_ids?: string[] | null;
+  kind: "chief_of_staff" | "specialist";
+  // `variant` names an illustrated face (see BotAvatar). `color`/`emoji` are
+  // what bots were given before those existed, and are still what the server
+  // writes on create — a bot without a variant is dealt one from its id.
+  avatar?: { variant?: string; color?: string; emoji?: string; initial?: string } | null;
+  created_by?: string;
+  stats?: { missions?: number; success_rate?: number } | null;
+  created_at: string;
+}
+
+export interface BotGroupInfo {
+  id: string;
+  name: string;
+  member_ids: string[];
+  leader_id: string;
+  session_id: string;
+}
+
+export interface BotGroupInput {
+  name: string;
+  member_ids: string[];
+  leader_id: string;
+}
+
+export interface SessionInfo {
+  id: string;
+  title: string;
+  updated_at: string;
+  model?: string | null;
+  bot_id?: string | null;
+  group_id?: string | null;
+  kind?: string;
+  running?: boolean;
+  // "web" for normal chats, "schedule" for sessions created by a scheduled task
+  // (shown with an alarm-clock marker), "telegram"/"heartbeat" for those channels.
+  channel?: string;
+}
+
+/** A mission still in flight: `running`, or `blocked` on a step someone has to
+ *  review. Both are "active" — blocked reads like an ending but is the state
+ *  where nothing moves until the user decides. */
+export interface ActiveMission {
+  id: string;
+  goal: string;
+  status: string;
+  /** The thread the mission was planned in, so its progress is shown there. */
+  session_id?: string | null;
+  total: number;
+  done: number;
+  /** Steps executing right now — this is what marks a bot busy in the sidebar. */
+  running: { node_id: string; title: string; bot_id: string; bot_name: string }[];
+  queued?: { node_id: string; title: string; bot_id: string; bot_name: string; depends_on: string[] }[];
+  /** Gates parked for the user's decision. */
+  awaiting: { node_id: string; title: string }[];
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  meta?: {
+    artifacts?: string[];
+    delivery_id?: string;
+    vision_model?: string;
+    // Set alongside speaker_bot_id: what this bot was asked to do, shown as the
+    // assignment it answered.
+    delegated_task?: string;
+    // Identifies the handoff this reply closes, so a repeat delegation to the
+    // same bot is a second card rather than a match against the first.
+    delegation_id?: string;
+    // The specialist errored or was cut off mid-answer; the text is real but partial.
+    speaker_error?: boolean;
+    task_result?: TaskResult;
+    // On a user message: the bot that gave this instruction, when it was
+    // delegated rather than typed by the user in this thread.
+    delegated_by?: string | null;
+    // The specialist's name and role as they were when it answered, so a
+    // reloaded transcript still labels the bubble after a rename or a delete.
+    speaker_name?: string;
+    coordinator_bot_id?: string;
+    speaker_role?: string;
+  } | null;
+  // Set when another bot said this, not the one the user is chatting with.
+  speaker_bot_id?: string | null;
+  // Set on messages loaded from history and absent on ones appended live — it
+  // is the paging cursor, and only the server can assign it.
+  seq?: number;
+}
+
+export interface MessagePage {
+  messages: ChatMessage[];
+  has_more: boolean;
+  next_before_seq: number | null;
+}
+
+export interface AttachmentRef {
+  name: string;
+  path: string;
+  mime: string;
+  size: number;
+  is_image: boolean;
+  blueprint?: { id: string; name: string; version: number };
+}
+
+export interface BlueprintInfo {
+  id: string;
+  name: string;
+  description: string;
+  visibility: "private" | "group" | "public";
+  owner_id: string;
+  owner_name: string;
+  is_owner: boolean;
+  current_version: number;
+  filename: string;
+  mime: string;
+  size: number;
+  updated_at: string;
+}
+
+export interface BlueprintVersion {
+  id: string;
+  version: number;
+  filename: string;
+  mime: string;
+  size: number;
+  is_current: boolean;
+  created_at: string;
+}
+
+export interface ShareFile {
+  name: string;
+  is_image: boolean;
+}
+
+export interface SharedMessage {
+  role: "user" | "assistant";
+  content: string;
+  files: ShareFile[];
+}
+
+export interface SharedConversation {
+  title: string;
+  messages: SharedMessage[];
+  created_at: string | null;
+}
+
+export interface CreatedShare {
+  id: string;
+  token: string;
+  url: string;
+  path: string;
+  expires_at: string | null;
+}
+
+export interface AgentEvent {
+  type:
+    | "turn_started"
+    | "text_delta"
+    | "thinking_delta"
+    | "tool_started"
+    | "tool_finished"
+    | "tool_progress"
+    | "delegation_started"
+    | "delegation_step"
+    | "delegation_delta"
+    | "delegation_finished"
+    | "delegated_task"
+    | "plan_updated"
+    | "tool_confirm_request"
+    | "tool_confirm_resolved"
+    | "turn_completed"
+    | "mission_reported"
+    | "turn_error";
+  turn_id: string;
+  text?: string;
+  tool?: string;
+  args_preview?: string;
+  result_preview?: string;
+  is_error?: boolean;
+  content?: string;
+  message?: string;
+  artifacts?: string[];
+  // turn_completed: the vision model that read an attached image, when the chat
+  // model couldn't. Empty on every ordinary turn.
+  vision_model?: string;
+  coordinator_bot_id?: string;
+  speaker_name?: string;
+  request_id?: string;
+  approved?: boolean;
+  // tool_progress: live sub-step of a long tool (workflow plan/step/synthesize)
+  label?: string;
+  stage?: string;
+  index?: number;
+  total?: number;
+  status?: string;
+  // delegation_started/finished: which bot was handed the work, and what it was
+  // asked. `text` carries its full reply on delegation_finished — not a preview,
+  // unlike tool_finished's result_preview.
+  // delegation_step/delta: what that bot is doing right now, under its own
+  // card. `detail` is the argument preview while running and the result preview
+  // once done; `index` numbers the steps within one assignment (not across
+  // them, unlike tool_progress's shared `index`).
+  detail?: string;
+  result?: TaskResult;
+  delegation_id?: string;
+  // delegated_task: the instruction a leader handed this bot, shown in the
+  // bot's own thread. No other user message arrives as an event — the client
+  // that sent one already rendered it — but this one has no client of its own.
+  delegated_by?: string;
+  bot_id?: string;
+  bot_name?: string;
+  role_title?: string;
+  task?: string;
+  // plan_updated: the agent's current working plan (goal + step checklist)
+  goal?: string;
+  steps?: { step: string; status: string }[];
+}
+
+export interface WorkingPlan {
+  goal: string;
+  steps: { step: string; status: string }[];
+}
+
+export interface SkillInfo {
+  id: string;
+  name: string;
+  description: string;
+  content: string;
+  enabled: boolean;
+  // Built-in skills ship with the platform: read-only, always enabled.
+  builtin?: boolean;
+  // MCP connector this skill's instructions rely on, if any. The runtime
+  // resolves that connector's current tool names live every turn, so the
+  // skill's own text can stay generic instead of hardcoding a connector name
+  // that could later be renamed — null = no linked connector.
+  connector_id?: string | null;
+  // "CAPABILITIES COVERED" detail-view cards — only set for built-in skills
+  // that have them (e.g. pptx/xlsx/pdf/docx), empty/absent otherwise.
+  capabilities?: { title: string; description: string }[];
+  summary?: string;
+  // True when this (user-owned) skill's name matches a built-in's, hiding
+  // that built-in from the list — surfaced so the collision isn't silent.
+  shadows_builtin?: boolean;
+}
+
+export interface MemoryInfo {
+  core: string;
+  history: string[];
+}
+
+export interface SavedMemory {
+  // The stored document, which the server may have sanitized — the editor shows
+  // this rather than the submitted draft, or rejected lines would look saved.
+  core: string;
+  dropped: string[];
+}
+
+export interface ApiOperationParam {
+  name: string;
+  location: "path" | "query" | "header" | "body";
+  type: "string" | "number" | "boolean";
+  required: boolean;
+  description: string;
+}
+
+export interface ApiOperation {
+  name: string;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  description: string;
+  parameters: ApiOperationParam[];
+  // JSON template sent as the request body, e.g. {"limit": {limit}} — only
+  // meaningful for POST/PUT/PATCH. Empty string = no body sent.
+  body: string;
+}
+
+export interface ConnectorInfo {
+  id: string;
+  name: string;
+  description: string;
+  // "mcp" speaks the MCP protocol over transport/command/url (default);
+  // "api" is a plain REST base URL described by `operations`, called
+  // directly with no MCP handshake.
+  kind: "mcp" | "api";
+  transport: "stdio" | "http";
+  command: string;
+  url: string;
+  env: Record<string, string>;
+  // Only meaningful when kind === "api".
+  operations: ApiOperation[];
+  // Per-connector connect/tool-call timeout override, in milliseconds. null =
+  // use the instance-wide default.
+  timeout_ms: number | null;
+  enabled: boolean;
+  // tool_names are the exact `mcp_{connector}_{tool}` (or `api_{connector}_
+  // {operation}`) names a skill must reference to call one of this
+  // connector's tools — not the server's own (unprefixed) tool name.
+  // shadowed_tools are names another connector already registered, so this
+  // connector's version of them is NOT reachable — see _register_scoped.
+  runtime: {
+    status: string;
+    tools?: number;
+    tool_names?: string[];
+    shadowed_tools?: string[];
+    error?: string;
+  };
+}
+
+// Redacted view of an admin-global connector — never carries command/url/env/
+// operations, since the viewer (any regular user) is never that connector's
+// owner.
+export interface ConnectorGlobalSummary {
+  id: string;
+  name: string;
+  description: string;
+  kind: "mcp" | "api";
+  transport: "stdio" | "http";
+  enabled: boolean;
+  // shadowed_tools are names another connector already registered, so this
+  // connector's version of them is NOT reachable — see _register_scoped.
+  runtime: {
+    status: string;
+    tools?: number;
+    tool_names?: string[];
+    shadowed_tools?: string[];
+    error?: string;
+  };
+}
+
+export interface FieldSpec {
+  key: string;
+  label: string;
+  help: string;
+  secret: boolean;
+  optional: boolean;
+  placeholder: string;
+  prefix: string;
+}
+
+export interface ConnectorPreset {
+  key: string;
+  name: string;
+  label: string;
+  description: string;
+  transport: "stdio" | "http";
+  category: string;
+  setup: "api_key" | "token" | "oauth" | "custom";
+  command: string;
+  url: string;
+  // When true, `url` is only a prefilled default — the setup form should let
+  // the user override it (e.g. a self-hosted Softnix ONE endpoint).
+  url_configurable: boolean;
+  fields: FieldSpec[];
+  docs: string;
+  oauth_provider: string;
+  oauth_scopes: string;
+  env_prefix: string;
+}
+
+export interface ScheduleInfo {
+  id: string;
+  name: string;
+  prompt: string;
+  cron: string;
+  interval_seconds: number;
+  session_id: string | null;
+  enabled: boolean;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_status: string;
+}
+
+export interface KnowledgeBase {
+  id: string;
+  name: string;
+  description: string;
+  visibility: "private" | "group" | "public";
+  // Only meaningful when visibility === "group": the owner's own group is
+  // always included by default (not listed here); these are additional
+  // groups the owner explicitly shared it with. Only populated for bases the
+  // caller owns.
+  shared_group_ids?: string[];
+  owner_group_name?: string | null;
+  is_owner: boolean;
+  docs: number;
+  owner_id?: string;
+}
+
+// Minimal org-wide group info — just enough to populate a "share with
+// additional groups" picker. See GroupInfo for the fuller admin-only shape.
+export interface SimpleGroup {
+  id: string;
+  name: string;
+}
+
+export interface KnowledgeDoc {
+  id: string;
+  title: string;
+  filename: string;
+  mime: string;
+  size: number;
+  chars: number;
+  chunks: number;
+  // Background ingestion lifecycle: pending → processing → ready | failed.
+  status: "pending" | "processing" | "ready" | "failed";
+  error: string;
+  created_at: string;
+}
+
+export interface KnowledgeDocPreview {
+  available: boolean;
+  status?: string; // set when available is false (e.g. pending/failed/missing)
+  title?: string;
+  filename?: string;
+  total_chars?: number;
+  offset?: number;
+  next_offset?: number;
+  has_more?: boolean;
+  text?: string;
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  display_name: string;
+  is_admin: boolean;
+  role: string;
+  // False for an OAuth-only or not-yet-activated (imported-pending) account
+  // — the frontend uses this to decide whether to show a "change password"
+  // form on the Profile settings page.
+  has_password: boolean;
+  group_id: string | null;
+  // Personal appearance overrides (Settings > Profile > Preferences). Null
+  // until the user's first save there — meaning "inherit the Control Plane's
+  // global branding default" (see branding.tsx's merge logic).
+  language: BrandingLanguage | null;
+  font_size: BrandingFontSize | null;
+  chat_background: BrandingChatBackground | null;
+  // Desktop UI's Execution panel: off by default, no admin-level default to
+  // inherit — a plain boolean, unlike the appearance overrides above.
+  execution_panel_enabled: boolean;
+}
+
+export interface AdminUser extends AuthUser {
+  is_active: boolean;
+  // How the account was created — informational only, shown as a badge in the
+  // Control Plane's Users list. Accounts predating this field default to
+  // "password" (the oldest signup path), which may not be exact for them.
+  signup_method: "password" | "google" | "microsoft" | "admin_created" | "dev_token" | "imported";
+  sessions: number;
+  group_name: string | null;
+  plan_id: string | null;
+  plan_name: string | null;
+  created_at: string;
+  // Null means inherit the account's organizational-group project policy.
+  project_containers_enabled: boolean | null;
+  project_container_limit: number | null;
+}
+
+export interface GroupInfo {
+  id: string;
+  name: string;
+  is_default: boolean;
+  user_count: number;
+  plan_id: string | null;
+  plan_name: string | null;
+  project_containers_enabled: boolean;
+  project_container_limit: number;
+}
+
+export interface ProjectContainerInfo {
+  project: string;
+  container: string;
+  state: string;
+  ports: Record<string, { HostIp: string; HostPort: string }[] | null>;
+}
+
+export interface ProjectInventory {
+  available: boolean;
+  allowed: boolean;
+  source: "user" | "group" | "none";
+  max_containers: number;
+  projects: ProjectContainerInfo[];
+}
+
+// A usage-tier plan (Free/Plus/Pro/Max/Unlimited-style): model cost ceilings +
+// daily/per-minute quotas. Mirrors claw/db/models.py::PolicyPlan.
+export interface PlanInfo {
+  id: string;
+  name: string;
+  rank: number;
+  max_chat_cost: ModelCost;
+  allow_image: boolean;
+  max_image_cost: ModelCost;
+  messages_per_day: number; // 0 = unlimited
+  images_per_day: number; // 0 = unlimited
+  turns_per_minute: number; // 0 = inherit global
+  is_default: boolean;
+  user_count?: number; // attached by the admin list endpoint
+}
+
+export type PlanCreate = Omit<PlanInfo, "id" | "user_count">;
+export type PlanPatch = Partial<PlanCreate>;
+
+// GET /api/my/plan — the caller's effective plan + today's consumption.
+export interface MyPlan {
+  plan: PlanInfo | null;
+  used: { turns: number; images: number };
+  messages_remaining?: number | null;
+  images_remaining?: number | null;
+}
+
+// Bulk user import (CSV/XLSX) — parse is stateless: the browser holds the
+// full parsed grid and posts it back (with the chosen mapping) on commit.
+export interface UserImportParseResult {
+  columns: string[];
+  rows: string[][];
+  row_count: number;
+}
+export interface UserImportMapping {
+  email_col: number;
+  name_mode: "full" | "split" | "none";
+  full_name_col?: number | null;
+  first_name_col?: number | null;
+  last_name_col?: number | null;
+}
+export type UserImportRowStatus =
+  | "created"
+  | "duplicate_in_file"
+  | "already_exists"
+  | "invalid_email"
+  | "missing_email"
+  | "error";
+export interface UserImportRowResult {
+  row_index: number;
+  email: string;
+  status: UserImportRowStatus;
+}
+export interface UserImportCommitResult {
+  created: number;
+  results: UserImportRowResult[];
+}
+
+export interface ActivityPoint {
+  label: string;
+  count: number;
+}
+
+export interface ModelUsagePoint {
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  turns: number;
+}
+
+export interface ProviderUsageSummary {
+  name: string;
+  enabled: boolean;
+  has_key: boolean;
+  model_count: number;
+  enabled_model_count: number;
+}
+
+export interface SessionsByUserPoint {
+  user_id: string;
+  label: string;
+  sessions: number;
+}
+
+export interface TokenUsagePoint {
+  bucket: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  turns: number;
+}
+export interface TokenUsageSeries {
+  key: string;
+  label: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  turns: number;
+  points: TokenUsagePoint[];
+}
+export interface TokenUsageReport {
+  granularity: string;
+  group_by: string;
+  buckets: string[];
+  series: TokenUsageSeries[];
+  totals: { prompt_tokens: number; completion_tokens: number; turns: number };
+}
+export interface TokenUsageParams {
+  granularity?: "daily" | "weekly" | "monthly" | "yearly";
+  group_by?: "user" | "model" | "provider";
+  user_id?: string;
+  model?: string;
+  provider?: string;
+  start?: string;
+  end?: string;
+}
+
+// Filter options for the Tokens Usage report — every model id and its
+// resolvable provider name across every scope (admin-global + all users'
+// BYOK), so private-provider usage is still selectable/labelled correctly.
+export interface UsageDimensionModel {
+  model_id: string;
+  provider: string;
+}
+export interface UsageDimensions {
+  providers: string[];
+  models: UsageDimensionModel[];
+}
+
+export interface GuardrailHitsByUserPoint {
+  user_id: string;
+  label: string;
+  count: number;
+}
+export interface GuardrailHitsByRulePoint {
+  rule: string;
+  count: number;
+}
+
+export interface AdminOverview {
+  stats: Record<string, number | boolean>;
+  activity_by_day: ActivityPoint[];
+  activity_by_hour: ActivityPoint[];
+  usage_by_model: ModelUsagePoint[];
+  providers: ProviderUsageSummary[];
+  sessions_by_user_7d: SessionsByUserPoint[];
+  sessions_by_day_7d: ActivityPoint[];
+  guardrail_hits_by_day: ActivityPoint[];
+  guardrail_hits_by_user: GuardrailHitsByUserPoint[];
+  guardrail_hits_by_rule: GuardrailHitsByRulePoint[];
+  plans_report: PlansReport;
+}
+
+export interface PlansReport {
+  plans: PlanInfo[];
+  usage_today: PlanUsageRow[];
+}
+
+export interface PlanUsageRow {
+  user_id: string;
+  label: string;
+  plan_name: string | null;
+  turns: number;
+  messages_limit: number;
+  images: number;
+  images_limit: number;
+}
+
+export type ModelCost = "low" | "medium" | "high" | "very_high";
+
+export type ModelKind = "chat" | "image" | "vision";
+
+export interface LLMModelCfg {
+  id: string;
+  model_id: string;
+  label: string;
+  enabled: boolean;
+  is_default: boolean;
+  is_fallback: boolean;
+  cost: ModelCost;
+  description: string;
+  // "chat" = agent chat picker; "image" = text-to-image only.
+  kind: ModelKind;
+  // Admin's input-token window override; null = look it up from LiteLLM's table.
+  context_window: number | null;
+}
+
+export interface LLMProviderCfg {
+  id: string;
+  name: string;
+  api_base: string;
+  has_key: boolean;
+  enabled: boolean;
+  // LiteLLM routing prefix auto-applied to model ids added under this provider
+  // (e.g. "openai", "openrouter"). Empty on providers created before this
+  // existed — those still type the full model id manually.
+  model_prefix: string;
+  models: LLMModelCfg[];
+}
+
+export interface GuardrailRule {
+  id: string;
+  name: string;
+  pattern: string;
+  action: "mask" | "block" | "monitor";
+  scopes: string[];
+  severity: string;
+  placeholder: string;
+  enabled: boolean;
+  is_builtin: boolean;
+}
+
+export interface AuditRow {
+  id: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  user_id: string | null;
+  user_label: string;
+  session_id: string | null;
+  created_at: string;
+}
+
+export interface TelegramAdminConfig {
+  has_token: boolean;
+  enabled: boolean;
+  // "database" once an admin has saved anything here; "env" while still
+  // running off the CLAW_TELEGRAM_BOT_TOKEN fallback; "none" if unconfigured.
+  source: "database" | "env" | "none";
+  running: boolean;
+  bot_username: string;
+}
+
+export interface SmtpAdminConfig {
+  provider: string;
+  host: string;
+  port: number;
+  username: string;
+  from_address: string;
+  use_tls: boolean;
+  use_ssl: boolean;
+  enabled: boolean;
+  has_password: boolean;
+}
+export interface SmtpAdminConfigBody {
+  provider: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string; // empty keeps the existing password
+  from_address: string;
+  use_tls: boolean;
+  use_ssl: boolean;
+  enabled: boolean;
+}
+
+// Control Plane > Preferences (global branding & appearance).
+export type BrandingLanguage = "en" | "th";
+export type BrandingFontSize = "small" | "medium" | "large";
+export type BrandingChatBackground = "solid" | "dots" | "grid";
+export type BrandingLogoSlot = "login" | "chat" | "sidebar";
+// Public shape (GET /api/branding) — logos are ready-to-use URLs or null.
+export interface PublicBranding {
+  language: BrandingLanguage;
+  font_size: BrandingFontSize;
+  chat_background: BrandingChatBackground;
+  logos: Record<BrandingLogoSlot, string | null>;
+}
+// Admin shape (GET/PUT /api/admin/branding) — logos are raw stored filenames.
+export interface AdminBranding {
+  language: BrandingLanguage;
+  font_size: BrandingFontSize;
+  chat_background: BrandingChatBackground;
+  logo_login: string | null;
+  logo_chat: string | null;
+  logo_sidebar: string | null;
+}
+export interface BrandingBody {
+  language: BrandingLanguage;
+  font_size: BrandingFontSize;
+  chat_background: BrandingChatBackground;
+}
+// Settings > Profile > Preferences — unlike admin's BrandingBody (always a
+// full save), a personal override save only sends the field(s) the user
+// actually changed; omitted fields leave that field's stored override alone.
+export interface PreferencesUpdateBody {
+  language?: BrandingLanguage;
+  font_size?: BrandingFontSize;
+  chat_background?: BrandingChatBackground;
+  execution_panel_enabled?: boolean;
+}
+
+export interface OAuthAppPublic {
+  client_id: string;
+  tenant: string;
+  has_secret: boolean;
+}
+
+export interface OAuthAppsInfo {
+  google: OAuthAppPublic;
+  microsoft: OAuthAppPublic;
+  redirect_uris: { google: string; microsoft: string };
+  login_redirect_uris: { google: string; microsoft: string };
+}
+
+export interface GuardrailTestResult {
+  action: "mask" | "block" | "monitor" | null;
+  matched_rules: { name: string; scope: string }[];
+  masked: string;
+  severity: string;
+  monitor_only: boolean;
+}
+
+export interface ModelOption {
+  model_id: string;
+  label: string;
+  provider: string;
+  is_default: boolean;
+  cost: ModelCost;
+  description: string;
+  // "global" = admin-configured (Control Plane); "private" = the user's own
+  // bring-your-own-key model. Absent on the env-fallback option.
+  scope?: "global" | "private";
+}
+
+// Provider/model management API surface — one shape, two scopes. The admin
+// Control Plane binds it to /api/admin/*, the per-user "My Models" screen binds
+// it to /api/my/*. Both drive the SAME Providers UI (see LlmProviders in
+// Admin.tsx), so there is a single implementation to maintain.
+export interface LlmProviderCreate {
+  name: string;
+  api_key: string;
+  api_base: string;
+  enabled?: boolean;
+  model_prefix?: string;
+}
+export interface LlmProviderPatch {
+  name?: string;
+  api_key?: string;
+  api_base?: string;
+  enabled?: boolean;
+  model_prefix?: string;
+}
+export interface LlmModelCreate {
+  model_id: string;
+  label: string;
+  enabled?: boolean;
+  cost?: ModelCost;
+  description?: string;
+  kind?: ModelKind;
+  context_window?: number | null;
+}
+export interface LlmModelPatch {
+  model_id?: string;
+  label?: string;
+  enabled?: boolean;
+  is_default?: boolean;
+  is_fallback?: boolean;
+  cost?: ModelCost;
+  description?: string;
+  kind?: ModelKind;
+  // 0 clears the override back to automatic lookup.
+  context_window?: number | null;
+}
+export interface LlmApi {
+  list: () => Promise<{ providers: LLMProviderCfg[] }>;
+  createProvider: (p: LlmProviderCreate) => Promise<LLMProviderCfg>;
+  updateProvider: (id: string, p: LlmProviderPatch) => Promise<LLMProviderCfg>;
+  deleteProvider: (id: string) => Promise<unknown>;
+  createModel: (providerId: string, m: LlmModelCreate) => Promise<LLMModelCfg>;
+  updateModel: (id: string, m: LlmModelPatch) => Promise<LLMModelCfg>;
+  deleteModel: (id: string) => Promise<unknown>;
+}
+
+export interface BrowserExtensionInstance {
+  extension_id: string;
+  label: string;
+  last_seen: number;
+  online: boolean;
+}
+
+export interface BrowserExtensionStatus {
+  client_extension_enabled: boolean;
+  paired: boolean;
+  online: boolean;
+  extensions: BrowserExtensionInstance[];
+}
+
+export interface BrowserExtensionPairing {
+  api_base: string;
+  instance_id: string;
+  pairing_ticket: string;
+  expires_at: number;
+}
+
+export function getToken(): string {
+  return localStorage.getItem("claw_jwt") ?? "";
+}
+
+export function setToken(token: string) {
+  localStorage.setItem("claw_jwt", token);
+}
+
+export function clearToken() {
+  localStorage.removeItem("claw_jwt");
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// Extends Error additively (status/body) so existing catch blocks that only
+// read `.message`/`String(e)` see no change, while a caller that needs to
+// branch on the server's structured error (e.g. a 403 with a `reason` field)
+// can inspect `.status`/`.body` instead of parsing the message string.
+export class ApiError extends Error {
+  status: number;
+  body: unknown;
+  /** `Retry-After` as milliseconds, when the server sent one. */
+  retryAfterMs?: number;
+  constructor(status: number, text: string, retryAfter?: string | null) {
+    super(`${status} ${text}`);
+    this.status = status;
+    try {
+      this.body = JSON.parse(text);
+    } catch {
+      this.body = undefined;
+    }
+    // Only the delta-seconds form is read. The HTTP-date form is legal but
+    // nothing here sends one, and misreading a date as 0 would busy-loop the
+    // caller against an endpoint that just asked it to back off.
+    const seconds = Number(retryAfter);
+    if (retryAfter && Number.isFinite(seconds) && seconds > 0) {
+      this.retryAfterMs = seconds * 1000;
+    }
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const resp = await fetch(endpoint(path), {
+    ...init,
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...(init?.headers ?? {}) },
+  });
+  if (!resp.ok) {
+    if (resp.status === 401) clearToken();
+    throw new ApiError(resp.status, await resp.text(), resp.headers.get("Retry-After"));
+  }
+  return resp.json();
+}
+
+export const api = {
+  adminTeamPolicy: () => request<import("./api").TeamPolicy>("/api/admin/team-policy"),
+  adminSaveTeamPolicy: (policy: import("./api").TeamPolicy) => request<import("./api").TeamPolicy>("/api/admin/team-policy", {method: "PUT", body: JSON.stringify(policy)}),
+  register: (email: string, password: string, display_name = "") =>
+    request<{ access_token: string; user: AuthUser }>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ email, password, display_name }),
+    }),
+  login: (email: string, password: string) =>
+    request<{ access_token: string; user: AuthUser }>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    }),
+  // For a bulk-imported user (no password yet): redeems the signed token
+  // from an emailed activation link (#activate=<token>) to set their
+  // password and log in immediately, same response shape as login/register.
+  completeRegistration: (token: string, password: string, display_name?: string) =>
+    request<{ access_token: string; user: AuthUser }>("/api/auth/complete-registration", {
+      method: "POST",
+      body: JSON.stringify({ token, password, display_name }),
+    }),
+  // Decodes an activation link token so the set-password form can be
+  // prefilled with the real account's email/display name. POST (token in
+  // the body, not a GET path param) so the token never appears in a URL a
+  // reverse proxy/CDN would log.
+  activationInfo: (token: string) =>
+    request<{ email: string; display_name: string }>("/api/auth/activation", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  // Always resolves the same way regardless of account state — the backend
+  // never reveals that distinction (account enumeration). If it matches an
+  // account with a password, a reset link is emailed; if it matches an
+  // imported account that never activated, an activation link is emailed
+  // instead (see forgot_password() in claw/api/auth.py).
+  forgotPassword: (email: string) =>
+    request<{ ok: boolean }>("/api/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  // Redeems a signed password-reset link (#reset-password=<token>) to set a
+  // new password and log in immediately, same response shape as login/register.
+  resetPassword: (token: string, password: string) =>
+    request<{ access_token: string; user: AuthUser }>("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ token, password }),
+    }),
+  // Self-service change for an already-logged-in user — requires the
+  // current password (proves identity via the credential itself, since the
+  // caller already holds a valid session).
+  changePassword: (current_password: string, new_password: string) =>
+    request<{ ok: boolean }>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ current_password, new_password }),
+    }),
+  // Settings > Profile > Preferences — personal override of the Control
+  // Plane's global branding defaults (same body shape, different scope).
+  updateMyPreferences: (body: PreferencesUpdateBody) =>
+    request<AuthUser>("/api/auth/preferences", { method: "PUT", body: JSON.stringify(body) }),
+  me: () => request<AuthUser>("/api/auth/me"),
+  logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+  providers: () => request<{ providers: string[] }>("/api/auth/providers"),
+  features: () => request<{ speech_to_text: boolean; text_to_speech: boolean }>("/api/features"),
+  // Public (no auth) — the login screen renders before authentication.
+  getBranding: () => request<PublicBranding>("/api/branding"),
+
+  transcribe: async (audio: Blob, filename = "audio.webm"): Promise<string> => {
+    const form = new FormData();
+    form.append("file", audio, filename);
+    const resp = await fetch(endpoint("/api/transcribe"), {
+      method: "POST",
+      headers: authHeaders(), // no Content-Type: browser sets multipart boundary
+      body: form,
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+    return (await resp.json()).text as string;
+  },
+
+  // Text-to-speech for the assistant message "read aloud" button. Returns raw
+  // audio bytes (audio/mpeg) — not JSON, so this bypasses request<T>().
+  speak: async (text: string): Promise<Blob> => {
+    const resp = await fetch(endpoint("/api/tts"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ text }),
+    });
+    if (!resp.ok) throw new ApiError(resp.status, await resp.text());
+    return resp.blob();
+  },
+
+  listSessions: () => request<SessionInfo[]>("/api/sessions"),
+  createSession: (title = "New chat", botId?: string | null, kind = "direct") =>
+    request<{ id: string }>("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({ title, bot_id: botId, kind }),
+    }),
+  renameSession: (id: string, title: string) =>
+    request(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ title }) }),
+  deleteSession: (id: string) => request(`/api/sessions/${id}`, { method: "DELETE" }),
+  listMessages: (sessionId: string, opts?: { beforeSeq?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.beforeSeq != null) q.set("before_seq", String(opts.beforeSeq));
+    if (opts?.limit != null) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return request<MessagePage>(`/api/sessions/${sessionId}/messages${qs ? `?${qs}` : ""}`);
+  },
+
+  listBotGroups: () => request<BotGroupInfo[]>("/api/bot-groups"),
+  createBotGroup: (data: BotGroupInput) => request<BotGroupInfo>("/api/bot-groups", {
+    method: "POST", body: JSON.stringify(data),
+  }),
+  updateBotGroup: (id: string, data: BotGroupInput) => request<BotGroupInfo>(`/api/bot-groups/${id}`, {
+    method: "PATCH", body: JSON.stringify(data),
+  }),
+  deleteBotGroup: (id: string) => request(`/api/bot-groups/${id}`, { method: "DELETE" }),
+
+  listBots: () => request<BotInfo[]>("/api/bots"),
+  // Polled rather than pushed: a mission runs detached from any chat turn, so
+  // there is no socket carrying its progress, and the answer has to stay right
+  // across a reload and whichever thread happens to be open.
+  activeMissions: () => request<ActiveMission[]>("/api/missions/active"),
+  createBot: (data: {
+    name: string;
+    role_title?: string;
+    charter?: string;
+    model?: string;
+    tool_allowlist?: string[];
+  }) => request<{ id: string; name: string; role_title: string }>("/api/bots", {
+    method: "POST",
+    body: JSON.stringify(data),
+  }),
+  getBot: (id: string) => request<BotInfo>(`/api/bots/${id}`),
+  updateBot: (id: string, data: Partial<BotInfo>) =>
+    request(`/api/bots/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  deleteBot: (id: string) => request(`/api/bots/${id}`, { method: "DELETE" }),
+  uploadAttachments: async (sessionId: string, files: File[]): Promise<AttachmentRef[]> => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f);
+    const resp = await fetch(endpoint(`/api/sessions/${sessionId}/attachments`), {
+      method: "POST",
+      headers: authHeaders(), // no Content-Type: browser sets multipart boundary
+      body: form,
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+    return resp.json();
+  },
+
+  listBlueprints: () => request<BlueprintInfo[]>("/api/blueprints"),
+  createBlueprint: async (
+    file: File,
+    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"] },
+  ): Promise<BlueprintInfo> => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("name", data.name);
+    form.append("description", data.description ?? "");
+    form.append("visibility", data.visibility);
+    const resp = await fetch(endpoint("/api/blueprints"), { method: "POST", headers: authHeaders(), body: form });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+    return resp.json();
+  },
+  updateBlueprint: (id: string, patch: Partial<Pick<BlueprintInfo, "name" | "description" | "visibility">>) =>
+    request<BlueprintInfo>(`/api/blueprints/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteBlueprint: (id: string) => request(`/api/blueprints/${id}`, { method: "DELETE" }),
+  listBlueprintVersions: (id: string) =>
+    request<BlueprintVersion[]>(`/api/blueprints/${id}/versions`),
+  addBlueprintVersion: async (id: string, file: File): Promise<BlueprintVersion> => {
+    const form = new FormData();
+    form.append("file", file);
+    const resp = await fetch(endpoint(`/api/blueprints/${id}/versions`), {
+      method: "POST",
+      headers: authHeaders(),
+      body: form,
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+    return resp.json();
+  },
+  activateBlueprintVersion: (id: string, version: number) =>
+    request<{ activated: boolean; current_version: number }>(
+      `/api/blueprints/${id}/versions/${version}/activate`,
+      { method: "POST" },
+    ),
+  materializeBlueprint: (id: string, version?: number) =>
+    request<AttachmentRef>(`/api/blueprints/${id}/materialize`, {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    }),
+  saveArtifactAsBlueprint: (
+    sessionId: string,
+    path: string,
+    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"] },
+  ) => request<BlueprintInfo>("/api/blueprints/from-artifact", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, path, ...data }),
+  }),
+
+  listSkills: () => request<SkillInfo[]>("/api/skills"),
+  // Built-in skills come back from listSkills with an empty `content` — theirs
+  // is static and large enough that shipping all of it on every panel open is
+  // wasted bandwidth, so the detail view pulls just the one it is showing.
+  skillContent: (id: string) =>
+    request<{ content: string }>(`/api/skills/${encodeURIComponent(id)}/content`),
+  saveSkill: (skill: Omit<SkillInfo, "id">) =>
+    request<SkillInfo>(`/api/skills/${encodeURIComponent(skill.name)}`, {
+      method: "PUT",
+      body: JSON.stringify(skill),
+    }),
+  deleteSkill: (id: string) => request(`/api/skills/${id}`, { method: "DELETE" }),
+
+  getMemory: () => request<MemoryInfo>("/api/memory"),
+  saveMemory: (content: string) =>
+    request<SavedMemory>("/api/memory", { method: "PUT", body: JSON.stringify({ content }) }),
+
+  listConnectors: () => request<ConnectorInfo[]>("/api/connectors"),
+  connectorPresets: () => request<ConnectorPreset[]>("/api/connectors/presets"),
+  saveConnector: (c: Omit<ConnectorInfo, "id" | "runtime">) =>
+    request<ConnectorInfo>(`/api/connectors/${encodeURIComponent(c.name)}`, {
+      method: "PUT",
+      body: JSON.stringify(c),
+    }),
+  deleteConnector: (id: string) => request(`/api/connectors/${id}`, { method: "DELETE" }),
+  // One-click OAuth: returns the provider authorize URL for the browser to visit.
+  connectorOAuthStart: (presetKey: string) =>
+    request<{ url: string }>(`/api/connectors/oauth/${encodeURIComponent(presetKey)}/start`),
+  // Admin-global connectors ("Provided by your organization") — read-only,
+  // redacted (no command/url/env), for Settings' transparency panel.
+  listGlobalConnectors: () => request<ConnectorGlobalSummary[]>("/api/connectors/global"),
+
+  // Knowledge bases (OKF): uploaded documents the agent can search to answer from.
+  listKnowledge: () => request<KnowledgeBase[]>("/api/knowledge"),
+  createKnowledge: (
+    name: string,
+    description: string,
+    visibility: "private" | "group" | "public",
+    sharedGroupIds?: string[],
+  ) =>
+    request<KnowledgeBase>("/api/knowledge", {
+      method: "POST",
+      body: JSON.stringify({ name, description, visibility, shared_group_ids: sharedGroupIds ?? null }),
+    }),
+  updateKnowledge: (
+    id: string,
+    patch: Partial<Pick<KnowledgeBase, "name" | "description" | "visibility" | "shared_group_ids">>,
+  ) =>
+    request<KnowledgeBase>(`/api/knowledge/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...patch, shared_group_ids: patch.shared_group_ids ?? null }),
+    }),
+  // Org-wide group names, for the "share with additional groups" picker.
+  listGroups: () => request<SimpleGroup[]>("/api/groups"),
+  deleteKnowledge: (id: string) => request(`/api/knowledge/${id}`, { method: "DELETE" }),
+  listKnowledgeDocs: (id: string) => request<KnowledgeDoc[]>(`/api/knowledge/${id}/documents`),
+  uploadKnowledgeDocs: async (
+    id: string,
+    files: File[],
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<{ ingested: { title: string }[]; errors: string[] }> => {
+    // The backend accepts at most 10 files per request, so send them in
+    // sequential batches and merge the results. This lets a user pick 100 files
+    // at once without hitting a 413, while keeping the same return shape.
+    const BATCH = 10;
+    const ingested: { title: string }[] = [];
+    const errors: string[] = [];
+    for (let i = 0; i < files.length; i += BATCH) {
+      const form = new FormData();
+      for (const f of files.slice(i, i + BATCH)) form.append("files", f);
+      const resp = await fetch(endpoint(`/api/knowledge/${id}/documents`), {
+        method: "POST",
+        headers: authHeaders(), // browser sets multipart boundary
+        body: form,
+      });
+      if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+      const batch = (await resp.json()) as { ingested: { title: string }[]; errors: string[] };
+      ingested.push(...batch.ingested);
+      errors.push(...batch.errors);
+      onProgress?.(Math.min(i + BATCH, files.length), files.length);
+    }
+    return { ingested, errors };
+  },
+  deleteKnowledgeDoc: (kbId: string, docId: string) =>
+    request(`/api/knowledge/${kbId}/documents/${docId}`, { method: "DELETE" }),
+  previewKnowledgeDoc: (kbId: string, docId: string, offset = 0) =>
+    request<KnowledgeDocPreview>(
+      `/api/knowledge/${kbId}/documents/${docId}/preview?offset=${offset}`,
+    ),
+
+  listSchedules: () => request<ScheduleInfo[]>("/api/schedules"),
+  createSchedule: (s: Partial<ScheduleInfo>) =>
+    request<ScheduleInfo>("/api/schedules", { method: "POST", body: JSON.stringify(s) }),
+  updateSchedule: (id: string, s: Partial<ScheduleInfo>) =>
+    request<ScheduleInfo>(`/api/schedules/${id}`, { method: "PUT", body: JSON.stringify(s) }),
+  deleteSchedule: (id: string) => request(`/api/schedules/${id}`, { method: "DELETE" }),
+  runScheduleNow: (id: string) =>
+    request<ScheduleInfo>(`/api/schedules/${id}/run`, { method: "POST" }),
+
+  listProjects: () => request<ProjectInventory>("/api/projects"),
+  startProject: (project: string) =>
+    request<ProjectInventory>(`/api/projects/${encodeURIComponent(project)}/start`, { method: "POST" }),
+  stopProject: (project: string) =>
+    request<ProjectInventory>(`/api/projects/${encodeURIComponent(project)}/stop`, { method: "POST" }),
+
+  adminListUsers: () => request<AdminUser[]>("/api/admin/users"),
+  adminStats: () =>
+    request<Record<string, number | boolean>>("/api/admin/stats"),
+  adminCreateUser: (
+    email: string,
+    password: string,
+    is_admin: boolean,
+    display_name = "",
+    group_id: string | null = null,
+  ) =>
+    request<AdminUser>("/api/admin/users", {
+      method: "POST",
+      body: JSON.stringify({ email, password, is_admin, display_name, group_id }),
+    }),
+  adminUpdateUser: (
+    id: string,
+    // Omit group_id/plan_id to leave unchanged; pass null to clear.
+    patch: {
+      is_admin?: boolean;
+      is_active?: boolean;
+      display_name?: string;
+      password?: string;
+      group_id?: string | null;
+      plan_id?: string | null;
+      project_policy?: { enabled: boolean | null; max_containers: number | null };
+    },
+  ) => request<AdminUser>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  adminDeleteUser: (id: string) => request(`/api/admin/users/${id}`, { method: "DELETE" }),
+  adminResendActivation: (id: string) =>
+    request<{ ok: boolean }>(`/api/admin/users/${id}/resend-activation`, { method: "POST" }),
+
+  // Bulk user import — parse returns the full grid (no server-side state);
+  // commit takes the same rows back along with the column mapping.
+  adminImportUsersParse: async (file: File): Promise<UserImportParseResult> => {
+    const form = new FormData();
+    form.append("file", file);
+    const resp = await fetch(endpoint("/api/admin/users/import/parse"), {
+      method: "POST",
+      headers: authHeaders(), // no Content-Type: browser sets multipart boundary
+      body: form,
+    });
+    if (!resp.ok) throw new ApiError(resp.status, await resp.text());
+    return resp.json();
+  },
+  adminImportUsersCommit: (payload: {
+    columns: string[];
+    rows: string[][];
+    mapping: UserImportMapping;
+    group_id?: string | null;
+  }) =>
+    request<UserImportCommitResult>("/api/admin/users/import/commit", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  // -- admin: user groups (organizational only) --
+  adminListGroups: () => request<GroupInfo[]>("/api/admin/groups"),
+  adminCreateGroup: (name: string) =>
+    request<GroupInfo>("/api/admin/groups", { method: "POST", body: JSON.stringify({ name }) }),
+  adminDeleteGroup: (id: string) => request(`/api/admin/groups/${id}`, { method: "DELETE" }),
+  adminSetDefaultGroup: (group_id: string | null) =>
+    request<{ default_group_id: string | null }>("/api/admin/groups/default", {
+      method: "PUT",
+      body: JSON.stringify({ group_id }),
+    }),
+  adminUpdateGroup: (id: string, patch: {
+    plan_id?: string | null;
+    project_policy?: { enabled: boolean; max_containers: number };
+  }) =>
+    request<GroupInfo>(`/api/admin/groups/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+
+  // -- admin: usage-tier plans --
+  adminListPlans: () => request<PlanInfo[]>("/api/admin/plans"),
+  adminCreatePlan: (plan: PlanCreate) =>
+    request<PlanInfo>("/api/admin/plans", { method: "POST", body: JSON.stringify(plan) }),
+  adminUpdatePlan: (id: string, patch: PlanPatch) =>
+    request<PlanInfo>(`/api/admin/plans/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  adminDeletePlan: (id: string) => request(`/api/admin/plans/${id}`, { method: "DELETE" }),
+  adminSetDefaultPlan: (plan_id: string | null) =>
+    request<{ default_plan_id: string | null }>("/api/admin/plans/default", {
+      method: "PUT",
+      body: JSON.stringify({ plan_id }),
+    }),
+
+  // -- user: my effective plan + today's usage (composer quota hint) --
+  myPlan: () => request<MyPlan>("/api/my/plan"),
+
+  // -- admin: overview / LLM providers / guardrails / audit --
+  adminOverview: () => request<AdminOverview>("/api/admin/overview"),
+  adminTokenUsage: (params: TokenUsageParams = {}) => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);
+    return request<TokenUsageReport>(`/api/admin/usage/tokens?${q.toString()}`);
+  },
+  adminUsageDimensions: () => request<UsageDimensions>("/api/admin/usage/dimensions"),
+
+  adminGuardrails: () =>
+    request<{ monitor_only: boolean; tool_args_exempt: string[]; rules: GuardrailRule[] }>(
+      "/api/admin/guardrails",
+    ),
+  adminSetMonitorOnly: (monitor_only: boolean) =>
+    request<{ monitor_only: boolean }>("/api/admin/guardrails", {
+      method: "PUT",
+      body: JSON.stringify({ monitor_only }),
+    }),
+  // Replace the tool-args exemption list (tool-name globs). monitor_only must be
+  // sent too (the endpoint owns both) — pass the current value through.
+  adminSetToolArgsExempt: (monitor_only: boolean, tool_args_exempt: string[]) =>
+    request<{ monitor_only: boolean; tool_args_exempt: string[] }>("/api/admin/guardrails", {
+      method: "PUT",
+      body: JSON.stringify({ monitor_only, tool_args_exempt }),
+    }),
+  adminCreateRule: (r: {
+    name: string;
+    kind: "keyword" | "regex";
+    pattern: string;
+    action: "mask" | "block" | "monitor";
+    severity?: string;
+  }) => request<GuardrailRule>("/api/admin/guardrails/rules", { method: "POST", body: JSON.stringify(r) }),
+  adminUpdateRule: (
+    id: string,
+    patch: {
+      enabled?: boolean;
+      action?: string;
+      name?: string;
+      pattern?: string;
+      severity?: string;
+      kind?: "keyword" | "regex";
+    },
+  ) =>
+    request<GuardrailRule>(`/api/admin/guardrails/rules/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  adminDeleteRule: (id: string) => request(`/api/admin/guardrails/rules/${id}`, { method: "DELETE" }),
+  adminTestGuardrails: (text: string) =>
+    request<GuardrailTestResult>("/api/admin/guardrails/test", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+
+  adminGetOAuthApps: () => request<OAuthAppsInfo>("/api/admin/oauth-apps"),
+  adminSetOAuthApp: (
+    provider: "google" | "microsoft",
+    body: { client_id: string; client_secret: string; tenant?: string },
+  ) => request<OAuthAppPublic>(`/api/admin/oauth-apps/${provider}`, { method: "PUT", body: JSON.stringify(body) }),
+
+  adminGetTelegramConfig: () => request<TelegramAdminConfig>("/api/admin/telegram"),
+  adminSetTelegramConfig: (body: { bot_token: string; enabled: boolean }) =>
+    request<TelegramAdminConfig>("/api/admin/telegram", { method: "PUT", body: JSON.stringify(body) }),
+
+  adminGetEmailConfig: () => request<SmtpAdminConfig>("/api/admin/email/config"),
+  adminSetEmailConfig: (body: SmtpAdminConfigBody) =>
+    request<SmtpAdminConfig>("/api/admin/email/config", { method: "PUT", body: JSON.stringify(body) }),
+  adminTestEmailConfig: (body: SmtpAdminConfigBody & { recipient: string }) =>
+    request<{ ok: boolean }>("/api/admin/email/test", { method: "POST", body: JSON.stringify(body) }),
+
+  adminGetBranding: () => request<AdminBranding>("/api/admin/branding"),
+  adminSetBranding: (body: BrandingBody) =>
+    request<AdminBranding>("/api/admin/branding", { method: "PUT", body: JSON.stringify(body) }),
+  adminUploadBrandingLogo: async (slot: BrandingLogoSlot, file: File): Promise<AdminBranding> => {
+    const form = new FormData();
+    form.append("file", file);
+    const resp = await fetch(endpoint(`/api/admin/branding/logo/${slot}`), {
+      method: "POST",
+      headers: authHeaders(), // no Content-Type: browser sets multipart boundary
+      body: form,
+    });
+    if (!resp.ok) throw new ApiError(resp.status, await resp.text());
+    return resp.json();
+  },
+  adminDeleteBrandingLogo: (slot: BrandingLogoSlot) =>
+    request<AdminBranding>(`/api/admin/branding/logo/${slot}`, { method: "DELETE" }),
+
+  adminAudit: (
+    filters: { kind?: string; user_id?: string; search?: string; before?: string; limit?: number } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (filters.kind) q.set("kind", filters.kind);
+    if (filters.user_id) q.set("user_id", filters.user_id);
+    if (filters.search) q.set("search", filters.search);
+    if (filters.before) q.set("before", filters.before);
+    q.set("limit", String(filters.limit ?? 50));
+    return request<{ events: AuditRow[]; kinds: string[]; has_more: boolean; next_before: string | null }>(
+      `/api/admin/audit?${q.toString()}`,
+    );
+  },
+
+  listModels: () => request<{ models: ModelOption[]; default: string }>("/api/models"),
+
+  // Text-to-image: the composer's "+ Image" picker + one-shot generation
+  // (separate from the chat WebSocket / agent loop).
+  listImageModels: () => request<{ models: ModelOption[] }>("/api/image-models"),
+  generateImage: (sessionId: string, model: string, prompt: string, size?: string) =>
+    request<{ path: string; prompt: string }>(`/api/sessions/${sessionId}/images`, {
+      method: "POST",
+      body: JSON.stringify({ model, prompt, size }),
+    }),
+
+  getHeartbeat: () =>
+    request<{ interval_minutes: number; enabled: boolean; next_run_at: string | null }>("/api/heartbeat"),
+  setHeartbeat: (interval_minutes: number) =>
+    request<{ interval_minutes: number; enabled: boolean; next_run_at: string | null }>("/api/heartbeat", {
+      method: "PUT",
+      body: JSON.stringify({ interval_minutes }),
+    }),
+
+  submitFeedback: (signal: "up" | "down", opts: { session_id?: string; note?: string; message_preview?: string }) =>
+    request<{ recorded: boolean }>("/api/feedback", {
+      method: "POST",
+      body: JSON.stringify({ signal, ...opts }),
+    }),
+
+  createShare: (
+    sessionId: string,
+    body: { title?: string; messages: { role: string; content: string; artifacts?: string[] }[] },
+  ) =>
+    request<CreatedShare>(`/api/sessions/${sessionId}/share`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  revokeShare: (id: string) => request<{ revoked: boolean }>(`/api/shares/${id}`, { method: "DELETE" }),
+  getShare: (token: string) => request<SharedConversation>(`/api/share/${encodeURIComponent(token)}`),
+
+  getPolicy: () =>
+    request<{ monitor_only: boolean; rules: { name: string; action: string; severity: string }[] }>(
+      "/api/policy",
+    ),
+  setPolicy: (monitor_only: boolean) =>
+    request<{ monitor_only: boolean }>("/api/policy", {
+      method: "PUT",
+      body: JSON.stringify({ monitor_only }),
+    }),
+
+  getTelegramStatus: () =>
+    request<{ enabled: boolean; linked: boolean; bot_username: string }>("/api/telegram/status"),
+  createTelegramLink: () =>
+    request<{ code: string; expires_in: number; bot_username: string }>("/api/telegram/link", {
+      method: "POST",
+    }),
+  unlinkTelegram: () => request<{ linked: boolean }>("/api/telegram/link", { method: "DELETE" }),
+
+  browserExtensionStatus: () =>
+    request<BrowserExtensionStatus>("/api/browser-extension/status"),
+  browserExtensionPairingInit: () =>
+    request<BrowserExtensionPairing>("/api/browser-extension/pairing/init", { method: "POST" }),
+  browserExtensionUnpair: () =>
+    request<{ unpaired: number }>("/api/browser-extension/pairing", { method: "DELETE" }),
+};
+
+// One factory, two scopes: the admin Control Plane (/api/admin) and the per-user
+// "My Models" screen (/api/my). Both bind the identical Providers UI, so provider
+// management is defined once.
+function makeLlmApi(base: string): LlmApi {
+  return {
+    list: () => request<{ providers: LLMProviderCfg[] }>(`${base}/llm`),
+    createProvider: (p) =>
+      request<LLMProviderCfg>(`${base}/providers`, { method: "POST", body: JSON.stringify(p) }),
+    updateProvider: (id, p) =>
+      request<LLMProviderCfg>(`${base}/providers/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+    deleteProvider: (id) => request(`${base}/providers/${id}`, { method: "DELETE" }),
+    createModel: (providerId, m) =>
+      request<LLMModelCfg>(`${base}/providers/${providerId}/models`, {
+        method: "POST",
+        body: JSON.stringify(m),
+      }),
+    updateModel: (id, m) =>
+      request<LLMModelCfg>(`${base}/models/${id}`, { method: "PATCH", body: JSON.stringify(m) }),
+    deleteModel: (id) => request(`${base}/models/${id}`, { method: "DELETE" }),
+  };
+}
+
+export const ADMIN_LLM_API: LlmApi = makeLlmApi("/api/admin");
+export const USER_LLM_API: LlmApi = makeLlmApi("/api/my");
+
+// Admin-global "Pre-built Connectors" — same shape as personal connectors
+// (ConnectorInfo, full detail since the admin IS the owner of these rows),
+// just scoped to /api/admin instead of /api/connectors.
+export const ADMIN_CONNECTOR_API = {
+  list: () => request<ConnectorInfo[]>("/api/admin/connectors"),
+  save: (c: Omit<ConnectorInfo, "id" | "runtime">) =>
+    request<ConnectorInfo>(`/api/admin/connectors/${encodeURIComponent(c.name)}`, {
+      method: "PUT",
+      body: JSON.stringify(c),
+    }),
+  remove: (id: string) => request(`/api/admin/connectors/${id}`, { method: "DELETE" }),
+};
+
+export function openChatSocket(sessionId: string): WebSocket {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return new WebSocket(
+    `${proto}://${location.host}/ws/chat/${sessionId}?token=${encodeURIComponent(getToken())}`,
+  );
+}
+
+/** URL to open/download a file the agent created in the workspace. The token is
+ * in the query so a plain new-tab link authenticates (no header needed). */
+export function fileUrl(sessionId: string, path: string): string {
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  return endpoint(`/api/sessions/${sessionId}/files/${encoded}?token=${encodeURIComponent(getToken())}`);
+}
+
+export function blueprintFileUrl(id: string, version: number): string {
+  return endpoint(`/api/blueprints/${encodeURIComponent(id)}/versions/${version}/file?token=${encodeURIComponent(getToken())}`);
+}
+
+/** How many times a preview card retries a shed (503) before giving up and
+ * falling back to the plain download chip. */
+const PREVIEW_RETRY_LIMIT = 4;
+
+/** Delay before a preview card retries, or null if it should stop and fall back.
+ *
+ * Shared by both preview components deliberately. A fixed, uncapped, unjittered
+ * interval is worse than not retrying at all: every card shed in the same burst
+ * re-fires in the same burst, forever, aimed at the endpoint that is already
+ * over capacity — and each attempt costs the server a session lookup and a stat
+ * before admission control can refuse it, so shedding never gets cheaper. The
+ * exponential term lets offered load actually decay, the jitter decorrelates
+ * cards that were shed together, and the cap is what guarantees the loop ends.
+ *
+ * Anything other than a 503 returns null: those are terminal, and retrying a
+ * 400 for a malformed file just repeats the same parse failure. */
+export function previewRetryDelay(err: unknown, attempt: number): number | null {
+  if (!(err instanceof ApiError) || err.status !== 503) return null;
+  if (attempt >= PREVIEW_RETRY_LIMIT) return null;
+  const base = Math.min((err.retryAfterMs ?? 5000) * 2 ** attempt, 60_000);
+  // Jitter upward only, so the wait never undercuts the server's Retry-After.
+  return base + Math.random() * base;
+}
+
+export type TablePreview = {
+  columns: string[];
+  rows: string[][];
+  /** More rows exist than were returned — show a "download for the rest" hint. */
+  truncated: boolean;
+  truncated_columns: boolean;
+  /** Worksheet the rows came from; null for CSV/TSV. */
+  sheet: string | null;
+  sheets?: string[];
+};
+
+/** Extensions the server can render as a table. Kept in sync with
+ * PREVIEWABLE_SUFFIXES in claw/api/file_preview.py. */
+export const PREVIEWABLE_TABLE_RE = /\.(csv|tsv|xlsx)$/i;
+
+/** Intermediate files a turn produces on the way to its real deliverable (a
+ * script that builds the PDF, the JSON/XML it read along the way, a base64
+ * payload it inlines). They stay in the workspace and the backend no longer
+ * records them as artifacts; this filter is what keeps OLD transcripts (saved
+ * before that) from showing them either.
+ *
+ * Deliberately conservative, because this runs over stored transcripts: a rule
+ * that is too broad doesn't just hide a chip, it retroactively erases a file
+ * that was already handed to the user, and there is no workspace browser to go
+ * find it in. Mirrors _is_artifact_hidden / _drop_shadowed_templates in
+ * claw/core/loop.py — keep the two in step. */
+const HIDDEN_ARTIFACT_RE = /\.(py|json|xml|b64)$/i;
+/** Whole `._-`-delimited tokens only. The bare substring "b64" collides with
+ * hex ids often enough to matter ("chart_9b64c1.png", "generated-a1b64f.png"). */
+const HIDDEN_ARTIFACT_TOKENS = new Set(["b64", "base64"]);
+
+function nameTokens(path: string): string[] {
+  const name = path.split("/").pop() ?? path;
+  return name.toLowerCase().replace(/\.[^.]*$/, "").split(/[._\-\s]+/);
+}
+
+function extensionOf(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot).toLowerCase() : "";
+}
+
+export function isHiddenArtifact(path: string): boolean {
+  if (path.startsWith('.deliveries/')) return false;
+  if (HIDDEN_ARTIFACT_RE.test(path)) return true;
+  return nameTokens(path).some((tok) => HIDDEN_ARTIFACT_TOKENS.has(tok));
+}
+
+/** The artifacts of one turn, minus its intermediates. Templates are resolved
+ * against the rest of the turn: a "*_template.html" next to the finished report
+ * is the assembly input, but a lone template is what the user asked for. */
+export function visibleArtifacts(paths: string[] | undefined | null): string[] {
+  if (!paths || paths.length === 0) return [];
+  const kept = paths.filter((p) => !isHiddenArtifact(p));
+  const isTemplate = (p: string) => nameTokens(p).includes("template");
+  const shadowing = new Set(kept.filter((p) => !isTemplate(p)).map(extensionOf));
+  return kept.filter((p) => p.startsWith('.deliveries/') || !isTemplate(p) || !shadowing.has(extensionOf(p)));
+}
+
+/** Icon + human label + accent color class for a downloadable artifact card, by
+ * file extension. Unknown types get a generic file icon in neutral gray. */
+export type ArtifactTypeMeta = {
+  icon: LucideIcon;
+  label: string;
+  className: string;
+};
+
+export const ARTIFACT_TYPE_META: Record<string, ArtifactTypeMeta> = {
+  pdf: { icon: FileText, label: "PDF", className: "pdf" },
+  doc: { icon: FileText, label: "DOC", className: "doc" },
+  docx: { icon: FileText, label: "DOCX", className: "doc" },
+  xls: { icon: FileSpreadsheet, label: "XLS", className: "xls" },
+  xlsx: { icon: FileSpreadsheet, label: "XLSX", className: "xls" },
+  csv: { icon: FileSpreadsheet, label: "CSV", className: "xls" },
+  tsv: { icon: FileSpreadsheet, label: "TSV", className: "xls" },
+  ppt: { icon: FileBox, label: "PPT", className: "ppt" },
+  pptx: { icon: FileBox, label: "PPTX", className: "ppt" },
+  txt: { icon: FileText, label: "TXT", className: "txt" },
+  md: { icon: FileText, label: "MD", className: "txt" },
+  zip: { icon: FileArchive, label: "ZIP", className: "zip" },
+  gz: { icon: FileArchive, label: "GZ", className: "zip" },
+  tar: { icon: FileArchive, label: "TAR", className: "zip" },
+  "7z": { icon: FileArchive, label: "7Z", className: "zip" },
+  rar: { icon: FileArchive, label: "RAR", className: "zip" },
+  mp3: { icon: FileAudio, label: "AUDIO", className: "media" },
+  wav: { icon: FileAudio, label: "AUDIO", className: "media" },
+  m4a: { icon: FileAudio, label: "AUDIO", className: "media" },
+  mp4: { icon: FileVideo, label: "VIDEO", className: "media" },
+  mov: { icon: FileVideo, label: "VIDEO", className: "media" },
+  yaml: { icon: FileCog, label: "YAML", className: "data" },
+  yml: { icon: FileCog, label: "YAML", className: "data" },
+  html: { icon: FileCode, label: "HTML", className: "data" },
+  htm: { icon: FileCode, label: "HTML", className: "data" },
+};
+
+/** Look up artifact card metadata for a path; falls back to a neutral card. */
+export function artifactTypeMeta(path: string): ArtifactTypeMeta {
+  const ext = (path.split(".").pop() ?? "").toLowerCase();
+  return ARTIFACT_TYPE_META[ext] ?? { icon: File, label: ext.toUpperCase() || "FILE", className: "generic" };
+}
+
+/** Bounded table preview of a workspace file. The server caps rows/columns, so
+ * this response stays small no matter how big the underlying file is.
+ *
+ * `signal` aborts the transfer only. It does NOT free the server's preview slot:
+ * Starlette awaits the handler plainly and uvicorn merely flags the disconnect,
+ * so an in-flight parse runs to completion either way. That cuts both ways and
+ * is why passing one is safe — admission accounting cannot desync from what the
+ * pool is actually doing. */
+export function fileTablePreview(
+  sessionId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<TablePreview> {
+  return request<TablePreview>(
+    `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(path)}`,
+    { signal },
+  );
+}
+
+export type HtmlPreview = {
+  /** Raw markup, capped server-side. Only ever safe inside a sandboxed iframe. */
+  html: string;
+  /** The file was longer than the cap and the tail was dropped. */
+  truncated: boolean;
+};
+
+/** Extensions rendered as a sandboxed HTML page. Kept in sync with
+ * PREVIEWABLE_HTML_SUFFIXES in claw/api/file_preview.py. */
+export const PREVIEWABLE_HTML_RE = /\.html?$/i;
+
+/** Bounded source of an HTML artifact. The caller MUST render this only inside
+ * an iframe with a bare `sandbox` attribute — the markup is agent-authored and
+ * is deliberately not sanitized anywhere on the way here. */
+export function fileHtmlPreview(
+  sessionId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<HtmlPreview> {
+  return request<HtmlPreview>(
+    `/api/sessions/${sessionId}/file-preview/html?path=${encodeURIComponent(path)}`,
+    { signal },
+  );
+}
+
+export type DocumentPreview = {
+  /** Extracted text, capped server-side. DOCX previews intentionally omit layout. */
+  text: string;
+  /** More document text exists than the preview returned. */
+  truncated: boolean;
+};
+
+/** DOCX, Markdown and plain-text artifacts have a bounded text preview. */
+export const PREVIEWABLE_DOCUMENT_RE = /\.(docx|pptx|pdf|md|txt)$/i;
+
+export function fileDocumentPreview(
+  sessionId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<DocumentPreview> {
+  return request<DocumentPreview>(
+    `/api/sessions/${sessionId}/file-preview/document?path=${encodeURIComponent(path)}`,
+    { signal },
+  );
+}
+
+/** Public URL for a file copied into a share snapshot. No auth token — the
+ * capability token in the path is the only credential. */
+export function shareFileUrl(token: string, name: string): string {
+  return endpoint(`/api/share/${encodeURIComponent(token)}/files/${encodeURIComponent(name)}`);
+}

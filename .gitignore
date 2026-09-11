@@ -19,3 +19,9 @@ claw.log
 claw.out.log
 claw.err.log
 /logs/
+
+workspaces-sbot/
+blueprints/
+
+/web/node_modules
+/dist/local-agent/

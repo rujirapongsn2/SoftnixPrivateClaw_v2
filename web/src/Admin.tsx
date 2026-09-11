@@ -18,7 +18,6 @@ import { useToast } from "@astryxdesign/core/Toast";
 import {
   Asterisk,
   Ban,
-  Brain,
   ChevronDown,
   ChevronRight,
   Cloud,
@@ -110,7 +109,7 @@ import {
   ADMIN_CONNECTOR_API,
   ADMIN_LLM_API,
   type LlmApi,
-} from "./api";
+} from "./shared-api";
 
 export type AdminSection =
   | "overview"
@@ -141,30 +140,26 @@ export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconTy
   { key: "overview", labelKey: "admin.nav.overview", icon: LayoutDashboard },
   { key: "providers", labelKey: "admin.nav.providers", icon: Cpu },
   { key: "connectors", labelKey: "admin.nav.connectors", icon: Plug },
-  { key: "plans", labelKey: "admin.nav.plans", icon: Gauge },
   { key: "guardrails", labelKey: "admin.nav.guardrails", icon: ShieldCheck },
   { key: "oauth", labelKey: "admin.nav.oauth", icon: KeyRound },
   { key: "telegram", labelKey: "admin.nav.telegram", icon: Send },
   { key: "email", labelKey: "admin.nav.email", icon: Mail },
+  { key: "users", labelKey: "admin.nav.users", icon: Users },
+  { key: "plans", labelKey: "admin.nav.plans", icon: Gauge },
   { key: "preferences", labelKey: "admin.nav.preferences", icon: Palette },
   { key: "audit", labelKey: "admin.nav.audit", icon: ScrollText },
-  { key: "users", labelKey: "admin.nav.users", icon: Users },
 ];
 
-// The Control Plane sidebar groups the sections above into collapsible
-// clusters (see App.tsx's Control Plane render) so the nav stays scannable
-// as more sections get added — "overview" and "preferences" are left out
-// here and rendered standalone instead, since a single-item group is just
-// an extra click for no organizational benefit.
-export const ADMIN_SECTION_GROUPS: { labelKey: string; icon: IconType | IconName; sections: AdminSection[] }[] = [
-  { labelKey: "admin.navGroup.aiConfig", icon: Cpu, sections: ["providers", "connectors", "guardrails"] },
-  { labelKey: "admin.navGroup.integrations", icon: Globe, sections: ["oauth", "telegram", "email"] },
-  { labelKey: "admin.navGroup.accounts", icon: Users, sections: ["plans", "users", "audit"] },
-];
-
-export function AdminPanel({ section, selfId }: { section: AdminSection; selfId: string }) {
+export function AdminPanel({
+  section,
+  selfId,
+  onSectionChange,
+}: {
+  section: AdminSection;
+  selfId: string;
+  onSectionChange: (section: AdminSection) => void;
+}) {
   const t = useT();
-  const meta = ADMIN_SECTIONS.find((s) => s.key === section);
   // LLM Providers is a data table (model id, cost, status, several action
   // buttons per row) — the shared 720px prose-reading column that suits every
   // other admin page (forms, prose, short lists) squeezes it into ellipsis
@@ -175,8 +170,15 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
   return (
     <div className="claw-settings-panel">
       <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
-        <Icon icon={meta?.icon ?? "check"} size="lg" color="secondary" />
-        <Text type="display-3">{meta ? t(meta.labelKey) : ""}</Text>
+        <Icon icon={Shield} size="lg" color="secondary" />
+        <Text type="display-3">{t("nav.controlPlane")}</Text>
+      </div>
+      <div className={`claw-control-plane-tabs${isWide ? " claw-panel-wide" : ""}`}>
+        <TabList value={section} onChange={(value) => onSectionChange(value as AdminSection)} hasDivider aria-label={t("nav.controlPlane")}>
+          {ADMIN_SECTIONS.map((item) => (
+            <Tab key={item.key} value={item.key} label={t(item.labelKey)} icon={<Icon icon={item.icon} size="sm" />} />
+          ))}
+        </TabList>
       </div>
       <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
         {section === "overview" && <OverviewPanel />}
@@ -187,7 +189,7 @@ export function AdminPanel({ section, selfId }: { section: AdminSection; selfId:
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
         {section === "email" && <EmailConfigPanel />}
-        {section === "preferences" && <PreferencesPanel />}
+        {section === "preferences" && <><TeamPolicyPanel /><PreferencesPanel /></>}
         {section === "audit" && <AuditPanel />}
         {section === "users" && <UsersPanel selfId={selfId} />}
       </div>
@@ -341,17 +343,6 @@ function StackedBarChart({ buckets, series }: { buckets: string[]; series: Token
 
 // ---------------------------------------------------------------- Overview
 
-const STAT_CARDS: { key: string; labelKey: string; icon: IconType }[] = [
-  { key: "users", labelKey: "admin.overview.stat.users", icon: Users },
-  { key: "active_users", labelKey: "admin.overview.stat.activeUsers", icon: Users },
-  { key: "sessions", labelKey: "admin.overview.stat.sessions", icon: MessageSquare },
-  { key: "messages", labelKey: "admin.overview.stat.messages", icon: MessageSquare },
-  { key: "turns", labelKey: "admin.overview.stat.turns", icon: Cpu },
-  { key: "prompt_tokens", labelKey: "admin.overview.stat.promptTokens", icon: Cpu },
-  { key: "consolidations", labelKey: "admin.overview.stat.consolidations", icon: Sparkles },
-  { key: "memory_users", labelKey: "admin.overview.stat.memoryUsers", icon: Brain },
-];
-
 // Overview groups its metrics into tabs (Summary / Activity / Models / Safety)
 // so the page stays scannable as more data is added. Everything comes from one
 // adminOverview() fetch, so switching tabs is an instant client-side view swap.
@@ -374,22 +365,31 @@ function OverviewPanel() {
     void guard(async () => setData(await api.adminOverview()));
   }, [guard]);
 
-  if (error) return <ErrorText>{error}</ErrorText>;
-  if (!data) return <Text color="secondary">{t("admin.common.loading")}</Text>;
-
   return (
-    <div className="claw-panel">
-      <TabList value={tab} onChange={setTab} hasDivider aria-label={t("admin.overview.sectionsAria")}>
+    <div className="claw-overview-layout">
+      <nav className="claw-overview-tabs" aria-label={t("admin.overview.sectionsAria")}>
         {OVERVIEW_TABS.map((tabItem) => (
-          <Tab key={tabItem.key} value={tabItem.key} label={t(tabItem.labelKey)} icon={<Icon icon={tabItem.icon} size="sm" />} />
+          <button key={tabItem.key} type="button"
+            className={tab === tabItem.key ? "is-selected" : undefined}
+            aria-current={tab === tabItem.key ? "page" : undefined}
+            onClick={() => setTab(tabItem.key)}>
+            <Icon icon={tabItem.icon} size="sm" />
+            <span>{t(tabItem.labelKey)}</span>
+          </button>
         ))}
-      </TabList>
-      {tab === "summary" && <OverviewSummary data={data} />}
-      {tab === "activity" && <OverviewActivity data={data} />}
-      {tab === "models" && <OverviewModels data={data} />}
-      {tab === "tokens" && <OverviewTokens />}
-      {tab === "plans" && <OverviewPlans data={data} />}
-      {tab === "safety" && <OverviewSafety data={data} />}
+      </nav>
+      <div className="claw-overview-content">
+        {error ? <ErrorText>{error}</ErrorText>
+          : !data ? <Text color="secondary">{t("admin.common.loading")}</Text>
+          : <>
+            {tab === "summary" && <OverviewSummary data={data} />}
+            {tab === "activity" && <OverviewActivity data={data} />}
+            {tab === "models" && <OverviewModels data={data} />}
+            {tab === "tokens" && <OverviewTokens />}
+            {tab === "plans" && <OverviewPlans data={data} />}
+            {tab === "safety" && <OverviewSafety data={data} />}
+          </>}
+      </div>
     </div>
   );
 }
@@ -397,50 +397,126 @@ function OverviewPanel() {
 function OverviewSummary({ data }: { data: AdminOverview }) {
   const t = useT();
   const s = data.stats;
+  const currentDays = data.activity_by_day.slice(-7);
+  const previousDays = data.activity_by_day.slice(-14, -7);
+  const currentMessages = currentDays.reduce((sum, point) => sum + point.count, 0);
+  const previousMessages = previousDays.reduce((sum, point) => sum + point.count, 0);
+  const trend = previousMessages > 0
+    ? Math.round(((currentMessages - previousMessages) / previousMessages) * 100)
+    : 0;
+  const trendState = previousMessages === 0
+    ? (currentMessages > 0 ? "new" : "neutral")
+    : trend > 0 ? "positive" : trend < 0 ? "negative" : "neutral";
+  const trendLabel = trendState === "new"
+    ? t("admin.overview.summary.newActivity")
+    : trendState === "neutral" && previousMessages === 0
+      ? t("admin.overview.summary.noChange")
+      : t("admin.overview.summary.change", { percent: Math.abs(trend).toLocaleString() });
+  const topModels = [...data.usage_by_model]
+    .sort((a, b) => b.turns - a.turns)
+    .slice(0, 5);
+  const maxModelTurns = Math.max(1, ...topModels.map((model) => model.turns));
+  const maxHourlyActivity = Math.max(1, ...data.activity_by_hour.map((point) => point.count));
+  const summaryMetrics = [
+    { label: t("admin.overview.summary.totalUsers"), value: Number(s.users ?? 0) },
+    { label: t("admin.overview.summary.activeUsers"), value: Number(s.active_users ?? 0) },
+    { label: t("admin.overview.summary.totalSessions"), value: Number(s.sessions ?? 0) },
+    { label: t("admin.overview.summary.aiTurns"), value: Number(s.turns ?? 0) },
+  ];
+
   return (
-    <>
-      <div className="claw-stat-grid">
-        {STAT_CARDS.map((c) => (
-          <Card key={c.key} padding={2} variant="muted">
-            <div className="claw-stat">
-              <Icon icon={c.icon} size="sm" color="secondary" />
-              <Text type="display-3">{Number(s[c.key] ?? 0).toLocaleString()}</Text>
-              <Text size="sm" color="secondary">
-                {t(c.labelKey)}
-              </Text>
-            </div>
-          </Card>
-        ))}
+    <Card padding={3} className="claw-summary-dashboard">
+      <div className="claw-summary-heading">
+        <div>
+          <Text weight="semibold">{t("admin.overview.summary.title")}</Text>
+          <Text size="sm" color="secondary" as="p">{t("admin.overview.summary.subtitle")}</Text>
+        </div>
+        <Badge variant="neutral" label={t("admin.overview.summary.last7Days")} />
       </div>
 
-      <div className="claw-row">
-        <Badge
-          variant="neutral"
-          icon={<Icon icon={Shield} size="xsm" />}
-          label={t("admin.overview.badge.admins", { count: String(s.admins ?? 0) })}
-        />
-        <Badge
-          variant="neutral"
-          icon={<Icon icon={Ban} size="xsm" />}
-          label={t("admin.overview.badge.suspended", { count: String(s.suspended ?? 0) })}
-        />
-        <Badge
-          variant={s.policy_enforcing ? "success" : "neutral"}
-          icon={<Icon icon={ShieldCheck} size="xsm" />}
-          label={s.policy_enforcing ? t("admin.overview.badge.enforcing") : t("admin.overview.badge.monitorOnly")}
-        />
-        <Badge
-          variant={s.browser_enabled ? "success" : "neutral"}
-          icon={<Icon icon={Globe} size="xsm" />}
-          label={s.browser_enabled ? t("admin.overview.badge.browserOn") : t("admin.overview.badge.browserOff")}
-        />
-        <Badge
-          variant={s.telegram_enabled ? "success" : "neutral"}
-          icon={<Icon icon={Send} size="xsm" />}
-          label={s.telegram_enabled ? t("admin.overview.badge.telegramOn") : t("admin.overview.badge.telegramOff")}
-        />
+      <div className="claw-summary-usage-grid">
+        <section className="claw-summary-primary" aria-labelledby="summary-messages-title">
+          <div className="claw-summary-kicker" id="summary-messages-title">
+            {t("admin.overview.summary.messages")}
+          </div>
+          <div className="claw-summary-value">{currentMessages.toLocaleString()}</div>
+          <div className={`claw-summary-trend is-${trendState}`}>
+            <span aria-hidden="true">{trendState === "positive" || trendState === "new" ? "↑" : trendState === "negative" ? "↓" : "→"}</span>
+            {trendLabel}
+          </div>
+          <div className="claw-summary-chart-title">{t("admin.overview.summary.dailyMessages")}</div>
+          <BarChart data={currentDays} />
+        </section>
+
+        <section className="claw-summary-models" aria-labelledby="summary-models-title">
+          <div className="claw-summary-section-head">
+            <Text weight="semibold" id="summary-models-title">{t("admin.overview.summary.topModels")}</Text>
+            <Text size="sm" color="secondary">{t("admin.overview.summary.byRequests")}</Text>
+          </div>
+          {topModels.length === 0 ? (
+            <Text size="sm" color="secondary">{t("admin.overview.summary.noModelActivity")}</Text>
+          ) : (
+            <div className="claw-summary-model-list">
+              {topModels.map((model, index) => {
+                const parts = model.model.split("/").filter(Boolean);
+                const modelName = parts.at(-1) ?? model.model;
+                const providerName = parts.length > 1 ? parts.at(-2) : "";
+                return (
+                  <div className="claw-summary-model" key={model.model} title={model.model}>
+                    <div className="claw-summary-model-head">
+                      <span className="claw-summary-model-rank">{index + 1}</span>
+                      <span className="claw-summary-model-identity">
+                        <span className="claw-summary-model-name">{modelName}</span>
+                        {providerName && <span className="claw-summary-model-provider">{providerName}</span>}
+                      </span>
+                      <span className="claw-summary-model-count">{model.turns.toLocaleString()}</span>
+                    </div>
+                    <div className="claw-summary-model-track" aria-hidden="true">
+                      <span style={{ width: `${(model.turns / maxModelTurns) * 100}%`, background: stackColor(index, model.model) }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
       </div>
-    </>
+
+      <section className="claw-summary-activity" aria-labelledby="summary-activity-title">
+        <div className="claw-summary-section-head">
+          <Text weight="semibold" id="summary-activity-title">{t("admin.overview.summary.activity")}</Text>
+          <Text size="sm" color="secondary">{t("admin.overview.summary.byHour")}</Text>
+        </div>
+        <div className="claw-summary-metrics">
+          {summaryMetrics.map((metric) => (
+            <div key={metric.label}>
+              <Text size="sm" color="secondary">{metric.label}</Text>
+              <strong>{metric.value.toLocaleString()}</strong>
+            </div>
+          ))}
+        </div>
+        <div className="claw-summary-heatmap" role="img" aria-label={t("admin.overview.summary.byHour")}>
+          {data.activity_by_hour.map((point) => (
+            <span
+              key={point.label}
+              title={`${point.label}: ${point.count.toLocaleString()}`}
+              style={{ opacity: point.count === 0 ? 0.12 : 0.25 + (point.count / maxHourlyActivity) * 0.75 }}
+            />
+          ))}
+        </div>
+        <div className="claw-summary-hour-axis" aria-hidden="true">
+          <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span>
+        </div>
+      </section>
+
+      <div className="claw-summary-status">
+        <Badge variant="neutral" icon={<Icon icon={Shield} size="xsm" />} label={t("admin.overview.badge.admins", { count: String(s.admins ?? 0) })} />
+        <Badge variant={Number(s.suspended ?? 0) > 0 ? "warning" : "neutral"} icon={<Icon icon={Ban} size="xsm" />} label={t("admin.overview.badge.suspended", { count: String(s.suspended ?? 0) })} />
+        <Badge variant={s.policy_enforcing ? "success" : "neutral"} icon={<Icon icon={ShieldCheck} size="xsm" />} label={s.policy_enforcing ? t("admin.overview.badge.enforcing") : t("admin.overview.badge.monitorOnly")} />
+        <Badge variant={s.browser_enabled ? "success" : "neutral"} icon={<Icon icon={Globe} size="xsm" />} label={s.browser_enabled ? t("admin.overview.badge.browserOn") : t("admin.overview.badge.browserOff")} />
+        <Badge variant={s.telegram_enabled ? "success" : "neutral"} icon={<Icon icon={Send} size="xsm" />} label={s.telegram_enabled ? t("admin.overview.badge.telegramOn") : t("admin.overview.badge.telegramOff")} />
+      </div>
+    </Card>
   );
 }
 
@@ -1220,6 +1296,17 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
   const [providers, setProviders] = useState<LLMProviderCfg[]>([]);
   const [adding, setAdding] = useState(false);
   const { error, guard } = useAsyncError();
+  const toast = useToast();
+
+  const chatModels = providers.flatMap((provider) =>
+    provider.models.map((model) => ({ provider, model })).filter(({ model }) => model.kind === "chat"),
+  );
+  const defaultModel = chatModels.find(({ model }) => model.is_default);
+  const fallbackModel = chatModels.find(({ model }) => model.is_fallback);
+  const fallbackCandidates = chatModels.filter(
+    ({ provider, model }) =>
+      model.is_fallback || (provider.enabled && model.enabled && !model.is_default),
+  );
 
   const reload = useCallback(() => llmApi.list().then((r) => setProviders(r.providers)), [llmApi]);
   useEffect(() => {
@@ -1242,6 +1329,62 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
         )}
       </div>
       {error && <ErrorText>{error}</ErrorText>}
+
+      {scope === "admin" && providers.length > 0 && (
+        <Card padding={2} variant="muted" className="claw-model-fallback-card">
+          <div className="claw-model-fallback-heading">
+            <div className="claw-row">
+              <Icon icon={Router} size="md" color="secondary" />
+              <div>
+                <Text weight="semibold">{t("admin.providers.fallbackTitle")}</Text>
+                <Text size="sm" color="secondary" as="p">
+                  {t("admin.providers.fallbackDescription")}
+                </Text>
+              </div>
+            </div>
+            <label className="claw-model-fallback-picker">
+              <Text size="sm" weight="semibold">{t("admin.providers.fallbackModel")}</Text>
+              <select
+                className="claw-token-filter"
+                value={fallbackModel?.model.id ?? ""}
+                aria-label={t("admin.providers.fallbackModel")}
+                onChange={(event) => {
+                  const nextId = event.target.value;
+                  void guard(async () => {
+                    if (!nextId && fallbackModel) {
+                      await llmApi.updateModel(fallbackModel.model.id, { is_fallback: false });
+                    } else if (nextId) {
+                      await llmApi.updateModel(nextId, { is_fallback: true });
+                    }
+                    toast({ body: t("admin.providers.fallbackSaved"), type: "info", autoHideDuration: 2500 });
+                    await reload();
+                  });
+                }}
+              >
+                <option value="">{t("admin.providers.fallbackDisabled")}</option>
+                {fallbackCandidates.map(({ provider, model }) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label || model.model_id} · {provider.name} · {t(COST_LABEL[model.cost])}
+                  </option>
+                ))}
+              </select>
+              <Text size="sm" color="secondary">
+                {t("admin.providers.fallbackPlanHint")}
+              </Text>
+            </label>
+          </div>
+          {defaultModel && fallbackModel && (
+            <div className="claw-model-fallback-route" aria-label={t("admin.providers.fallbackRoute")}>
+              <Badge variant="purple" label={`${t("admin.providers.defaultBadge")}: ${defaultModel.model.label}`} />
+              <span aria-hidden="true">→</span>
+              <Badge variant="neutral" label={`${t("admin.providers.fallbackBadge")}: ${fallbackModel.model.label}`} />
+            </div>
+          )}
+          {fallbackCandidates.length === 0 && !fallbackModel && (
+            <Text size="sm" color="secondary">{t("admin.providers.fallbackNoCandidates")}</Text>
+          )}
+        </Card>
+      )}
 
       {adding && (
         <AddProviderForm llmApi={llmApi} guard={guard} reload={reload} onClose={() => setAdding(false)} />
@@ -1803,6 +1946,9 @@ function ModelRow({
         <Text className="claw-model-label">{model.label || stripKnownPrefix(modelPrefix, model.model_id)}</Text>
         {model.is_default && (
           <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label={t("admin.providers.defaultBadge")} />
+        )}
+        {model.is_fallback && (
+          <Badge variant="neutral" icon={<Icon icon={Router} size="xsm" />} label={t("admin.providers.fallbackBadge")} />
         )}
       </div>
       <div className="claw-model-cost-cell">
@@ -4325,6 +4471,88 @@ function GroupPicker({
   );
 }
 
+function UserProjectPolicyPicker({
+  enabled,
+  limit,
+  onChange,
+}: {
+  enabled: boolean | null;
+  limit: string;
+  onChange: (enabled: boolean | null, limit: string) => void;
+}) {
+  const t = useT();
+  return (
+    <div className="claw-field-group">
+      <Text size="sm" color="secondary">{t("admin.users.projectPolicy")}</Text>
+      <div className="claw-row">
+        <Button label={t("admin.users.projectPolicyInherit")} size="sm" variant={enabled === null ? "primary" : "secondary"} clickAction={() => onChange(null, "")} />
+        <Button label={t("admin.users.projectPolicyAllow")} size="sm" variant={enabled === true ? "primary" : "secondary"} clickAction={() => onChange(true, limit || "1")} />
+        <Button label={t("admin.users.projectPolicyDeny")} size="sm" variant={enabled === false ? "primary" : "secondary"} clickAction={() => onChange(false, "")} />
+      </div>
+      {enabled === true && (
+        <TextInput
+          label={t("admin.users.projectLimit")}
+          description={t("admin.users.projectLimitDesc")}
+          value={limit}
+          onChange={(value) => onChange(true, value)}
+        />
+      )}
+    </div>
+  );
+}
+
+function GroupProjectPolicy({
+  group,
+  guard,
+  reload,
+}: {
+  group: GroupInfo;
+  guard: (fn: () => Promise<void>) => Promise<void>;
+  reload: () => Promise<void>;
+}) {
+  const t = useT();
+  const [enabled, setEnabled] = useState(group.project_containers_enabled);
+  const [limit, setLimit] = useState(String(group.project_container_limit || 1));
+  const numberLimit = Number(limit);
+  const valid = !enabled || (Number.isInteger(numberLimit) && numberLimit >= 1 && numberLimit <= 100);
+
+  useEffect(() => {
+    setEnabled(group.project_containers_enabled);
+    setLimit(String(group.project_container_limit || 1));
+  }, [group.id, group.project_containers_enabled, group.project_container_limit]);
+
+  return (
+    <div className="claw-field-group">
+      <label className="claw-toggle-inline">
+        <Switch value={enabled} label={t("admin.users.projectPolicy")} isLabelHidden changeAction={setEnabled} />
+        <Text size="sm" color="secondary">{t("admin.users.projectPolicy")}</Text>
+      </label>
+      {enabled && (
+        <TextInput
+          label={t("admin.users.projectLimit")}
+          description={t("admin.users.projectLimitDesc")}
+          value={limit}
+          onChange={setLimit}
+        />
+      )}
+      <Button
+        label={t("admin.users.projectPolicySave")}
+        size="sm"
+        variant="secondary"
+        isDisabled={!valid}
+        clickAction={() =>
+          void guard(async () => {
+            await api.adminUpdateGroup(group.id, {
+              project_policy: { enabled, max_containers: enabled ? numberLimit : 0 },
+            });
+            await reload();
+          })
+        }
+      />
+    </div>
+  );
+}
+
 // Housekeeping card: create/delete groups and choose which one new self-signups
 // land in. Groups are organizational only — no permission effect.
 function GroupsManager({
@@ -4430,6 +4658,7 @@ function GroupsManager({
                 }
               />
             )}
+            <GroupProjectPolicy group={g} guard={guard} reload={reload} />
           </div>
         ))}
         {adding ? (
@@ -5288,6 +5517,8 @@ function UserRow({
   const [newPassword, setNewPassword] = useState("");
   const [groupId, setGroupId] = useState<string | null>(u.group_id);
   const [planId, setPlanId] = useState<string | null>(u.plan_id);
+  const [projectEnabled, setProjectEnabled] = useState<boolean | null>(u.project_containers_enabled);
+  const [projectLimit, setProjectLimit] = useState(u.project_container_limit?.toString() ?? "");
   const toast = useToast();
   const isSelf = u.id === selfId;
   const label = u.display_name || u.email;
@@ -5391,6 +5622,8 @@ function UserRow({
               setNewPassword("");
               setGroupId(u.group_id);
               setPlanId(u.plan_id);
+              setProjectEnabled(u.project_containers_enabled);
+              setProjectLimit(u.project_container_limit?.toString() ?? "");
               setEditing((e) => !e);
             }}
           />
@@ -5429,19 +5662,34 @@ function UserRow({
           />
           <GroupPicker groups={groups} value={groupId} onChange={setGroupId} onCreate={createGroup} />
           {plans.length > 0 && <PlanPicker plans={plans} value={planId} onChange={setPlanId} />}
+          <UserProjectPolicyPicker
+            enabled={projectEnabled}
+            limit={projectLimit}
+            onChange={(enabled, limit) => {
+              setProjectEnabled(enabled);
+              setProjectLimit(limit);
+            }}
+          />
           <div className="claw-row">
             <Button
               label={t("admin.common.saveChanges")}
               variant="primary"
               icon={<Icon icon="check" size="sm" />}
               size="sm"
-              isDisabled={newPassword.length > 0 && newPassword.length < 8}
+              isDisabled={
+                (newPassword.length > 0 && newPassword.length < 8) ||
+                (projectEnabled === true && (!Number.isInteger(Number(projectLimit)) || Number(projectLimit) < 1 || Number(projectLimit) > 100))
+              }
               clickAction={() =>
                 guard(async () => {
                   await api.adminUpdateUser(u.id, {
                     display_name: displayName.trim(),
                     group_id: groupId,
                     plan_id: planId,
+                    project_policy: {
+                      enabled: projectEnabled,
+                      max_containers: projectEnabled === true ? Number(projectLimit) : null,
+                    },
                     ...(newPassword ? { password: newPassword } : {}),
                   });
                   setEditing(false);
@@ -5456,5 +5704,91 @@ function UserRow({
         </div>
       )}
     </div>
+  );
+}
+
+
+function TeamPolicyPanel() {
+  const t = useT();
+  const [policy, setPolicy] = useState<import("./api").TeamPolicy | null>(null);
+  const [models, setModels] = useState("{}");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    api.adminTeamPolicy().then(p => { setPolicy(p); setModels(JSON.stringify(p.model_output_limits, null, 2)); }).catch(e => setError(String(e)));
+  }, []);
+  const fields = [
+    ["max_job_tokens", "admin.teamPolicy.tokens", 1000, 1000],
+    ["max_job_seconds", "admin.teamPolicy.seconds", 60, 60],
+    ["max_step_recoveries", "admin.teamPolicy.recoveries", 0, 1],
+    ["max_resource_adjustments", "admin.teamPolicy.extensions", 0, 1],
+    ["resource_headroom", "admin.teamPolicy.headroom", 1, 0.1],
+  ] as const;
+  return (
+    <Card padding={2} className="claw-team-policy-card">
+      <div className="claw-team-policy-header">
+        <div className="claw-team-policy-icon"><Icon icon={Gauge} size="sm" /></div>
+        <div>
+          <Text weight="semibold">{t("admin.teamPolicy.title")}</Text>
+          <Text size="sm" color="secondary">{t("admin.teamPolicy.description")}</Text>
+        </div>
+      </div>
+      {error && <div className="claw-team-policy-error" role="alert">{error}</div>}
+      {policy && (
+        <form className="claw-team-policy-form" onSubmit={async e => {
+          e.preventDefault(); setBusy(true); setError(""); setSaved(false);
+          try {
+            const next = await api.adminSaveTeamPolicy({...policy, model_output_limits: JSON.parse(models)});
+            setPolicy(next); setSaved(true);
+          } catch (e) { setError(String(e)); } finally { setBusy(false); }
+        }}>
+          <div className="claw-team-policy-switch">
+            <CheckboxInput
+              label={t("admin.teamPolicy.automatic")}
+              description={t("admin.teamPolicy.automaticDescription")}
+              value={policy.automatic_resources}
+              onChange={(automatic_resources) => { setPolicy({...policy, automatic_resources}); setSaved(false); }}
+            />
+          </div>
+          <div className="claw-team-policy-section">
+            <div className="claw-team-policy-section-title">
+              <Text weight="semibold" size="sm">{t("admin.teamPolicy.resourceLimits")}</Text>
+              <Text size="sm" color="secondary">{t("admin.teamPolicy.resourceLimitsDescription")}</Text>
+            </div>
+            <div className="claw-team-policy-grid">
+              {fields.map(([key, label, min, step]) => (
+                <label className="claw-team-policy-field" key={key}>
+                  <span>{t(label)}</span>
+                  <input
+                    type="number"
+                    required
+                    min={min}
+                    step={step}
+                    value={policy[key]}
+                    onChange={e => { setPolicy({...policy, [key]: Number(e.target.value)}); setSaved(false); }}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="claw-team-policy-section">
+            <TextArea
+              label={t("admin.teamPolicy.models")}
+              description={t("admin.teamPolicy.modelsDescription")}
+              value={models}
+              onChange={(value) => { setModels(value); setSaved(false); }}
+              rows={4}
+              width="100%"
+              hasSpellCheck={false}
+            />
+          </div>
+          <div className="claw-team-policy-actions">
+            {saved && <Text size="sm" color="secondary" role="status">{t("admin.teamPolicy.saved")}</Text>}
+            <Button label={t(busy ? "admin.teamPolicy.saving" : "admin.teamPolicy.save")} type="submit" isDisabled={busy} />
+          </div>
+        </form>
+      )}
+    </Card>
   );
 }

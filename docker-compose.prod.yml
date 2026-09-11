@@ -41,6 +41,11 @@ services:
       # path inside the container (see the volumes below) — the tool-ephemeral
       # sandbox bind-mounts workspace.resolve() into a sibling container via the
       # host daemon, so the path has to resolve identically on host and in-app.
+      CLAW_SBOT_ENABLED: ${CLAW_SBOT_ENABLED:-true}
+      CLAW_SBOT_WORKSPACES_ROOT: ${CLAW_DATA_DIR}/workspaces-sbot
+      CLAW_BLUEPRINTS_ROOT: ${CLAW_DATA_DIR}/blueprints
+      CLAW_SANDBOX__PROJECTS_ENABLED: ${CLAW_SANDBOX__PROJECTS_ENABLED:-false}
+      CLAW_SANDBOX__PROJECT_DOCKER_ENABLED: ${CLAW_SANDBOX__PROJECT_DOCKER_ENABLED:-false}
       CLAW_WORKSPACES_ROOT: ${CLAW_DATA_DIR:?set CLAW_DATA_DIR to an absolute host path}/workspaces
       CLAW_KNOWLEDGE_ROOT: ${CLAW_DATA_DIR}/knowledge
       # Tool-ephemeral sandbox (Docker-outside-of-Docker). The image must exist on
@@ -72,6 +77,8 @@ services:
       # Persistent data, mounted at the SAME absolute path the app uses internally
       # so the sandbox's bind-mount source resolves correctly on the host daemon.
       - ${CLAW_DATA_DIR}/workspaces:${CLAW_DATA_DIR}/workspaces
+      - ${CLAW_DATA_DIR}/workspaces-sbot:${CLAW_DATA_DIR}/workspaces-sbot
+      - ${CLAW_DATA_DIR}/blueprints:${CLAW_DATA_DIR}/blueprints
       - ${CLAW_DATA_DIR}/knowledge:${CLAW_DATA_DIR}/knowledge
     # Bind to localhost only — the reverse proxy / tunnel forwards to it; the app
     # is never exposed to the public interface directly.

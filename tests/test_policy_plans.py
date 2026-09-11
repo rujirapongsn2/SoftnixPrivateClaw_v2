@@ -104,9 +104,42 @@ async def test_default_model_for_picks_allowed(db_factory):
     await _add_chat_model(store, "vendor/cheap", "low")
     m = await _add_chat_model(store, "vendor/pricey", "very_high")
     await store.update_model(m.id, owner_id=None, is_default=True)  # pricey is default
+    await store.update_model(m.id, owner_id=None, is_default=True)  # idempotent desired state
     # A low-tier plan can't use the pricey default → best allowed (cheap) instead.
     assert await store.default_model_for("low") == "vendor/cheap"
     assert await store.default_model_for(None) == "vendor/pricey"
+
+
+async def test_configured_fallback_is_unique_and_respects_plan_ceiling(db_factory):
+    store = LLMConfigStore(db_factory)
+    cheap = await _add_chat_model(store, "vendor/cheap", "low")
+    pricey = await _add_chat_model(store, "vendor/pricey", "very_high")
+
+    await store.update_model(cheap.id, owner_id=None, is_fallback=True)
+    assert await store.fallback_model_for("low") == "vendor/cheap"
+
+    # Desired-state PATCHes are commonly replayed by admin clients. Selecting
+    # the current fallback again must remain idempotent.
+    await store.update_model(cheap.id, owner_id=None, is_fallback=True)
+    assert await store.fallback_model_for("low") == "vendor/cheap"
+
+    # Disabling its provider removes the route rather than leaving the Control
+    # Plane showing a fallback the runtime cannot use.
+    await store.update_provider(cheap.provider_id, owner_id=None, enabled=False)
+    assert await store.fallback_model_for(None) is None
+    assert not any(m.is_fallback for m in await store.list_models())
+    await store.update_provider(cheap.provider_id, owner_id=None, enabled=True)
+
+    # Selecting another fallback atomically replaces the previous one.
+    await store.update_model(pricey.id, owner_id=None, is_fallback=True)
+    assert await store.fallback_model_for(None) == "vendor/pricey"
+    assert await store.fallback_model_for("low") is None
+    models = await store.list_models()
+    assert [m.model_id for m in models if m.is_fallback] == ["vendor/pricey"]
+
+    # Making the fallback the normal default clears the redundant route.
+    await store.update_model(pricey.id, owner_id=None, is_default=True)
+    assert await store.fallback_model_for(None) is None
 
 
 # ---- usage counters ----

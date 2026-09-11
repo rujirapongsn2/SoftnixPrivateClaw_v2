@@ -59,6 +59,7 @@ class ModelPatch(BaseModel):
     label: str | None = None
     enabled: bool | None = None
     is_default: bool | None = None  # admin-global only; ignored on user scope
+    is_fallback: bool | None = None  # admin-global only; ignored on user scope
     cost: str | None = Field(default=None, pattern=_COST_RE)
     description: str | None = None
     kind: str | None = Field(default=None, pattern=_KIND_RE)
@@ -84,6 +85,7 @@ def model_row(m) -> dict:
         "label": m.label or m.model_id,
         "enabled": m.enabled,
         "is_default": m.is_default,
+        "is_fallback": m.is_fallback,
         "cost": m.cost or "medium",
         "description": m.description or "",
         "kind": m.kind or "chat",

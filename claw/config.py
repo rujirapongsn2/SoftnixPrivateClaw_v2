@@ -1,8 +1,9 @@
 """Application configuration — single source of truth, env-driven (CLAW_*)."""
 
 from pathlib import Path
+from sbot.config import TeamWorkSettings
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import PositiveInt, BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +17,7 @@ class LLMSettings(BaseModel):
     # rather than a short one — 4096 was low enough to do that on a single
     # tool-using turn.
     max_tokens: int = 16384
+    model_output_limits: dict[str, PositiveInt] = Field(default_factory=dict)
     temperature: float = 0.1
     max_iterations: int = 60
     # Wall-clock budget for one turn, checked between steps (0 disables it).
@@ -49,7 +51,10 @@ class BrowserSettings(BaseModel):
     allowed_domains: list[str] = []
 
 
-class SandboxSettings(BaseModel):
+from sbot.config import SandboxSettings as SbotSandboxSettings
+
+
+class SandboxSettings(SbotSandboxSettings):
     """Tool-ephemeral sandbox: shell commands run in short-lived containers."""
 
     enabled: bool = True
@@ -270,6 +275,9 @@ class Settings(BaseSettings):
     port: int = 8700
     # Root directory holding per-user agent workspaces.
     workspaces_root: Path = Path("workspaces")
+    sbot_enabled: bool = True
+    sbot_workspaces_root: Path | None = None
+    blueprints_root: Path = Path("blueprints")
     # Root directory holding knowledge-base OKF bundles (one subdir per base).
     knowledge_root: Path = Path("knowledge")
     # Root directory holding admin-uploaded branding assets (Control Plane >
@@ -292,6 +300,9 @@ class Settings(BaseSettings):
     speech_api_key: str = Field(default="", validation_alias="QROQ_KEY")
     speech_api_base: str = Field(default="https://api.groq.com/openai/v1", validation_alias="QROQ_URL")
     speech_model: str = Field(default="whisper-large-v3", validation_alias="QROQ_MODEL")
+
+    # Shared deployment must expose the same organization policy as Bot Mode.
+    team_work: TeamWorkSettings = TeamWorkSettings()
 
     log: LogSettings = LogSettings()
     llm: LLMSettings = LLMSettings()

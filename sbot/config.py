@@ -1,0 +1,384 @@
+"""Application configuration — single source of truth, env-driven (SBOT_*)."""
+
+from pathlib import Path
+
+from pydantic import PositiveInt, BaseModel, Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class LLMSettings(BaseModel):
+    model: str = "anthropic/claude-sonnet-4-5"
+    api_key: str = ""
+    api_base: str = ""
+    # Output cap per LLM call. Reasoning models (Qwen3, DeepSeek-R1, …) spend
+    # this budget on hidden thinking *before* writing any visible answer, so a
+    # tight cap makes them return an empty completion (finish_reason="length")
+    # rather than a short one — 4096 was low enough to do that on a single
+    # tool-using turn.
+    max_tokens: int = 16384
+    model_output_limits: dict[str, PositiveInt] = Field(default_factory=dict)
+    temperature: float = 0.1
+    max_iterations: int = 60
+    # Wall-clock budget for one turn, checked between steps (0 disables it).
+    # The step limit alone doesn't bound how long a user waits: a model stuck
+    # retrying the same slow tool can run for many minutes well inside its
+    # iteration budget.
+    max_turn_seconds: float = 600
+    # Token budget for the assembled prompt (input side).
+    max_context_tokens: int = 60_000
+
+
+class BrowserSettings(BaseModel):
+    """Server-side browser automation (Playwright). Off by default — requires the
+    `browser` dependency group and `playwright install chromium`."""
+
+    enabled: bool = False
+    headless: bool = True
+    timeout_seconds: int = 30
+    max_chars: int = 30_000
+    # Close a user's idle browser page after this many seconds (0 = keep until shutdown).
+    idle_close_seconds: int = 600
+    # Client-side browser: pair the user's own Chrome via the downloadable
+    # extension. When a paired extension is online, the `browser` tool drives it
+    # (real cookies/sessions); otherwise it falls back to the server-side one.
+    client_extension_enabled: bool = False
+    # How long the agent waits for the extension to run a queued task.
+    poll_timeout_seconds: int = 60
+    # Require admin approval before the extension runs a submit action.
+    require_confirmation_for_submit: bool = False
+    # Optional allow-list of domains the client browser may visit (empty = any).
+    allowed_domains: list[str] = []
+
+
+class SandboxSettings(BaseModel):
+    """Tool-ephemeral sandbox: shell commands run in short-lived containers."""
+
+    enabled: bool = True
+    # Custom image pre-loaded with the document/archive stack (reportlab,
+    # weasyprint, openpyxl, python-docx, python-pptx, pandas, zip/unzip).
+    # Build with: docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .
+    image: str = "claw-sandbox:latest"
+    cpu_limit: float = 1.0
+    memory_limit: str = "1g"
+    pids_limit: int = 256
+    # bridge gives the sandbox internet (pip install, downloads); none isolates
+    # it. bridge is more capable but riskier — exec runs are audit-logged.
+    network: str = "bridge"  # none | bridge
+    timeout_seconds: int = 90
+    # Persistent development is opt-in; ordinary document execution is unchanged.
+    projects_enabled: bool = False
+    project_image: str = "sbot-developer:latest"
+    project_docker_enabled: bool = False
+    project_cpu_limit: float = Field(default=2.0, gt=0)
+    project_memory_limit: str = "4g"
+    project_pids_limit: int = Field(default=1024, gt=0)
+    project_ports: list[int] = [3000, 8000, 8080]
+
+    @model_validator(mode="after")
+    def _project_ports(self):
+        if len(self.project_ports) > 20 or any(p < 1 or p > 65535 for p in self.project_ports):
+            raise ValueError("project_ports must contain at most 20 valid TCP ports")
+        return self
+
+    # Longer default: pip install / network fetches can be slow.
+    # (kept modest to bound worst-case; raise if agents do heavy builds)
+
+
+class ReliabilitySettings(BaseModel):
+    """Staged rollout. Empty pilot list applies the chosen modes to all owners."""
+
+    verification_mode: str = Field(default='off', pattern='^(off|shadow|enforce)$')
+    pilot_owner_ids: list[str] = Field(default_factory=list)
+    verifier_image: str = 'sbot-verifier:latest'
+    verifier_model: str | None = None
+    verification_seconds: int = Field(default=60, ge=1, le=120)
+    retry_empty_output: bool = False
+    isolated_assignments: bool = False
+
+    def enabled_for(self, owner_id: str | None) -> bool:
+        return not self.pilot_owner_ids or owner_id in self.pilot_owner_ids
+
+
+class MemorySettings(BaseModel):
+    """Continuous-learning memory consolidation: the agent folds a session into
+    durable per-user memory once enough new messages accumulate."""
+
+    # New messages (user + assistant + tool) in a session before a consolidation
+    # pass runs. Lower = the agent "learns" from shorter conversations. Tune via
+    # SBOT_MEMORY__WINDOW.
+    window: int = 30
+    # Most-recent messages left raw (not yet folded into memory) each pass; must
+    # be smaller than `window`. Tune via SBOT_MEMORY__KEEP.
+    keep: int = 12
+
+
+class KnowledgeSettings(BaseModel):
+    """Knowledge-base ingestion (upload → parse → chunk → index)."""
+
+    # Max size of a single uploaded document. Uploads stream to a staging file on
+    # disk, so this is bounded by disk, not memory.
+    max_doc_mb: int = 150
+    # Files accepted per upload request (the web UI batches large selections to
+    # stay under this). The real capacity comes from the background queue below.
+    max_docs_per_upload: int = 10
+    # How many documents the background ingest worker parses at once. Kept small
+    # so ingestion never starves the event loop / chat responsiveness.
+    ingest_concurrency: int = 2
+    # OCR fallback for scanned/image-only PDFs. Off by default (needs the
+    # `ocrmypdf` CLI + tesseract installed on the host). When on, a PDF that
+    # yields almost no extractable text is run through OCR before chunking.
+    ocr_enabled: bool = False
+    # A PDF whose total extracted text is below this many characters is treated
+    # as scanned (OCR candidate).
+    ocr_min_chars: int = 20
+    # Hard cap on how long a single OCR pass may run (seconds).
+    ocr_timeout_seconds: int = 600
+
+
+class ImageSettings(BaseModel):
+    """Text-to-image generation (the composer's "+ Image" action). A separate
+    request/response path from the agent loop — see claw/api/routes.py's
+    /images endpoint and LiteLLMProvider.generate_image."""
+
+    # Hard cap on one image-generation call (some models are slow).
+    timeout_seconds: int = 120
+    # Passed to the /images endpoint (DALL·E-style) providers; ignored by
+    # chat-multimodal image models that don't accept a size param.
+    default_size: str = "1024x1024"
+    # Reject absurdly long prompts before spending a call.
+    max_prompt_chars: int = 4000
+    # Per-user generations per minute (0 = unlimited). Mirrors the chat path's
+    # turns_per_minute — each call hits a paid provider, so it needs a throttle.
+    per_minute: int = 10
+    # Reject a generated image larger than this before writing it to disk
+    # (a misbehaving/compromised provider or BYOK api_base could return a huge
+    # payload). Matches the attachment upload cap.
+    max_bytes: int = 20_000_000
+    # Cap on how many generated images a single user's workspace keeps —
+    # unlike attachments (user-initiated, self-limiting), every successful
+    # /images call writes a new file with nothing to ever delete it. Oldest
+    # files beyond this count are pruned after each generation so the
+    # directory can't grow unbounded.
+    max_stored_per_user: int = 200
+
+
+class TtsSettings(BaseModel):
+    """Text-to-speech (the "read aloud" speaker button on assistant messages).
+    Fully independent of Control Plane > LLM Providers — configured entirely
+    via these SBOT_TTS__* env vars so it can point at any OpenAI-wire-compatible
+    /audio/speech endpoint (real OpenAI, OpenRouter, a self-hosted gateway,
+    ...) regardless of what chat/image providers are set up. The feature is
+    unavailable (button hidden, /api/tts returns 503) whenever api_key is unset
+    — that is the sole on/off switch, so there's no way to half-configure this
+    into a broken-but-visible state."""
+
+    api_base: str = "https://api.openai.com/v1"
+    api_key: str = ""
+    model: str = "tts-1"
+    voice: str = "alloy"
+    timeout_seconds: int = 30
+    # OpenAI's /audio/speech input cap is 4096 chars; stay a bit under it.
+    max_chars: int = 4000
+    # Per-user calls per minute (0 = unlimited) — each call hits a paid provider.
+    per_minute: int = 20
+
+    @model_validator(mode="after")
+    def _sanitize(self) -> "TtsSettings":
+        # API keys are ASCII; pasting one from a web page/chat easily smuggles
+        # in a non-breaking space, stray whitespace, or other unicode that
+        # httpx can't encode into an Authorization header (a crash, not a
+        # clean error). Strip to printable ASCII, same as LLMConfigStore's
+        # _clean_key for DB-stored keys.
+        self.api_key = "".join(ch for ch in self.api_key if 33 <= ord(ch) <= 126)
+        # An explicitly-blank SBOT_TTS__API_BASE ("=" with nothing after it)
+        # binds api_base to "", bypassing the field default entirely — fall
+        # back the same way the old DB-backed lookup did (`api_base or default`).
+        if not self.api_base.strip():
+            self.api_base = "https://api.openai.com/v1"
+        return self
+
+
+class ConnectorSettings(BaseModel):
+    """MCP connector connect/tool-call timeouts. A single misbehaving remote
+    MCP server (e.g. one that hangs instead of raising, after sending a
+    malformed response the client can't parse) must not be able to hang a
+    user's connector sync or chat turn forever — see claw/core/connectors.py."""
+
+    # Budget for one connector's connect + list_tools handshake.
+    connect_timeout_seconds: int = 20
+    # Budget for one already-connected MCP tool call.
+    tool_call_timeout_seconds: int = 60
+    # After a connector fails to connect, hold off retrying the whole set for
+    # this long. sync_tools runs on every chat turn and every /connectors
+    # listing, and a retry reconnects ALL of the user's connectors (waiting the
+    # full connect_timeout for the broken one), so without this a single broken
+    # connector would add connect_timeout_seconds to every turn and page load
+    # indefinitely. A config change or explicit invalidate still retries
+    # immediately regardless. 0 = retry on every sync (the pre-cooldown behavior).
+    error_retry_cooldown_seconds: int = 60
+
+
+class SchedulerSettings(BaseModel):
+    """Recurring/one-shot scheduled tasks."""
+
+    # IANA timezone that cron expressions are interpreted in — e.g. cron
+    # "0 7 * * *" means 07:00 in THIS zone, not UTC. Defaults to Asia/Bangkok so
+    # local users get the wall-clock time they expect without configuring it.
+    # Override with SBOT_SCHEDULER__TIMEZONE (e.g. UTC, America/New_York).
+    timezone: str = "Asia/Bangkok"
+
+
+class LogSettings(BaseModel):
+    """Application logging. Left unconfigured, loguru ships a stderr sink with
+    `diagnose=True`, which prints the *value* of every local variable in every
+    traceback frame — so a crash loop writes prompts, message text and the
+    database URL (password included) into whatever file the supervisor is
+    capturing. loguru's own docs call that a leak and advise against it in
+    production; see claw/logging_setup.py for where this gets applied."""
+
+    level: str = "INFO"
+    # Full stack traces stay on — they're the useful half of loguru's default.
+    # Only the per-frame variable dump is dropped.
+    backtrace: bool = True
+    # Leave False outside of local debugging. See the class docstring.
+    diagnose: bool = False
+    # Rotating file sink, relative to the repo root ("" disables it). Separate
+    # from the supervisor's own capture file (sbot.log / sbot.err.log), which
+    # no in-process sink can rotate because the shell holds it open in append
+    # mode for the lifetime of the process.
+    file: str = "logs/sbot.log"
+    # Handed to loguru as-is: a size ("20 MB") or an interval ("1 day").
+    rotation: str = "20 MB"
+    retention: str = "14 days"
+    # Gzip rotated segments — they're mostly repeated stack frames, so they
+    # compress hard. Not a format choice: the archive has to be written
+    # owner-only, and only the gzip path in logging_setup.py does that.
+    compress: bool = True
+
+
+class TeamWorkSettings(BaseModel):
+    """Bounded background work for a single application worker."""
+
+    enabled: bool = True
+    max_pending_per_owner: int = Field(default=12, ge=1, le=100)
+    max_pending_total: int = Field(default=128, ge=1, le=1000)
+    max_parallel_total: int = Field(default=4, ge=1, le=32)
+    max_parallel_per_owner: int = Field(default=2, ge=1, le=16)
+    max_steps: int = Field(default=12, ge=1, le=40)
+    max_step_recoveries: int = Field(default=2, ge=0, le=5)
+    automatic_resources: bool = True
+    max_job_tokens: int = Field(default=5_000_000, ge=1000)
+    max_job_seconds: int = Field(default=21600, ge=60)
+    max_resource_adjustments: int = Field(default=4, ge=0, le=20)
+    resource_headroom: float = Field(default=1.5, ge=1, le=3)
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="SBOT_", env_nested_delimiter="__", env_file=".env", extra="ignore"
+    )
+
+    database_url: str = "postgresql+asyncpg://claw:claw@localhost:5432/claw"
+    # Run Alembic migrations on startup (production). Tests/dev may create_all directly.
+    auto_migrate: bool = False
+    secret_key: str = "dev-secret-key-change-me"
+    dev_token: str = "dev-token"
+    # "dev" also accepts token+email (for scripts/tests); JWT bearer works in any mode.
+    auth_mode: str = "dev"
+    # Allow public self-registration. When false, only admins create users.
+    open_registration: bool = True
+    token_ttl_seconds: int = 7 * 24 * 3600
+    # Imported-user activation link lifetime — short enough to bound the
+    # window an intercepted email link stays exploitable, long enough that
+    # most people click it same-day (the admin "resend" action covers anyone
+    # who doesn't).
+    activation_token_ttl_seconds: int = 6 * 3600
+    # Minimum gap between activation-email sends to the same account, so a
+    # login/register attempt (or the admin "resend" action) can't be used to
+    # spam a real user's inbox.
+    activation_email_resend_cooldown_seconds: int = 5 * 60
+    # "Forgot password" reset link lifetime — shorter than the activation
+    # link since it's a more time-sensitive, more frequently-used action;
+    # requesting a new one is a one-click "Forgot password?" away.
+    password_reset_token_ttl_seconds: int = 1 * 3600
+    # Minimum gap between reset emails to the same account, so repeated
+    # "forgot password" submissions can't be used to spam a real user's inbox.
+    password_reset_resend_cooldown_seconds: int = 5 * 60
+
+    # Public base URL of THIS API (for OIDC redirect_uri) and the web app to return to.
+    public_base_url: str = "http://localhost:8700"
+    web_base_url: str = "http://localhost:5173"
+    # OIDC / social login — a provider is enabled when both client id and secret are set.
+    oidc_google_client_id: str = ""
+    oidc_google_client_secret: str = ""
+    oidc_microsoft_client_id: str = ""
+    oidc_microsoft_client_secret: str = ""
+    oidc_microsoft_tenant: str = "common"
+    host: str = "0.0.0.0"
+    port: int = 8700
+    # Root directory holding per-user agent workspaces.
+    workspaces_root: Path = Path("workspaces")
+    # Root directory holding knowledge-base OKF bundles (one subdir per base).
+    knowledge_root: Path = Path("knowledge")
+    # Immutable reusable document templates. Agents never receive this path;
+    # selecting a Blueprint copies a version into the user's workspace.
+    blueprints_root: Path = Path("blueprints")
+    # Root directory holding admin-uploaded branding assets (Control Plane >
+    # Preferences logos). Auto-created at startup like workspaces_root.
+    branding_root: Path = Path("branding")
+
+    # When false, the control policy runs in monitor-only mode (logs hits, no mask/block).
+    policy_enforce: bool = True
+    # Resource caps (bound in-memory growth at scale).
+    max_resident_agents: int = 256
+    max_session_locks: int = 2048
+    # Per-user turn rate limit per minute (0 = unlimited).
+    turns_per_minute: int = 60
+    # Optional Telegram bot token; the channel starts only when set.
+    telegram_bot_token: str = ""
+
+    # Speech-to-text (Groq Whisper, OpenAI-compatible /audio/transcriptions).
+    # Env names are un-prefixed (QROQ_*) by request, so read via explicit aliases
+    # rather than the SBOT_ prefix. STT is enabled when the key is set.
+    speech_api_key: str = Field(default="", validation_alias="QROQ_KEY")
+    speech_api_base: str = Field(default="https://api.groq.com/openai/v1", validation_alias="QROQ_URL")
+    speech_model: str = Field(default="whisper-large-v3", validation_alias="QROQ_MODEL")
+
+    log: LogSettings = LogSettings()
+    llm: LLMSettings = LLMSettings()
+    sandbox: SandboxSettings = SandboxSettings()
+    reliability: ReliabilitySettings = ReliabilitySettings()
+    team_work: TeamWorkSettings = TeamWorkSettings()
+    browser: BrowserSettings = BrowserSettings()
+    memory: MemorySettings = MemorySettings()
+    scheduler: SchedulerSettings = SchedulerSettings()
+    knowledge: KnowledgeSettings = KnowledgeSettings()
+    connectors: ConnectorSettings = ConnectorSettings()
+    image: ImageSettings = ImageSettings()
+    tts: TtsSettings = TtsSettings()
+
+    @model_validator(mode="after")
+    def _default_web_base_url_to_public(self) -> "Settings":
+        # An operator who sets SBOT_PUBLIC_BASE_URL (this API's own address)
+        # but forgets SBOT_WEB_BASE_URL (where emailed links — e.g. the
+        # imported-user activation link, the password-reset link — should
+        # point) would otherwise silently mail every real user a broken
+        # localhost link. web_base_url's dev default is the Vite dev
+        # server's :5173 (Option C, manual dev setup); but install.sh and
+        # docker-compose.prod.yml both default it to the API's own :8700
+        # too (Option A/B, before an operator points it at a real domain) —
+        # so both localhost defaults must fall back, not just :5173, or a
+        # host-native/Docker install that only ever set SBOT_PUBLIC_BASE_URL
+        # keeps mailing http://localhost:8700 links forever. Still
+        # overridable by setting SBOT_WEB_BASE_URL explicitly (e.g. when the
+        # frontend is served from a different host than the API).
+        if (
+            self.web_base_url in ("http://localhost:5173", "http://localhost:8700")
+            and self.public_base_url != "http://localhost:8700"
+        ):
+            self.web_base_url = self.public_base_url
+        return self
+
+
+def load_settings() -> Settings:
+    return Settings()

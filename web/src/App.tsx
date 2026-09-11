@@ -14,7 +14,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { useToast } from "@astryxdesign/core/Toast";
 import { AlarmClock, ChevronDown, Loader2, LogOut, Menu, MessageCircle, MessageSquare, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ADMIN_SECTION_GROUPS, ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
+import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
@@ -22,7 +22,7 @@ import { useBranding, useT } from "./branding";
 import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
 import { ApiError, AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
-import { MOBILE_QUERY, PHONE_QUERY, useMediaQuery } from "./useMediaQuery";
+import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
 
 const PROVIDER_LABELS: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
 const PROVIDER_LOGO: Record<string, string> = {
@@ -75,7 +75,26 @@ function NewChatButton({ onClick }: { onClick: () => void }) {
  * and gets clipped/squeezed there. */
 function SidebarBrand() {
   const { isCollapsed } = useSideNavCollapse();
-  return <div className="claw-sidenav-brand">{isCollapsed ? <SoftnixMark size={22} /> : <Brand height={22} />}</div>;
+  const [sbotEnabled, setSbotEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    fetch("/api/modes").then(r => r.json()).then(r => setSbotEnabled(Boolean(r.sbot))).catch(() => setSbotEnabled(false));
+  }, []);
+  if (isCollapsed) return <div className="claw-sidenav-brand"><SoftnixMark size={22} /></div>;
+  const content = (
+    <div className="claw-mode-menu">
+      <a className="claw-mode-menu-item claw-mode-menu-item--active" href="/chat/privateclaw">
+        <span><strong>PrivateClaw</strong><small>Personal AI workspace</small></span><span aria-hidden="true">✓</span>
+      </a>
+      <a className="claw-mode-menu-item" href="/chat/sbot">
+        <span><strong>Bot Mode</strong><small>Work with your bot team</small></span>
+      </a>
+    </div>
+  );
+  return <div className="claw-sidenav-brand">
+    {sbotEnabled ? <Popover label="Switch mode" placement="below" alignment="start" width={272} hasAutoFocus={false} content={content}>
+      <button type="button" className="claw-mode-menu-trigger" aria-label="Switch mode"><Brand height={22} /><Icon icon={ChevronDown} size="sm" /></button>
+    </Popover> : <Brand height={22} />}
+  </div>;
 }
 
 /** Truncate a chat title for the narrow collapsed-rail popover. */
@@ -570,18 +589,27 @@ export default function App() {
   const { setUserOverride } = useBranding();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [checking, setChecking] = useState(true);
+  const [sbotEnabled, setSbotEnabled] = useState(false);
+  useEffect(() => { fetch("/api/modes").then(r => r.json()).then(r => setSbotEnabled(Boolean(r.sbot))).catch(() => undefined); }, []);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [active, setActive] = useState<string | null>(null);
+  const [active, setActive] = useState<string | null>(() => {
+    const parts = window.location.pathname.split("/");
+    return parts[3] || sessionStorage.getItem("claw:last:privateclaw");
+  });
+  useEffect(() => {
+    if (active) sessionStorage.setItem("claw:last:privateclaw", active);
+    else sessionStorage.removeItem("claw:last:privateclaw");
+    if (window.location.pathname.startsWith("/chat"))
+      window.history.replaceState(null, "", "/chat/privateclaw" + (active ? "/" + encodeURIComponent(active) : ""));
+  }, [active]);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
   const [activationToken, setActivationToken] = useState("");
   const [resetToken, setResetToken] = useState("");
   // Responsive shell. Below the tablet width the sidebar becomes an off-canvas
-  // drawer (navOpen); on desktop `collapsed` drives the rail. Control Plane is
-  // hidden on phones (see the trade-off note in the render).
+  // drawer (navOpen); on desktop `collapsed` drives the rail.
   const isMobile = useMediaQuery(MOBILE_QUERY);
-  const isPhone = useMediaQuery(PHONE_QUERY);
   const [navOpen, setNavOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   // Per-session "last read" timestamps (id -> epoch ms), persisted to
@@ -770,6 +798,8 @@ export default function App() {
     // signing out locally, so it's fire-and-forget.
     void api.logout().catch(() => undefined);
     clearToken();
+    sessionStorage.removeItem("claw:last:privateclaw");
+    sessionStorage.removeItem("claw:last:sbot");
     setUser(null);
     setSessions([]);
     setActive(null);
@@ -790,7 +820,7 @@ export default function App() {
 
   // Selecting anything in the drawer should close it on mobile.
   const closeDrawer = () => setNavOpen(false);
-  const showAdmin = user.is_admin && !isPhone; // aggressive: no admin console on phones
+  const showAdmin = user.is_admin;
   const settingsSectionMeta = settingsSection
     ? SETTINGS_SECTIONS.find((s) => s.key === settingsSection)
     : undefined;
@@ -829,7 +859,7 @@ export default function App() {
                 icon={SettingsIcon}
                 collapsible={{ defaultIsCollapsed: true }}
               >
-                {SETTINGS_SECTIONS.map((s) => (
+                {SETTINGS_SECTIONS.filter(s => sbotEnabled || s.key !== "projects").map((s) => (
                   <SideNavItem
                     key={s.key}
                     label={t(s.labelKey)}
@@ -849,71 +879,14 @@ export default function App() {
                   <SideNavItem
                     label={t("nav.controlPlane")}
                     icon={Shield}
-                    collapsible={{ defaultIsCollapsed: true }}
-                  >
-                    {(() => {
-                      const selectAdminSection = (key: AdminSection) => {
-                        setAdminSection(key);
-                        setSettingsSection(null);
-                        setActive(null);
-                        closeDrawer();
-                      };
-                      // "overview" leads standalone (it's the landing view, not
-                      // a config category); everything else is either grouped
-                      // (ADMIN_SECTION_GROUPS) or, for the few sections no
-                      // group claims (currently just "preferences"), rendered
-                      // standalone after the groups.
-                      const grouped = new Set(ADMIN_SECTION_GROUPS.flatMap((g) => g.sections));
-                      const overview = ADMIN_SECTIONS.find((s) => s.key === "overview");
-                      const ungrouped = ADMIN_SECTIONS.filter(
-                        (s) => s.key !== "overview" && !grouped.has(s.key),
-                      );
-                      return (
-                        <>
-                          {overview && (
-                            <SideNavItem
-                              label={t(overview.labelKey)}
-                              icon={overview.icon}
-                              isSelected={adminSection === overview.key}
-                              onClick={() => selectAdminSection(overview.key)}
-                            />
-                          )}
-                          {ADMIN_SECTION_GROUPS.map((group) => (
-                            <SideNavItem
-                              key={group.labelKey}
-                              label={t(group.labelKey)}
-                              icon={group.icon}
-                              isSelected={adminSection !== null && group.sections.includes(adminSection)}
-                              collapsible={{ defaultIsCollapsed: true }}
-                            >
-                              {group.sections.map((key) => {
-                                const s = ADMIN_SECTIONS.find((sec) => sec.key === key);
-                                if (!s) return null;
-                                return (
-                                  <SideNavItem
-                                    key={s.key}
-                                    label={t(s.labelKey)}
-                                    icon={s.icon}
-                                    isSelected={adminSection === s.key}
-                                    onClick={() => selectAdminSection(s.key)}
-                                  />
-                                );
-                              })}
-                            </SideNavItem>
-                          ))}
-                          {ungrouped.map((s) => (
-                            <SideNavItem
-                              key={s.key}
-                              label={t(s.labelKey)}
-                              icon={s.icon}
-                              isSelected={adminSection === s.key}
-                              onClick={() => selectAdminSection(s.key)}
-                            />
-                          ))}
-                        </>
-                      );
-                    })()}
-                  </SideNavItem>
+                    isSelected={adminSection !== null}
+                    onClick={() => {
+                      setAdminSection("overview");
+                      setSettingsSection(null);
+                      setActive(null);
+                      closeDrawer();
+                    }}
+                  />
                 </div>
               )}
               <SideNavItem label={t("nav.logout")} icon={LogOut} onClick={logout} />
@@ -955,17 +928,7 @@ export default function App() {
           <SoftnixMark size={20} />
         </div>
         {adminSection ? (
-          isPhone ? (
-            <div className="claw-mobile-blocked">
-              <Text weight="semibold">Control Plane isn't available on phones</Text>
-              <Text color="secondary" as="p">
-                It's built for wide screens (charts, tables, audit logs). Please open it on a
-                tablet in landscape or a desktop.
-              </Text>
-            </div>
-          ) : (
-            <AdminPanel section={adminSection} selfId={user.id} />
-          )
+          <AdminPanel section={adminSection} selfId={user.id} onSectionChange={setAdminSection} />
         ) : settingsSection ? (
           <SettingsPanel section={settingsSection} />
         ) : (

@@ -1,12 +1,12 @@
 import asyncio
 import time
-from pathlib import Path
 
 from claw.config import SandboxSettings
 from claw.core.subagent import SubagentManager
 from claw.core.turn_context import current_turn_deadline
 from claw.sandbox.ephemeral import EphemeralSandbox
-from claw.providers.base import ChatResult, ToolCall
+from claw.db.stores import LLMConfigStore
+from claw.providers.base import ChatResult, ProviderError, TextDelta, ToolCall
 from claw.tools.spawn import SpawnTool
 from tests.conftest import FakeProvider, text_turn
 
@@ -26,6 +26,43 @@ async def test_subagent_returns_final_text(tmp_path):
     assert "subagent" in first_call[0]["content"].lower()
     assert first_call[1]["content"].startswith("find the answer")
 
+
+async def test_subagent_uses_control_plane_fallback(db_factory, tmp_path):
+    store = LLMConfigStore(db_factory)
+    primary_provider = await store.create_provider("primary", "primary-key", "", model_prefix="openai")
+    fallback_provider = await store.create_provider("fallback", "fallback-key", "", model_prefix="openai")
+    await store.create_model(
+        primary_provider.id, "openai/primary", "Primary", True, "low", "", kind="chat"
+    )
+    backup = await store.create_model(
+        fallback_provider.id, "openai/backup", "Backup", True, "low", "", kind="chat"
+    )
+    await store.update_model(backup.id, owner_id=None, is_fallback=True)
+
+    class FailingPrimary(FakeProvider):
+        def __init__(self):
+            super().__init__([])
+            self.models = []
+
+        async def stream_chat(self, messages, **kwargs):
+            self.models.append(kwargs["model"])
+            if kwargs["model"] == "openai/primary":
+                raise ProviderError("provider unavailable")
+            yield TextDelta(text="completed by backup")
+            yield ChatResult(content="completed by backup")
+
+    provider = FailingPrimary()
+    manager = SubagentManager(
+        provider,
+        _sandbox(),
+        tmp_path,
+        model="openai/primary",
+        max_iterations=5,
+        llm_config=store,
+    )
+
+    assert await manager.run("finish this") == "completed by backup"
+    assert provider.models == ["openai/primary", "openai/backup"]
 
 async def test_subagent_can_use_tools(tmp_path):
     provider = FakeProvider(

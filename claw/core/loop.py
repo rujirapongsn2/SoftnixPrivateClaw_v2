@@ -25,7 +25,7 @@ from claw.core.events import (
     ToolProgress,
     ToolStarted,
 )
-from claw.providers.base import ChatResult, LLMProvider, TextDelta, ThinkingDelta
+from claw.providers.base import ChatResult, LLMProvider, ProviderError, TextDelta, ThinkingDelta
 from claw.providers.registry import context_window
 from claw.tools.registry import ToolRegistry
 
@@ -401,6 +401,11 @@ class AgentLoop:
         api_key: str | None = None,
         api_base: str | None = None,
         context_window: int | None = None,
+        fallback_model: str | None = None,
+        fallback_api_key: str | None = None,
+        fallback_api_base: str | None = None,
+        fallback_context_window: int | None = None,
+        on_fallback: Callable[[str], None] | None = None,
         permission_mode: str = "auto",
         confirm: ConfirmFn | None = None,
     ) -> TurnOutcome:
@@ -409,11 +414,21 @@ class AgentLoop:
         `model`/`api_key`/`api_base` override the loop defaults for this turn only
         (per-chat model selection), falling back to the agent's configured model.
         `context_window` is the admin's per-model input-window override, if set.
+        A configured fallback is adopted for the rest of the turn only when an
+        upstream call fails before emitting any stream event.
         """
         working = list(messages)
         base_len = len(working)
         usage_total: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         effective_model = model or self.model
+        fallback_available = bool(
+            fallback_model
+            and (
+                fallback_model != effective_model
+                or fallback_api_key != api_key
+                or fallback_api_base != api_base
+            )
+        )
         # Files the agent wrote/edited this turn (deduped, in order). Split into
         # surfaced/suppressed by _split_artifacts at each exit, since whether a
         # template counts as an intermediate depends on what else the turn wrote.
@@ -439,6 +454,11 @@ class AgentLoop:
         sent_results: dict[str, str] = {}
         sent_order: list[str] = []
         ceiling = _compaction_ceiling_chars(effective_model, self.max_tokens, context_window)
+        if fallback_available:
+            ceiling = min(
+                ceiling,
+                _compaction_ceiling_chars(fallback_model, self.max_tokens, fallback_context_window),
+            )
 
         for _iteration in range(self.max_iterations):
             # Checked between iterations, so an in-flight tool always finishes;
@@ -475,26 +495,54 @@ class AgentLoop:
                 if self.max_turn_seconds > 0
                 else None
             )
+            stream_started = False
             try:
-                async with asyncio.timeout(remaining) as budget:
-                    async for event in self.provider.stream_chat(
-                        prompt,
-                        tools=definitions,
-                        model=effective_model,
-                        max_tokens=self.max_tokens,
-                        temperature=self.temperature,
-                        api_key=api_key,
-                        api_base=api_base,
-                    ):
-                        if isinstance(event, TextDelta):
-                            if first_text_at is None:
-                                first_text_at = time.monotonic()
-                            partial.append(event.text)
-                            emit(TextDeltaEvent(turn_id=turn_id, text=event.text))
-                        elif isinstance(event, ThinkingDelta):
-                            emit(ThinkingDeltaEvent(turn_id=turn_id, text=event.text))
-                        elif isinstance(event, ChatResult):
-                            result = event
+                while True:
+                    try:
+                        async with asyncio.timeout(remaining) as budget:
+                            async for event in self.provider.stream_chat(
+                                prompt,
+                                tools=definitions,
+                                model=effective_model,
+                                max_tokens=self.max_tokens,
+                                temperature=self.temperature,
+                                api_key=api_key,
+                                api_base=api_base,
+                            ):
+                                stream_started = True
+                                if isinstance(event, TextDelta):
+                                    if first_text_at is None:
+                                        first_text_at = time.monotonic()
+                                    partial.append(event.text)
+                                    emit(TextDeltaEvent(turn_id=turn_id, text=event.text))
+                                elif isinstance(event, ThinkingDelta):
+                                    emit(ThinkingDeltaEvent(turn_id=turn_id, text=event.text))
+                                elif isinstance(event, ChatResult):
+                                    result = event
+                        break
+                    except ProviderError as exc:
+                        if fallback_available and not stream_started:
+                            logger.warning(
+                                "Turn {} switching from model {} to fallback {} after upstream failure: {}",
+                                turn_id,
+                                effective_model,
+                                fallback_model,
+                                exc,
+                            )
+                            effective_model = fallback_model
+                            api_key = fallback_api_key
+                            api_base = fallback_api_base
+                            context_window = fallback_context_window
+                            fallback_available = False
+                            if on_fallback is not None:
+                                on_fallback(effective_model)
+                            remaining = (
+                                max(0.0, self.max_turn_seconds - (time.monotonic() - started))
+                                if self.max_turn_seconds > 0
+                                else None
+                            )
+                            continue
+                        raise
             except TimeoutError:
                 # A provider that raises TimeoutError of its own (its per-request
                 # HTTP budget) lands here too, and that is NOT the turn running

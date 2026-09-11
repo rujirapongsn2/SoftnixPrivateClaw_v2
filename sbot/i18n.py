@@ -1,0 +1,220 @@
+"""User-facing message catalog. Core code never hardcodes UI language."""
+
+from typing import Any
+
+_MESSAGES: dict[str, dict[str, str]] = {
+    "error.plan_incomplete": {
+        "en": "The plan is still incomplete. The agent did not continue after two automatic reminders. Please retry to resume the remaining work.",
+        "th": "งานยังไม่เสร็จตามแผน: agent ไม่ดำเนินการต่อหลังระบบเตือนอัตโนมัติสองครั้ง กรุณาลองใหม่เพื่อทำขั้นตอนที่เหลือ",
+    },
+    "error.llm": {
+        "en": "The AI model could not be reached ({reason}). Please try again.",
+        "th": "ไม่สามารถติดต่อโมเดล AI ได้ ({reason}) กรุณาลองใหม่อีกครั้ง",
+    },
+    # Distinct from error.llm: retrying is futile here (the model itself
+    # can never handle a tool-calling request), so the message tells the
+    # user to switch models instead of "please try again".
+    "error.llm_no_tool_support": {
+        "en": (
+            "This model doesn't support tool/function calling, so it can't be used as a "
+            "chat model here. Please pick a different model."
+        ),
+        "th": "โมเดลนี้ไม่รองรับการเรียกใช้เครื่องมือ (tool calling) จึงใช้เป็นโมเดลแชทในระบบนี้ไม่ได้ กรุณาเลือกโมเดลอื่น",
+    },
+    # Distinct from error.llm for the same reason as error.llm_no_tool_support:
+    # retrying with an image attached to a text-only model fails identically
+    # every time, so this tells the user to remove the attachment or switch
+    # models instead of "please try again".
+    "error.llm_no_vision_support": {
+        "en": (
+            "This model doesn't support image input, so it can't read the attached image. "
+            "Please remove the attachment or pick a vision-capable model."
+        ),
+        "th": "โมเดลนี้ไม่รองรับการรับรูปภาพ จึงไม่สามารถอ่านรูปที่แนบมาได้ กรุณานำไฟล์แนบออก หรือเลือกโมเดลที่รองรับรูปภาพแทน",
+    },
+    "error.tool": {
+        "en": "A tool failed while working on your request ({reason}).",
+        "th": "เครื่องมือทำงานไม่สำเร็จระหว่างประมวลผลคำขอ ({reason})",
+    },
+    # Distinct from error.llm because the model is not at fault: the answer was
+    # produced and then lost on the way to storage. Saying "could not reach the
+    # model" here sends the user (and whoever reads the bug report) after the
+    # provider instead of the database.
+    "error.save": {
+        "en": "The answer was generated but could not be saved (internal error). Please try again.",
+        "th": "สร้างคำตอบสำเร็จแล้ว แต่บันทึกไม่สำเร็จ (ข้อผิดพลาดภายใน) กรุณาลองใหม่อีกครั้ง",
+    },
+    # Distinct from error.save: this is the user's own message failing to
+    # persist *before* the model was ever called — no answer exists yet, so
+    # error.save's "the answer was generated" would be false here.
+    "error.save_request": {
+        "en": "Your message could not be saved (internal error). Please try again.",
+        "th": "บันทึกข้อความของคุณไม่สำเร็จ (ข้อผิดพลาดภายใน) กรุณาลองใหม่อีกครั้ง",
+    },
+    # The model hit its output cap before writing a visible answer — typical of
+    # a reasoning model that spends the whole budget on hidden thinking. Saying
+    # "could not reach the model" would be wrong: it answered, and the answer
+    # was cut off. Retrying is worth it (the next attempt may think less).
+    "error.continuation_stopped": {
+        "en": "The follow-up produced no answer. The earlier response is preserved; remaining work is still pending.",
+        "th": "รอบทำงานต่อไม่มีคำตอบ จึงแสดงคำตอบก่อนหน้าไว้ งานที่เหลือยังไม่เสร็จ",
+    },
+    "error.truncated": {
+        "en": (
+            "The answer hit the response-length limit before it could be written out. "
+            "Please try again, or ask for a shorter answer."
+        ),
+        "th": "คำตอบชนขีดจำกัดความยาวก่อนจะเขียนออกมาได้ กรุณาลองใหม่อีกครั้ง หรือขอคำตอบที่สั้นลง",
+    },
+    # Model finished normally but produced no text at all. Rare, and there is
+    # nothing actionable to say beyond "try again" — but it must still be said,
+    # because an empty turn otherwise looks like the app silently did nothing.
+    "error.empty_response": {
+        "en": "The model returned an empty response. Please try again.",
+        "th": "โมเดลตอบกลับมาว่างเปล่า กรุณาลองใหม่อีกครั้ง",
+    },
+    # The turn ran past its wall-clock budget. Distinct from error.max_iterations:
+    # the step count may be nowhere near its limit, so telling the user to use
+    # fewer steps would be misleading — what ran out was time.
+    "error.turn_timeout": {
+        "en": "This is taking too long, so I stopped before finishing. Try a smaller task, or ask me to continue.",
+        "th": "งานนี้ใช้เวลานานเกินกำหนด จึงหยุดก่อนทำเสร็จ ลองแบ่งงานให้เล็กลง หรือสั่งให้ทำต่อได้",
+    },
+    # The deadline cut the stream off while the model was mid-answer. Distinct
+    # from error.turn_timeout: there IS an answer, it is just unfinished, so the
+    # message has to mark where it stops rather than replace it.
+    "error.turn_timeout_partial": {
+        "en": "[This answer was cut off — the turn ran out of time. Ask me to continue.]",
+        "th": "[คำตอบนี้ถูกตัดกลางคัน เพราะหมดเวลาที่กำหนดไว้ สั่งให้ทำต่อได้]",
+    },
+    "error.max_iterations": {
+        "en": "I reached the step limit before finishing. Try splitting the task into smaller parts.",
+        "th": "ถึงจำนวนขั้นตอนสูงสุดก่อนงานเสร็จ ลองแบ่งงานเป็นส่วนย่อยลง",
+    },
+    # Appended to any of the "no answer" messages above when the turn did in fact
+    # produce files before it ran out of time/steps. Without this the user is told
+    # the turn failed and never learns that the work is sitting in their workspace.
+    "error.partial_artifacts": {
+        "en": "Files created before I stopped: {files}",
+        "th": "ไฟล์ที่สร้างไว้ก่อนหยุด: {files}",
+    },
+    # A delegated specialist's reply is rendered as its own message in the
+    # transcript, so when there is no reply the substitute is user-visible and
+    # permanently stored — it belongs here rather than hardcoded in the tool.
+    # Split the same way error.turn_timeout and error.max_iterations are: the
+    # user can act on "give it a smaller task" only if told which limit ran out.
+    "delegate.no_output_timeout": {
+        "en": "{bot} ran out of time before it could write up an answer. Any work it did finish may be in the files it saved.",
+        "th": "{bot} หมดเวลาก่อนจะเรียบเรียงคำตอบได้ งานที่ทำเสร็จไปแล้วบางส่วนอาจอยู่ในไฟล์ที่บันทึกไว้",
+    },
+    "delegate.no_output_steps": {
+        "en": "{bot} reached its step limit before it could write up an answer. Any work it did finish may be in the files it saved.",
+        "th": "{bot} ใช้ขั้นตอนครบจำนวนก่อนจะเรียบเรียงคำตอบได้ งานที่ทำเสร็จไปแล้วบางส่วนอาจอยู่ในไฟล์ที่บันทึกไว้",
+    },
+    # Neither limit was hit — the specialist simply finished with nothing to
+    # say, so there is no limit to name and nothing for the user to adjust.
+    "delegate.no_output": {
+        "en": "{bot} finished without writing an answer.",
+        "th": "{bot} ทำงานจบแล้วแต่ไม่ได้เขียนคำตอบออกมา",
+    },
+    "error.rate_limited": {
+        "en": "You're sending messages too fast. Please wait a moment and try again.",
+        "th": "คุณส่งข้อความถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง",
+    },
+    "error.daily_limit": {
+        "en": "You've reached your plan's daily message limit. It resets tomorrow.",
+        "th": "คุณใช้ข้อความครบตามโควตารายวันของแพ็กเกจแล้ว ระบบจะรีเซ็ตในวันพรุ่งนี้",
+    },
+    "error.no_model_for_plan": {
+        "en": "Your plan doesn't allow any of the currently available chat models. Ask an admin to adjust your plan or the model lineup.",
+        "th": "แพ็กเกจของคุณไม่อนุญาตให้ใช้โมเดลแชทที่มีอยู่ในระบบตอนนี้เลย กรุณาติดต่อผู้ดูแลระบบเพื่อปรับแพ็กเกจหรือรายการโมเดล",
+    },
+    # No Control Plane provider is configured AND the operator's env fallback
+    # (SBOT_LLM__API_KEY / SBOT_LLM__API_BASE) is empty, so there is no usable
+    # model at all — an admin-facing setup message, distinct from a raw provider
+    # auth error, so the operator knows exactly what to configure.
+    "error.no_model_configured": {
+        "en": "No chat model is configured yet. An administrator needs to set SBOT_LLM__API_KEY or SBOT_LLM__API_BASE in .env, or add an LLM provider in the Control Plane.",
+        "th": "ยังไม่ได้ตั้งค่าโมเดลแชท ผู้ดูแลระบบต้องตั้งค่า SBOT_LLM__API_KEY หรือ SBOT_LLM__API_BASE ใน .env หรือเพิ่ม LLM provider ใน Control Plane ก่อน",
+    },
+    "reason.timeout": {"en": "connection timed out", "th": "การเชื่อมต่อหมดเวลา"},
+    "reason.auth": {"en": "authentication failed", "th": "การยืนยันตัวตนล้มเหลว"},
+    "reason.rate_limit": {"en": "rate limit exceeded", "th": "เกินขีดจำกัดการเรียกใช้งาน"},
+    "reason.network": {"en": "network unreachable", "th": "เชื่อมต่อเครือข่ายไม่ได้"},
+    "reason.internal": {"en": "internal error", "th": "ข้อผิดพลาดภายใน"},
+}
+
+DEFAULT_LOCALE = "en"
+
+
+def t(key: str, locale: str | None = None, **params: Any) -> str:
+    entry = _MESSAGES.get(key)
+    if not entry:
+        return key
+    text = entry.get(locale or DEFAULT_LOCALE) or entry[DEFAULT_LOCALE]
+    try:
+        return text.format(**params)
+    except (KeyError, IndexError):
+        return text
+
+
+def is_no_tool_support_error(detail: str) -> bool:
+    """True when the provider rejected the request specifically because the
+    selected model doesn't support tool/function calling at all (e.g. a
+    pure image-generation model picked as the chat model) — retrying gets
+    the identical error every time, so this needs its own message telling
+    the user to switch models rather than error.llm's generic "try again"."""
+    lowered = detail.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "no endpoints found that support tool use",
+            "does not support tool",
+            "does not support function calling",
+        )
+    )
+
+
+def is_no_vision_support_error(detail: str) -> bool:
+    """True when the provider rejected the request specifically because the
+    selected model doesn't support image/vision input — retrying gets the
+    identical rejection every time (the model can never read the image), so
+    this needs its own message telling the user to drop the attachment or
+    switch models, same as is_no_tool_support_error above. This is the
+    reactive safety net for any text-only model the registry's proactive
+    supports_vision() check doesn't yet know about."""
+    lowered = detail.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "does not support image",
+            "does not support vision",
+            "no endpoints found that support image",
+            "multimodal messages are not enabled",
+            "image content is not supported",
+            "unsupported image",
+            "invalid content type: image",
+            "model does not support the image_url",
+            # Observed verbatim from an OpenAI-compatible gateway fronting a
+            # text-only model: the server's message schema has no image_url
+            # variant at all, so it fails at JSON deserialization rather than
+            # with a capability message.
+            "unknown variant `image_url`",
+        )
+    )
+
+
+def classify_error_reason(detail: str) -> str:
+    """Map a raw exception string to a translatable reason key."""
+    lowered = detail.lower()
+    if any(tok in lowered for tok in ("timeout", "timed out", "deadline")):
+        return "reason.timeout"
+    if any(
+        tok in lowered for tok in ("401", "403", "unauthorized", "forbidden", "api key", "authentication")
+    ):
+        return "reason.auth"
+    if any(tok in lowered for tok in ("429", "rate limit", "quota", "too many requests")):
+        return "reason.rate_limit"
+    if any(tok in lowered for tok in ("connection", "network", "dns", "unreachable", "ssl")):
+        return "reason.network"
+    return "reason.internal"
