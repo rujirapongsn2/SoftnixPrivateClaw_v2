@@ -1,6 +1,8 @@
 import asyncio
 from typing import Any
 
+import pytest
+
 from sbot.core.events import AgentEvent, TextDeltaEvent, ToolFinished, ToolStarted
 from sbot.core.loop import (
     _DEFAULT_COMPACTION_CEILING_CHARS,
@@ -14,7 +16,7 @@ from sbot.core.loop import (
     _prompt_size,
     visible_artifacts,
 )
-from sbot.providers.base import ChatResult, TextDelta, ToolCall
+from sbot.providers.base import ChatResult, ProviderError, TextDelta, ToolCall
 from sbot.tools.base import Tool
 from sbot.tools.registry import ToolRegistry
 from tests.sbot_mode.conftest import FakeProvider, text_turn
@@ -48,6 +50,49 @@ async def test_plain_text_turn_streams_and_completes():
     assert outcome.final_content == "hello there"
     assert outcome.new_messages == [{"role": "assistant", "content": "hello there"}]
     assert any(isinstance(e, TextDeltaEvent) for e in events)
+
+
+async def test_provider_failure_before_stream_switches_to_configured_fallback():
+    class FailingPrimary(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            self.calls.append(list(messages))
+            self.models.append(kwargs["model"])
+            if kwargs["model"] == "primary/model":
+                raise ProviderError("429 rate limit")
+            yield TextDelta(text="fallback answer")
+            yield ChatResult(content="fallback answer")
+
+    provider = FailingPrimary([])
+    outcome = await AgentLoop(provider, ToolRegistry()).run_turn(
+        "fallback",
+        [{"role": "user", "content": "hi"}],
+        lambda _event: None,
+        model="primary/model",
+        fallback_model="backup/model",
+    )
+
+    assert outcome.final_content == "fallback answer"
+    assert provider.models == ["primary/model", "backup/model"]
+
+
+async def test_provider_failure_after_stream_started_does_not_retry_fallback():
+    class PartialFailure(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            self.models.append(kwargs["model"])
+            yield TextDelta(text="already visible")
+            raise ProviderError("connection reset")
+
+    provider = PartialFailure([])
+    with pytest.raises(ProviderError, match="connection reset"):
+        await AgentLoop(provider, ToolRegistry()).run_turn(
+            "partial",
+            [{"role": "user", "content": "hi"}],
+            lambda _event: None,
+            model="primary/model",
+            fallback_model="backup/model",
+        )
+
+    assert provider.models == ["primary/model"]
 
 
 async def test_durable_handoff_ends_turn_without_polling_model_again():

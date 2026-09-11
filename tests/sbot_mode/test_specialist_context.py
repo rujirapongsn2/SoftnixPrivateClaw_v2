@@ -16,8 +16,8 @@ from sbot.config import LLMSettings, SandboxSettings, Settings
 from sbot.core.memory import MemoryService
 from sbot.core.missions import MissionService
 from sbot.core.specialist import SpecialistRunner
-from sbot.db.stores import SkillStore
-from sbot.providers.base import ChatResult, ToolCall
+from sbot.db.stores import LLMConfigStore, SkillStore
+from sbot.providers.base import ChatResult, ProviderError, TextDelta, ToolCall
 from sbot.sandbox.ephemeral import EphemeralSandbox
 from sbot.tools.cos import DelegateTool
 from sbot.tools.skills import scope_skills
@@ -40,6 +40,63 @@ def make_settings(tmp_path) -> Settings:
 
 def make_memory(stores, provider) -> MemoryService:
     return MemoryService(stores["memories"], stores["messages"], stores["sessions"], provider)
+
+
+@pytest.mark.asyncio
+async def test_specialist_uses_control_plane_fallback(db_factory, tmp_path):
+    llm_config = LLMConfigStore(db_factory)
+    primary_provider = await llm_config.create_provider(
+        "primary", "primary-key", "", model_prefix="openai"
+    )
+    fallback_provider = await llm_config.create_provider(
+        "fallback", "fallback-key", "", model_prefix="openai"
+    )
+    primary = await llm_config.create_model(
+        primary_provider.id, "openai/primary", "Primary", True, "low", "", kind="chat"
+    )
+    backup = await llm_config.create_model(
+        fallback_provider.id, "openai/backup", "Backup", True, "low", "", kind="chat"
+    )
+    await llm_config.update_model(backup.id, owner_id=None, is_fallback=True)
+    await llm_config.update_model(backup.id, owner_id=None, is_fallback=True)
+    assert await llm_config.fallback_model_for(None) == "openai/backup"
+
+    await llm_config.update_provider(fallback_provider.id, owner_id=None, enabled=False)
+    assert await llm_config.fallback_model_for(None) is None
+    await llm_config.update_provider(fallback_provider.id, owner_id=None, enabled=True)
+    await llm_config.update_model(backup.id, owner_id=None, is_fallback=True)
+
+    class FailingPrimary(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            self.models.append(kwargs["model"])
+            if kwargs["model"] == "openai/primary":
+                raise ProviderError("provider unavailable")
+            yield TextDelta(text="specialist backup result")
+            yield ChatResult(content="specialist backup result")
+
+    provider = FailingPrimary([])
+    runner = SpecialistRunner(
+        provider=provider,
+        sandbox=EphemeralSandbox(SandboxSettings(enabled=False)),
+        workspace=tmp_path,
+        model="openai/primary",
+        llm_config=llm_config,
+        llm_settings=LLMSettings(max_iterations=3),
+    )
+    bot = SimpleNamespace(
+        id="bot-1", kind="specialist", model="openai/primary", tool_allowlist=[], skill_ids=[]
+    )
+
+    outcome = await runner.run(bot, "Complete the task", "Do it", lambda _event: None, "turn-1")
+
+    assert outcome.text == "specialist backup result"
+    assert provider.models == ["openai/primary", "openai/backup"]
+
+    await llm_config.update_model(primary.id, owner_id=None, enabled=False)
+    provider.models.clear()
+    outcome = await runner.run(bot, "Complete the task", "Do it again", lambda _event: None, "turn-2")
+    assert outcome.text == "specialist backup result"
+    assert provider.models == ["openai/backup"]
 
 
 def test_skill_scope_distinguishes_all_selected_and_none():

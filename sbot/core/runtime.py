@@ -238,6 +238,7 @@ class ClawAgent:
             max_turn_seconds=settings.llm.max_turn_seconds,
             owner_id=user_id,
             project_access=project_access,
+            llm_config=llm_config,
         )
         self.tools.register(SpawnTool(subagents))
         self.tools.register(WorkflowTool(WorkflowService(provider, subagents, model=settings.llm.model)))

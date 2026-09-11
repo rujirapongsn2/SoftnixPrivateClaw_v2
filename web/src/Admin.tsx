@@ -1300,10 +1300,13 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
                 <option value="">{t("admin.providers.fallbackDisabled")}</option>
                 {fallbackCandidates.map(({ provider, model }) => (
                   <option key={model.id} value={model.id}>
-                    {model.label || model.model_id} · {provider.name}
+                    {model.label || model.model_id} · {provider.name} · {t(COST_LABEL[model.cost])}
                   </option>
                 ))}
               </select>
+              <Text size="sm" color="secondary">
+                {t("admin.providers.fallbackPlanHint")}
+              </Text>
             </label>
           </div>
           {defaultModel && fallbackModel && (

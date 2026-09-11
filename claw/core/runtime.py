@@ -11,6 +11,7 @@ import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
@@ -57,7 +58,7 @@ from claw.i18n import classify_error_reason, is_no_tool_support_error, is_no_vis
 from claw.providers.base import LLMProvider, ProviderError
 from claw.providers.registry import supports_vision as model_supports_vision
 from claw.sandbox.ephemeral import EphemeralSandbox
-from claw.security.policy import Action, PolicyEngine
+from claw.security.policy import PolicyEngine
 from claw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from claw.tools.registry import ToolRegistry
 from claw.tools.browser import BrowserTool
@@ -72,6 +73,9 @@ from claw.tools.spawn import SpawnTool
 from claw.tools.web import WebFetchTool, WebSearchTool
 from claw.tools.workflow import WorkflowTool
 from claw.workflows.service import WorkflowService
+
+if TYPE_CHECKING:
+    from claw.db.stores import BlueprintStore, LLMConfigStore
 
 _STORED_TOOL_RESULT_CAP = 4000
 
@@ -163,6 +167,7 @@ class ClawAgent:
         knowledge: "KnowledgeStore | None" = None,
         sessions: SessionStore | None = None,
         blueprints: "BlueprintStore | None" = None,
+        llm_config: "LLMConfigStore | None" = None,
     ):
         self.user_id = user_id
         self.workspace = workspace
@@ -192,6 +197,8 @@ class ClawAgent:
             model=settings.llm.model,
             max_tokens=settings.llm.max_tokens,
             max_turn_seconds=settings.llm.max_turn_seconds,
+            owner_id=user_id,
+            llm_config=llm_config,
         )
         self.tools.register(SpawnTool(subagents))
         self.tools.register(WorkflowTool(WorkflowService(provider, subagents, model=settings.llm.model)))
@@ -506,6 +513,7 @@ class AgentRuntime:
             knowledge=self.knowledge,
             sessions=self.sessions,
             blueprints=self.blueprints,
+            llm_config=self.llm_config,
         )
         self._agents[user_id] = agent
         self._agents.move_to_end(user_id)

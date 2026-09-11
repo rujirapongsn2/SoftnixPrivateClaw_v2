@@ -499,6 +499,33 @@ class SpecialistRunner:
             }
         return resolved
 
+    async def _resolve_fallback(self) -> dict[str, Any] | None:
+        if self.llm_config is None:
+            return None
+        resolver = getattr(self.llm_config, "fallback_model_for", None)
+        fallback_id = await resolver(None) if resolver is not None else None
+        if not fallback_id:
+            return None
+        found = await self.llm_config.resolve(fallback_id, None)
+        if found is None:
+            return None
+        return {
+            "model": found["model_id"],
+            "api_key": found["api_key"] or None,
+            "api_base": found["api_base"] or None,
+            "context_window": found["context_window"],
+        }
+
+    async def _resolve_route(
+        self, preferred: str | None
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        fallback = await self._resolve_fallback()
+        if preferred and self.llm_config is not None:
+            found = await self.llm_config.resolve(preferred, self.owner_id)
+            if found is None and fallback is not None:
+                return fallback, None
+        return await self._resolve_model(preferred), fallback
+
     def _budget(self, max_seconds: float) -> float:
         """Never outlive the enclosing turn's deadline, if there is one — a
         delegated specialist runs inside the caller's turn."""
@@ -521,7 +548,7 @@ class SpecialistRunner:
         resume_messages: list[dict] | None = None,
     ) -> SpecialistOutcome:
         max_iterations = max_iterations or self.llm_settings.max_iterations
-        model = await self._resolve_model(getattr(bot, "model", None))
+        model, fallback = await self._resolve_route(getattr(bot, "model", None))
         budget = self._budget(max_seconds)
         tools = self.build_tools(bot.tool_allowlist, extra_tools, bot=bot)
         if self.connectors is not None and self.owner_id:
@@ -576,6 +603,10 @@ class SpecialistRunner:
             api_key=model["api_key"],
             api_base=model["api_base"],
             context_window=model["context_window"],
+            fallback_model=fallback["model"] if fallback else None,
+            fallback_api_key=fallback["api_key"] if fallback else None,
+            fallback_api_base=fallback["api_base"] if fallback else None,
+            fallback_context_window=fallback["context_window"] if fallback else None,
         )
         usage = outcome.usage or {}
         return SpecialistOutcome(

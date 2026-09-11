@@ -12,6 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -64,6 +65,8 @@ class SubagentManager:
         max_tokens: int = 4096,
         max_concurrent: int = 4,
         max_turn_seconds: float = 600,
+        owner_id: str | None = None,
+        llm_config: Any = None,
     ):
         self.provider = provider
         self.sandbox = sandbox
@@ -72,7 +75,40 @@ class SubagentManager:
         self.max_iterations = max_iterations
         self.max_tokens = max_tokens
         self.max_turn_seconds = max_turn_seconds
+        self.owner_id = owner_id
+        self.llm_config = llm_config
         self._sem = asyncio.Semaphore(max_concurrent)
+
+    async def _model_route(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        primary = {"model": self.model, "api_key": None, "api_base": None, "context_window": None}
+        if self.llm_config is None:
+            return primary, None
+
+        found = await self.llm_config.resolve(self.model, self.owner_id) if self.model else None
+        fallback = None
+        resolver = getattr(self.llm_config, "fallback_model_for", None)
+        fallback_id = await resolver(None) if resolver is not None else None
+        if fallback_id:
+            resolved = await self.llm_config.resolve(fallback_id, None)
+            if resolved is not None:
+                fallback = {
+                    "model": resolved["model_id"],
+                    "api_key": resolved["api_key"] or None,
+                    "api_base": resolved["api_base"] or None,
+                    "context_window": resolved["context_window"],
+                }
+
+        if found is None:
+            default_id = await self.llm_config.default_model_for(None)
+            found = await self.llm_config.resolve(default_id, None) if default_id else None
+        if found is not None:
+            primary = {
+                "model": found["model_id"],
+                "api_key": found["api_key"] or None,
+                "api_base": found["api_base"] or None,
+                "context_window": found["context_window"],
+            }
+        return primary, fallback
 
     def _build_tools(self) -> ToolRegistry:
         tools = ToolRegistry()
@@ -119,10 +155,11 @@ class SubagentManager:
                 if left <= 0:
                     return SubagentRun(_OUT_OF_TIME, ok=False)
                 budget = max(min(budget, left), _MIN_RUN_SECONDS)
+            primary, fallback = await self._model_route()
             loop = AgentLoop(
                 provider=self.provider,
                 tools=self._build_tools(),
-                model=self.model,
+                model=primary["model"],
                 max_iterations=self.max_iterations,
                 max_tokens=self.max_tokens,
                 max_turn_seconds=budget,
@@ -134,7 +171,19 @@ class SubagentManager:
             ]
             turn_id = f"sub-{uuid.uuid4().hex[:8]}"
             try:
-                outcome = await loop.run_turn(turn_id, messages, lambda _ev: None)
+                outcome = await loop.run_turn(
+                    turn_id,
+                    messages,
+                    lambda _ev: None,
+                    model=primary["model"],
+                    api_key=primary["api_key"],
+                    api_base=primary["api_base"],
+                    context_window=primary["context_window"],
+                    fallback_model=fallback["model"] if fallback else None,
+                    fallback_api_key=fallback["api_key"] if fallback else None,
+                    fallback_api_base=fallback["api_base"] if fallback else None,
+                    fallback_context_window=fallback["context_window"] if fallback else None,
+                )
             except ProviderError as exc:
                 logger.warning("Subagent failed: {}", exc)
                 return SubagentRun(f"Subagent error: {exc}", ok=False)

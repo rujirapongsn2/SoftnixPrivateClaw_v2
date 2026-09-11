@@ -3106,6 +3106,12 @@ class LLMConfigStore:
                 row.api_base = fields["api_base"]
             if "enabled" in fields and fields["enabled"] is not None:
                 row.enabled = fields["enabled"]
+                if not row.enabled:
+                    await db.execute(
+                        LLMModel.__table__.update()
+                        .where(LLMModel.provider_id == provider_id)
+                        .values(is_fallback=False)
+                    )
             if "model_prefix" in fields and fields["model_prefix"] is not None:
                 row.model_prefix = fields["model_prefix"]
             # Only overwrite the key when a non-empty value is supplied.
@@ -3215,7 +3221,8 @@ class LLMConfigStore:
                 await db.execute(
                     LLMModel.__table__.update()
                     .where(
-                        LLMModel.provider_id.in_(select(LLMProvider.id).where(LLMProvider.owner_id.is_(None)))
+                        LLMModel.provider_id.in_(select(LLMProvider.id).where(LLMProvider.owner_id.is_(None))),
+                        LLMModel.id != row.id,
                     )
                     .values(is_default=False)
                 )
@@ -3230,7 +3237,8 @@ class LLMConfigStore:
                         .where(
                             LLMModel.provider_id.in_(
                                 select(LLMProvider.id).where(LLMProvider.owner_id.is_(None))
-                            )
+                            ),
+                            LLMModel.id != row.id,
                         )
                         .values(is_fallback=False)
                     )
