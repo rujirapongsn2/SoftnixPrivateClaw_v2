@@ -50,7 +50,7 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
     dialog.current?.querySelector<HTMLInputElement>("#bot-name")?.focus();
     let cancelled = false;
     api.listSkills().then(items => {
-      if (!cancelled) setSkills(items.filter(item => item.enabled));
+      if (!cancelled) setSkills(items.filter(item => item.enabled && (!item.read_only || item.subscription_enabled)));
     }).catch(() => {
       if (!cancelled) {
         setSkillsLoadFailed(true);

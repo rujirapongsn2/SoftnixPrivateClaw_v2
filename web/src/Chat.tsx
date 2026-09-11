@@ -1075,7 +1075,9 @@ export function Chat({
   // connect during a chat turn, so this surfaces it without a manual reload.
   useEffect(() => {
     if (running) return;
-    api.listSkills().then((s) => setSkills(s.filter((x) => x.enabled))).catch(() => setSkills([]));
+    api.listSkills()
+      .then((s) => setSkills(s.filter((x) => x.enabled && (!x.read_only || x.subscription_enabled))))
+      .catch(() => setSkills([]));
     api
       .listConnectors()
       .then((c) => setConnectors(c.filter((x) => x.enabled && x.runtime.status === "connected")))
