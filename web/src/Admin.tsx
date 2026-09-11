@@ -18,7 +18,6 @@ import { useToast } from "@astryxdesign/core/Toast";
 import {
   Asterisk,
   Ban,
-  Brain,
   ChevronDown,
   ChevronRight,
   Cloud,
@@ -344,17 +343,6 @@ function StackedBarChart({ buckets, series }: { buckets: string[]; series: Token
 
 // ---------------------------------------------------------------- Overview
 
-const STAT_CARDS: { key: string; labelKey: string; icon: IconType }[] = [
-  { key: "users", labelKey: "admin.overview.stat.users", icon: Users },
-  { key: "active_users", labelKey: "admin.overview.stat.activeUsers", icon: Users },
-  { key: "sessions", labelKey: "admin.overview.stat.sessions", icon: MessageSquare },
-  { key: "messages", labelKey: "admin.overview.stat.messages", icon: MessageSquare },
-  { key: "turns", labelKey: "admin.overview.stat.turns", icon: Cpu },
-  { key: "prompt_tokens", labelKey: "admin.overview.stat.promptTokens", icon: Cpu },
-  { key: "consolidations", labelKey: "admin.overview.stat.consolidations", icon: Sparkles },
-  { key: "memory_users", labelKey: "admin.overview.stat.memoryUsers", icon: Brain },
-];
-
 // Overview groups its metrics into tabs (Summary / Activity / Models / Safety)
 // so the page stays scannable as more data is added. Everything comes from one
 // adminOverview() fetch, so switching tabs is an instant client-side view swap.
@@ -409,50 +397,118 @@ function OverviewPanel() {
 function OverviewSummary({ data }: { data: AdminOverview }) {
   const t = useT();
   const s = data.stats;
+  const currentDays = data.activity_by_day.slice(-7);
+  const previousDays = data.activity_by_day.slice(-14, -7);
+  const currentMessages = currentDays.reduce((sum, point) => sum + point.count, 0);
+  const previousMessages = previousDays.reduce((sum, point) => sum + point.count, 0);
+  const trend = previousMessages > 0
+    ? Math.round(((currentMessages - previousMessages) / previousMessages) * 100)
+    : 0;
+  const trendState = previousMessages === 0
+    ? (currentMessages > 0 ? "new" : "neutral")
+    : trend > 0 ? "positive" : trend < 0 ? "negative" : "neutral";
+  const trendLabel = trendState === "new"
+    ? t("admin.overview.summary.newActivity")
+    : trendState === "neutral" && previousMessages === 0
+      ? t("admin.overview.summary.noChange")
+      : t("admin.overview.summary.change", { percent: Math.abs(trend).toLocaleString() });
+  const topModels = [...data.usage_by_model]
+    .sort((a, b) => b.turns - a.turns)
+    .slice(0, 5);
+  const maxModelTurns = Math.max(1, ...topModels.map((model) => model.turns));
+  const maxHourlyActivity = Math.max(1, ...data.activity_by_hour.map((point) => point.count));
+  const summaryMetrics = [
+    { label: t("admin.overview.summary.totalUsers"), value: Number(s.users ?? 0) },
+    { label: t("admin.overview.summary.activeUsers"), value: Number(s.active_users ?? 0) },
+    { label: t("admin.overview.summary.totalSessions"), value: Number(s.sessions ?? 0) },
+    { label: t("admin.overview.summary.aiTurns"), value: Number(s.turns ?? 0) },
+  ];
+
   return (
-    <>
-      <div className="claw-stat-grid">
-        {STAT_CARDS.map((c) => (
-          <Card key={c.key} padding={2} variant="muted">
-            <div className="claw-stat">
-              <Icon icon={c.icon} size="sm" color="secondary" />
-              <Text type="display-3">{Number(s[c.key] ?? 0).toLocaleString()}</Text>
-              <Text size="sm" color="secondary">
-                {t(c.labelKey)}
-              </Text>
-            </div>
-          </Card>
-        ))}
+    <Card padding={3} className="claw-summary-dashboard">
+      <div className="claw-summary-heading">
+        <div>
+          <Text weight="semibold">{t("admin.overview.summary.title")}</Text>
+          <Text size="sm" color="secondary" as="p">{t("admin.overview.summary.subtitle")}</Text>
+        </div>
+        <Badge variant="neutral" label={t("admin.overview.summary.last7Days")} />
       </div>
 
-      <div className="claw-row">
-        <Badge
-          variant="neutral"
-          icon={<Icon icon={Shield} size="xsm" />}
-          label={t("admin.overview.badge.admins", { count: String(s.admins ?? 0) })}
-        />
-        <Badge
-          variant="neutral"
-          icon={<Icon icon={Ban} size="xsm" />}
-          label={t("admin.overview.badge.suspended", { count: String(s.suspended ?? 0) })}
-        />
-        <Badge
-          variant={s.policy_enforcing ? "success" : "neutral"}
-          icon={<Icon icon={ShieldCheck} size="xsm" />}
-          label={s.policy_enforcing ? t("admin.overview.badge.enforcing") : t("admin.overview.badge.monitorOnly")}
-        />
-        <Badge
-          variant={s.browser_enabled ? "success" : "neutral"}
-          icon={<Icon icon={Globe} size="xsm" />}
-          label={s.browser_enabled ? t("admin.overview.badge.browserOn") : t("admin.overview.badge.browserOff")}
-        />
-        <Badge
-          variant={s.telegram_enabled ? "success" : "neutral"}
-          icon={<Icon icon={Send} size="xsm" />}
-          label={s.telegram_enabled ? t("admin.overview.badge.telegramOn") : t("admin.overview.badge.telegramOff")}
-        />
+      <div className="claw-summary-usage-grid">
+        <section className="claw-summary-primary" aria-labelledby="summary-messages-title">
+          <div className="claw-summary-kicker" id="summary-messages-title">
+            {t("admin.overview.summary.messages")}
+          </div>
+          <div className="claw-summary-value">{currentMessages.toLocaleString()}</div>
+          <div className={`claw-summary-trend is-${trendState}`}>
+            <span aria-hidden="true">{trendState === "positive" || trendState === "new" ? "↑" : trendState === "negative" ? "↓" : "→"}</span>
+            {trendLabel}
+          </div>
+          <div className="claw-summary-chart-title">{t("admin.overview.summary.dailyMessages")}</div>
+          <BarChart data={currentDays} />
+        </section>
+
+        <section className="claw-summary-models" aria-labelledby="summary-models-title">
+          <div className="claw-summary-section-head">
+            <Text weight="semibold" id="summary-models-title">{t("admin.overview.summary.topModels")}</Text>
+            <Text size="sm" color="secondary">{t("admin.overview.summary.byRequests")}</Text>
+          </div>
+          {topModels.length === 0 ? (
+            <Text size="sm" color="secondary">{t("admin.overview.summary.noModelActivity")}</Text>
+          ) : (
+            <div className="claw-summary-model-list">
+              {topModels.map((model, index) => (
+                <div className="claw-summary-model" key={model.model}>
+                  <div className="claw-summary-model-head">
+                    <span className="claw-summary-model-rank">{index + 1}</span>
+                    <span className="claw-summary-model-name" title={model.model}>{model.model}</span>
+                    <span>{model.turns.toLocaleString()}</span>
+                  </div>
+                  <div className="claw-summary-model-track" aria-hidden="true">
+                    <span style={{ width: `${(model.turns / maxModelTurns) * 100}%`, background: stackColor(index, model.model) }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       </div>
-    </>
+
+      <section className="claw-summary-activity" aria-labelledby="summary-activity-title">
+        <div className="claw-summary-section-head">
+          <Text weight="semibold" id="summary-activity-title">{t("admin.overview.summary.activity")}</Text>
+          <Text size="sm" color="secondary">{t("admin.overview.summary.byHour")}</Text>
+        </div>
+        <div className="claw-summary-metrics">
+          {summaryMetrics.map((metric) => (
+            <div key={metric.label}>
+              <Text size="sm" color="secondary">{metric.label}</Text>
+              <strong>{metric.value.toLocaleString()}</strong>
+            </div>
+          ))}
+        </div>
+        <div className="claw-summary-heatmap" role="img" aria-label={t("admin.overview.summary.byHour")}>
+          {data.activity_by_hour.map((point) => (
+            <span
+              key={point.label}
+              title={`${point.label}: ${point.count.toLocaleString()}`}
+              style={{ opacity: point.count === 0 ? 0.12 : 0.25 + (point.count / maxHourlyActivity) * 0.75 }}
+            />
+          ))}
+        </div>
+        <div className="claw-summary-hour-axis" aria-hidden="true">
+          <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span>
+        </div>
+      </section>
+
+      <div className="claw-summary-status">
+        <Badge variant="neutral" icon={<Icon icon={Shield} size="xsm" />} label={t("admin.overview.badge.admins", { count: String(s.admins ?? 0) })} />
+        <Badge variant={Number(s.suspended ?? 0) > 0 ? "warning" : "neutral"} icon={<Icon icon={Ban} size="xsm" />} label={t("admin.overview.badge.suspended", { count: String(s.suspended ?? 0) })} />
+        <Badge variant={s.policy_enforcing ? "success" : "neutral"} icon={<Icon icon={ShieldCheck} size="xsm" />} label={s.policy_enforcing ? t("admin.overview.badge.enforcing") : t("admin.overview.badge.monitorOnly")} />
+        <Badge variant={s.browser_enabled ? "success" : "neutral"} icon={<Icon icon={Globe} size="xsm" />} label={s.browser_enabled ? t("admin.overview.badge.browserOn") : t("admin.overview.badge.browserOff")} />
+        <Badge variant={s.telegram_enabled ? "success" : "neutral"} icon={<Icon icon={Send} size="xsm" />} label={s.telegram_enabled ? t("admin.overview.badge.telegramOn") : t("admin.overview.badge.telegramOff")} />
+      </div>
+    </Card>
   );
 }
 

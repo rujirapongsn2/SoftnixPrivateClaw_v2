@@ -1722,6 +1722,153 @@ html[data-chat-bg="grid"] .claw-chat {
   flex-direction: column;
   gap: 2px;
 }
+
+/* Overview summary: one dense operational surface with the same scan pattern
+   as an account-usage dashboard, using product activity instead of spend. */
+.claw-summary-dashboard {
+  gap: 0;
+  overflow: hidden;
+}
+.claw-summary-heading,
+.claw-summary-section-head,
+.claw-summary-model-head,
+.claw-summary-status {
+  display: flex;
+  align-items: center;
+}
+.claw-summary-heading {
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 18px;
+}
+.claw-summary-heading > div:first-child { display: grid; gap: 3px; }
+.claw-summary-usage-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(250px, .9fr);
+  border-top: 1px solid var(--color-border-subtle, #ebe9e4);
+  border-bottom: 1px solid var(--color-border-subtle, #ebe9e4);
+}
+.claw-summary-primary { padding: 22px 24px 22px 0; }
+.claw-summary-models {
+  min-width: 0;
+  padding: 22px 0 22px 24px;
+  border-left: 1px solid var(--color-border-subtle, #ebe9e4);
+}
+.claw-summary-kicker,
+.claw-summary-chart-title {
+  color: var(--color-text-secondary, #6b6760);
+  font-size: 12px;
+  font-weight: 600;
+}
+.claw-summary-value {
+  margin-top: 4px;
+  font-size: clamp(32px, 5vw, 46px);
+  font-weight: 700;
+  letter-spacing: -.04em;
+  line-height: 1;
+}
+.claw-summary-trend {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  min-height: 20px;
+  margin-top: 7px;
+  color: var(--color-success, #198754);
+  font-size: 12px;
+}
+.claw-summary-trend.is-negative { color: var(--color-error, #c0392b); }
+.claw-summary-trend.is-neutral { color: var(--color-text-secondary, #6b6760); }
+.claw-summary-chart-title { margin-top: 18px; }
+.claw-summary-primary .claw-chart-svg { height: 150px; }
+.claw-summary-section-head {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.claw-summary-model-list { display: grid; gap: 15px; }
+.claw-summary-model { display: grid; gap: 6px; }
+.claw-summary-model-head { gap: 8px; font-size: 12px; }
+.claw-summary-model-rank {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border-radius: 6px;
+  background: var(--color-surface-2, #f3f1ea);
+  color: var(--color-text-secondary, #6b6760);
+  font-size: 11px;
+  font-weight: 600;
+}
+.claw-summary-model-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.claw-summary-model-track {
+  position: relative;
+  height: 4px;
+  margin-left: 30px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-surface-2, #f3f1ea);
+}
+.claw-summary-model-track span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+}
+.claw-summary-activity { padding: 22px 0 18px; }
+.claw-summary-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.claw-summary-metrics > div { display: grid; gap: 2px; }
+.claw-summary-metrics strong { font-size: 18px; font-weight: 600; }
+.claw-summary-heatmap {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(7px, 1fr));
+  gap: 4px;
+}
+.claw-summary-heatmap span {
+  aspect-ratio: 1;
+  max-height: 24px;
+  border-radius: 4px;
+  background: var(--color-primary, #4b6bfb);
+}
+.claw-summary-hour-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 7px;
+  color: var(--color-text-secondary, #6b6760);
+  font-size: 10px;
+}
+.claw-summary-status {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border-subtle, #ebe9e4);
+}
+@media (max-width: 800px) {
+  .claw-summary-usage-grid { grid-template-columns: 1fr; }
+  .claw-summary-primary { padding-right: 0; }
+  .claw-summary-models {
+    padding: 20px 0;
+    border-top: 1px solid var(--color-border-subtle, #ebe9e4);
+    border-left: 0;
+  }
+}
+@media (max-width: 560px) {
+  .claw-summary-heading { align-items: flex-start; }
+  .claw-summary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .claw-summary-heatmap { gap: 2px; }
+  .claw-summary-heatmap span { border-radius: 2px; }
+}
 .claw-chart {
   display: flex;
   flex-direction: column;
