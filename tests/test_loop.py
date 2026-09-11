@@ -1,6 +1,8 @@
 import asyncio
 from typing import Any
 
+import pytest
+
 from claw.core.events import AgentEvent, TextDeltaEvent, ToolFinished, ToolStarted
 from claw.core.loop import (
     _DEFAULT_COMPACTION_CEILING_CHARS,
@@ -14,7 +16,7 @@ from claw.core.loop import (
     _prompt_size,
     visible_artifacts,
 )
-from claw.providers.base import ChatResult, TextDelta, ToolCall
+from claw.providers.base import ChatResult, ProviderError, TextDelta, ToolCall
 from claw.tools.base import Tool
 from claw.tools.registry import ToolRegistry
 from tests.conftest import FakeProvider, text_turn
@@ -48,6 +50,73 @@ async def test_plain_text_turn_streams_and_completes():
     assert outcome.final_content == "hello there"
     assert outcome.new_messages == [{"role": "assistant", "content": "hello there"}]
     assert any(isinstance(e, TextDeltaEvent) for e in events)
+
+
+async def test_provider_failure_before_stream_switches_to_configured_fallback():
+    class FailingPrimary:
+        def __init__(self):
+            self.calls = []
+
+        async def stream_chat(self, messages, **kwargs):
+            self.calls.append((kwargs["model"], kwargs.get("api_key"), kwargs.get("api_base")))
+            if kwargs["model"] == "primary/model":
+                raise ProviderError("429 rate limit")
+            yield TextDelta(text="fallback answer")
+            yield ChatResult(content="fallback answer")
+
+        def count_tokens(self, messages, model=None):
+            return 1
+
+    provider = FailingPrimary()
+    switched = []
+    loop = AgentLoop(provider, ToolRegistry())
+    outcome = await loop.run_turn(
+        "t1",
+        [{"role": "user", "content": "hi"}],
+        lambda _event: None,
+        model="primary/model",
+        api_key="primary-key",
+        api_base="https://primary.example/v1",
+        fallback_model="backup/model",
+        fallback_api_key="backup-key",
+        fallback_api_base="https://backup.example/v1",
+        on_fallback=switched.append,
+    )
+
+    assert outcome.final_content == "fallback answer"
+    assert provider.calls == [
+        ("primary/model", "primary-key", "https://primary.example/v1"),
+        ("backup/model", "backup-key", "https://backup.example/v1"),
+    ]
+    assert switched == ["backup/model"]
+
+
+async def test_provider_failure_after_stream_started_does_not_retry_or_duplicate_output():
+    class PartialFailure:
+        def __init__(self):
+            self.models = []
+
+        async def stream_chat(self, messages, **kwargs):
+            self.models.append(kwargs["model"])
+            yield TextDelta(text="already visible")
+            raise ProviderError("connection reset")
+
+        def count_tokens(self, messages, model=None):
+            return 1
+
+    provider = PartialFailure()
+    loop = AgentLoop(provider, ToolRegistry())
+
+    with pytest.raises(ProviderError, match="connection reset"):
+        await loop.run_turn(
+            "t1",
+            [{"role": "user", "content": "hi"}],
+            lambda _event: None,
+            model="primary/model",
+            fallback_model="backup/model",
+        )
+
+    assert provider.models == ["primary/model"]
 
 
 async def test_tool_call_turn_executes_and_iterates():

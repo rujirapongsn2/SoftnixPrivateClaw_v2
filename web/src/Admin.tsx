@@ -1232,6 +1232,17 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
   const [providers, setProviders] = useState<LLMProviderCfg[]>([]);
   const [adding, setAdding] = useState(false);
   const { error, guard } = useAsyncError();
+  const toast = useToast();
+
+  const chatModels = providers.flatMap((provider) =>
+    provider.models.map((model) => ({ provider, model })).filter(({ model }) => model.kind === "chat"),
+  );
+  const defaultModel = chatModels.find(({ model }) => model.is_default);
+  const fallbackModel = chatModels.find(({ model }) => model.is_fallback);
+  const fallbackCandidates = chatModels.filter(
+    ({ provider, model }) =>
+      model.is_fallback || (provider.enabled && model.enabled && !model.is_default),
+  );
 
   const reload = useCallback(() => llmApi.list().then((r) => setProviders(r.providers)), [llmApi]);
   useEffect(() => {
@@ -1254,6 +1265,59 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
         )}
       </div>
       {error && <ErrorText>{error}</ErrorText>}
+
+      {scope === "admin" && providers.length > 0 && (
+        <Card padding={2} variant="muted" className="claw-model-fallback-card">
+          <div className="claw-model-fallback-heading">
+            <div className="claw-row">
+              <Icon icon={Router} size="md" color="secondary" />
+              <div>
+                <Text weight="semibold">{t("admin.providers.fallbackTitle")}</Text>
+                <Text size="sm" color="secondary" as="p">
+                  {t("admin.providers.fallbackDescription")}
+                </Text>
+              </div>
+            </div>
+            <label className="claw-model-fallback-picker">
+              <Text size="sm" weight="semibold">{t("admin.providers.fallbackModel")}</Text>
+              <select
+                className="claw-token-filter"
+                value={fallbackModel?.model.id ?? ""}
+                aria-label={t("admin.providers.fallbackModel")}
+                onChange={(event) => {
+                  const nextId = event.target.value;
+                  void guard(async () => {
+                    if (!nextId && fallbackModel) {
+                      await llmApi.updateModel(fallbackModel.model.id, { is_fallback: false });
+                    } else if (nextId) {
+                      await llmApi.updateModel(nextId, { is_fallback: true });
+                    }
+                    toast({ body: t("admin.providers.fallbackSaved"), type: "info", autoHideDuration: 2500 });
+                    await reload();
+                  });
+                }}
+              >
+                <option value="">{t("admin.providers.fallbackDisabled")}</option>
+                {fallbackCandidates.map(({ provider, model }) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label || model.model_id} · {provider.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {defaultModel && fallbackModel && (
+            <div className="claw-model-fallback-route" aria-label={t("admin.providers.fallbackRoute")}>
+              <Badge variant="purple" label={`${t("admin.providers.defaultBadge")}: ${defaultModel.model.label}`} />
+              <span aria-hidden="true">→</span>
+              <Badge variant="neutral" label={`${t("admin.providers.fallbackBadge")}: ${fallbackModel.model.label}`} />
+            </div>
+          )}
+          {fallbackCandidates.length === 0 && !fallbackModel && (
+            <Text size="sm" color="secondary">{t("admin.providers.fallbackNoCandidates")}</Text>
+          )}
+        </Card>
+      )}
 
       {adding && (
         <AddProviderForm llmApi={llmApi} guard={guard} reload={reload} onClose={() => setAdding(false)} />
@@ -1815,6 +1879,9 @@ function ModelRow({
         <Text className="claw-model-label">{model.label || stripKnownPrefix(modelPrefix, model.model_id)}</Text>
         {model.is_default && (
           <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label={t("admin.providers.defaultBadge")} />
+        )}
+        {model.is_fallback && (
+          <Badge variant="neutral" icon={<Icon icon={Router} size="xsm" />} label={t("admin.providers.fallbackBadge")} />
         )}
       </div>
       <div className="claw-model-cost-cell">

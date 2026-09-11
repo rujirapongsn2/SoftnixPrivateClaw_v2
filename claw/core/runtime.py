@@ -709,12 +709,17 @@ class AgentRuntime:
                 # The plan's chat cost ceiling gates which admin-global model this
                 # turn may use; resolve() returns None for a disallowed one, so a
                 # user can't reach a pricier model than their tier by passing its
-                # id. The fallback picks the best model the plan DOES allow.
+                # id. Default resolution picks the best model the plan allows.
                 plan_chat_cost = plan["max_chat_cost"] if plan else None
                 effective_model: str | None = None
                 model_key: str | None = None
                 model_base: str | None = None
                 model_window: int | None = None
+                fallback_model: str | None = None
+                fallback_key: str | None = None
+                fallback_base: str | None = None
+                fallback_window: int | None = None
+                requested_unavailable = False
                 if self.llm_config is not None:
                     requested = model or (session.model if session else None)
                     if requested:
@@ -724,22 +729,24 @@ class AgentRuntime:
                             model_key = resolved["api_key"] or None
                             model_base = resolved["api_base"] or None
                             model_window = resolved["context_window"]
+                        else:
+                            requested_unavailable = True
                     if effective_model is None:
                         effective_model = await self.llm_config.default_model_for(plan_chat_cost)
                         if effective_model is not None:
-                            # Second lookup purely for the admin's context-window
-                            # override; credentials stay on the env default here,
-                            # as they have always been on this fallback path.
                             # Scoped to admin-global rows (user_id=None) to match
                             # default_model_for, which picked this model from that
                             # scope: resolve() otherwise prefers the caller's own
                             # row on a model_id tie, so a user with a same-named
                             # BYOK model would set the window for a turn running on
                             # the admin's credentials.
-                            fallback = await self.llm_config.resolve(
+                            default_resolved = await self.llm_config.resolve(
                                 effective_model, None, max_cost=plan_chat_cost
                             )
-                            model_window = fallback["context_window"] if fallback else None
+                            if default_resolved:
+                                model_key = default_resolved["api_key"] or None
+                                model_base = default_resolved["api_base"] or None
+                                model_window = default_resolved["context_window"]
                     # A plan cost ceiling is in effect but no admin-global model
                     # satisfies it. Distinguish two cases before rejecting:
                     #   1. Admin-global models DO exist but the plan allows none of
@@ -771,6 +778,27 @@ class AgentRuntime:
                             msg = t("error.no_model_for_plan", locale)
                             self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
                             return msg
+                    fallback_resolver = getattr(self.llm_config, "fallback_model_for", None)
+                    fallback_model = (
+                        await fallback_resolver(plan_chat_cost) if fallback_resolver is not None else None
+                    )
+                    if fallback_model is not None:
+                        fallback_resolved = await self.llm_config.resolve(
+                            fallback_model, None, max_cost=plan_chat_cost
+                        )
+                        if fallback_resolved is not None:
+                            fallback_key = fallback_resolved["api_key"] or None
+                            fallback_base = fallback_resolved["api_base"] or None
+                            fallback_window = fallback_resolved["context_window"]
+                            # A sticky/user-selected model that was disabled or
+                            # removed should go straight to the configured
+                            # backstop, rather than silently changing to default.
+                            if requested_unavailable:
+                                effective_model = fallback_model
+                                model_key = fallback_key
+                                model_base = fallback_base
+                                model_window = fallback_window
+                                fallback_model = None
                     # About to fall through to the operator's env-configured default
                     # (effective_model is None, no DB model available). If that env
                     # default has no usable credentials either (no api_key and no
@@ -979,6 +1007,12 @@ class AgentRuntime:
                     time.monotonic() + budget if budget > 0 else None
                 )
                 try:
+                    model_used = effective_model or self.settings.llm.model
+
+                    def _on_fallback(model_id: str) -> None:
+                        nonlocal model_used
+                        model_used = model_id
+
                     outcome = await agent.loop.run_turn(
                         turn_id,
                         prompt_messages,
@@ -987,6 +1021,11 @@ class AgentRuntime:
                         api_key=model_key,
                         api_base=model_base,
                         context_window=model_window,
+                        fallback_model=fallback_model,
+                        fallback_api_key=fallback_key,
+                        fallback_api_base=fallback_base,
+                        fallback_context_window=fallback_window,
+                        on_fallback=_on_fallback,
                         permission_mode=permission_mode,
                         confirm=_confirm,
                     )
@@ -1202,7 +1241,7 @@ class AgentRuntime:
                 self.usage.record(
                     user_id,
                     session_id,
-                    effective_model or self.settings.llm.model,
+                    model_used,
                     outcome.usage,
                     metrics={
                         "iterations": outcome.iterations,

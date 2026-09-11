@@ -523,6 +523,7 @@ export interface LLMModelCfg {
   label: string;
   enabled: boolean;
   is_default: boolean;
+  is_fallback: boolean;
   cost: ModelCost;
   description: string;
   // "chat" = agent chat picker; "image" = text-to-image only.
@@ -700,6 +701,7 @@ export interface LlmModelPatch {
   label?: string;
   enabled?: boolean;
   is_default?: boolean;
+  is_fallback?: boolean;
   cost?: ModelCost;
   description?: string;
   kind?: ModelKind;

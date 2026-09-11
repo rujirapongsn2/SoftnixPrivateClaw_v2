@@ -2694,6 +2694,34 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-info-box.is-warning {
   background: #fdf3e2;
 }
+.claw-model-fallback-card {
+  gap: 12px;
+}
+.claw-model-fallback-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+  gap: 20px;
+  align-items: end;
+}
+.claw-model-fallback-picker {
+  display: grid;
+  gap: 6px;
+}
+.claw-model-fallback-picker select {
+  width: 100%;
+}
+.claw-model-fallback-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+@media (max-width: 640px) {
+  .claw-model-fallback-heading {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+}
 .claw-row-2col {
   display: grid;
   grid-template-columns: 1fr 1fr;

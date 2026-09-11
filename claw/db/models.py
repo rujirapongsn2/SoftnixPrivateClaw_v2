@@ -457,7 +457,16 @@ class LLMModel(Base):
     """A model a provider exposes; enabled ones appear in the chat model picker."""
 
     __tablename__ = "llm_models"
-    __table_args__ = (Index("ix_llm_models_provider", "provider_id"),)
+    __table_args__ = (
+        Index("ix_llm_models_provider", "provider_id"),
+        Index(
+            "uq_llm_models_single_fallback",
+            "is_fallback",
+            unique=True,
+            postgresql_where=text("is_fallback = true"),
+            sqlite_where=text("is_fallback = 1"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     provider_id: Mapped[str] = mapped_column(ForeignKey("llm_providers.id"), index=True)
@@ -473,6 +482,10 @@ class LLMModel(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # One admin-global chat model may be the automatic runtime fallback. It is
+    # deliberately separate from is_default: the default is the normal route,
+    # while this model is called only after an upstream failure.
+    is_fallback: Mapped[bool] = mapped_column(Boolean, default=False)
     # Input-token window, for when the admin knows it and LiteLLM's bundled model
     # table does not (private gateways, brand-new checkpoints). NULL = look it
     # up; the agent loop sizes its prompt-compaction ceiling from whichever wins.
