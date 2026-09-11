@@ -357,6 +357,21 @@ class MessageStore:
 
 
 class BotStore:
+    DEFAULT_COS_NAME = "Default"
+    DEFAULT_COS_CHARTER = (
+        "คุณคือ Default Chief of Staff หัวหน้าทีม AI อัจฉริยะ "
+        "มีหน้าที่รับโจทย์จากผู้ใช้ วิเคราะห์ วางแผน แตกงาน มอบหมายงานให้บอทผู้เชี่ยวชาญ "
+        "และติดตามผลมารายงานผู้ใช้อย่างกระชับและชัดเจน"
+    )
+    DEFAULT_COS_AVATAR = {"color": "#0ea5e9", "emoji": "👑", "initial": "D"}
+    LEGACY_COS_NAME = "บุ้ย"
+    LEGACY_COS_CHARTER = (
+        "คุณคือ 'บุ้ย' Chief of Staff หัวหน้าทีม AI อัจฉริยะ "
+        "มีหน้าที่รับโจทย์จากผู้ใช้ วิเคราะห์ วางแผน แตกงาน มอบหมายงานให้บอทผู้เชี่ยวชาญ "
+        "และติดตามผลมารายงานผู้ใช้อย่างกระชับและชัดเจน"
+    )
+    LEGACY_COS_AVATAR = {"color": "#0ea5e9", "emoji": "👑", "initial": "บ"}
+
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
         self.factory = factory
         # A roster must be checked and written as one critical section.  The
@@ -526,19 +541,35 @@ class BotStore:
                 )
             )
             if cos is not None:
+                # Upgrade only the system-created legacy default. A Chief of
+                # Staff renamed by its owner keeps that chosen name. Check for
+                # an existing active "Default" specialist first because bot
+                # names are unique within an owner's active roster.
+                if cos.name == self.LEGACY_COS_NAME and cos.created_by == "system":
+                    conflict = await db.scalar(
+                        select(Bot.id).where(
+                            Bot.owner_id == owner_id,
+                            Bot.name == self.DEFAULT_COS_NAME,
+                            Bot.id != cos.id,
+                            Bot.is_archived.is_(False),
+                        )
+                    )
+                    if conflict is None:
+                        cos.name = self.DEFAULT_COS_NAME
+                        if cos.charter == self.LEGACY_COS_CHARTER:
+                            cos.charter = self.DEFAULT_COS_CHARTER
+                        if cos.avatar == self.LEGACY_COS_AVATAR:
+                            cos.avatar = dict(self.DEFAULT_COS_AVATAR)
+                        await db.commit()
                 return cos
 
             cos = Bot(
                 owner_id=owner_id,
-                name="บุ้ย",
+                name=self.DEFAULT_COS_NAME,
                 role_title="Chief of Staff",
-                charter=(
-                    "คุณคือ 'บุ้ย' Chief of Staff หัวหน้าทีม AI อัจฉริยะ "
-                    "มีหน้าที่รับโจทย์จากผู้ใช้ วิเคราะห์ วางแผน แตกงาน มอบหมายงานให้บอทผู้เชี่ยวชาญ "
-                    "และติดตามผลมารายงานผู้ใช้อย่างกระชับและชัดเจน"
-                ),
+                charter=self.DEFAULT_COS_CHARTER,
                 kind="chief_of_staff",
-                avatar={"color": "#0ea5e9", "emoji": "👑", "initial": "บ"},
+                avatar=dict(self.DEFAULT_COS_AVATAR),
                 created_by="system",
             )
             db.add(cos)

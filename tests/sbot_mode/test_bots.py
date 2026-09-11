@@ -13,10 +13,11 @@ async def test_cos_auto_seeding(stores):
     cos = await bot_store.get_or_create_cos(user.id)
 
     assert cos is not None
-    assert cos.name == "บุ้ย"
+    assert cos.name == "Default"
     assert cos.kind == "chief_of_staff"
     assert cos.role_title == "Chief of Staff"
     assert cos.owner_id == user.id
+    assert cos.avatar["initial"] == "D"
 
     # Calling again returns same instance
     cos_again = await bot_store.get_or_create_cos(user.id)
@@ -54,7 +55,7 @@ async def test_create_and_list_specialist_bots(stores):
 
     bots = await bot_store.list_for_user(user.id)
     bot_names = [b.name for b in bots]
-    assert "บุ้ย" in bot_names
+    assert "Default" in bot_names
     assert "นักวิจัย" in bot_names
     assert "QA Web" in bot_names
 
@@ -69,6 +70,29 @@ async def test_create_and_list_specialist_bots(stores):
     assert "QA Web" not in [b.name for b in active_bots]
     all_bots = await bot_store.list_for_user(user.id, include_archived=True)
     assert "QA Web" in [b.name for b in all_bots]
+
+
+@pytest.mark.asyncio
+async def test_legacy_cos_default_is_upgraded_without_replacing_the_bot(stores):
+    bot_store: BotStore = stores["bots"]
+    user_store: UserStore = stores["users"]
+    user = await user_store.get_or_create_by_email("legacy@sbot.ai", "legacy")
+    legacy = await bot_store.create(
+        owner_id=user.id,
+        name=BotStore.LEGACY_COS_NAME,
+        role_title="Chief of Staff",
+        charter=BotStore.LEGACY_COS_CHARTER,
+        kind="chief_of_staff",
+        avatar=BotStore.LEGACY_COS_AVATAR,
+        created_by="system",
+    )
+
+    upgraded = await bot_store.get_or_create_cos(user.id)
+
+    assert upgraded.id == legacy.id
+    assert upgraded.name == "Default"
+    assert upgraded.charter == BotStore.DEFAULT_COS_CHARTER
+    assert upgraded.avatar == BotStore.DEFAULT_COS_AVATAR
 
 
 @pytest.mark.asyncio
