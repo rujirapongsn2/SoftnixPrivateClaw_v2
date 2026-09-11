@@ -45,6 +45,7 @@ from claw.db.models import (
     Schedule,
     Share,
     Skill,
+    SkillSubscription,
     UsageDaily,
     UsageRecord,
     User,
@@ -479,31 +480,43 @@ class SkillStore:
             return list(rows)
 
     async def available_for_user(self, user_id: str) -> list[Skill]:
-        """Own skills plus enabled shares; group membership is checked on every read."""
+        """Own skills plus readable shares, annotated with recipient opt-ins."""
         async with self.factory() as db:
             viewer = await db.get(User, user_id)
             if viewer is None:
                 return []
             shared_scope = Skill.visibility == "public"
             if viewer.group_id:
-                shared_scope = or_(shared_scope, (Skill.visibility == "group") & (User.group_id == viewer.group_id))
+                shared_scope = or_(shared_scope, (Skill.visibility == "group") & (Skill.shared_group_id == viewer.group_id))
             rows = await db.scalars(
                 select(Skill).join(User, User.id == Skill.user_id).where(
                     or_(Skill.user_id == user_id,
                         shared_scope & Skill.enabled.is_(True) & User.is_active.is_(True))
                 ).order_by(Skill.name, Skill.created_at, Skill.id)
             )
-            return list(rows)
+            skills = list(rows)
+            subscribed_ids = set(
+                (await db.scalars(
+                    select(SkillSubscription.skill_id).where(SkillSubscription.user_id == user_id)
+                )).all()
+            )
+            for skill in skills:
+                # The owner controls source availability; recipients separately
+                # choose whether to include a shared skill in their AI context.
+                skill.subscription_enabled = skill.enabled if skill.user_id == user_id else skill.id in subscribed_ids
+            return skills
 
     async def enabled_for_user(self, user_id: str) -> list[Skill]:
+        # Filter before resolving collisions: a disabled private copy must not
+        # hide an enabled shared skill of the same name.
+        rows = [s for s in await self.available_for_user(user_id) if getattr(s, "subscription_enabled", s.enabled)]
         # A private skill wins a name collision. Shared collisions resolve to
         # the oldest stable ID, identically for discovery and read_skill.
-        rows = await self.available_for_user(user_id)
         rows.sort(key=lambda skill: skill.user_id != user_id)
         chosen = {}
         for skill in rows:
             chosen.setdefault(skill.name, skill)
-        return [skill for skill in chosen.values() if skill.enabled]
+        return list(chosen.values())
 
     async def readable_by_name(self, user_id: str, name: str) -> Skill | None:
         return next((s for s in await self.enabled_for_user(user_id) if s.name == name), None)
@@ -518,6 +531,7 @@ class SkillStore:
             visibility = fields.get("visibility")
             if visibility is not None and visibility not in {"private", "group", "public"}:
                 raise ValueError("invalid skill visibility")
+            owner = None
             if visibility == "group":
                 owner = await db.get(User, user_id)
                 if owner is None or not owner.group_id:
@@ -528,6 +542,12 @@ class SkillStore:
             for key in ("description", "content", "enabled", "visibility"):
                 if key in fields and fields[key] is not None:
                     setattr(skill, key, fields[key])
+            if visibility == "group":
+                # An explicit Group selection captures the group at this time;
+                # ordinary content edits retain the original sharing target.
+                skill.shared_group_id = owner.group_id
+            elif visibility in {"private", "public"}:
+                skill.shared_group_id = None
             # Unlike the fields above, connector_id's presence itself is the
             # signal (None is a valid, meaningful value — "no connector
             # linked" — not "leave unchanged"), so callers must omit the key
@@ -536,6 +556,32 @@ class SkillStore:
                 skill.connector_id = fields["connector_id"]
             await db.commit()
             return skill
+
+    async def set_subscription(self, user_id: str, skill_id: str, enabled: bool) -> bool:
+        """Enable or remove a recipient opt-in after rechecking access."""
+        async with self.factory() as db:
+            viewer = await db.get(User, user_id)
+            if viewer is None:
+                return False
+            shared_scope = Skill.visibility == "public"
+            if viewer.group_id:
+                shared_scope = or_(shared_scope, (Skill.visibility == "group") & (Skill.shared_group_id == viewer.group_id))
+            skill = await db.scalar(
+                select(Skill).join(User, User.id == Skill.user_id).where(
+                    Skill.id == skill_id,
+                    Skill.user_id != user_id,
+                    shared_scope & Skill.enabled.is_(True) & User.is_active.is_(True),
+                )
+            )
+            if skill is None:
+                return False
+            subscription = await db.get(SkillSubscription, {"user_id": user_id, "skill_id": skill_id})
+            if enabled and subscription is None:
+                db.add(SkillSubscription(user_id=user_id, skill_id=skill_id))
+            elif not enabled and subscription is not None:
+                await db.delete(subscription)
+            await db.commit()
+            return True
 
     async def delete(self, user_id: str, skill_id: str) -> bool:
         async with self.factory() as db:
@@ -838,6 +884,14 @@ class UserStore:
                 await db.execute(select(User.id, User.display_name, User.email).where(User.id.in_(ids)))
             ).all()
         return {uid: (name or email or uid) for uid, name, email in rows}
+
+    async def display_names(self, ids: list[str]) -> dict[str, str]:
+        """Safe display labels for user-shared resources; never expose email."""
+        if not ids:
+            return {}
+        async with self.factory() as db:
+            rows = (await db.execute(select(User.id, User.display_name).where(User.id.in_(ids)))).all()
+        return {uid: name for uid, name in rows if name}
 
     async def count(self) -> int:
         async with self.factory() as db:

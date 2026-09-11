@@ -258,9 +258,9 @@ export interface WorkingPlan {
 
 export interface SkillInfo {
   visibility?: "private" | "group" | "public";
-  owner_id?: string;
   owner_name?: string;
   read_only?: boolean;
+  subscription_enabled?: boolean;
   id: string;
   name: string;
   description: string;
@@ -1174,6 +1174,11 @@ export const api = {
     request<SkillInfo>(`/api/skills/${encodeURIComponent(skill.name)}`, {
       method: "PUT",
       body: JSON.stringify(skill),
+    }),
+  setSkillSubscription: (id: string, enabled: boolean) =>
+    request<{ enabled: boolean }>(`/api/skills/${encodeURIComponent(id)}/subscription`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
     }),
   deleteSkill: (id: string) => request(`/api/skills/${id}`, { method: "DELETE" }),
 

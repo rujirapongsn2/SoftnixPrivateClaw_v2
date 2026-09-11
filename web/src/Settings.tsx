@@ -799,6 +799,7 @@ function SkillsPanel() {
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [globalConnectors, setGlobalConnectors] = useState<ConnectorGlobalSummary[]>([]);
   const [editing, setEditing] = useState<Partial<SkillInfo> | null>(null);
+  const [sharing, setSharing] = useState(false);
   const [viewingDetail, setViewingDetail] = useState<SkillInfo | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const { error, guard } = useAsyncError();
@@ -829,6 +830,7 @@ function SkillsPanel() {
 
   if (editing) {
     const readOnly = !!editing.builtin || !!editing.read_only;
+    const sharingNeedsScope = sharing && (editing.visibility ?? "private") === "private";
     return (
       <div className="claw-panel">
         {readOnly && (
@@ -868,6 +870,9 @@ function SkillsPanel() {
             </SegmentedControl>
             {editing.visibility && editing.visibility !== "private" && (
               <Text size="sm" color="secondary" as="p">{t("settings.skills.sharingHint")}</Text>
+            )}
+            {sharingNeedsScope && (
+              <Text size="sm" color="secondary" as="p">{t("settings.skills.chooseShareScope")}</Text>
             )}
           </div>
         )}
@@ -911,20 +916,26 @@ function SkillsPanel() {
         <div className="claw-row">
           {!readOnly && (
             <Button
-              label={t("settings.skills.save")}
+              label={sharing ? t("settings.skills.share") : t("settings.skills.save")}
               icon={<Icon icon="check" size="sm" />}
+              isDisabled={sharingNeedsScope}
               clickAction={() =>
                 guard(async () => {
-                  await api.saveSkill({
+                  const visibility = editing.visibility ?? "private";
+                  const saved = await api.saveSkill({
                     id: editing.id,
-                    visibility: editing.visibility ?? "private",
+                    visibility,
                     name: (editing.name ?? "").trim(),
                     description: editing.description ?? "",
                     content: editing.content ?? "",
                     enabled: editing.enabled ?? true,
                     connector_id: editing.connector_id ?? null,
                   });
+                  if (saved.visibility !== visibility) {
+                    throw new Error(t("settings.skills.saveVisibilityFailed"));
+                  }
                   setEditing(null);
+                  setSharing(false);
                   setSkillTab("user");
                   await reload();
                 })
@@ -934,7 +945,10 @@ function SkillsPanel() {
           <Button
             label={readOnly ? t("settings.skills.back") : t("settings.common.cancel")}
             variant="ghost"
-            clickAction={() => setEditing(null)}
+            clickAction={() => {
+              setEditing(null);
+              setSharing(false);
+            }}
           />
         </div>
       </div>
@@ -949,7 +963,10 @@ function SkillsPanel() {
           label={t("settings.skills.new")}
           icon={<Icon icon={Plus} size="sm" />}
           size="sm"
-          clickAction={() => setEditing({ enabled: true })}
+          clickAction={() => {
+            setEditing({ enabled: true });
+            setSharing(false);
+          }}
         />
       </div>
       {error && <ErrorText>{error}</ErrorText>}
@@ -1002,7 +1019,7 @@ function SkillsPanel() {
                     </Text>
                   )}
                 </div>
-                {skill.builtin || skill.read_only ? (
+                {skill.builtin ? (
                   <Button
                     label={t("settings.skills.view")}
                     icon={<Icon icon={ExternalLink} size="sm" />}
@@ -1010,10 +1027,6 @@ function SkillsPanel() {
                     variant="ghost"
                     clickAction={() =>
                       guard(async () => {
-                        if (!skill.builtin) {
-                          setEditing(skill);
-                          return;
-                        }
                         // Built-ins arrive from the list without their content —
                         // see api.skillContent. Both destinations below render it,
                         // so it has to be in hand before either opens.
@@ -1028,6 +1041,26 @@ function SkillsPanel() {
                       })
                     }
                   />
+                ) : skill.read_only ? (
+                  <div className="claw-row claw-skill-card-actions">
+                    <Switch
+                      value={!!skill.subscription_enabled}
+                      label={t("settings.skills.useShared", { name: skill.name })}
+                      changeAction={(enabled) =>
+                        guard(async () => {
+                          await api.setSkillSubscription(skill.id, enabled);
+                          await reload();
+                        })
+                      }
+                    />
+                    <Button
+                      label={t("settings.skills.view")}
+                      icon={<Icon icon={ExternalLink} size="sm" />}
+                      size="sm"
+                      variant="ghost"
+                      clickAction={() => setEditing(skill)}
+                    />
+                  </div>
                 ) : (
                   <div className="claw-row claw-skill-card-actions">
                     <Switch
@@ -1046,14 +1079,20 @@ function SkillsPanel() {
                       icon={<Icon icon={Users} size="sm" />}
                       size="sm"
                       variant="ghost"
-                      clickAction={() => setEditing(skill)}
+                      clickAction={() => {
+                        setEditing(skill);
+                        setSharing(true);
+                      }}
                     />
                     <Button
                       label={t("settings.common.edit")}
                       icon={<Icon icon={Pencil} size="sm" />}
                       size="sm"
                       variant="ghost"
-                      clickAction={() => setEditing(skill)}
+                      clickAction={() => {
+                        setEditing(skill);
+                        setSharing(false);
+                      }}
                     />
                     <Button
                       label={t("settings.common.delete")}

@@ -36,6 +36,10 @@ class SkillBody(BaseModel):
     connector_id: str | None = None
 
 
+class SkillSubscriptionBody(BaseModel):
+    enabled: bool
+
+
 def _skill_json(
     s, builtin: bool = False, shadows_builtin: bool = False, with_content: bool = True, viewer_id: str | None = None, owner_name: str = ""
 ) -> dict:
@@ -49,9 +53,9 @@ def _skill_json(
         "updated_at": s.updated_at.isoformat(),
         "builtin": builtin,
         "visibility": getattr(s, "visibility", "private"),
-        "owner_id": getattr(s, "user_id", None),
         "owner_name": owner_name,
         "read_only": builtin or (viewer_id is not None and s.user_id != viewer_id),
+        "subscription_enabled": getattr(s, "subscription_enabled", s.enabled),
         # Only BuiltinSkill instances carry these (the "CAPABILITIES COVERED"
         # detail view) — user/ORM skills never set them, hence the getattr.
         "capabilities": [{"title": t, "description": d} for t, d in getattr(s, "capabilities", ())],
@@ -68,7 +72,7 @@ async def list_skills(user: User = Depends(current_user), state: AppState = Depe
     from claw.core.builtin_skills import builtin_skills
 
     user_skills = await state.skills.available_for_user(user.id)
-    owners = await state.users.labels(list({s.user_id for s in user_skills}))
+    owners = await state.users.display_names(list({s.user_id for s in user_skills}))
     user_names = {s.name for s in user_skills}
     builtin_names = {b.name for b in builtin_skills()}
     # Built-ins first (read-only), skipping any a user skill shadows by name.
@@ -103,6 +107,18 @@ async def skill_content(skill_id: str, _: User = Depends(require_operator)) -> d
     if skill is None:
         raise HTTPException(status_code=404, detail="skill not found")
     return {"content": skill.content}
+
+
+@router.put("/skills/{skill_id}/subscription")
+async def set_skill_subscription(
+    skill_id: str,
+    body: SkillSubscriptionBody,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    if skill_id.startswith("builtin:") or not await state.skills.set_subscription(user.id, skill_id, body.enabled):
+        raise HTTPException(status_code=404, detail="shared skill not found")
+    return {"enabled": body.enabled}
 
 
 @router.put("/skills/{name}")

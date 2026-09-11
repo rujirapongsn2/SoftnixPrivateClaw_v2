@@ -221,11 +221,19 @@ class Skill(Base):
     """User-authored capability: description goes in the system prompt, content on demand."""
 
     __tablename__ = "skills"
-    __table_args__ = (Index("ix_skills_user_name", "user_id", "name", unique=True),)
+    __table_args__ = (
+        Index("ix_skills_user_name", "user_id", "name", unique=True),
+        Index("ix_skills_share_scope", "visibility", "enabled", "shared_group_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     visibility: Mapped[str] = mapped_column(String(16), default="private", server_default="private")
+    # Capture the group selected at share time. Moving the owner later must
+    # never silently expose the skill to the owner's new group.
+    shared_group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_groups.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(String(500), default="")
     content: Mapped[str] = mapped_column(Text, default="")
@@ -242,6 +250,21 @@ class Skill(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class SkillSubscription(Base):
+    """A recipient opt-in to use a shared skill in their own AI context.
+
+    This grants no edit permission; it only controls whether the recipient's
+    turns include an otherwise readable Group/Public skill.
+    """
+
+    __tablename__ = "skill_subscriptions"
+    __table_args__ = (Index("ix_skill_subscriptions_skill", "skill_id"),)
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class McpConnector(Base):

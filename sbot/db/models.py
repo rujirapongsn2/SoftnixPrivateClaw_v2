@@ -229,7 +229,7 @@ class MissionBlackboard(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
-from claw.db.models import Skill
+from claw.db.models import Skill, SkillSubscription
 
 
 from claw.db.models import McpConnector
