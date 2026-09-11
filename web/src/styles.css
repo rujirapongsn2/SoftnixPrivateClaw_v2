@@ -4293,10 +4293,16 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-skill-card--owned { flex-direction: column; gap: 10px; }
 .claw-skill-card--owned .claw-skill-card-copy { width: 100%; }
+.claw-skill-card--shared { align-items: center; }
 .claw-skill-card-actions {
   flex: 0 0 auto;
   width: 100%;
   justify-content: flex-end;
+}
+.claw-skill-card--shared .claw-skill-card-actions {
+  width: auto;
+  align-items: center;
+  gap: 12px;
 }
 @media (max-width: 560px) {
   .claw-skill-card {
@@ -4305,6 +4311,10 @@ html[data-chat-bg="grid"] .claw-chat {
   .claw-skill-card-actions {
     width: 100%;
     justify-content: flex-end;
+  }
+  .claw-skill-card--shared .claw-skill-card-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 }
 .claw-skill-capability-grid {

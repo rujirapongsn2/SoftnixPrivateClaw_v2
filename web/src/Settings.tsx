@@ -795,7 +795,7 @@ function SkillDetailModal({
 function SkillsPanel() {
   const t = useT();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [skillTab, setSkillTab] = useState<"builtin" | "user">("builtin");
+  const [skillTab, setSkillTab] = useState<"builtin" | "user" | "shared">("builtin");
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [globalConnectors, setGlobalConnectors] = useState<ConnectorGlobalSummary[]>([]);
   const [editing, setEditing] = useState<Partial<SkillInfo> | null>(null);
@@ -824,9 +824,13 @@ function SkillsPanel() {
   const ownNames = new Set(connectors.filter((c) => c.enabled).map((c) => c.name));
   const pickableGlobalConnectors = globalConnectors.filter((c) => !ownNames.has(c.name));
   const builtinSkills = skills.filter((skill) => skill.builtin);
-  const userSkills = skills.filter((skill) => !skill.builtin)
-    .sort((a, b) => Number(!!a.read_only) - Number(!!b.read_only));
-  const visibleSkills = skillTab === "builtin" ? builtinSkills : userSkills;
+  const userSkills = skills.filter((skill) => !skill.builtin && !skill.read_only);
+  const sharedSkills = skills.filter((skill) => !skill.builtin && skill.read_only);
+  const visibleSkills = skillTab === "builtin"
+    ? builtinSkills
+    : skillTab === "shared"
+      ? sharedSkills
+      : userSkills;
 
   if (editing) {
     const readOnly = !!editing.builtin || !!editing.read_only;
@@ -985,22 +989,35 @@ function SkillsPanel() {
             value="user"
             label={t("settings.skills.tabUser", { count: userSkills.length.toLocaleString() })}
           />
+          <Tab
+            value="shared"
+            label={t("settings.skills.tabShared", { count: sharedSkills.length.toLocaleString() })}
+          />
         </TabList>
       </div>
       {visibleSkills.length === 0 ? (
         <EmptyState
-          title={t(skillTab === "builtin" ? "settings.skills.builtinEmptyTitle" : "settings.skills.emptyTitle")}
-          description={t(skillTab === "builtin" ? "settings.skills.builtinEmptyDesc" : "settings.skills.emptyDesc")}
+          title={t(
+            skillTab === "builtin"
+              ? "settings.skills.builtinEmptyTitle"
+              : skillTab === "shared"
+                ? "settings.skills.sharedEmptyTitle"
+                : "settings.skills.emptyTitle",
+          )}
+          description={t(
+            skillTab === "builtin"
+              ? "settings.skills.builtinEmptyDesc"
+              : skillTab === "shared"
+                ? "settings.skills.sharedEmptyDesc"
+                : "settings.skills.emptyDesc",
+          )}
         />
       ) : (
         <div className="claw-skill-list">
-          {visibleSkills.map((skill, index) => (
+          {visibleSkills.map((skill) => (
             <Fragment key={skill.id}>
-            {!skill.builtin && skill.read_only && !visibleSkills[index - 1]?.read_only && (
-              <Text weight="semibold">{t("settings.skills.sharedWithYou")}</Text>
-            )}
             <Card padding={2}>
-              <div className={`claw-skill-card${!skill.builtin && !skill.read_only ? " claw-skill-card--owned" : ""}`}>
+              <div className={`claw-skill-card${!skill.builtin && !skill.read_only ? " claw-skill-card--owned" : ""}${skill.read_only ? " claw-skill-card--shared" : ""}`}>
                 <div className="claw-skill-card-copy">
                   <div className="claw-row">
                     <Text weight="semibold">{skill.name}</Text>
@@ -1045,7 +1062,7 @@ function SkillsPanel() {
                   <div className="claw-row claw-skill-card-actions">
                     <Switch
                       value={!!skill.subscription_enabled}
-                      label={t("settings.skills.useShared", { name: skill.name })}
+                      label={t("settings.skills.useShared")}
                       changeAction={(enabled) =>
                         guard(async () => {
                           await api.setSkillSubscription(skill.id, enabled);
