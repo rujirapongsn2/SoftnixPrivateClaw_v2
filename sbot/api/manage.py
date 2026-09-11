@@ -1,6 +1,7 @@
 """Management API: skills, memory, connectors, schedules — all in-chat, no separate control plane."""
 
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -332,6 +333,8 @@ class SkillBody(BaseModel):
     description: str = Field(default="", max_length=500)
     content: str = ""
     enabled: bool = True
+    visibility: Literal["private", "group", "public"] | None = None
+    id: str | None = None
     # The MCP connector this skill's instructions rely on, if any — lets the
     # runtime resolve that connector's CURRENT tool names live every turn
     # instead of the skill text hardcoding a connector name that can later be
@@ -340,7 +343,7 @@ class SkillBody(BaseModel):
 
 
 def _skill_json(
-    s, builtin: bool = False, shadows_builtin: bool = False, with_content: bool = True
+    s, builtin: bool = False, shadows_builtin: bool = False, with_content: bool = True, viewer_id: str | None = None, owner_name: str = ""
 ) -> dict:
     return {
         "id": s.id,
@@ -351,6 +354,10 @@ def _skill_json(
         "connector_id": getattr(s, "connector_id", None),
         "updated_at": s.updated_at.isoformat(),
         "builtin": builtin,
+        "visibility": getattr(s, "visibility", "private"),
+        "owner_id": getattr(s, "user_id", None),
+        "owner_name": owner_name,
+        "read_only": builtin or (viewer_id is not None and s.user_id != viewer_id),
         # Only BuiltinSkill instances carry these (the "CAPABILITIES COVERED"
         # detail view) — user/ORM skills never set them, hence the getattr.
         "capabilities": [{"title": t, "description": d} for t, d in getattr(s, "capabilities", ())],
@@ -366,7 +373,8 @@ def _skill_json(
 async def list_skills(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
     from sbot.core.builtin_skills import builtin_skills
 
-    user_skills = await state.skills.list_for_user(user.id)
+    user_skills = await state.skills.available_for_user(user.id)
+    owners = await state.users.labels(list({s.user_id for s in user_skills}))
     user_names = {s.name for s in user_skills}
     builtin_names = {b.name for b in builtin_skills()}
     # Built-ins first (read-only), skipping any a user skill shadows by name.
@@ -384,7 +392,7 @@ async def list_skills(user: User = Depends(current_user), state: AppState = Depe
         if b.name not in user_names
     ]
     return builtins + [
-        _skill_json(s, shadows_builtin=s.name in builtin_names) for s in user_skills
+        _skill_json(s, shadows_builtin=s.name in builtin_names, viewer_id=user.id, owner_name=owners.get(s.user_id, "")) for s in user_skills
     ]
 
 
@@ -414,6 +422,12 @@ async def upsert_skill(
 
     if get_builtin_skill(name.strip()) is not None:
         raise HTTPException(status_code=400, detail="that name is reserved by a built-in skill")
+    if body.id:
+        owned_skills = await state.skills.list_for_user(user.id)
+        if not any(s.id == body.id and s.name == name.strip() for s in owned_skills):
+            raise HTTPException(status_code=403, detail="Only the owner can edit this skill")
+    if body.visibility == "group" and not user.group_id:
+        raise HTTPException(status_code=400, detail="Join a group before sharing a skill with your group")
     if body.connector_id is not None:
         # A skill may link either the caller's own connector or an
         # admin-global one ("Pre-built Connectors") — the latter has no
@@ -428,6 +442,7 @@ async def upsert_skill(
         description=body.description,
         content=body.content,
         enabled=body.enabled,
+        visibility=body.visibility,
         connector_id=body.connector_id,
     )
     return _skill_json(skill)

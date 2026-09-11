@@ -106,6 +106,10 @@ export interface WorkingPlan {
 }
 
 export interface SkillInfo {
+  visibility?: "private" | "group" | "public";
+  owner_id?: string;
+  owner_name?: string;
+  read_only?: boolean;
   id: string;
   name: string;
   description: string;
@@ -920,7 +924,7 @@ export const api = {
   // wasted bandwidth, so the detail view pulls just the one it is showing.
   skillContent: (id: string) =>
     request<{ content: string }>(`/api/skills/${encodeURIComponent(id)}/content`),
-  saveSkill: (skill: Omit<SkillInfo, "id">) =>
+  saveSkill: (skill: Omit<SkillInfo, "id"> & { id?: string }) =>
     request<SkillInfo>(`/api/skills/${encodeURIComponent(skill.name)}`, {
       method: "PUT",
       body: JSON.stringify(skill),

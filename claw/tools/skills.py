@@ -41,7 +41,7 @@ class ReadSkillTool(Tool):
 
     async def execute(self, name: str, section: str | None = None, offset: int = 0, limit: int = DEFAULT_READ_LIMIT, **_: Any) -> str:
         name = name.strip()
-        skill = await self.store.get_by_name(self.user_id, name)
+        skill = await self.store.readable_by_name(self.user_id, name)
         if skill is not None and skill.enabled:
             resolved_name, content = skill.name, skill.content
         else:

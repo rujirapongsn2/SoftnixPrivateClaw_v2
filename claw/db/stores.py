@@ -478,12 +478,35 @@ class SkillStore:
             rows = await db.scalars(select(Skill).where(Skill.user_id == user_id).order_by(Skill.name))
             return list(rows)
 
-    async def enabled_for_user(self, user_id: str) -> list[Skill]:
+    async def available_for_user(self, user_id: str) -> list[Skill]:
+        """Own skills plus enabled shares; group membership is checked on every read."""
         async with self.factory() as db:
+            viewer = await db.get(User, user_id)
+            if viewer is None:
+                return []
+            shared_scope = Skill.visibility == "public"
+            if viewer.group_id:
+                shared_scope = or_(shared_scope, (Skill.visibility == "group") & (User.group_id == viewer.group_id))
             rows = await db.scalars(
-                select(Skill).where(Skill.user_id == user_id, Skill.enabled.is_(True)).order_by(Skill.name)
+                select(Skill).join(User, User.id == Skill.user_id).where(
+                    or_(Skill.user_id == user_id,
+                        shared_scope & Skill.enabled.is_(True) & User.is_active.is_(True))
+                ).order_by(Skill.name, Skill.created_at, Skill.id)
             )
             return list(rows)
+
+    async def enabled_for_user(self, user_id: str) -> list[Skill]:
+        # A private skill wins a name collision. Shared collisions resolve to
+        # the oldest stable ID, identically for discovery and read_skill.
+        rows = await self.available_for_user(user_id)
+        rows.sort(key=lambda skill: skill.user_id != user_id)
+        chosen = {}
+        for skill in rows:
+            chosen.setdefault(skill.name, skill)
+        return [skill for skill in chosen.values() if skill.enabled]
+
+    async def readable_by_name(self, user_id: str, name: str) -> Skill | None:
+        return next((s for s in await self.enabled_for_user(user_id) if s.name == name), None)
 
     async def get_by_name(self, user_id: str, name: str) -> Skill | None:
         async with self.factory() as db:
@@ -492,10 +515,17 @@ class SkillStore:
     async def upsert(self, user_id: str, name: str, **fields: Any) -> Skill:
         async with self.factory() as db:
             skill = await db.scalar(select(Skill).where(Skill.user_id == user_id, Skill.name == name))
+            visibility = fields.get("visibility")
+            if visibility is not None and visibility not in {"private", "group", "public"}:
+                raise ValueError("invalid skill visibility")
+            if visibility == "group":
+                owner = await db.get(User, user_id)
+                if owner is None or not owner.group_id:
+                    raise ValueError("Join a group before sharing a skill with your group")
             if skill is None:
                 skill = Skill(user_id=user_id, name=name)
                 db.add(skill)
-            for key in ("description", "content", "enabled"):
+            for key in ("description", "content", "enabled", "visibility"):
                 if key in fields and fields[key] is not None:
                     setattr(skill, key, fields[key])
             # Unlike the fields above, connector_id's presence itself is the

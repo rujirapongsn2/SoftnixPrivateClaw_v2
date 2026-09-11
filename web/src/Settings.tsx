@@ -50,7 +50,7 @@ import {
   User as UserIcon,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ProvidersPanel } from "./Admin";
 import { useBranding, useT } from "./branding";
 import { ErrorText } from "./ErrorText";
@@ -823,16 +823,17 @@ function SkillsPanel() {
   const ownNames = new Set(connectors.filter((c) => c.enabled).map((c) => c.name));
   const pickableGlobalConnectors = globalConnectors.filter((c) => !ownNames.has(c.name));
   const builtinSkills = skills.filter((skill) => skill.builtin);
-  const userSkills = skills.filter((skill) => !skill.builtin);
+  const userSkills = skills.filter((skill) => !skill.builtin)
+    .sort((a, b) => Number(!!a.read_only) - Number(!!b.read_only));
   const visibleSkills = skillTab === "builtin" ? builtinSkills : userSkills;
 
   if (editing) {
-    const readOnly = !!editing.builtin;
+    const readOnly = !!editing.builtin || !!editing.read_only;
     return (
       <div className="claw-panel">
         {readOnly && (
           <Text size="sm" color="secondary">
-            {t("settings.skills.builtinNotice")}
+            {t(editing.builtin ? "settings.skills.builtinNotice" : "settings.skills.sharedNotice")}
           </Text>
         )}
         <TextInput
@@ -854,6 +855,22 @@ function SkillsPanel() {
           rows={10}
           isDisabled={readOnly}
         />
+        {!readOnly && (
+          <div className="claw-field-group">
+            <SegmentedControl
+              label={t("settings.skills.sharing")}
+              value={editing.visibility ?? "private"}
+              onChange={(value) => setEditing({ ...editing, visibility: value as "private" | "group" | "public" })}
+            >
+              <SegmentedControlItem value="private" label={t("settings.blueprints.private")} />
+              <SegmentedControlItem value="group" label={t("settings.blueprints.group")} />
+              <SegmentedControlItem value="public" label={t("settings.blueprints.public")} />
+            </SegmentedControl>
+            {editing.visibility && editing.visibility !== "private" && (
+              <Text size="sm" color="secondary" as="p">{t("settings.skills.sharingHint")}</Text>
+            )}
+          </div>
+        )}
         {!readOnly && (connectors.length > 0 || pickableGlobalConnectors.length > 0) && (
           <div className="claw-field-group">
             <Text size="sm" color="secondary">
@@ -899,6 +916,8 @@ function SkillsPanel() {
               clickAction={() =>
                 guard(async () => {
                   await api.saveSkill({
+                    id: editing.id,
+                    visibility: editing.visibility ?? "private",
                     name: (editing.name ?? "").trim(),
                     description: editing.description ?? "",
                     content: editing.content ?? "",
@@ -906,6 +925,7 @@ function SkillsPanel() {
                     connector_id: editing.connector_id ?? null,
                   });
                   setEditing(null);
+                  setSkillTab("user");
                   await reload();
                 })
               }
@@ -957,23 +977,32 @@ function SkillsPanel() {
         />
       ) : (
         <div className="claw-skill-list">
-          {visibleSkills.map((skill) => (
-            <Card key={skill.id} padding={2}>
-              <div className="claw-skill-card">
+          {visibleSkills.map((skill, index) => (
+            <Fragment key={skill.id}>
+            {!skill.builtin && skill.read_only && !visibleSkills[index - 1]?.read_only && (
+              <Text weight="semibold">{t("settings.skills.sharedWithYou")}</Text>
+            )}
+            <Card padding={2}>
+              <div className={`claw-skill-card${!skill.builtin && !skill.read_only ? " claw-skill-card--owned" : ""}`}>
                 <div className="claw-skill-card-copy">
                   <div className="claw-row">
                     <Text weight="semibold">{skill.name}</Text>
+                    {!skill.builtin && <Badge variant="neutral" label={t(`settings.blueprints.${skill.visibility ?? "private"}`)} />}
+                    {skill.read_only && !skill.builtin && <Badge variant="info" label={t("settings.skills.readOnly")} />}
                   </div>
                   <Text size="sm" color="secondary" as="p" className="claw-skill-description">
                     {skill.description || "—"}
                   </Text>
+                  {skill.read_only && skill.owner_name && (
+                    <Text size="sm" color="secondary">{t("settings.skills.sharedBy", { name: skill.owner_name })}</Text>
+                  )}
                   {skill.shadows_builtin && (
                     <Text size="sm" color="secondary" as="p">
                       {t("settings.skills.shadowsBuiltin")}
                     </Text>
                   )}
                 </div>
-                {skill.builtin ? (
+                {skill.builtin || skill.read_only ? (
                   <Button
                     label={t("settings.skills.view")}
                     icon={<Icon icon={ExternalLink} size="sm" />}
@@ -981,6 +1010,10 @@ function SkillsPanel() {
                     variant="ghost"
                     clickAction={() =>
                       guard(async () => {
+                        if (!skill.builtin) {
+                          setEditing(skill);
+                          return;
+                        }
                         // Built-ins arrive from the list without their content —
                         // see api.skillContent. Both destinations below render it,
                         // so it has to be in hand before either opens.
@@ -1009,6 +1042,13 @@ function SkillsPanel() {
                       }
                     />
                     <Button
+                      label={t("settings.skills.share")}
+                      icon={<Icon icon={Users} size="sm" />}
+                      size="sm"
+                      variant="ghost"
+                      clickAction={() => setEditing(skill)}
+                    />
+                    <Button
                       label={t("settings.common.edit")}
                       icon={<Icon icon={Pencil} size="sm" />}
                       size="sm"
@@ -1031,6 +1071,7 @@ function SkillsPanel() {
                 )}
               </div>
             </Card>
+            </Fragment>
           ))}
         </div>
       )}

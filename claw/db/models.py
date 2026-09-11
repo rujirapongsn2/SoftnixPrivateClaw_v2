@@ -225,6 +225,7 @@ class Skill(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    visibility: Mapped[str] = mapped_column(String(16), default="private", server_default="private")
     name: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(String(500), default="")
     content: Mapped[str] = mapped_column(Text, default="")

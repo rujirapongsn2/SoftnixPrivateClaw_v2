@@ -4291,8 +4291,12 @@ html[data-chat-bg="grid"] .claw-chat {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
+.claw-skill-card--owned { flex-direction: column; gap: 10px; }
+.claw-skill-card--owned .claw-skill-card-copy { width: 100%; }
 .claw-skill-card-actions {
   flex: 0 0 auto;
+  width: 100%;
+  justify-content: flex-end;
 }
 @media (max-width: 560px) {
   .claw-skill-card {
