@@ -62,6 +62,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BotAvatar, avatarVariantFor, type BotAvatarVariant } from "./BotAvatar";
+import { botDisplayName } from "./botLabels";
 import { ErrorText } from "./ErrorText";
 import { ExecutionPanel } from "./ExecutionPanel";
 import {
@@ -503,6 +504,7 @@ export function Chat({
 }: ChatProps) {
   const t = useT();
   const { executionPanelEnabled } = useBranding();
+  const botName = bot ? botDisplayName(bot, t) : "";
   const [items, setItems] = useState<TranscriptItem[]>([]);
   // The session whose initial transcript page has finished loading. Keeping
   // this separate from `items` prevents the previous session (or an empty
@@ -2193,8 +2195,8 @@ export function Chat({
       <div className="sbot-greeting-identity">
         {groupName ? <Text type="display-2">{groupName}</Text> : bot ? (
           <>
-            <BotAvatar variant={avatarVariantFor(bot)} size={60} title={bot.name} working={busy} />
-            <Text type="display-2" className="sbot-greeting-name">{bot.name}</Text>
+            <BotAvatar variant={avatarVariantFor(bot)} size={60} title={botName} working={busy} />
+            <Text type="display-2" className="sbot-greeting-name">{botName}</Text>
             <div className="sbot-greeting-meta">
               <span className="sbot-badge-cos">{bot.role_title}</span>
               {bot.kind === "chief_of_staff" && (

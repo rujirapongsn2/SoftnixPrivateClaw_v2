@@ -23,6 +23,7 @@ import { ErrorText } from "./ErrorText";
 import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
 import { useBranding, useT } from "../branding";
 import { PasswordField } from "./PasswordField";
+import { botDisplayName } from "./botLabels";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "../Settings";
 import { ActiveMission, ApiError, AuthUser, BotGroupInfo, BotInfo, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
@@ -222,6 +223,7 @@ function TeamNav({
         {shownBots.length > 0 && (
           <SideNavSection title="Team Bots">
             {shownBots.map((b) => {
+              const displayName = botDisplayName(b, t);
               return (
                 <div
                   key={b.id}
@@ -232,7 +234,7 @@ function TeamNav({
                     <button
                       type="button"
                       className="sbot-avatar-pick"
-                      aria-label={t("nav.changeAvatar", { name: b.name })}
+                      aria-label={t("nav.changeAvatar", { name: displayName })}
                       onClick={(e) => {
                         // The row opens the bot's chat. Clicking the picture is
                         // the one place that should mean "change the picture".
@@ -268,7 +270,7 @@ function TeamNav({
                       </>
                     )}
                     <div className="sbot-bot-meta">
-                      <span className="sbot-bot-name">{b.name}</span>
+                      <span className="sbot-bot-name">{displayName}</span>
                       <span className="sbot-bot-role">{b.role_title}</span>
                     </div>
                   </div>
@@ -276,7 +278,7 @@ function TeamNav({
                   {b.kind === "chief_of_staff" && <span className="sbot-badge-cos">Leader</span>}
                   <span className="sbot-bot-menu">
                     <IconButton
-                      label={`Manage ${b.name}`}
+                      label={`Manage ${displayName}`}
                       icon={<Icon icon={MoreVertical} size="sm" />}
                       variant="ghost"
                       size="sm"
@@ -354,10 +356,11 @@ function TeamNav({
                 <Text size="sm" weight="semibold" color="secondary" className="claw-recents-popover-title">
                   Team Bots
                 </Text>
-                {shownBots.map((b) => (
-                  <div key={b.id} className="claw-recents-popover-row">
+                {shownBots.map((b) => {
+                  const displayName = botDisplayName(b, t);
+                  return <div key={b.id} className="claw-recents-popover-row">
                     <Button
-                      label={truncateTitle(b.name)}
+                      label={truncateTitle(displayName)}
                       icon={
                         <BotAvatar variant={avatarVariantFor(b)} size={18} working={botIsWorking(b.id)} />
                       }
@@ -371,7 +374,7 @@ function TeamNav({
                     />
                     {botStatus(b.id)}
                     <IconButton
-                      label={`Manage ${b.name}`}
+                      label={`Manage ${displayName}`}
                       icon={<Icon icon={MoreVertical} size="sm" />}
                       variant="ghost"
                       size="sm"
@@ -380,8 +383,8 @@ function TeamNav({
                         setIsOpen(false);
                       }}
                     />
-                  </div>
-                ))}
+                  </div>;
+                })}
               </div>
             )}
             {shownOthers.length > 0 && (

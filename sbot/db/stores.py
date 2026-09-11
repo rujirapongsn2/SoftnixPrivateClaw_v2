@@ -357,20 +357,32 @@ class MessageStore:
 
 
 class BotStore:
-    DEFAULT_COS_NAME = "Default"
+    DEFAULT_COS_NAME = "Team Lead"
     DEFAULT_COS_CHARTER = (
-        "คุณคือ Default Chief of Staff หัวหน้าทีม AI อัจฉริยะ "
+        "คุณคือ Team Lead ในบทบาท Chief of Staff หัวหน้าทีม AI อัจฉริยะ "
         "มีหน้าที่รับโจทย์จากผู้ใช้ วิเคราะห์ วางแผน แตกงาน มอบหมายงานให้บอทผู้เชี่ยวชาญ "
         "และติดตามผลมารายงานผู้ใช้อย่างกระชับและชัดเจน"
     )
-    DEFAULT_COS_AVATAR = {"color": "#0ea5e9", "emoji": "👑", "initial": "D"}
-    LEGACY_COS_NAME = "บุ้ย"
-    LEGACY_COS_CHARTER = (
-        "คุณคือ 'บุ้ย' Chief of Staff หัวหน้าทีม AI อัจฉริยะ "
-        "มีหน้าที่รับโจทย์จากผู้ใช้ วิเคราะห์ วางแผน แตกงาน มอบหมายงานให้บอทผู้เชี่ยวชาญ "
-        "และติดตามผลมารายงานผู้ใช้อย่างกระชับและชัดเจน"
+    DEFAULT_COS_AVATAR = {"color": "#0ea5e9", "emoji": "👑", "initial": "T"}
+    LEGACY_COS_NAMES = frozenset({"บุ้ย", "Default", "หัวหน้าทีม"})
+    LEGACY_COS_CHARTERS = frozenset(
+        {
+            (
+                "คุณคือ 'บุ้ย' Chief of Staff หัวหน้าทีม AI อัจฉริยะ "
+                "มีหน้าที่รับโจทย์จากผู้ใช้ วิเคราะห์ วางแผน แตกงาน มอบหมายงานให้บอทผู้เชี่ยวชาญ "
+                "และติดตามผลมารายงานผู้ใช้อย่างกระชับและชัดเจน"
+            ),
+            (
+                "คุณคือ Default Chief of Staff หัวหน้าทีม AI อัจฉริยะ "
+                "มีหน้าที่รับโจทย์จากผู้ใช้ วิเคราะห์ วางแผน แตกงาน มอบหมายงานให้บอทผู้เชี่ยวชาญ "
+                "และติดตามผลมารายงานผู้ใช้อย่างกระชับและชัดเจน"
+            ),
+        }
     )
-    LEGACY_COS_AVATAR = {"color": "#0ea5e9", "emoji": "👑", "initial": "บ"}
+    LEGACY_COS_AVATARS = (
+        {"color": "#0ea5e9", "emoji": "👑", "initial": "บ"},
+        {"color": "#0ea5e9", "emoji": "👑", "initial": "D"},
+    )
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
         self.factory = factory
@@ -545,7 +557,7 @@ class BotStore:
                 # Staff renamed by its owner keeps that chosen name. Check for
                 # an existing active "Default" specialist first because bot
                 # names are unique within an owner's active roster.
-                if cos.name == self.LEGACY_COS_NAME and cos.created_by == "system":
+                if cos.name in self.LEGACY_COS_NAMES and cos.created_by == "system":
                     conflict = await db.scalar(
                         select(Bot.id).where(
                             Bot.owner_id == owner_id,
@@ -556,9 +568,9 @@ class BotStore:
                     )
                     if conflict is None:
                         cos.name = self.DEFAULT_COS_NAME
-                        if cos.charter == self.LEGACY_COS_CHARTER:
+                        if cos.charter in self.LEGACY_COS_CHARTERS:
                             cos.charter = self.DEFAULT_COS_CHARTER
-                        if cos.avatar == self.LEGACY_COS_AVATAR:
+                        if cos.avatar in self.LEGACY_COS_AVATARS:
                             cos.avatar = dict(self.DEFAULT_COS_AVATAR)
                         await db.commit()
                 return cos

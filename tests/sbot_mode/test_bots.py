@@ -13,11 +13,11 @@ async def test_cos_auto_seeding(stores):
     cos = await bot_store.get_or_create_cos(user.id)
 
     assert cos is not None
-    assert cos.name == "Default"
+    assert cos.name == "Team Lead"
     assert cos.kind == "chief_of_staff"
     assert cos.role_title == "Chief of Staff"
     assert cos.owner_id == user.id
-    assert cos.avatar["initial"] == "D"
+    assert cos.avatar["initial"] == "T"
 
     # Calling again returns same instance
     cos_again = await bot_store.get_or_create_cos(user.id)
@@ -55,7 +55,7 @@ async def test_create_and_list_specialist_bots(stores):
 
     bots = await bot_store.list_for_user(user.id)
     bot_names = [b.name for b in bots]
-    assert "Default" in bot_names
+    assert "Team Lead" in bot_names
     assert "นักวิจัย" in bot_names
     assert "QA Web" in bot_names
 
@@ -73,24 +73,30 @@ async def test_create_and_list_specialist_bots(stores):
 
 
 @pytest.mark.asyncio
-async def test_legacy_cos_default_is_upgraded_without_replacing_the_bot(stores):
+@pytest.mark.parametrize(
+    ("legacy_name", "charter_marker", "avatar_index"),
+    [("บุ้ย", "'บุ้ย'", 0), ("Default", "Default Chief", 1)],
+)
+async def test_legacy_cos_default_is_upgraded_without_replacing_the_bot(
+    stores, legacy_name, charter_marker, avatar_index
+):
     bot_store: BotStore = stores["bots"]
     user_store: UserStore = stores["users"]
-    user = await user_store.get_or_create_by_email("legacy@sbot.ai", "legacy")
+    user = await user_store.get_or_create_by_email(f"legacy-{avatar_index}@sbot.ai", "legacy")
     legacy = await bot_store.create(
         owner_id=user.id,
-        name=BotStore.LEGACY_COS_NAME,
+        name=legacy_name,
         role_title="Chief of Staff",
-        charter=BotStore.LEGACY_COS_CHARTER,
+        charter=next(item for item in BotStore.LEGACY_COS_CHARTERS if charter_marker in item),
         kind="chief_of_staff",
-        avatar=BotStore.LEGACY_COS_AVATAR,
+        avatar=BotStore.LEGACY_COS_AVATARS[avatar_index],
         created_by="system",
     )
 
     upgraded = await bot_store.get_or_create_cos(user.id)
 
     assert upgraded.id == legacy.id
-    assert upgraded.name == "Default"
+    assert upgraded.name == "Team Lead"
     assert upgraded.charter == BotStore.DEFAULT_COS_CHARTER
     assert upgraded.avatar == BotStore.DEFAULT_COS_AVATAR
 

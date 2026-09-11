@@ -5,6 +5,8 @@ import { Loader2, Plus, Users, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { BotAvatar, avatarVariantFor } from "./BotAvatar";
 import { api, type BotGroupInfo, type BotInfo, type SessionInfo } from "./api";
+import { useT } from "../branding";
+import { botDisplayName } from "./botLabels";
 
 export function BotGroupNav({ groups, sessions, active, done, onSelect, onCreate }: {
   groups: BotGroupInfo[]; sessions: SessionInfo[]; active: string | null; done: Set<string>;
@@ -35,12 +37,13 @@ export function BotGroupNav({ groups, sessions, active, done, onSelect, onCreate
 export function BotGroupHeader({ group, bots, working, groupRunning, onEdit }: {
   group: BotGroupInfo; bots: BotInfo[]; working?: Set<string>; groupRunning?: boolean; onEdit: () => void;
 }) {
+  const t = useT();
   const leader = bots.find(b => b.id === group.leader_id);
   return <header className="sbot-group-header">
     <Users size={22} aria-hidden="true" />
     <div className="sbot-group-heading">
       <strong title={group.name}>{group.name}</strong>
-      <span>{leader ? `Leader · ${leader.name}` : "Choose an active leader"}</span>
+      <span>{leader ? `Leader · ${botDisplayName(leader, t)}` : "Choose an active leader"}</span>
     </div>
     <button type="button" className="sbot-group-members-button" onClick={onEdit} aria-label={`Edit ${group.name} members`}>
       <span className="sbot-group-faces" aria-hidden="true">{group.member_ids.slice(0, 3).map(id =>
@@ -60,6 +63,7 @@ export function BotGroupEditor({ group, bots, onClose, onSaved, onDeleted }: {
   group: BotGroupInfo | null; bots: BotInfo[]; onClose: () => void;
   onSaved: (group: BotGroupInfo) => void; onDeleted: (group: BotGroupInfo) => void;
 }) {
+  const t = useT();
   const dialog = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState(group?.name ?? "");
   const [members, setMembers] = useState<string[]>(group?.member_ids ?? []);
@@ -110,16 +114,16 @@ export function BotGroupEditor({ group, bots, onClose, onSaved, onDeleted }: {
         <div className="sbot-group-field-heading"><label htmlFor="bot-group-search">Members</label><span>{members.length}/12 · minimum 2</span></div>
         <input id="bot-group-search" type="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search bots" />
         <div className="sbot-group-picker" role="group" aria-label="Select group members">
-          {bots.filter(b => `${b.name} ${b.role_title}`.toLowerCase().includes(query.toLowerCase())).map(b =>
+          {bots.filter(b => `${botDisplayName(b, t)} ${b.name} ${b.role_title}`.toLowerCase().includes(query.toLowerCase())).map(b =>
             <label key={b.id} className={`sbot-group-option${members.includes(b.id) ? " is-selected" : ""}`}>
               <input type="checkbox" checked={members.includes(b.id)} onChange={() => toggle(b.id)}
                 disabled={!members.includes(b.id) && members.length >= 12} />
               <BotAvatar variant={avatarVariantFor(b)} size={32} />
-              <span><strong>{b.name}</strong><small>{b.role_title}</small></span>
+              <span><strong>{botDisplayName(b, t)}</strong><small>{b.role_title}</small></span>
             </label>
           )}
           {bots.length === 0 && <p>Create at least two bots to start a group.</p>}
-          {bots.length > 0 && !bots.some(b => `${b.name} ${b.role_title}`.toLowerCase().includes(query.toLowerCase())) && <p>No bots found.</p>}
+          {bots.length > 0 && !bots.some(b => `${botDisplayName(b, t)} ${b.name} ${b.role_title}`.toLowerCase().includes(query.toLowerCase())) && <p>No bots found.</p>}
           {missing.length > 0 && <div role="alert" className="sbot-group-error">{missing.length} member(s) are unavailable.
             <button type="button" onClick={() => { const next = members.filter(id => activeIds.has(id)); setMembers(next); if (!next.includes(leader)) setLeader(next[0] ?? ""); }}>Remove unavailable members</button>
           </div>}
@@ -127,7 +131,7 @@ export function BotGroupEditor({ group, bots, onClose, onSaved, onDeleted }: {
         <label htmlFor="bot-group-leader">Group leader</label>
         <select id="bot-group-leader" value={leader} onChange={e => setLeader(e.target.value)} required>
           <option value="" disabled>Select a member</option>
-          {bots.filter(b => members.includes(b.id)).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+          {bots.filter(b => members.includes(b.id)).map(b => <option key={b.id} value={b.id}>{botDisplayName(b, t)}</option>)}
         </select>
       </fieldset>
       {group && <p className="sbot-group-note">Changes apply to the next message.</p>}
