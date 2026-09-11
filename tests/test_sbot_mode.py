@@ -89,6 +89,22 @@ async def test_first_team_lead_session_has_one_persisted_onboarding_message(inte
     assert messages[0]["meta"] == {"onboarding": True}
 
 
+async def test_team_lead_onboarding_uses_thai_profile_language(integrated):
+    app, c, user = integrated
+    await app.state.sbot.users.update_preferences(user.id, ui_language="th")
+    bots = (await c.get("/modes/sbot/api/bots")).json()
+    team_lead = next(bot for bot in bots if bot["kind"] == "chief_of_staff")
+
+    created = await c.post("/modes/sbot/api/sessions", json={"title": "Team Lead", "bot_id": team_lead["id"]})
+
+    messages = (await c.get(f"/modes/sbot/api/sessions/{created.json()['id']}/messages")).json()["messages"]
+    content = messages[0]["content"]
+    assert "หัวหน้าทีม AI" in content
+    assert "ช่วยวางแผนเปิดตัวสินค้าใหม่ให้หน่อย" in content
+    assert "สูงสุด 20 ตัวรวมผม" in content
+    assert "สร้างบอตนักวิจัยตลาด เพื่อติดตามคู่แข่ง" in content
+
+
 async def test_blueprint_routes_share_library_and_use_host_workspace(integrated):
     app, c, u = integrated
     created = await c.post("/modes/sbot/api/blueprints", data={"name": "Template"},

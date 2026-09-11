@@ -148,12 +148,11 @@ class CreateSessionRequest(BaseModel):
 def _team_lead_onboarding(locale: str) -> str:
     if locale.lower().startswith("th"):
         return (
-            "สวัสดีครับ ผม Team Lead ผู้ช่วยวางแผนและประสานงานทีม AI ของคุณ\n\n"
-            "เริ่มต้นได้ทันที:\n"
-            "• ช่วยวางแผนเปิดตัวสินค้าใหม่\n"
-            "• สรุปไฟล์นี้และระบุงานที่ต้องทำต่อ\n"
-            "• สร้างบอทนักวิจัยเพื่อติดตามคู่แข่ง\n\n"
-            "บอกเป้าหมายหรือแนบไฟล์ได้เลย ผมจะช่วยตอบ วางแผน หรือสร้าง Specialist ให้เมื่อเหมาะสมครับ"
+            "สวัสดีครับ ผม Team Lead หัวหน้าทีม AI ของคุณ\n\n"
+            "ผมช่วยตอบคำถาม วางแผนงาน สรุปไฟล์ และประสานงานกับบอตผู้เชี่ยวชาญให้ได้\n\n"
+            "ลองพิมพ์: “ช่วยวางแผนเปิดตัวสินค้าใหม่ให้หน่อย”\n\n"
+            "คุณสามารถสร้างทีมบอตผู้เชี่ยวชาญได้สูงสุด 20 ตัวรวมผม\n"
+            "ตัวอย่าง: “สร้างบอตนักวิจัยตลาด เพื่อติดตามคู่แข่ง”"
         )
     return (
         "Hello, I’m Team Lead. I help you plan work and coordinate your AI team.\n\n"
@@ -381,13 +380,21 @@ async def create_session(
     if body.kind not in {"direct", "mission"}:
         raise HTTPException(400, "Invalid session kind")
     if bot is not None and body.kind == "direct":
+        onboarding = None
+        if bot.kind == "chief_of_staff":
+            # Onboarding is visible UI content, so it follows the profile's
+            # language preference and the Control Plane default just as web
+            # replies do. `locale` is only the final compatibility fallback.
+            try:
+                onboarding_locale = user.ui_language or (await state.branding.get())["language"]
+            except Exception:
+                onboarding_locale = user.ui_language or user.locale
+            onboarding = _team_lead_onboarding(onboarding_locale)
         session = await state.sessions.thread_for_bot(
             user.id,
             bot.id,
             body.title,
-            initial_assistant_message=(
-                _team_lead_onboarding(user.locale) if bot.kind == "chief_of_staff" else None
-            ),
+            initial_assistant_message=onboarding,
         )
     else:
         session = await state.sessions.create(

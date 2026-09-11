@@ -313,6 +313,23 @@ async def test_delegations_at_once_do_not_give_a_bot_two_threads(stores, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_thread_for_bot_locks_its_owner_before_lookup(stores, tmp_path):
+    """The owner row lock is the cross-worker part of canonical-thread creation."""
+    user, bot, _ = await _team(stores, "thread-owner-lock@sbot.ai")
+    real_scalar = AsyncSession.scalar
+    statements = []
+
+    async def scalar(self, statement, *args, **kwargs):
+        statements.append(statement)
+        return await real_scalar(self, statement, *args, **kwargs)
+
+    with patch.object(AsyncSession, "scalar", scalar):
+        await stores["sessions"].thread_for_bot(user.id, bot.id, title=bot.name)
+
+    assert statements[0]._for_update_arg is not None
+
+
+@pytest.mark.asyncio
 async def test_two_writers_at_once_do_not_land_on_the_same_seq(stores, tmp_path):
     """`seq` is read with a SELECT and committed on a later await, so two
     writers to one session can read the same maximum. A duplicate is

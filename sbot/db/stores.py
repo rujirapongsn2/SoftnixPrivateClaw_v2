@@ -1258,13 +1258,23 @@ class SessionStore:
         bot a second view: the team list shows one row per bot, and the extra
         thread drops out of it into "Other".
 
-        Held under a lock because the lookup and the insert are two awaits: a
-        `delegate_many` naming the same bot twice had both calls find nothing
-        and both create one. There is deliberately no unique constraint to lean
-        on instead — a user may have as many ordinary chats with a bot as they
-        like, and this is only asking for the one that stands for it.
+        Held under an in-process lock because the lookup and insert are two
+        awaits: a `delegate_many` naming the same bot twice had both calls find
+        nothing and both create one. The owner row is also locked inside the
+        transaction, which serializes this lookup/create across PostgreSQL web
+        workers. There is deliberately no unique constraint to lean on instead
+        — a user may have as many ordinary chats with a bot as they like, and
+        this is only asking for the one that stands for it.
         """
         async with self._thread_locks.get(f"{user_id}:{bot_id}"), self.factory() as db:
+            # A KeyedLocks instance lives in just one worker. Locking the owner
+            # row ensures a simultaneous first open handled by another worker
+            # cannot insert a competing canonical thread before this transaction
+            # has checked for one. SQLite ignores FOR UPDATE; its local process
+            # lock remains the compatible fallback used by single-process setups.
+            owner = await db.scalar(select(User.id).where(User.id == user_id).with_for_update())
+            if owner is None:
+                raise ValueError("session owner no longer exists")
             existing = await db.scalar(
                 select(ChatSession)
                 .where(ChatSession.user_id == user_id, ChatSession.bot_id == bot_id)
