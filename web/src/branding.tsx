@@ -439,6 +439,11 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.skills.back": "Back",
     "settings.skills.intro": "Skills teach Sbot reusable procedures. Enabled skills appear in its context.",
     "settings.skills.new": "New skill",
+    "settings.skills.tabsAria": "Skill types",
+    "settings.skills.tabBuiltin": "Built-in skills ({count})",
+    "settings.skills.tabUser": "Your skills ({count})",
+    "settings.skills.builtinEmptyTitle": "No built-in skills available",
+    "settings.skills.builtinEmptyDesc": "Built-in skills will appear here when they are available.",
     "settings.skills.emptyTitle": "No skills yet",
     "settings.skills.emptyDesc": "Create a skill to teach Sbot a procedure.",
     "settings.skills.shadowsBuiltin":
@@ -1535,6 +1540,11 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.skills.back": "ย้อนกลับ",
     "settings.skills.intro": "สกิลสอนขั้นตอนการทำงานที่ใช้ซ้ำได้ให้ Sbot สกิลที่เปิดใช้งานจะปรากฏในบริบทของมัน",
     "settings.skills.new": "สกิลใหม่",
+    "settings.skills.tabsAria": "ประเภทสกิล",
+    "settings.skills.tabBuiltin": "สกิลในระบบ ({count})",
+    "settings.skills.tabUser": "สกิลของคุณ ({count})",
+    "settings.skills.builtinEmptyTitle": "ยังไม่มีสกิลในระบบ",
+    "settings.skills.builtinEmptyDesc": "สกิลที่มาพร้อมระบบจะแสดงที่นี่เมื่อพร้อมใช้งาน",
     "settings.skills.emptyTitle": "ยังไม่มีสกิล",
     "settings.skills.emptyDesc": "สร้างสกิลเพื่อสอนขั้นตอนการทำงานให้ Sbot",
     "settings.skills.shadowsBuiltin":

@@ -4259,6 +4259,50 @@ html[data-chat-bg="grid"] .claw-chat {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.claw-skills-tabs {
+  min-width: 0;
+  overflow-x: auto;
+}
+.claw-skills-tabs nav {
+  width: max-content;
+  min-width: 100%;
+  flex-wrap: nowrap;
+}
+.claw-skill-list {
+  display: grid;
+  gap: 10px;
+}
+.claw-skill-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+}
+.claw-skill-card-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.claw-skill-description {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.claw-skill-card-actions {
+  flex: 0 0 auto;
+}
+@media (max-width: 560px) {
+  .claw-skill-card {
+    flex-direction: column;
+  }
+  .claw-skill-card-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
 .claw-skill-capability-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

@@ -795,6 +795,7 @@ function SkillDetailModal({
 function SkillsPanel() {
   const t = useT();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [skillTab, setSkillTab] = useState<"builtin" | "user">("builtin");
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [globalConnectors, setGlobalConnectors] = useState<ConnectorGlobalSummary[]>([]);
   const [editing, setEditing] = useState<Partial<SkillInfo> | null>(null);
@@ -821,6 +822,9 @@ function SkillsPanel() {
   // even though it's actually live and usable.
   const ownNames = new Set(connectors.filter((c) => c.enabled).map((c) => c.name));
   const pickableGlobalConnectors = globalConnectors.filter((c) => !ownNames.has(c.name));
+  const builtinSkills = skills.filter((skill) => skill.builtin);
+  const userSkills = skills.filter((skill) => !skill.builtin);
+  const visibleSkills = skillTab === "builtin" ? builtinSkills : userSkills;
 
   if (editing) {
     const readOnly = !!editing.builtin;
@@ -929,85 +933,106 @@ function SkillsPanel() {
         />
       </div>
       {error && <ErrorText>{error}</ErrorText>}
-      {skills.length === 0 ? (
-        <EmptyState title={t("settings.skills.emptyTitle")} description={t("settings.skills.emptyDesc")} />
+      <div className="claw-skills-tabs">
+        <TabList
+          value={skillTab}
+          onChange={(value) => setSkillTab(value as "builtin" | "user")}
+          hasDivider
+          aria-label={t("settings.skills.tabsAria")}
+        >
+          <Tab
+            value="builtin"
+            label={t("settings.skills.tabBuiltin", { count: builtinSkills.length.toLocaleString() })}
+          />
+          <Tab
+            value="user"
+            label={t("settings.skills.tabUser", { count: userSkills.length.toLocaleString() })}
+          />
+        </TabList>
+      </div>
+      {visibleSkills.length === 0 ? (
+        <EmptyState
+          title={t(skillTab === "builtin" ? "settings.skills.builtinEmptyTitle" : "settings.skills.emptyTitle")}
+          description={t(skillTab === "builtin" ? "settings.skills.builtinEmptyDesc" : "settings.skills.emptyDesc")}
+        />
       ) : (
-        skills.map((skill) => (
-          <Card key={skill.id} padding={2}>
-            <div className="claw-row claw-row-between">
-              <div>
-                <div className="claw-row">
-                  <Text weight="semibold">{skill.name}</Text>
-                  {skill.builtin && <Badge variant="info" label="Built-in" />}
-                </div>
-                <Text size="sm" color="secondary" as="p">
-                  {skill.description || "—"}
-                </Text>
-                {skill.shadows_builtin && (
-                  <Text size="sm" color="secondary" as="p">
-                    {t("settings.skills.shadowsBuiltin")}
+        <div className="claw-skill-list">
+          {visibleSkills.map((skill) => (
+            <Card key={skill.id} padding={2}>
+              <div className="claw-skill-card">
+                <div className="claw-skill-card-copy">
+                  <div className="claw-row">
+                    <Text weight="semibold">{skill.name}</Text>
+                  </div>
+                  <Text size="sm" color="secondary" as="p" className="claw-skill-description">
+                    {skill.description || "—"}
                   </Text>
-                )}
-              </div>
-              {skill.builtin ? (
-                <Button
-                  label={t("settings.skills.view")}
-                  icon={<Icon icon={ExternalLink} size="sm" />}
-                  size="sm"
-                  variant="ghost"
-                  clickAction={() =>
-                    guard(async () => {
-                      // Built-ins arrive from the list without their content —
-                      // see api.skillContent. Both destinations below render it,
-                      // so it has to be in hand before either opens.
-                      const { content } = await api.skillContent(skill.id);
-                      const full = { ...skill, content };
-                      if (skill.capabilities?.length) {
-                        setViewingDetail(full);
-                        setDetailOpen(true);
-                      } else {
-                        setEditing(full);
-                      }
-                    })
-                  }
-                />
-              ) : (
-                <div className="claw-row">
-                  <Switch
-                    value={skill.enabled}
-                    label={t("settings.common.enable", { name: skill.name })}
-                    isLabelHidden
-                    changeAction={(checked) =>
-                      guard(async () => {
-                        await api.saveSkill({ ...skill, enabled: checked });
-                        await reload();
-                      })
-                    }
-                  />
+                  {skill.shadows_builtin && (
+                    <Text size="sm" color="secondary" as="p">
+                      {t("settings.skills.shadowsBuiltin")}
+                    </Text>
+                  )}
+                </div>
+                {skill.builtin ? (
                   <Button
-                    label={t("settings.common.edit")}
-                    icon={<Icon icon={Pencil} size="sm" />}
+                    label={t("settings.skills.view")}
+                    icon={<Icon icon={ExternalLink} size="sm" />}
                     size="sm"
                     variant="ghost"
-                    clickAction={() => setEditing(skill)}
-                  />
-                  <Button
-                    label={t("settings.common.delete")}
-                    icon={<Icon icon={Trash2} size="sm" />}
-                    size="sm"
-                    variant="destructive"
                     clickAction={() =>
                       guard(async () => {
-                        await api.deleteSkill(skill.id);
-                        await reload();
+                        // Built-ins arrive from the list without their content —
+                        // see api.skillContent. Both destinations below render it,
+                        // so it has to be in hand before either opens.
+                        const { content } = await api.skillContent(skill.id);
+                        const full = { ...skill, content };
+                        if (skill.capabilities?.length) {
+                          setViewingDetail(full);
+                          setDetailOpen(true);
+                        } else {
+                          setEditing(full);
+                        }
                       })
                     }
                   />
-                </div>
-              )}
-            </div>
-          </Card>
-        ))
+                ) : (
+                  <div className="claw-row claw-skill-card-actions">
+                    <Switch
+                      value={skill.enabled}
+                      label={t("settings.common.enable", { name: skill.name })}
+                      isLabelHidden
+                      changeAction={(checked) =>
+                        guard(async () => {
+                          await api.saveSkill({ ...skill, enabled: checked });
+                          await reload();
+                        })
+                      }
+                    />
+                    <Button
+                      label={t("settings.common.edit")}
+                      icon={<Icon icon={Pencil} size="sm" />}
+                      size="sm"
+                      variant="ghost"
+                      clickAction={() => setEditing(skill)}
+                    />
+                    <Button
+                      label={t("settings.common.delete")}
+                      icon={<Icon icon={Trash2} size="sm" />}
+                      size="sm"
+                      variant="destructive"
+                      clickAction={() =>
+                        guard(async () => {
+                          await api.deleteSkill(skill.id);
+                          await reload();
+                        })
+                      }
+                    />
+                  </div>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
       )}
       <SkillDetailModal skill={viewingDetail} isOpen={detailOpen} onOpenChange={setDetailOpen} />
     </div>
