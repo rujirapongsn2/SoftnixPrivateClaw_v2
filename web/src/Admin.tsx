@@ -457,18 +457,26 @@ function OverviewSummary({ data }: { data: AdminOverview }) {
             <Text size="sm" color="secondary">{t("admin.overview.summary.noModelActivity")}</Text>
           ) : (
             <div className="claw-summary-model-list">
-              {topModels.map((model, index) => (
-                <div className="claw-summary-model" key={model.model}>
-                  <div className="claw-summary-model-head">
-                    <span className="claw-summary-model-rank">{index + 1}</span>
-                    <span className="claw-summary-model-name" title={model.model}>{model.model}</span>
-                    <span>{model.turns.toLocaleString()}</span>
+              {topModels.map((model, index) => {
+                const parts = model.model.split("/").filter(Boolean);
+                const modelName = parts.at(-1) ?? model.model;
+                const providerName = parts.length > 1 ? parts.at(-2) : "";
+                return (
+                  <div className="claw-summary-model" key={model.model} title={model.model}>
+                    <div className="claw-summary-model-head">
+                      <span className="claw-summary-model-rank">{index + 1}</span>
+                      <span className="claw-summary-model-identity">
+                        <span className="claw-summary-model-name">{modelName}</span>
+                        {providerName && <span className="claw-summary-model-provider">{providerName}</span>}
+                      </span>
+                      <span className="claw-summary-model-count">{model.turns.toLocaleString()}</span>
+                    </div>
+                    <div className="claw-summary-model-track" aria-hidden="true">
+                      <span style={{ width: `${(model.turns / maxModelTurns) * 100}%`, background: stackColor(index, model.model) }} />
+                    </div>
                   </div>
-                  <div className="claw-summary-model-track" aria-hidden="true">
-                    <span style={{ width: `${(model.turns / maxModelTurns) * 100}%`, background: stackColor(index, model.model) }} />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </section>
