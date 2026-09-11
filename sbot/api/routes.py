@@ -145,6 +145,26 @@ class CreateSessionRequest(BaseModel):
     kind: str = "direct"
 
 
+def _team_lead_onboarding(locale: str) -> str:
+    if locale.lower().startswith("th"):
+        return (
+            "สวัสดีครับ ผม Team Lead ผู้ช่วยวางแผนและประสานงานทีม AI ของคุณ\n\n"
+            "เริ่มต้นได้ทันที:\n"
+            "• ช่วยวางแผนเปิดตัวสินค้าใหม่\n"
+            "• สรุปไฟล์นี้และระบุงานที่ต้องทำต่อ\n"
+            "• สร้างบอทนักวิจัยเพื่อติดตามคู่แข่ง\n\n"
+            "บอกเป้าหมายหรือแนบไฟล์ได้เลย ผมจะช่วยตอบ วางแผน หรือสร้าง Specialist ให้เมื่อเหมาะสมครับ"
+        )
+    return (
+        "Hello, I’m Team Lead. I help you plan work and coordinate your AI team.\n\n"
+        "Try one of these:\n"
+        "• Plan a product launch\n"
+        "• Summarize this file and list the next actions\n"
+        "• Create a research bot to track competitors\n\n"
+        "Share a goal or attach a file. I can answer directly, make a plan, or create a Specialist when it helps."
+    )
+
+
 class SendMessageRequest(BaseModel):
     content: str
 
@@ -353,17 +373,30 @@ async def create_session(
         if group is None:
             raise HTTPException(404, "Group not found")
         return {"id": group.session_id, "title": group.name, "group_id": group.id, "kind": "group"}
-    if body.bot_id and await state.bots.get(body.bot_id, user.id) is None:
-        raise HTTPException(404, "Bot not found")
+    bot = None
+    if body.bot_id:
+        bot = await state.bots.get(body.bot_id, user.id)
+        if bot is None:
+            raise HTTPException(404, "Bot not found")
     if body.kind not in {"direct", "mission"}:
         raise HTTPException(400, "Invalid session kind")
-    session = await state.sessions.create(
-        user.id,
-        title=body.title,
-        bot_id=body.bot_id,
-        group_id=body.group_id,
-        kind=body.kind,
-    )
+    if bot is not None and body.kind == "direct":
+        session = await state.sessions.thread_for_bot(
+            user.id,
+            bot.id,
+            body.title,
+            initial_assistant_message=(
+                _team_lead_onboarding(user.locale) if bot.kind == "chief_of_staff" else None
+            ),
+        )
+    else:
+        session = await state.sessions.create(
+            user.id,
+            title=body.title,
+            bot_id=body.bot_id,
+            group_id=body.group_id,
+            kind=body.kind,
+        )
     return {"id": session.id, "title": session.title, "bot_id": session.bot_id, "kind": session.kind}
 
 

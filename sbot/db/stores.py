@@ -1244,7 +1244,13 @@ class SessionStore:
         async with self.factory() as db:
             return await db.get(ChatSession, session_id)
 
-    async def thread_for_bot(self, user_id: str, bot_id: str, title: str) -> ChatSession:
+    async def thread_for_bot(
+        self,
+        user_id: str,
+        bot_id: str,
+        title: str,
+        initial_assistant_message: str | None = None,
+    ) -> ChatSession:
         """The one thread that stands for this bot, created if it has none yet.
 
         Picks the most recently updated, which is the same thread the sidebar
@@ -1269,6 +1275,17 @@ class SessionStore:
                 return existing
             session = ChatSession(user_id=user_id, title=title, bot_id=bot_id)
             db.add(session)
+            # The ORM assigns the session id during flush. Flush before adding
+            # the welcome row so both records commit atomically.
+            await db.flush()
+            if initial_assistant_message:
+                db.add(Message(
+                    session_id=session.id,
+                    seq=1,
+                    role="assistant",
+                    content=initial_assistant_message,
+                    meta={"onboarding": True},
+                ))
             await db.commit()
             return session
 

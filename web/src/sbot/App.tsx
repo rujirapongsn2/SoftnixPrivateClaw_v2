@@ -1012,10 +1012,22 @@ export default function App() {
     // session requests, and avoids a visible landing-to-transcript jump.
     setOpeningBotId(bot.id);
     setActive(null);
-    void api.listSessions().then((known) => {
+    void api.listSessions().then(async (known) => {
       if (botSelectionRequestRef.current !== request) return;
       setSessions(known);
-      setActive(botThread(known, bot.id)?.id ?? null);
+      const existing = botThread(known, bot.id);
+      if (existing) {
+        setActive(existing.id);
+        return;
+      }
+      if (bot.kind === "chief_of_staff") {
+        const created = await api.createSession("Team Lead", bot.id, "direct");
+        if (botSelectionRequestRef.current !== request) return;
+        setActive(created.id);
+        void refresh();
+        return;
+      }
+      setActive(null);
     }).catch(() => {
       if (botSelectionRequestRef.current === request) setActive(null);
     }).finally(() => {

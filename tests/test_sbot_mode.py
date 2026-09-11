@@ -72,6 +72,23 @@ async def test_sbot_bot_api_enforces_active_team_quota(integrated):
     assert f"maximum of {MAX_BOTS_PER_OWNER} bots" in response.json()["detail"]
 
 
+async def test_first_team_lead_session_has_one_persisted_onboarding_message(integrated):
+    _, c, _ = integrated
+    bots = (await c.get("/modes/sbot/api/bots")).json()
+    team_lead = next(bot for bot in bots if bot["kind"] == "chief_of_staff")
+
+    first = await c.post("/modes/sbot/api/sessions", json={"title": "Team Lead", "bot_id": team_lead["id"]})
+    second = await c.post("/modes/sbot/api/sessions", json={"title": "Team Lead", "bot_id": team_lead["id"]})
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+    messages = (await c.get(f"/modes/sbot/api/sessions/{first.json()['id']}/messages")).json()["messages"]
+    assert len(messages) == 1
+    assert messages[0]["role"] == "assistant"
+    assert "Team Lead" in messages[0]["content"]
+    assert messages[0]["meta"] == {"onboarding": True}
+
+
 async def test_blueprint_routes_share_library_and_use_host_workspace(integrated):
     app, c, u = integrated
     created = await c.post("/modes/sbot/api/blueprints", data={"name": "Template"},
