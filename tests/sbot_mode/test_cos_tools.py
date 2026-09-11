@@ -417,17 +417,15 @@ async def test_a_specialist_that_raises_still_closes_its_delegation(stores, tmp_
 
 
 @pytest.mark.asyncio
-async def test_a_roster_too_long_to_list_says_so(stores, tmp_path):
-    """The pinned roster is cut at a fixed count, oldest-first, so what drops
-    off is whatever the user created most recently. A leader told only that
-    `list_bots` returns fuller charters reads the short list as the whole team
-    and concludes nobody fits."""
+async def test_maximum_roster_fits_without_truncation(stores, tmp_path):
+    """The active-team quota includes the leader, so every permitted member
+    fits in the leader's pinned roster without hiding a specialist."""
+    from sbot.db.stores import MAX_BOTS_PER_OWNER
     from sbot.core.runtime import _TEAM_ROSTER_LIMIT
 
     user = await stores["users"].get_or_create_by_email("big_team@sbot.ai")
     cos = await stores["bots"].get_or_create_cos(user.id)
-    over = _TEAM_ROSTER_LIMIT + 2
-    for i in range(over):
+    for i in range(MAX_BOTS_PER_OWNER - 1):
         await stores["bots"].create(
             owner_id=user.id, name=f"บอท{i}", role_title="Specialist", charter="ทำงาน"
         )
@@ -437,11 +435,10 @@ async def test_a_roster_too_long_to_list_says_so(stores, tmp_path):
     await make_runtime(stores, provider, tmp_path).handle_message(user.id, session.id, "สวัสดี")
 
     prompt = provider.calls[0][0]["content"]
-    assert f"Showing {_TEAM_ROSTER_LIMIT} of {over}" in prompt
-    assert "list_bots" in prompt
-    # The ones it can see are still named — the notice is an addition, not a
-    # replacement for the roster.
+    assert MAX_BOTS_PER_OWNER == _TEAM_ROSTER_LIMIT
+    assert "Showing" not in prompt
     assert "บอท0" in prompt
+    assert f"บอท{MAX_BOTS_PER_OWNER - 2}" in prompt
 
 
 @pytest.mark.asyncio

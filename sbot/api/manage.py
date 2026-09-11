@@ -81,18 +81,22 @@ async def create_bot(
     user: User = Depends(current_user),
     state: AppState = Depends(get_state),
 ) -> dict:
-    bot = await state.bots.create(
-        owner_id=user.id,
-        name=body.name.strip(),
-        role_title=body.role_title.strip() or "Specialist",
-        charter=body.charter.strip(),
-        model=body.model,
-        tool_allowlist=body.tool_allowlist,
-        skill_ids=body.skill_ids,
-        kind=body.kind,
-        avatar=body.avatar,
-        created_by="user",
-    )
+    await state.bots.get_or_create_cos(user.id)
+    try:
+        bot = await state.bots.create(
+            owner_id=user.id,
+            name=body.name.strip(),
+            role_title=body.role_title.strip() or "Specialist",
+            charter=body.charter.strip(),
+            model=body.model,
+            tool_allowlist=body.tool_allowlist,
+            skill_ids=body.skill_ids,
+            kind=body.kind,
+            avatar=body.avatar,
+            created_by="user",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"id": bot.id, "name": bot.name, "role_title": bot.role_title}
 
 

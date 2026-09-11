@@ -1,7 +1,7 @@
 """Tests for sbot Bot Registry, Chief of Staff seeding, and CRUD operations."""
 
 import pytest
-from sbot.db.stores import BotStore, UserStore
+from sbot.db.stores import BotStore, MAX_BOTS_PER_OWNER, UserStore
 
 
 @pytest.mark.asyncio
@@ -70,6 +70,24 @@ async def test_create_and_list_specialist_bots(stores):
     assert "QA Web" not in [b.name for b in active_bots]
     all_bots = await bot_store.list_for_user(user.id, include_archived=True)
     assert "QA Web" in [b.name for b in all_bots]
+
+
+@pytest.mark.asyncio
+async def test_active_bot_limit_includes_team_lead_and_releases_on_archive(stores):
+    bot_store: BotStore = stores["bots"]
+    user = await stores["users"].get_or_create_by_email("bot-limit@sbot.ai", "bot-limit")
+    team_lead = await bot_store.get_or_create_cos(user.id)
+
+    for index in range(MAX_BOTS_PER_OWNER - 1):
+        await bot_store.create(owner_id=user.id, name=f"Specialist {index}")
+
+    assert await bot_store.count_for_user(user.id) == MAX_BOTS_PER_OWNER
+    with pytest.raises(ValueError, match=f"maximum of {MAX_BOTS_PER_OWNER} bots"):
+        await bot_store.create(owner_id=user.id, name="One too many")
+
+    assert await bot_store.archive(team_lead.id, user.id)
+    replacement = await bot_store.create(owner_id=user.id, name="Replacement")
+    assert replacement.name == "Replacement"
 
 
 @pytest.mark.asyncio

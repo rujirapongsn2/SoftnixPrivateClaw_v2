@@ -59,6 +59,19 @@ async def test_mode_session_and_file_authorization(integrated):
     assert (await c.get(f"/modes/sbot/api/sessions/{b}/files/report.txt")).text == "team"
 
 
+async def test_sbot_bot_api_enforces_active_team_quota(integrated):
+    from sbot.db.stores import MAX_BOTS_PER_OWNER
+
+    app, c, user = integrated
+    assert (await c.get("/modes/sbot/api/bots")).status_code == 200  # Seeds the Team Lead.
+    for index in range(MAX_BOTS_PER_OWNER - 1):
+        await app.state.sbot.bots.create(owner_id=user.id, name=f"Specialist {index}")
+
+    response = await c.post("/modes/sbot/api/bots", json={"name": "One too many"})
+    assert response.status_code == 409
+    assert f"maximum of {MAX_BOTS_PER_OWNER} bots" in response.json()["detail"]
+
+
 async def test_blueprint_routes_share_library_and_use_host_workspace(integrated):
     app, c, u = integrated
     created = await c.post("/modes/sbot/api/blueprints", data={"name": "Template"},

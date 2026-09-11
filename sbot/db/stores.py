@@ -357,6 +357,10 @@ class MessageStore:
         return [{"label": f"{h:02d}", "count": counts.get(h, 0)} for h in range(24)]
 
 
+# Includes the system Team Lead. Archived bots do not consume the quota.
+MAX_BOTS_PER_OWNER = 20
+
+
 class BotStore:
     DEFAULT_COS_NAME = "Team Lead"
     DEFAULT_COS_CHARTER = (
@@ -396,8 +400,6 @@ class BotStore:
         self,
         owner_id: str,
         bots: Sequence[dict[str, Any]],
-        *,
-        max_bots: int,
     ) -> list[Bot]:
         """Atomically add a validated roster for one owner.
 
@@ -421,9 +423,9 @@ class BotStore:
                         select(Bot).where(Bot.owner_id == owner_id, Bot.is_archived.is_(False))
                     )
                 )
-                if len(active) + len(bots) > max_bots:
+                if len(active) + len(bots) > MAX_BOTS_PER_OWNER:
                     raise ValueError(
-                        f"creating {len(bots)} bots would exceed the maximum of {max_bots} bots for this team"
+                        f"creating {len(bots)} bots would exceed the maximum of {MAX_BOTS_PER_OWNER} bots for this team"
                     )
 
                 existing_names = {bot.name.casefold() for bot in active}
@@ -477,22 +479,17 @@ class BotStore:
         avatar: dict | None = None,
         created_by: str = "user",
     ) -> Bot:
-        async with self.factory() as db:
-            bot = Bot(
-                owner_id=owner_id,
-                name=name,
-                role_title=role_title,
-                charter=charter,
-                model=model,
-                tool_allowlist=tool_allowlist,
-                skill_ids=skill_ids,
-                kind=kind,
-                avatar=avatar or {"color": "#4b6bfb", "emoji": "🤖", "initial": name[:1].upper()},
-                created_by=created_by,
-            )
-            db.add(bot)
-            await db.commit()
-            return bot
+        return (await self.create_batch(owner_id, [{
+            "name": name,
+            "role_title": role_title,
+            "charter": charter,
+            "model": model,
+            "tool_allowlist": tool_allowlist,
+            "skill_ids": skill_ids,
+            "kind": kind,
+            "avatar": avatar,
+            "created_by": created_by,
+        }]))[0]
 
     async def get(self, bot_id: str, owner_id: str) -> Bot | None:
         """Owner-scoped lookup. `owner_id` is required rather than optional

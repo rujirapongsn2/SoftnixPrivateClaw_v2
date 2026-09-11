@@ -27,7 +27,7 @@ from sbot.core.specialist import (
 from sbot.core.task_result import TaskResult
 from sbot.tools.finish_step import FinishStepTool
 from sbot.core.turn_context import current_turn_locale, current_turn_deadline
-from sbot.db.stores import BotStore
+from sbot.db.stores import BotStore, MAX_BOTS_PER_OWNER
 from sbot.i18n import t
 from sbot.tools.base import Tool
 
@@ -41,10 +41,6 @@ __all__ = [
     "DelegateTool",
     "ListBotsTool",
 ]
-
-# A team this large is a runaway loop, not a team. Bounded because create_bot is
-# driven by a model and each row costs a prompt on every list_bots call.
-MAX_BOTS_PER_OWNER = 50
 
 # How much of a mistyped bot id still resolves. A dropped or swapped character
 # in 32 hex ones scores ~0.97, while two unrelated ids score ~0.2 — so this sits
@@ -191,16 +187,19 @@ class CreateBotTool(Tool):
                 "Reuse or archive an existing specialist instead of creating another."
             )
 
-        bot = await self.bot_store.create(
-            owner_id=self.owner_id,
-            name=name,
-            role_title=role_title.strip(),
-            charter=charter.strip(),
-            tool_allowlist=tool_allowlist,
-            skill_ids=skill_ids,
-            kind="specialist",
-            created_by=f"bot:{self.creator_bot_id}",
-        )
+        try:
+            bot = await self.bot_store.create(
+                owner_id=self.owner_id,
+                name=name,
+                role_title=role_title.strip(),
+                charter=charter.strip(),
+                tool_allowlist=tool_allowlist,
+                skill_ids=skill_ids,
+                kind="specialist",
+                created_by=f"bot:{self.creator_bot_id}",
+            )
+        except ValueError as exc:
+            return f"Error: {exc}."
         return (
             f"สร้างบอท '{bot.name}' เรียบร้อยแล้ว "
             f"(บทบาท: {bot.role_title}, รหัส: {bot.id}). "
@@ -294,9 +293,7 @@ class CreateBotsTool(CreateBotTool):
             item["kind"] = "specialist"
             item["created_by"] = f"bot:{self.creator_bot_id}"
         try:
-            bots_created = await self.bot_store.create_batch(
-                self.owner_id, normalized, max_bots=MAX_BOTS_PER_OWNER
-            )
+            bots_created = await self.bot_store.create_batch(self.owner_id, normalized)
         except ValueError as exc:
             return f"Error: {exc}."
         except IntegrityError:
