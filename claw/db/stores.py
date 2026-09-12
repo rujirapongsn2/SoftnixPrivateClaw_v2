@@ -309,6 +309,19 @@ class SessionStore:
                 session.model = model
                 await db.commit()
 
+    async def set_pinned(self, session_id: str, pinned: bool) -> None:
+        # `onupdate=_now` on `updated_at` fires for any UPDATE against this
+        # table, Core or ORM, unless the column is explicitly given a value —
+        # so self-assign it here to keep pinning from looking like activity
+        # to the date-grouped sidebar.
+        async with self.factory() as db:
+            await db.execute(
+                update(ChatSession)
+                .where(ChatSession.id == session_id)
+                .values(pinned=pinned, updated_at=ChatSession.updated_at)
+            )
+            await db.commit()
+
     async def set_plan(self, session_id: str, goal: str, steps: list[dict[str, Any]]) -> None:
         """Replace the session's working plan (goal + ordered step checklist).
 

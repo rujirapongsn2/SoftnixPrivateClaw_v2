@@ -548,10 +548,12 @@ html[data-font-size="large"] {
   pointer-events: auto;
 }
 .sbot-bot-menu button,
+.claw-recents-popover-actions button,
 .claw-recents-popover-row > button:last-child {
   color: var(--color-text-secondary, #687080);
 }
 .sbot-bot-menu button:hover,
+.claw-recents-popover-actions button:hover,
 .claw-recents-popover-row > button:last-child:hover {
   color: var(--color-text-primary, #1f2937);
 }
@@ -667,14 +669,20 @@ html[data-font-size="large"] {
 .claw-recent-row {
   position: relative;
 }
+.claw-recent-row .claw-recent-actions,
 .claw-recent-row .claw-recent-delete {
   position: absolute;
   right: 6px;
   top: 50%;
   transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
 }
+.claw-recent-row:hover .claw-recent-actions,
+.claw-recent-row:focus-within .claw-recent-actions,
 .claw-recent-row:hover .claw-recent-delete,
 .claw-recent-row:focus-within .claw-recent-delete {
   opacity: 1;
@@ -740,12 +748,18 @@ html[data-font-size="large"] {
   width: 100%;
   justify-content: flex-start;
 }
+.claw-recents-popover-actions,
 .claw-recents-popover-row > button:last-child {
   position: absolute;
   right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
 }
+.claw-recents-popover-row:hover .claw-recents-popover-actions,
+.claw-recents-popover-row:focus-within .claw-recents-popover-actions,
 .claw-recents-popover-row:hover > button:last-child,
 .claw-recents-popover-row:focus-within > button:last-child {
   opacity: 1;

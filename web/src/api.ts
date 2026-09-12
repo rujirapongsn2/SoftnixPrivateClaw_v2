@@ -20,6 +20,7 @@ export interface SessionInfo {
   // "web" for normal chats, "schedule" for sessions created by a scheduled task
   // (shown with an alarm-clock marker), "telegram"/"heartbeat" for those channels.
   channel?: string;
+  pinned?: boolean;
 }
 
 export interface ChatMessage {
@@ -905,6 +906,8 @@ export const api = {
   renameSession: (id: string, title: string) =>
     request(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ title }) }),
   deleteSession: (id: string) => request(`/api/sessions/${id}`, { method: "DELETE" }),
+  pinSession: (id: string) => request(`/api/sessions/${id}/pin`, { method: "POST" }),
+  unpinSession: (id: string) => request(`/api/sessions/${id}/pin`, { method: "DELETE" }),
   listMessages: (sessionId: string) => request<ChatMessage[]>(`/api/sessions/${sessionId}/messages`),
   uploadAttachments: async (sessionId: string, files: File[]): Promise<AttachmentRef[]> => {
     const form = new FormData();

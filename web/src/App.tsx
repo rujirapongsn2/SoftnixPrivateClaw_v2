@@ -12,7 +12,7 @@ import {
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useToast } from "@astryxdesign/core/Toast";
-import { AlarmClock, ChevronDown, Loader2, LogOut, Menu, MessageCircle, MessageSquare, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
+import { AlarmClock, ChevronDown, Loader2, LogOut, Menu, MessageCircle, MessageSquare, Pin, PinOff, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
@@ -166,12 +166,14 @@ function RecentsNav({
   done,
   onSelect,
   onDelete,
+  onTogglePin,
 }: {
   sessions: SessionInfo[];
   active: string | null;
   done: Set<string>;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
+  onTogglePin: (id: string, pinned: boolean) => void;
 }) {
   const { isCollapsed } = useSideNavCollapse();
   const t = useT();
@@ -184,9 +186,15 @@ function RecentsNav({
 
   const q = query.trim().toLowerCase();
   const filtered = q ? sessions.filter((s) => s.title.toLowerCase().includes(q)) : sessions;
-  const shown = filtered.slice(0, visible);
+  // Pinned chats sit in their own section above "Today" regardless of
+  // updated_at, and are never competed off by recency — but still share the
+  // same "Show older" budget as the rest, so a user who pins dozens of chats
+  // doesn't get an unbounded, unpaginated section.
+  const pinned = filtered.filter((s) => s.pinned).slice(0, visible);
+  const rest = filtered.filter((s) => !s.pinned);
+  const shown = rest.slice(0, visible);
   const groups = groupSessions(shown);
-  const hasMore = filtered.length > shown.length;
+  const hasMore = rest.length > shown.length || filtered.filter((s) => s.pinned).length > pinned.length;
 
   // Running spinner (turn processing) or a "new response" dot (finished while
   // you were elsewhere) — shown until the row is hovered (which reveals delete).
@@ -214,47 +222,101 @@ function RecentsNav({
     </div>
   );
 
+  const row = (s: SessionInfo) => (
+    <div
+      key={s.id}
+      className={`claw-recent-row${done.has(s.id) ? " claw-recent-row--unread" : ""}`}
+    >
+      <SideNavItem
+        label={s.title}
+        icon={s.channel === "schedule" ? AlarmClock : MessageSquare}
+        isSelected={s.id === active}
+        onClick={() => onSelect(s.id)}
+      />
+      {statusFor(s)}
+      <span className="claw-recent-actions">
+        <IconButton
+          label={s.pinned ? "Unpin chat" : "Pin chat"}
+          icon={<Icon icon={s.pinned ? PinOff : Pin} size="xsm" />}
+          variant="ghost"
+          size="sm"
+          clickAction={(e) => {
+            e.stopPropagation();
+            onTogglePin(s.id, !s.pinned);
+          }}
+        />
+        <IconButton
+          label="Delete chat"
+          icon={<Icon icon="close" size="xsm" />}
+          variant="ghost"
+          size="sm"
+          clickAction={(e) => {
+            e.stopPropagation();
+            onDelete(s.id);
+          }}
+        />
+      </span>
+    </div>
+  );
+
+  const popoverRow = (s: SessionInfo) => (
+    <div
+      key={s.id}
+      className={`claw-recents-popover-row${done.has(s.id) ? " claw-recents-popover-row--unread" : ""}`}
+    >
+      <Button
+        label={truncateTitle(s.title)}
+        icon={<Icon icon={s.channel === "schedule" ? AlarmClock : MessageSquare} size="sm" />}
+        variant={s.id === active ? "secondary" : "ghost"}
+        size="sm"
+        className="claw-recents-popover-item"
+        clickAction={() => {
+          onSelect(s.id);
+          setIsOpen(false);
+        }}
+      />
+      <span className="claw-recents-popover-actions">
+        <IconButton
+          label={s.pinned ? "Unpin chat" : "Pin chat"}
+          icon={<Icon icon={s.pinned ? PinOff : Pin} size="xsm" />}
+          variant="ghost"
+          size="sm"
+          clickAction={() => onTogglePin(s.id, !s.pinned)}
+        />
+        <IconButton
+          label="Delete chat"
+          icon={<Icon icon="close" size="xsm" />}
+          variant="ghost"
+          size="sm"
+          clickAction={() => onDelete(s.id)}
+        />
+      </span>
+    </div>
+  );
+
   if (!isCollapsed) {
     return (
       <>
         {search}
-        {groups.length === 0 ? (
+        {groups.length === 0 && pinned.length === 0 ? (
           <div className="claw-recents-empty">
             <Text size="sm" color="secondary">
               {q ? "No chats match your search." : "No conversations yet."}
             </Text>
           </div>
         ) : (
-          groups.map((g) => (
-            <SideNavSection key={g.key} title={g.label}>
-              {g.items.map((s) => (
-                <div
-                  key={s.id}
-                  className={`claw-recent-row${done.has(s.id) ? " claw-recent-row--unread" : ""}`}
-                >
-                  <SideNavItem
-                    label={s.title}
-                    icon={s.channel === "schedule" ? AlarmClock : MessageSquare}
-                    isSelected={s.id === active}
-                    onClick={() => onSelect(s.id)}
-                  />
-                  {statusFor(s)}
-                  <span className="claw-recent-delete">
-                    <IconButton
-                      label="Delete chat"
-                      icon={<Icon icon="close" size="xsm" />}
-                      variant="ghost"
-                      size="sm"
-                      clickAction={(e) => {
-                        e.stopPropagation();
-                        onDelete(s.id);
-                      }}
-                    />
-                  </span>
-                </div>
-              ))}
-            </SideNavSection>
-          ))
+          <>
+            {pinned.length > 0 && (
+              <SideNavSection key="pinned" title="Pinned">
+                {pinned.map(row)}
+              </SideNavSection>
+            )}
+            {groups.map((g) => (
+              <SideNavSection key={g.key} title={g.label}>
+                {g.items.map(row)}
+              </SideNavSection>
+            ))}
+          </>
         )}
         {hasMore && (
           <button
@@ -289,43 +351,29 @@ function RecentsNav({
         content={
           <div className="claw-recents-popover">
             {search}
-            {groups.length === 0 ? (
+            {groups.length === 0 && pinned.length === 0 ? (
               <Text size="sm" color="secondary">
                 {q ? "No chats match your search." : "No conversations yet."}
               </Text>
             ) : (
-              groups.map((g) => (
-                <div key={g.key} className="claw-recents-popover-group">
-                  <Text size="sm" weight="semibold" color="secondary" className="claw-recents-popover-title">
-                    {g.label}
-                  </Text>
-                  {g.items.map((s) => (
-                    <div
-                      key={s.id}
-                      className={`claw-recents-popover-row${done.has(s.id) ? " claw-recents-popover-row--unread" : ""}`}
-                    >
-                      <Button
-                        label={truncateTitle(s.title)}
-                        icon={<Icon icon={s.channel === "schedule" ? AlarmClock : MessageSquare} size="sm" />}
-                        variant={s.id === active ? "secondary" : "ghost"}
-                        size="sm"
-                        className="claw-recents-popover-item"
-                        clickAction={() => {
-                          onSelect(s.id);
-                          setIsOpen(false);
-                        }}
-                      />
-                      <IconButton
-                        label="Delete chat"
-                        icon={<Icon icon="close" size="xsm" />}
-                        variant="ghost"
-                        size="sm"
-                        clickAction={() => onDelete(s.id)}
-                      />
-                    </div>
-                  ))}
-                </div>
-              ))
+              <>
+                {pinned.length > 0 && (
+                  <div key="pinned" className="claw-recents-popover-group">
+                    <Text size="sm" weight="semibold" color="secondary" className="claw-recents-popover-title">
+                      Pinned
+                    </Text>
+                    {pinned.map(popoverRow)}
+                  </div>
+                )}
+                {groups.map((g) => (
+                  <div key={g.key} className="claw-recents-popover-group">
+                    <Text size="sm" weight="semibold" color="secondary" className="claw-recents-popover-title">
+                      {g.label}
+                    </Text>
+                    {g.items.map(popoverRow)}
+                  </div>
+                ))}
+              </>
             )}
             {hasMore && (
               <button
@@ -910,6 +958,9 @@ export default function App() {
               if (active === id) setActive(null);
               void refresh();
             });
+          }}
+          onTogglePin={(id, pinned) => {
+            void (pinned ? api.pinSession(id) : api.unpinSession(id)).then(() => void refresh());
           }}
         />
       </SideNav>
