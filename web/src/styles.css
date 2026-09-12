@@ -576,9 +576,11 @@ html[data-font-size="large"] {
 .sbot-bot-editor legend { font-size: 13px; font-weight: 600; }
 .sbot-bot-editor label { display: flex; flex-direction: column; gap: 6px; }
 .sbot-bot-editor input:not([type="checkbox"]):not([type="radio"]),
+.sbot-bot-editor select,
 .sbot-bot-editor textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--color-border, #d7dbe2); border-radius: 8px; background: var(--color-background, #fff); color: inherit; padding: 9px 10px; font: inherit; font-size: 14px; }
 .sbot-bot-editor textarea { resize: vertical; line-height: 1.45; }
 .sbot-bot-editor input:focus-visible,
+.sbot-bot-editor select:focus-visible,
 .sbot-bot-editor textarea:focus-visible,
 .sbot-bot-avatar-option:focus-visible,
 .sbot-bot-secondary:focus-visible,

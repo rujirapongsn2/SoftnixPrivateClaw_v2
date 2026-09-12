@@ -72,6 +72,30 @@ async def test_sbot_bot_api_enforces_active_team_quota(integrated):
     assert f"maximum of {MAX_BOTS_PER_OWNER} bots" in response.json()["detail"]
 
 
+async def test_sbot_bot_model_must_come_from_the_users_picker(integrated):
+    _, c, _ = integrated
+    available = (await c.get("/modes/sbot/api/models")).json()
+    valid_model = available["default"]
+
+    created = await c.post("/modes/sbot/api/bots", json={"name": "Researcher", "model": valid_model})
+    assert created.status_code == 200
+    assert (await c.patch(f"/modes/sbot/api/bots/{created.json()['id']}", json={"model": "typo/model"})).status_code == 422
+
+
+async def test_sbot_model_picker_reports_the_runtime_default_not_a_byok_model(integrated):
+    app, c, user = integrated
+    provider = await app.state.sbot.llm_config.create_provider(
+        "Personal provider", "sk-test", "", True, "", owner_id=user.id
+    )
+    await app.state.sbot.llm_config.create_model(
+        provider.id, "byok/research", "Research", True, "high", "", owner_id=user.id
+    )
+
+    picker = (await c.get("/modes/sbot/api/models")).json()
+    assert picker["default"] == app.state.sbot.settings.llm.model
+    assert picker["default"] != "byok/research"
+
+
 async def test_first_team_lead_session_has_one_persisted_onboarding_message(integrated):
     _, c, _ = integrated
     bots = (await c.get("/modes/sbot/api/bots")).json()

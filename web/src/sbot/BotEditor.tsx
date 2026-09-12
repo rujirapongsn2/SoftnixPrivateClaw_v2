@@ -3,7 +3,7 @@ import { IconButton } from "@astryxdesign/core/IconButton";
 import { Loader2, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BOT_AVATARS, BotAvatar, avatarVariantFor, type BotAvatarVariant } from "./BotAvatar";
-import { api, type BotInfo, type SkillInfo } from "./api";
+import { api, type BotInfo, type ModelOption, type SkillInfo } from "./api";
 import { isSkillEnabledForCurrentUser } from "../skill-access";
 
 const BOT_TOOLS = [
@@ -35,6 +35,11 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
   const [roleTitle, setRoleTitle] = useState(bot.role_title);
   const [charter, setCharter] = useState(bot.charter);
   const [model, setModel] = useState(bot.model ?? "");
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [defaultModel, setDefaultModel] = useState("");
+  const [loadingModels, setLoadingModels] = useState(true);
+  const [modelsLoadFailed, setModelsLoadFailed] = useState(false);
+  const [modelTouched, setModelTouched] = useState(false);
   const [avatar, setAvatar] = useState<BotAvatarVariant>(avatarVariantFor(bot));
   const [restricted, setRestricted] = useState(bot.tool_allowlist !== null);
   const [tools, setTools] = useState<string[]>(bot.tool_allowlist ?? []);
@@ -60,6 +65,19 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
     }).finally(() => {
       if (!cancelled) setLoadingSkills(false);
     });
+    api.listModels().then(({ models: available, default: configuredDefault }) => {
+      if (cancelled) return;
+      setModels(available);
+      setDefaultModel(configuredDefault || "");
+      setModelsLoadFailed(false);
+    }).catch(() => {
+      if (!cancelled) {
+        setModels([]);
+        setModelsLoadFailed(true);
+      }
+    }).finally(() => {
+      if (!cancelled) setLoadingModels(false);
+    });
     return () => { cancelled = true; };
   }, []);
 
@@ -68,6 +86,11 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
     () => skills.some(skill => selectedSkillSet.has(skill.id) || selectedSkillSet.has(skill.name)),
     [skills, selectedSkillSet],
   );
+  const defaultModelLabel = useMemo(
+    () => models.find(option => option.model_id === defaultModel)?.label ?? defaultModel,
+    [defaultModel, models],
+  );
+  const selectedModelUnavailable = Boolean(model) && !models.some(option => option.model_id === model);
   const toggleTool = (id: string) => setTools(previous => previous.includes(id)
     ? previous.filter(item => item !== id)
     : [...previous, id]);
@@ -99,15 +122,19 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
     setError("");
     const savedSkillIds = skillScope === "all" ? null : skillScope === "none" ? [] : skillIds;
     try {
-      await api.updateBot(bot.id, {
+      const updates: Partial<BotInfo> = {
         name: name.trim(),
         role_title: roleTitle.trim(),
         charter: charter.trim(),
-        model: model.trim() || null,
         avatar: { ...(bot.avatar || {}), variant: avatar },
         skill_ids: savedSkillIds,
         tool_allowlist: restricted ? tools : null,
-      });
+      };
+      // Do not turn an existing override into the default merely because the
+      // picker request failed or the model was later made unavailable. A model
+      // changes only after the user chooses a new option deliberately.
+      if (modelTouched) updates.model = model || null;
+      await api.updateBot(bot.id, updates);
       onSaved(await api.getBot(bot.id));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save bot");
@@ -148,7 +175,21 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
           <textarea value={charter} rows={10} placeholder="Describe identity, mission, principles, workflow and boundaries..."
             onChange={e => setCharter(e.target.value)} />
         </label>
-        <label>Model override<input value={model} placeholder="Use server default" onChange={e => setModel(e.target.value)} /></label>
+        <label>Model
+          <select value={model} disabled={loadingModels || modelsLoadFailed} onChange={e => {
+            setModel(e.target.value);
+            setModelTouched(true);
+          }}>
+            <option value="">{defaultModelLabel ? `Use default model · ${defaultModelLabel}` : "Use default model"}</option>
+            {selectedModelUnavailable && <option value={model} disabled>
+              {modelsLoadFailed ? `Current model · ${model}` : `Unavailable model · ${model}`}
+            </option>}
+            {models.map(option => <option key={option.model_id} value={option.model_id}>
+              {option.label} · {option.provider}
+            </option>)}
+          </select>
+          {modelsLoadFailed && <small className="sbot-bot-muted">Could not load model choices. Reopen this editor to retry.</small>}
+        </label>
       </div>
 
       <fieldset className="sbot-bot-avatar-field">

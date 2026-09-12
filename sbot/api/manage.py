@@ -49,6 +49,19 @@ class UpdateBotBody(BaseModel):
 _NULLABLE_BOT_FIELDS = frozenset({"model", "tool_allowlist", "skill_ids", "avatar"})
 
 
+async def _validated_bot_model(model: str | None, user: User, state: AppState) -> str | None:
+    """Return a selectable chat model, or None to inherit the server default."""
+    if model is None:
+        return None
+    model_id = model.strip()
+    if not model_id:
+        return None
+    available = await list_models(user, state)
+    if model_id not in {item["model_id"] for item in available["models"]}:
+        raise HTTPException(status_code=422, detail="Model is unavailable for this account")
+    return model_id
+
+
 @router.get("/bots")
 async def list_bots(
     user: User = Depends(current_user),
@@ -82,13 +95,14 @@ async def create_bot(
     state: AppState = Depends(get_state),
 ) -> dict:
     await state.bots.get_or_create_cos(user.id)
+    model = await _validated_bot_model(body.model, user, state)
     try:
         bot = await state.bots.create(
             owner_id=user.id,
             name=body.name.strip(),
             role_title=body.role_title.strip() or "Specialist",
             charter=body.charter.strip(),
-            model=body.model,
+            model=model,
             tool_allowlist=body.tool_allowlist,
             skill_ids=body.skill_ids,
             kind=body.kind,
@@ -146,6 +160,8 @@ async def update_bot(
         for k, v in body.model_dump(exclude_unset=True).items()
         if v is not None or k in _NULLABLE_BOT_FIELDS
     }
+    if "model" in updates:
+        updates["model"] = await _validated_bot_model(updates["model"], user, state)
     updated = await state.bots.update(bot_id, user.id, **updates)
     if updated is None:
         raise HTTPException(status_code=404, detail="Bot not found")
@@ -767,8 +783,11 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
             ],
             "default": env_model,
         }
-    if not default:
-        default = models[0]["model_id"]
+    if not default and (state.settings.llm.api_key or state.settings.llm.api_base):
+        # A private BYOK model is selectable, but it is never the server
+        # default. Returning it here would label the default option incorrectly
+        # even though a null override routes through this configured model.
+        default = state.settings.llm.model
     return {"models": models, "default": default}
 
 
