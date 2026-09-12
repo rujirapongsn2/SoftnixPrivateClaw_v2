@@ -185,6 +185,10 @@ class ChatSession(Base):
     # the thread on long/autonomous runs even after early messages scroll out of
     # context. Maintained by the agent via the `update_plan` tool. Null = no plan.
     plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # User-controlled: kept above the date-grouped "Today" section in the chat
+    # list regardless of updated_at. Deliberately not touched by anything else
+    # that mutates the session, so pinning never happens as a side effect.
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
 
 class Message(Base):

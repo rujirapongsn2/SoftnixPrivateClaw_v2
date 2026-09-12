@@ -246,7 +246,7 @@ async def branding_asset(slot: str, state: AppState = Depends(get_state)) -> Fil
 @router.get("/api/sessions")
 async def list_sessions(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
     sessions = await state.sessions.list_for_user(user.id)
-    running = state.runtime.active_sessions()
+    running = state.runtime.active_sessions() if state.runtime is not None else set()
     return [
         {
             "id": s.id,
@@ -255,6 +255,7 @@ async def list_sessions(user: User = Depends(current_user), state: AppState = De
             "model": s.model,
             "running": s.id in running,
             "updated_at": s.updated_at.isoformat(),
+            "pinned": s.pinned,
         }
         for s in sessions
     ]
@@ -295,6 +296,28 @@ async def delete_session(
     await _owned_session(state, user, session_id)
     await state.sessions.delete(session_id)
     return {"deleted": True}
+
+
+@router.post("/api/sessions/{session_id}/pin")
+async def pin_session(
+    session_id: str,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    await _owned_session(state, user, session_id)
+    await state.sessions.set_pinned(session_id, True)
+    return {"pinned": True}
+
+
+@router.delete("/api/sessions/{session_id}/pin")
+async def unpin_session(
+    session_id: str,
+    user: User = Depends(current_user),
+    state: AppState = Depends(get_state),
+) -> dict:
+    await _owned_session(state, user, session_id)
+    await state.sessions.set_pinned(session_id, False)
+    return {"pinned": False}
 
 
 async def _owned_session(state: AppState, user: User, session_id: str, headers: dict[str, str] | None = None):
