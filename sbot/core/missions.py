@@ -190,10 +190,39 @@ class MissionService:
                                       budget={"max_tokens": min(DEFAULT_BUDGET["max_tokens"] * len(safe), limits.max_job_tokens),
                                               "max_wall_seconds": min(DEFAULT_BUDGET["max_wall_seconds"], limits.max_job_seconds)})
             await self.missions.blackboard_write(mission.id, 'scope:background', True)
-            await self.missions.update_mission(mission.id, status='queued')
+            await self.missions.update_mission(
+                mission.id, status='queued', plan_link=await self._plan_link(session_id)
+            )
             self._spawn(mission.id)
             mission.status = 'queued'
             return mission
+
+    async def _plan_link(self, session_id: str | None) -> dict[str, Any] | None:
+        """Claim the working-plan steps this job is about to carry out.
+
+        The agent's plan and the job's node graph are authored separately and
+        share no identifiers, so the claim has to be inferred — and only
+        `in_progress` steps are claimed, never `pending` ones. A step the agent
+        has not started is work this job may or may not cover, and writing
+        "done" onto it on success would have the panel credit work nobody did,
+        which is worse than the stale plan this whole mechanism exists to fix.
+        Under-claiming only leaves a step honestly outstanding.
+
+        Even so it stays a guess about which steps these are, so each one's text
+        is snapshotted here and re-checked before anything is written back.
+        """
+        if self.sessions is None or not session_id:
+            return None
+        plan, revision = await self.sessions.plan_snapshot(session_id)
+        steps = (plan or {}).get("steps")
+        if not isinstance(steps, list):
+            return None
+        claimed = [
+            {"index": index, "text": step.get("step")}
+            for index, step in enumerate(steps)
+            if isinstance(step, dict) and step.get("status") == "in_progress"
+        ]
+        return {"revision": revision, "steps": claimed} if claimed else None
 
     # ------------------------------------------------------------------ planning
     async def _current_members(self, owner_id: str, session_id: str | None) -> frozenset[str] | None:
@@ -512,7 +541,10 @@ class MissionService:
         outcomes after outages. The notifier remains a compatibility adapter
         for callers without a message store.
         """
-        if not mission.session_id or status not in _REPORTED_STATUSES:
+        if not mission.session_id:
+            return
+        await self._settle_plan(mission, status)
+        if status not in _REPORTED_STATUSES:
             return
         try:
             if self.messages is not None:
@@ -539,6 +571,36 @@ class MissionService:
             raise
         except Exception:  # noqa: BLE001 - a failed report must not fail the mission
             logger.exception("Mission {} settled as {} but could not be reported", mission.id, status)
+
+    async def _settle_plan(self, mission: Mission, status: str) -> None:
+        """Close out the working-plan steps this job claimed at submit.
+
+        Without this the plan is only ever written during a live turn, and a job
+        that outlives its turn — which is the whole point of background work —
+        leaves the panel reading "Incomplete" forever, contradicting the result
+        message sitting right next to it.
+
+        Persisted before it is announced, so a client that reloads instead of
+        receiving the event still sees the settled plan. The store returns None
+        when nothing moved, which is what keeps the minutely reconciliation sweep
+        from re-announcing an outcome the user already saw.
+        """
+        if self.sessions is None or not isinstance(mission.plan_link, dict):
+            return
+        try:
+            plan = await self.sessions.settle_plan_steps(
+                mission.session_id, mission.plan_link, status
+            )
+            if plan and self.bus:
+                from sbot.core.events import PlanUpdated
+                self.bus.publish(
+                    mission.session_id,
+                    PlanUpdated(mission.id, plan.get("goal") or "", plan.get("steps") or []),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a stale plan must not fail the report
+            logger.exception("Mission {} settled but its working plan could not be updated", mission.id)
 
     async def reconcile_reports(self) -> None:
         """Retry committed outcomes, including a crash between completion and delivery."""
@@ -906,6 +968,11 @@ class MissionService:
         if mission is None:
             return False
         await self.missions.update_mission(mission_id, status="cancelled")
+        # A mission cancelled before a worker ever picked it up never reaches
+        # `_run`, and `cancelled` is not reportable, so neither the run nor the
+        # reconciliation sweep will settle the steps it claimed. Settling here is
+        # idempotent, which is what makes it safe for the in-flight case too.
+        await self._settle_plan(mission, "cancelled")
         return True
 
     # ------------------------------------------------------------------- status

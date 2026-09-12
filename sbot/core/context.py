@@ -374,7 +374,11 @@ def render_plan(plan: dict[str, Any] | None) -> str:
             if not isinstance(s, dict):
                 continue
             mark = _PLAN_MARKS.get(s.get("status", "pending"), "[ ]")
-            lines.append(f"- {mark} {str(s.get('step') or '').strip()}")
+            # A background job that failed writes why here. Without it the model
+            # sees a step it believes it delegated sitting blocked for no stated
+            # reason, and re-delegates it.
+            why = str(s.get("reason") or "").strip()
+            lines.append(f"- {mark} {str(s.get('step') or '').strip()}" + (f" — {why}" if why else ""))
     return "\n".join(lines)
 
 

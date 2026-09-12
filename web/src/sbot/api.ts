@@ -126,6 +126,8 @@ export interface MessagePage {
   messages: ChatMessage[];
   has_more: boolean;
   next_before_seq: number | null;
+  // Session state, not transcript: sent with the first page only.
+  plan?: WorkingPlan | null;
 }
 
 export interface AttachmentRef {
@@ -248,12 +250,20 @@ export interface AgentEvent {
   task?: string;
   // plan_updated: the agent's current working plan (goal + step checklist)
   goal?: string;
-  steps?: { step: string; status: string }[];
+  steps?: PlanStep[];
+}
+
+export interface PlanStep {
+  step: string;
+  status: string;
+  // Why a step ended up blocked. Written by the server when background work
+  // fails or is cancelled; the agent's own update_plan never sets it.
+  reason?: string;
 }
 
 export interface WorkingPlan {
   goal: string;
-  steps: { step: string; status: string }[];
+  steps: PlanStep[];
 }
 
 export interface SkillInfo {

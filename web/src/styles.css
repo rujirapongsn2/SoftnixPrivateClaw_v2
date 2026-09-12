@@ -3183,6 +3183,9 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-plan-step--running .claw-plan-step-label {
   font-weight: 600;
 }
+.claw-plan-step-reason {
+  color: var(--color-text-secondary, #6b6760);
+}
 /* ---- minimal execution steps: one dense line per step ---- */
 .claw-xlist {
   padding: 6px 8px 12px;
