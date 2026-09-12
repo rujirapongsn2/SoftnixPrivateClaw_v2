@@ -119,6 +119,13 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     from sbot.local_workspaces import LocalWorkspaces
     runtime.local_workspaces = LocalWorkspaces(settings.workspaces_root / '_local_workspaces')
 
+    from sbot.core.delivery import LocalDeliveryWorker
+    local_deliveries = LocalDeliveryWorker(
+        runtime.local_workspaces,
+        settings.workspaces_root,
+        guard_for_owner=lambda owner: runtime.get_agent(owner)._guard_tool_args,
+    )
+
     if shared is not None:
         runtime._rate_limiter = shared.runtime._rate_limiter
 
@@ -175,12 +182,14 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         settings.blueprints_root.mkdir(parents=True, exist_ok=True)
         scheduler.start()
         heartbeat.start()
+        local_deliveries.start()
         maintenance = None
         try:
             await mission_service.resume_interrupted()
             maintenance = asyncio.create_task(mission_service.maintenance())
             yield
         finally:
+            await local_deliveries.stop()
             await heartbeat.stop()
             await scheduler.stop()
             if maintenance is not None:

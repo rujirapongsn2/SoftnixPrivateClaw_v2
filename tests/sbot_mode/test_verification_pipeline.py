@@ -5,6 +5,7 @@ from sbot.config import ReliabilitySettings, SandboxSettings
 from sbot.core.assignment_workspace import isolate_runner, rebase_result
 from sbot.core.delivery import LocalDelivery
 from sbot.core.specialist import SpecialistRunner
+from sbot.local_workspaces import OfflineError
 from sbot.sandbox.ephemeral import EphemeralSandbox
 from sbot.tools.finish_step import FinishStepTool
 
@@ -73,9 +74,10 @@ def test_isolation_fails_closed_without_sandbox(tmp_path):
 
 
 class Broker:
-    def __init__(self, digest, fail=False):
-        self.digest, self.fail = digest, fail
+    def __init__(self, digest, fail=False, offline=False):
+        self.digest, self.fail, self.offline = digest, fail, offline
         self.calls = []
+        self.queued = []
 
     def owned(self, owner, wid):
         assert owner == "owner"
@@ -83,9 +85,15 @@ class Broker:
 
     async def call(self, owner, wid, payload):
         self.calls.append(payload["action"])
+        if self.offline:
+            raise OfflineError("offline")
         if self.fail:
-            raise ValueError("offline")
+            raise ValueError("the folder did not confirm the write")
         return {"sha256": self.digest}
+
+    def enqueue(self, owner, wid, cloud_path, sha256, dest, name=""):
+        self.queued.append((cloud_path, sha256, dest))
+        return "delivery"
 
 
 @pytest.mark.asyncio
@@ -101,7 +109,26 @@ async def test_local_receipt_prevents_repeat_write(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_offline_local_delivery_stays_partial(tmp_path):
+async def test_offline_delivery_queues_a_path_the_worker_can_resolve(tmp_path):
+    # A mission step runs in a scoped subdirectory, but the background worker
+    # resolves queued paths against the owner's root workspace.
+    scoped = tmp_path / ".team-jobs" / "mission" / "node" / ".deliveries"
+    scoped.mkdir(parents=True)
+    (scoped / "a.txt").write_bytes(b"data")
+    digest = hashlib.sha256(b"data").hexdigest()
+    broker = Broker(digest, offline=True)
+    stages, _ = await LocalDelivery(
+        broker, "owner", {"workspace_id": "folder"}, root=tmp_path
+    ).send([{"path": "a.txt", "artifact": ".deliveries/a.txt", "sha256": digest}], scoped.parent)
+    assert stages["local"] == "queued"
+    cloud_path, sha256, dest = broker.queued[0]
+    assert cloud_path == ".team-jobs/mission/node/.deliveries/a.txt"
+    assert (tmp_path / cloud_path).read_bytes() == b"data"
+    assert (sha256, dest) == (digest, "a.txt")
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_local_delivery_stays_partial(tmp_path):
     (tmp_path / "a.txt").write_text("a")
     tool = FinishStepTool(
         tmp_path,

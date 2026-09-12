@@ -18,6 +18,20 @@ async def list_workspaces(user=Depends(current_user), state=Depends(get_state)):
     return broker(state).list(user.id)
 
 
+@router.get('/deliveries')
+async def deliveries(user=Depends(current_user), state=Depends(get_state)):
+    return broker(state).deliveries(user.id)
+
+
+@router.delete('/deliveries/{did}')
+async def cancel_delivery(did: str, user=Depends(current_user), state=Depends(get_state)):
+    try:
+        broker(state).cancel_delivery(user.id, did)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {'cancelled': True}
+
+
 @router.post('/pair')
 async def pair(user=Depends(current_user), state=Depends(get_state)):
     return broker(state).pair(user.id)

@@ -48,10 +48,18 @@ Example request: “Use the quotation template in this workspace to prepare a qu
 - Office editing runs on an imported cloud copy using existing document tools. Imported files are registered as downloadable chat artifacts; the bot must publish its completed output using the existing artifact tool.
 - Individual transfers are limited to 8 MB; text reads return at most 50,000 characters. Parent folders for exports must already exist.
 - The agent rejects absolute paths, parent traversal, and symlinks. It never executes shell commands. Pairing tokens are stored hashed on the server; disconnect revokes access.
-- Agent shutdown, computer sleep, or network loss makes the folder unavailable. Requests time out without automatic execution retry. After an interrupted write, inspect the output before retrying with a new name.
+- Agent shutdown, computer sleep, or network loss makes the folder unavailable. `list`, `read`, and `import` fail immediately; only outbound writes are queued. After an interrupted write, inspect the output before retrying with a new name.
+
+## Offline folders and queued deliveries
+
+The Workspace menu marks an unreachable folder **Offline** and says what that means for new files. Writes produced while a folder is offline are queued on the server and delivered automatically once the Local Agent polls again. A queued file is *not* saved to the computer yet, and the bot is instructed to report it as pending rather than delivered.
+
+Queued deliveries are re-authorized at send time, not at queue time. A delivery is dropped if the folder was disconnected, downgraded to read-only, blocked by guardrails, or if the cloud file changed or was removed after queueing — the stored SHA-256 is compared before any bytes leave the server. Delivery compares the destination's existing contents first, so a retry never duplicates a file and never overwrites a different one. Background deliveries yield to any queued or running interactive request, so they cannot delay a live turn.
+
+The queue is deliberately bounded: 50 pending files per folder, 5 delivery attempts, and a 7-day expiry, after which a delivery is marked failed and shown in the menu. Retries back off exponentially (one minute, doubling to thirty), so a single bad minute cannot spend the whole attempt budget; a folder that merely went offline again does not consume an attempt at all. A delivery interrupted by a server crash is re-queued at startup, and one abandoned by a failed worker is reclaimed after five minutes. Pending and failed entries can be cancelled from the Workspace menu; disconnecting a folder discards its queue.
 
 ## Current limits
 
-This phase does not provide local Docker, terminal execution, directory synchronization, Windows support, or durable offline job resumption. Specialist/mission workflows that create their own tool registries still need separate Local Workspace integration; direct chat access does not imply every autonomous team path supports it. File Preview uses the existing format-specific preview implementation; unsupported formats remain downloadable.
+This phase does not provide local Docker, terminal execution, directory synchronization, or Windows support. Deferred delivery covers outbound writes only — a read issued while the folder was offline is not replayed later. Specialist/mission workflows that create their own tool registries still need separate Local Workspace integration; direct chat access does not imply every autonomous team path supports it. File Preview uses the existing format-specific preview implementation; unsupported formats remain downloadable.
 
 Validation: `pytest tests/test_local_workspaces.py tests/test_sbot_mode.py` covers pairing, ownership, revocation, isolation, Unicode filenames, file delivery, and read-only/no-overwrite enforcement. `npm run build -- --emptyOutDir false` validates the frontend while retaining assets used by already-open browser tabs.
