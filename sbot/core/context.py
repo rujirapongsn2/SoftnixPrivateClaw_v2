@@ -48,6 +48,26 @@ _OMITTED_NOTE = (
 )
 
 
+# The history counterpart of _OMITTED_NOTE. _trim_history can legitimately keep
+# nothing, and the result is indistinguishable from a brand-new chat: the bot
+# answers a follow-up as an opening question, and the user reads that as it
+# having forgotten.
+#
+# It deliberately names no cause. The same empty result comes from an oversized
+# current message, an oversized earlier turn, an oversized pinned charter that
+# drove the budget down to its floor, and a window that happens to hold no user
+# message to anchor on — and the last two are the common ones. A note that
+# guessed would usually be wrong, and wrong in the expensive direction: the bot
+# relays it, and the user goes off to shorten a message that was never the
+# problem while the misconfigured charter stays hidden.
+_HISTORY_DROPPED_NOTE = (
+    "# Earlier conversation omitted\n\nEarlier messages in this conversation "
+    "could not be included in this turn. This is not the start of the "
+    "conversation: do not treat what you see as everything that was said, and "
+    "ask for anything you need restated."
+)
+
+
 def _omitted_note(dropped: list[str]) -> str:
     return _OMITTED_NOTE.format(names=", ".join(sorted(dropped)))
 
@@ -102,7 +122,29 @@ class ContextAssembler:
         budget = max(self.max_context_tokens - base_cost, int(self.max_context_tokens * _HISTORY_RESERVE))
 
         trimmed = self._trim_history(history, budget)
+        if history and not trimmed:
+            system = self._note_dropped_history(system, current_message)
         return [system, *trimmed, current_message]
+
+    def _note_dropped_history(
+        self, system: dict[str, Any], current_message: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Report the wipe, but only while the report itself still fits.
+
+        The note is appended after fit_system_prompt trimmed to its own budget,
+        so nothing charges for its tokens — and it fires exactly when the window
+        is tightest, which is where an unpriced surcharge is what decides whether
+        the provider accepts the request at all. Telling the model its history is
+        missing can only ever improve on saying nothing, so it is dropped rather
+        than allowed to turn a turn that fits into one that is rejected: the
+        invariant is that assemble never returns more tokens than it would have
+        without the note.
+        """
+        noted = dict(system)
+        noted["content"] += _SECTION_SEPARATOR + _HISTORY_DROPPED_NOTE
+        if self.count_tokens([noted, current_message]) > self.max_context_tokens:
+            return system
+        return noted
 
     def fit_system_prompt(
         self, sections: Sequence[PromptSection], reserved: int = 0
