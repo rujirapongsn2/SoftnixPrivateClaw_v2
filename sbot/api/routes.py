@@ -458,7 +458,7 @@ async def list_messages(
     fetch, and the previous fixed ceiling dropped the oldest messages with
     nothing in the response to say so.
     """
-    await _owned_session(state, user, session_id)
+    session = await _owned_session(state, user, session_id)
     page, has_more = await state.messages.page_for_display(
         session_id, before_seq=before_seq, limit=limit
     )
@@ -469,6 +469,11 @@ async def list_messages(
         "has_more": has_more,
         # Read before that filter, so a dropped message still advances the walk.
         "next_before_seq": page[0]["seq"] if page else None,
+        # The working plan is session state, not transcript, so it rides along
+        # with the first page only — the client already has it when paging back.
+        # Without it the Execution panel is blank after every reload, and blank
+        # is indistinguishable from "no plan" even when one is still running.
+        "plan": session.plan if before_seq is None else None,
     }
 
 

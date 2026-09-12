@@ -102,6 +102,11 @@ class ChatSession(Base):
     # the thread on long/autonomous runs even after early messages scroll out of
     # context. Maintained by the agent via the `update_plan` tool. Null = no plan.
     plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Monotonic counter bumped on every write to `plan`. A background mission can
+    # settle minutes after the turn that launched it, by which point the agent may
+    # have replaced the plan entirely; the mission records the revision it saw and
+    # refuses to write back if it has moved.
+    plan_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class BotChatGroup(Base):
@@ -174,6 +179,11 @@ class Mission(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     resumed_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Which working-plan steps this mission is responsible for, captured at submit:
+    # {"revision": int, "steps": [{"index": int, "text": str}]}. Plan steps have no
+    # stable ids — the agent resends the whole list each `update_plan` call — so the
+    # text is snapshotted alongside the index and both must still match at settle.
+    plan_link: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class MissionNode(Base):

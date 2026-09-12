@@ -1260,6 +1260,12 @@ export function Chat({
           setItems(page.messages.map(toTranscriptItem));
           setHasOlder(page.has_more);
           setOlderCursor(page.next_before_seq);
+          // The plan lives on the session, not in the transcript, so without
+          // this the panel comes back empty after every reload — including for
+          // background work that is still running. Safe to apply
+          // unconditionally: the socket only opens once this resolves, so a
+          // live plan_updated always lands after it, never before.
+          if (page.plan) setPlan(page.plan);
           setLoadedSessionId(sessionId);
         })
         .catch((e) => {
@@ -1368,6 +1374,9 @@ export function Chat({
           setItems(page.messages.map(toTranscriptItem));
           setHasOlder(page.has_more);
           setOlderCursor(page.next_before_seq);
+          // The same gap that swallowed turn_completed swallows the plan
+          // update a settling background job publishes with it.
+          if (page.plan) setPlan(page.plan);
           setBusy(false);
           setStreaming("");
         })

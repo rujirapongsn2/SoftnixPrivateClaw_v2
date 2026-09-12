@@ -210,6 +210,12 @@ export function ExecutionPanel({
                       {s.status === "blocked" && <strong>{t("exec.blocked")} · </strong>}
                       {s.status === "in_progress" && !running && <strong>{t("exec.incomplete")} · </strong>}
                       {s.step}
+                      {/* Why it stopped. Only the server sets this, and only for
+                          background work that failed — otherwise a blocked step
+                          reads as if nobody got round to it. */}
+                      {s.status === "blocked" && s.reason && (
+                        <span className="claw-plan-step-reason"> — {s.reason}</span>
+                      )}
                     </span>
                   </div>
                 );

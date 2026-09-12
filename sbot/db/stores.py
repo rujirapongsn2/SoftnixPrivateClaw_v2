@@ -1211,6 +1211,45 @@ class MissionStore:
             return manifest
 
 
+# How a finished mission lands on the working-plan steps it owns: the step status
+# to write, and the default reason when the mission supplied none. A mission that
+# did not finish must never leave a step reading "done", so failure maps to
+# "blocked" — visibly unfinished — rather than back to "pending", which the panel
+# renders identically to work that was never started.
+_PLAN_OUTCOMES: dict[str, tuple[str, str]] = {
+    "completed": ("done", ""),
+    "failed": ("blocked", "Background work failed."),
+    "blocked": ("blocked", "Background work is blocked."),
+    "cancelled": ("blocked", "Background work was cancelled."),
+    "paused": ("blocked", "Background work paused — budget exhausted."),
+}
+
+
+def _carry_reasons(previous: Any, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Re-attach server-written `reason` notes to an agent-authored plan.
+
+    Keyed on (text, status) rather than position: the agent reorders and inserts
+    steps freely, but a step it re-sends verbatim in the same state is the same
+    step. A status change means the note is about something that has since moved
+    on, so it is dropped.
+    """
+    prior = previous.get("steps") if isinstance(previous, dict) else None
+    if not isinstance(prior, list):
+        return steps
+    notes = {
+        (step.get("step"), step.get("status")): step["reason"]
+        for step in prior
+        if isinstance(step, dict) and step.get("reason")
+    }
+    if not notes:
+        return steps
+    merged = []
+    for step in steps:
+        note = notes.get((step.get("step"), step.get("status")))
+        merged.append({**step, "reason": note} if note else step)
+    return merged
+
+
 class SessionStore:
     def __init__(self, factory: async_sessionmaker[AsyncSession], is_postgres: bool = True):
         self.factory = factory
@@ -1376,17 +1415,117 @@ class SessionStore:
                 session.model = model
                 await db.commit()
 
-    async def set_plan(self, session_id: str, goal: str, steps: list[dict[str, Any]]) -> None:
+    async def set_plan(self, session_id: str, goal: str, steps: list[dict[str, Any]]) -> int:
         """Replace the session's working plan (goal + ordered step checklist).
 
         Full-replace (not partial) so the agent sends its complete current plan
         each time — idempotent, no drift between stored and intended state.
+
+        Returns the new plan revision, which a caller launching background work
+        must record so it can tell later whether the plan it planned against is
+        still the plan on screen.
+
+        The one field carried over from the previous plan is `reason`, and only
+        onto a step whose text and status both came back unchanged. The agent
+        cannot author a reason — only a settling background job writes one — so a
+        full replace would erase why a step is blocked the next time the agent
+        re-sends its plan, leaving the model looking at a step it believes it
+        delegated, blocked for no stated cause, and re-delegating it.
         """
         async with self.factory() as db:
             session = await db.get(ChatSession, session_id)
-            if session is not None:
-                session.plan = {"goal": goal, "steps": steps}
-                await db.commit()
+            if session is None:
+                return 0
+            session.plan = {"goal": goal, "steps": _carry_reasons(session.plan, steps)}
+            session.plan_revision = (session.plan_revision or 0) + 1
+            revision = session.plan_revision
+            await db.commit()
+            return revision
+
+    async def plan_snapshot(self, session_id: str) -> tuple[dict[str, Any] | None, int]:
+        """The current working plan and the revision it was written at."""
+        async with self.factory() as db:
+            session = await db.get(ChatSession, session_id)
+            if session is None:
+                return None, 0
+            return session.plan, session.plan_revision or 0
+
+    async def settle_plan_steps(
+        self, session_id: str, link: dict[str, Any], status: str, reason: str = ""
+    ) -> dict[str, Any] | None:
+        """Write a finished background mission's outcome onto the steps it owns.
+
+        `link` is the snapshot taken at submit (see Mission.plan_link). The write
+        is refused outright if the agent has authored a new plan since — a step at
+        the same index may now mean something entirely different — and each step is
+        re-checked against its snapshotted text besides.
+
+        Returns the updated plan for broadcast, or None when nothing changed, so
+        that a settle replayed by reconciliation neither rewrites nor re-announces.
+
+        Deliberately does not bump plan_revision: sibling missions launched from the
+        same plan hold the same revision, and bumping here would make the first one
+        home invalidate all the others.
+        """
+        if not isinstance(link.get("revision"), int):
+            return None
+        outcome, why = _PLAN_OUTCOMES.get(status, (None, ""))
+        if outcome is None:
+            return None
+        async with self.factory() as db:
+            session = await db.get(ChatSession, session_id)
+            if session is None or not isinstance(session.plan, dict):
+                return None
+            if (session.plan_revision or 0) != link.get("revision"):
+                return None
+            current = session.plan.get("steps")
+            if not isinstance(current, list):
+                return None
+            note = (reason or why)[:200]
+            # Copied rather than mutated in place: a plain JSON column has no
+            # change tracking, and SQLAlchemy decides whether to emit the UPDATE
+            # by comparing the new value to the loaded one — editing that same
+            # object makes the two compare equal and the write is silently
+            # dropped.
+            steps = [dict(step) if isinstance(step, dict) else step for step in current]
+            changed = False
+            for linked in link.get("steps") or []:
+                index = linked.get("index")
+                if not isinstance(index, int) or not 0 <= index < len(steps):
+                    continue
+                step = steps[index]
+                if not isinstance(step, dict) or step.get("step") != linked.get("text"):
+                    continue
+                if step.get("status") == outcome and step.get("reason", "") == note:
+                    continue
+                step["status"] = outcome
+                if note:
+                    step["reason"] = note
+                else:
+                    step.pop("reason", None)
+                changed = True
+            if not changed:
+                return None
+            plan = {**session.plan, "steps": steps}
+            # Compare-and-swap, not an ORM assignment: the revision was read a few
+            # awaits ago and `plan` is a whole-column overwrite, so a live turn
+            # that authored a new plan in between would be silently thrown away.
+            # Carrying the revision into the WHERE makes the database re-check it
+            # at write time, under the row lock, and refuse instead.
+            written = await db.execute(
+                update(ChatSession)
+                .where(
+                    ChatSession.id == session_id,
+                    ChatSession.plan_revision == link["revision"],
+                )
+                .values(plan=plan)
+                .execution_options(synchronize_session=False)
+            )
+            if written.rowcount != 1:
+                await db.rollback()
+                return None
+            await db.commit()
+            return plan
 
     async def by_user_since(self, days: int = 7, limit: int = 20) -> list[dict[str, Any]]:
         """Sessions created in the last `days` days, grouped by user — highest first.

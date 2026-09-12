@@ -14,7 +14,12 @@ import pytest
 from sbot.api.manage import UpdateBotBody, update_bot
 from sbot.config import LLMSettings, SandboxSettings, Settings
 from sbot.core.bus import EventBus
-from sbot.core.context import ContextAssembler, PromptSection
+from sbot.core.context import (
+    _HISTORY_DROPPED_NOTE,
+    _SECTION_SEPARATOR,
+    ContextAssembler,
+    PromptSection,
+)
 from sbot.core.memory import MemoryService
 from sbot.core.runtime import AgentRuntime
 from sbot.core.turn_context import current_session_id
@@ -492,6 +497,89 @@ def test_an_oversized_prompt_no_longer_starves_the_conversation():
 
     assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
     assert "ORION" in messages[1]["content"]
+
+
+def test_a_wiped_history_tells_the_model_it_is_not_a_new_conversation():
+    """One turn bigger than the whole budget leaves room for none of it, and the
+    result looks exactly like a chat that just started. Silently that reads as
+    the bot having forgotten; named, it can say what happened and ask."""
+    assembler = ContextAssembler(max_context_tokens=600)
+    sections = [PromptSection("charter", "# Charter\nYOU-ARE-THE-ANALYST", pinned=True)]
+    history = [{"role": "user", "content": "เอกสาร " * 3_000}]
+
+    messages = assembler.assemble(sections, history, {"role": "user", "content": "สรุปให้หน่อย"})
+
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert "Earlier conversation omitted" in messages[0]["content"]
+    # The note is the only difference — a turn that keeps its history must not
+    # pay for it, or every long session carries a claim that is false.
+    kept = assembler.assemble(
+        sections, [{"role": "user", "content": "สั้น"}], {"role": "user", "content": "ต่อ"}
+    )
+    assert "Earlier conversation omitted" not in kept[0]["content"]
+
+
+def test_the_wipe_note_never_makes_a_request_that_would_have_fit_overflow():
+    """The note is appended after fit_system_prompt trimmed to its budget, so
+    nothing charges for its tokens — and it fires precisely when the window is
+    tightest. Unguarded it turns a turn the provider would have accepted into a
+    context-length rejection, which is a worse outcome than the silent wipe it
+    was added to explain.
+
+    Sized so the guard is load-bearing rather than incidental: the assembled
+    request leaves less headroom than the note costs, so the note can only be
+    reported by overflowing, and must therefore be left out.
+    """
+    window = 8192
+    assembler = ContextAssembler(max_context_tokens=window)
+    sections = [
+        PromptSection("core", "# Core\n" + "identity " * 50, pinned=True),
+        PromptSection("memory", "# Memory\n" + "m " * 7_800),
+    ]
+    note_cost = assembler.count_tokens(
+        [{"role": "system", "content": _SECTION_SEPARATOR + _HISTORY_DROPPED_NOTE}]
+    )
+
+    messages = assembler.assemble(
+        sections,
+        [{"role": "user", "content": "earlier " * 2_000}],
+        {"role": "user", "content": "x " * 8_220},
+    )
+
+    assert messages[1:-1] == []  # history really was wiped, so the branch was taken
+    total = assembler.count_tokens(messages)
+    assert total <= window
+    assert window - total < note_cost  # nothing else was keeping this under the window
+
+
+def test_the_wipe_note_names_no_cause_because_unrelated_ones_produce_it():
+    """_trim_history empties for reasons that have nothing to do with each
+    other, and the two below are nowhere near the one the wording would most
+    naturally blame. A note that guessed would be wrong here and expensive: the
+    bot relays it, and the user shortens a message that was never the problem.
+    """
+    sections = [PromptSection("charter", "# Charter\nYOU-ARE-THE-ANALYST", pinned=True)]
+    tiny = {"role": "user", "content": "ต่อ"}
+
+    # An earlier turn is the oversized one; the current message is three characters.
+    by_budget = ContextAssembler(max_context_tokens=600).assemble(
+        sections, [{"role": "user", "content": "เอกสาร " * 3_000}], tiny
+    )
+    # Nothing is oversized at all — the retained window simply holds no user
+    # message to anchor a turn on, which _trim_history also answers with nothing.
+    roomy = ContextAssembler(max_context_tokens=60_000)
+    by_alignment = roomy.assemble(
+        sections,
+        [{"role": "assistant", "content": "รายงาน"}, {"role": "tool", "content": "ok"}],
+        tiny,
+    )
+
+    assert by_budget[1:-1] == [] and by_alignment[1:-1] == []
+    assert _HISTORY_DROPPED_NOTE in by_budget[0]["content"]
+    assert _HISTORY_DROPPED_NOTE in by_alignment[0]["content"]
+    # Under a thousandth of its window used, so any claim about a full budget
+    # would be false by three orders of magnitude.
+    assert roomy.count_tokens(by_alignment) < 1_000
 
 
 class _SmallWindowConfig:
