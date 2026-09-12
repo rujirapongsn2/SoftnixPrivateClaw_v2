@@ -1,10 +1,11 @@
 import base64
+import hashlib
 import json
 import uuid
 
 from sbot.filenames import safe_filename
 from sbot.tools.filesystem import _WorkspaceTool
-from sbot.local_workspaces import MAX_BYTES
+from sbot.local_workspaces import MAX_BYTES, OfflineError
 
 
 class LocalWorkspaceTool(_WorkspaceTool):
@@ -16,8 +17,9 @@ class LocalWorkspaceTool(_WorkspaceTool):
         'file into the cloud workspace for document tools and publishes it for Preview/download, '
         'export copies a cloud file to a NEW local filename. Existing local files are never overwritten. '
         'Import files before delegation and pass the resulting cloud paths to teammates. '
-        'Offline errors require the user to reconnect; '
-        'never claim success on an error. Maximum file size 8 MB. No local shell execution.'
+        'list, read and import fail immediately when the folder is offline and require the user to reconnect. '
+        'An export to an offline folder is QUEUED, not delivered: report it as pending and never say the file was saved. '
+        'Never claim success on an error. Maximum file size 8 MB. No local shell execution.'
     )
     parameters = {'type': 'object', 'properties': {
         'workspace_id': {'type': 'string'},
@@ -35,14 +37,26 @@ class LocalWorkspaceTool(_WorkspaceTool):
             if action not in ('list', 'read', 'import', 'export'):
                 raise ValueError('Unsupported action')
             payload = {'action': 'list' if action == 'list' else 'read', 'path': path}
+            digest = relative_source = ''
             if action == 'export':
                 source = self._resolve(cloud_path)
                 with source.open('rb') as f:
                     data = f.read(MAX_BYTES+1)
                 if len(data) > MAX_BYTES:
                     raise ValueError('File exceeds 8 MB limit')
+                digest = hashlib.sha256(data).hexdigest()
+                # Store the normalised form: a deferred delivery must resolve to
+                # this exact file, not re-interpret the model's raw argument.
+                relative_source = source.relative_to(self.workspace).as_posix()
                 payload = {'action': 'write', 'path': path, 'data': base64.b64encode(data).decode()}
-            result = await self.broker.call(self.owner, workspace_id, payload)
+            try:
+                result = await self.broker.call(self.owner, workspace_id, payload)
+            except OfflineError as offline:
+                if action != 'export':
+                    return f'Error: {offline}'
+                self.broker.enqueue(self.owner, workspace_id, relative_source, digest, path)
+                return (f'Queued, NOT delivered: the local folder is offline. {path} will be written automatically '
+                        'when the Local Agent reconnects. Tell the user the file is still pending on their computer.')
             if 'error' in result:
                 return 'Error: ' + str(result['error'])
             if action in ('read', 'import'):

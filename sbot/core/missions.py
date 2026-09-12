@@ -1072,7 +1072,7 @@ class MissionService:
             verifier.task_deadline = time.monotonic() + _NODE_SECONDS
         from sbot.core.delivery import LocalDelivery
         target = (node.budget or {}).get('delivery_target')
-        delivery = LocalDelivery(self.local_broker, mission.owner_id, target, runner.arg_guard) if target else None
+        delivery = LocalDelivery(self.local_broker, mission.owner_id, target, runner.arg_guard, root_workspace) if target else None
         completion = FinishStepTool(runner.workspace, (node.budget or {}).get('required_files'), verifier, mode, delivery)
         completion.require_record = bool(background)
         checkpoint = await self.missions.blackboard_read(mission.id, f'checkpoint:{node.id}') if background else None

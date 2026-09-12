@@ -1,8 +1,10 @@
 import { useEffect, useState, useRef } from 'react';
-import { Check, ChevronDown, Folder, FolderPlus, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, CloudOff, Folder, FolderPlus, Trash2, X } from 'lucide-react';
 import { getToken } from './api';
 
-type Workspace = { id: string; name: string; path?: string | null; online: boolean; writable: boolean };
+type Workspace = { id: string; name: string; path?: string | null; online: boolean; writable: boolean; pending: number; failed: number };
+type Delivery = { id: string; workspace: string; name: string; dest: string; status: string; detail: string };
+const VISIBLE_DELIVERIES = 5;
 const base = '/modes/sbot/api/local-workspaces';
 async function call(path: string, method = 'GET', body?: object) {
   const response = await fetch(base + path, {
@@ -22,6 +24,7 @@ export function LocalWorkspacePicker({ sessionId, ensureSession, disabled }: {
   disabled: boolean;
 }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [selected, setSelected] = useState('');
   const [pairing, setPairing] = useState<{ code: string; expires_in: number } | null>(null);
   const [error, setError] = useState('');
@@ -44,6 +47,16 @@ export function LocalWorkspacePicker({ sessionId, ensureSession, disabled }: {
     const timer = setInterval(refresh, 5000);
     return () => { live = false; clearInterval(timer); };
   }, []);
+  // The workspace list already carries pending/failed counts, so the queue
+  // itself is only fetched while the menu is open.
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    const refresh = () => call('/deliveries').then(items => { if (live) setDeliveries(items); }).catch(() => undefined);
+    void refresh();
+    const timer = setInterval(refresh, 5000);
+    return () => { live = false; clearInterval(timer); };
+  }, [open]);
   useEffect(() => {
     let live = true;
     setSelected('');
@@ -149,7 +162,23 @@ export function LocalWorkspacePicker({ sessionId, ensureSession, disabled }: {
     } catch (e) { setError((e as Error).message); }
     finally { setSaving(false); }
   };
-  const label = selected ? (active?.name ?? 'Local folder · Disconnected') : 'Work in a folder';
+  const cancelDelivery = async (id: string) => {
+    setError('');
+    try {
+      await call(`/deliveries/${encodeURIComponent(id)}`, 'DELETE');
+      setDeliveries(items => items.filter(item => item.id !== id));
+      void call('').then(setWorkspaces).catch(() => undefined);
+    } catch (e) { setError((e as Error).message); }
+  };
+  const status = (w: Workspace) => {
+    if (!w.writable) return 'Reconnect for read & write';
+    if (!w.online) return w.pending ? `Offline · ${w.pending} file(s) waiting to be delivered` : 'Offline · not reachable right now';
+    if (w.pending) return `Delivering ${w.pending} queued file(s)…`;
+    return '';
+  };
+  const label = selected
+    ? active ? (active.online ? active.name : `${active.name} · Offline`) : 'Local folder · Disconnected'
+    : 'Work in a folder';
   const select = choose;
   return <div className="sbot-local-workspace" ref={root}>
     <button type="button" className="sbot-local-workspace-trigger" aria-expanded={open} disabled={disabled || saving} onClick={() => { setOpen(value => !value); setPairing(null); setError(''); }}>
@@ -169,10 +198,28 @@ export function LocalWorkspacePicker({ sessionId, ensureSession, disabled }: {
         {selected && !active && <button type="button" className="sbot-local-workspace-option" disabled><Folder size={16} /><span>Local folder · Disconnected</span></button>}
         {workspaces.map(w => <div key={w.id} className="sbot-local-workspace-row">
           <button type="button" className="sbot-local-workspace-option" disabled={saving || disabled} onClick={() => w.writable ? void select(w.id) : void beginPairing()}>
-            <Folder size={16} /><span title={w.path ?? 'Local path unavailable — reconnect this folder with the latest Local Agent'}>{w.name}{w.path && <small className="sbot-local-workspace-path">{w.path}</small>}{(!w.online || !w.writable) && <small>{!w.writable ? 'Reconnect for read & write' : 'Offline'}</small>}</span>{selected === w.id && <Check size={16} />}
+            {w.online ? <Folder size={16} /> : <CloudOff size={16} aria-label="Offline" />}
+            <span title={w.path ?? 'Local path unavailable — reconnect this folder with the latest Local Agent'}>{w.name}{w.path && <small className="sbot-local-workspace-path">{w.path}</small>}{status(w) && <small className={w.online ? undefined : 'sbot-local-offline'}>{status(w)}</small>}{w.failed > 0 && <small className="sbot-local-failed">{w.failed} delivery(s) failed</small>}</span>{selected === w.id && <Check size={16} />}
           </button>
           <button type="button" className="sbot-local-remove" title={`Remove ${w.name}`} aria-label={`Remove ${w.name}`} disabled={saving || disabled} onClick={() => void remove(w.id)}><Trash2 size={15} /></button>
         </div>)}
+        {active && !active.online && <p className="sbot-local-offline-note" role="status">
+          {active.name} is offline. New files are queued and written automatically when the Local Agent reconnects; nothing is saved to your computer until then.
+        </p>}
+        {deliveries.length > 0 && <>
+          <div className="sbot-local-menu-divider" />
+          <div className="sbot-local-menu-heading">Waiting to be delivered</div>
+          {deliveries.slice(0, VISIBLE_DELIVERIES).map(d => <div key={d.id} className="sbot-local-workspace-row">
+            <span className="sbot-local-delivery" title={d.detail || d.dest}>
+              {d.dest}
+              <small className={d.status === 'failed' ? 'sbot-local-failed' : undefined}>
+                {d.status === 'failed' ? d.detail || 'Delivery failed' : d.status === 'running' ? 'Delivering…' : 'Waiting for the folder'}
+              </small>
+            </span>
+            <button type="button" className="sbot-local-remove" title={`Cancel ${d.dest}`} aria-label={`Cancel ${d.dest}`} disabled={d.status === 'running'} onClick={() => void cancelDelivery(d.id)}><X size={15} /></button>
+          </div>)}
+          {deliveries.length > VISIBLE_DELIVERIES && <small className="sbot-local-more">+{deliveries.length - VISIBLE_DELIVERIES} more</small>}
+        </>}
         <div className="sbot-local-menu-divider" />
         <button type="button" className="sbot-local-workspace-option sbot-local-workspace-add" disabled={saving || disabled} onClick={() => void beginPairing()}><FolderPlus size={16} /><span>Open local folder…</span></button>
       </>}

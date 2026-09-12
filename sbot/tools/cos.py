@@ -550,7 +550,7 @@ class DelegateTool(Tool):
         if input_manifest:
             user_prompt += '\nRead-only input snapshots (original path -> available path): ' + json.dumps(input_manifest)
         from sbot.core.delivery import LocalDelivery
-        delivery = LocalDelivery(self.local_broker, self.owner_id, delivery_target, runner.arg_guard) if delivery_target else None
+        delivery = LocalDelivery(self.local_broker, self.owner_id, delivery_target, runner.arg_guard, root_workspace) if delivery_target else None
         mode = self.reliability.verification_mode if self.reliability.enabled_for(self.owner_id) else 'off'
         from sbot.core.deep_verification import TaskVerifier
         verifier = TaskVerifier(runner, self.reliability, target_bot, task, acceptance_criteria, verification) if mode != 'off' else None
