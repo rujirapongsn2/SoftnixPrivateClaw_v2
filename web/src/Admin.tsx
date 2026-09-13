@@ -416,7 +416,8 @@ function OverviewSummary({ data }: { data: AdminOverview }) {
     .sort((a, b) => b.turns - a.turns)
     .slice(0, 5);
   const maxModelTurns = Math.max(1, ...topModels.map((model) => model.turns));
-  const maxHourlyActivity = Math.max(1, ...data.activity_by_hour.map((point) => point.count));
+  const weeklyActivity = data.sessions_by_day_7d.slice(-7);
+  const maxWeeklyActivity = Math.max(1, ...weeklyActivity.map((point) => point.count));
   const summaryMetrics = [
     { label: t("admin.overview.summary.totalUsers"), value: Number(s.users ?? 0) },
     { label: t("admin.overview.summary.activeUsers"), value: Number(s.active_users ?? 0) },
@@ -485,7 +486,7 @@ function OverviewSummary({ data }: { data: AdminOverview }) {
       <section className="claw-summary-activity" aria-labelledby="summary-activity-title">
         <div className="claw-summary-section-head">
           <Text weight="semibold" id="summary-activity-title">{t("admin.overview.summary.activity")}</Text>
-          <Text size="sm" color="secondary">{t("admin.overview.summary.byHour")}</Text>
+          <Text size="sm" color="secondary">{t("admin.overview.summary.sessions7Days")}</Text>
         </div>
         <div className="claw-summary-metrics">
           {summaryMetrics.map((metric) => (
@@ -495,17 +496,17 @@ function OverviewSummary({ data }: { data: AdminOverview }) {
             </div>
           ))}
         </div>
-        <div className="claw-summary-heatmap" role="img" aria-label={t("admin.overview.summary.byHour")}>
-          {data.activity_by_hour.map((point) => (
+        <div className="claw-summary-heatmap" role="img" aria-label={t("admin.overview.summary.sessions7Days")}>
+          {weeklyActivity.map((point) => (
             <span
               key={point.label}
               title={`${point.label}: ${point.count.toLocaleString()}`}
-              style={{ opacity: point.count === 0 ? 0.12 : 0.25 + (point.count / maxHourlyActivity) * 0.75 }}
+              style={{ opacity: point.count === 0 ? 0.12 : 0.25 + (point.count / maxWeeklyActivity) * 0.75 }}
             />
           ))}
         </div>
-        <div className="claw-summary-hour-axis" aria-hidden="true">
-          <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span>
+        <div className="claw-summary-week-axis" aria-hidden="true">
+          {weeklyActivity.map((point) => <span key={point.label}>{point.label.slice(5)}</span>)}
         </div>
       </section>
 
