@@ -30,6 +30,26 @@ def test_classify_error_reason_still_falls_back_to_internal():
     assert classify_error_reason("No endpoints found that support tool use.") == "reason.internal"
 
 
+def test_provider_unavailable_is_not_misclassified_as_local_network():
+    detail = (
+        "Metadata: {'error_type': 'provider_unavailable'}; Upstream error from Together: "
+        "Stream error: h2 protocol error: error reading a body from connection"
+    )
+    assert classify_error_reason(detail) == "reason.provider_unavailable"
+    assert t("error.provider_unavailable", "en") == (
+        "The upstream model provider is temporarily unavailable."
+    )
+    assert t("error.provider_unavailable", "th") == (
+        "ผู้ให้บริการโมเดลต้นทางไม่พร้อมใช้งานชั่วคราว"
+    )
+
+
+def test_timeout_rate_limit_and_local_network_classification_are_preserved():
+    assert classify_error_reason("request timed out") == "reason.timeout"
+    assert classify_error_reason("429 too many requests") == "reason.rate_limit"
+    assert classify_error_reason("DNS lookup failed for api.example.test") == "reason.network"
+
+
 def test_no_vision_support_error_detected_from_provider_message():
     detail = 'litellm.BadRequestError: This model does not support image input in the request.'
     assert is_no_vision_support_error(detail) is True

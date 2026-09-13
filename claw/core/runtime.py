@@ -1053,8 +1053,16 @@ class AgentRuntime:
                         # same non-retryable reasoning as the tool-support branch.
                         message = t("error.llm_no_vision_support", locale)
                     else:
-                        reason = t(classify_error_reason(detail), locale)
-                        message = t("error.llm", locale, reason=reason)
+                        reason_key = (
+                            "reason.provider_unavailable"
+                            if exc.error_type == "provider_unavailable"
+                            else classify_error_reason(detail)
+                        )
+                        if reason_key == "reason.provider_unavailable":
+                            message = t("error.provider_unavailable", locale)
+                        else:
+                            reason = t(reason_key, locale)
+                            message = t("error.llm", locale, reason=reason)
                     self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
                     # The user message is already persisted (above); never persist the
                     # error text, so a bad provider response can't poison future
@@ -1121,6 +1129,16 @@ class AgentRuntime:
                     rewrite_final = True
                     logger.warning(
                         "Turn {} was cut off mid-answer by its time budget (iterations={} chars={})",
+                        turn_id,
+                        outcome.iterations,
+                        len(outcome.final_content or ""),
+                    )
+                elif outcome.interrupted:
+                    final = f"{final}\n\n{t('error.provider_stream_partial', locale)}"
+                    rewrite_final = True
+                    logger.warning(
+                        "Turn {} kept a partial answer after its provider stream was interrupted "
+                        "(iterations={} chars={})",
                         turn_id,
                         outcome.iterations,
                         len(outcome.final_content or ""),

@@ -79,6 +79,14 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "en": "[This answer was cut off — the turn ran out of time. Ask me to continue.]",
         "th": "[คำตอบนี้ถูกตัดกลางคัน เพราะหมดเวลาที่กำหนดไว้ สั่งให้ทำต่อได้]",
     },
+    "error.provider_stream_partial": {
+        "en": "[This response was cut off because the upstream model provider became unavailable. Ask me to continue.]",
+        "th": "[คำตอบนี้ถูกตัดกลางคัน เพราะผู้ให้บริการโมเดลต้นทางไม่พร้อมใช้งานชั่วคราว สั่งให้ทำต่อได้]",
+    },
+    "error.provider_unavailable": {
+        "en": "The upstream model provider is temporarily unavailable.",
+        "th": "ผู้ให้บริการโมเดลต้นทางไม่พร้อมใช้งานชั่วคราว",
+    },
     "error.max_iterations": {
         "en": "I reached the step limit before finishing. Try splitting the task into smaller parts.",
         "th": "ถึงจำนวนขั้นตอนสูงสุดก่อนงานเสร็จ ลองแบ่งงานเป็นส่วนย่อยลง",
@@ -114,6 +122,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
     "reason.auth": {"en": "authentication failed", "th": "การยืนยันตัวตนล้มเหลว"},
     "reason.rate_limit": {"en": "rate limit exceeded", "th": "เกินขีดจำกัดการเรียกใช้งาน"},
     "reason.network": {"en": "network unreachable", "th": "เชื่อมต่อเครือข่ายไม่ได้"},
+    "reason.provider_unavailable": {
+        "en": "upstream model provider temporarily unavailable",
+        "th": "ผู้ให้บริการโมเดลต้นทางไม่พร้อมใช้งานชั่วคราว",
+    },
     "reason.internal": {"en": "internal error", "th": "ข้อผิดพลาดภายใน"},
 }
 
@@ -180,6 +192,16 @@ def is_no_vision_support_error(detail: str) -> bool:
 def classify_error_reason(detail: str) -> str:
     """Map a raw exception string to a translatable reason key."""
     lowered = detail.lower()
+    if any(
+        tok in lowered
+        for tok in (
+            "provider_unavailable",
+            "upstream error from",
+            "h2 protocol error",
+            "error reading a body from connection",
+        )
+    ):
+        return "reason.provider_unavailable"
     if any(tok in lowered for tok in ("timeout", "timed out", "deadline")):
         return "reason.timeout"
     if any(
