@@ -48,7 +48,7 @@ PREVIEWABLE_SUFFIXES = (".csv", ".tsv", ".xlsx")
 # file stays one click away on the download link.
 HTML_MAX_BYTES = 2 * 1024 * 1024
 
-PREVIEWABLE_HTML_SUFFIXES = (".html", ".htm")
+PREVIEWABLE_HTML_SUFFIXES = (".html", ".htm", ".svg")
 
 # Office files are zip containers. A DOCX layout needs a browser-grade renderer
 # to reproduce faithfully, but extracting its paragraphs gives a fast, safe
@@ -525,6 +525,12 @@ def preview_html(path: str | Path) -> dict:
         raw = raw[: end + 1]
 
     markup = decode_text_bytes(raw)
+    if resolved.suffix.lower() == '.svg':
+        # XML declarations/DTDs do not belong in an HTML srcdoc. Never resolve entities.
+        if re.search(r'<!DOCTYPE|<!ENTITY', markup, re.I):
+            raise PreviewError("SVG declarations are not supported")
+        markup = re.sub(r'<\?xml.*?\?>', '', markup, flags=re.S)
+        markup = '<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0}svg{display:block;max-width:100%;height:auto}</style></head><body>' + markup + '</body></html>'
     # A blank document needs no policy, and returning one would leave the UI
     # unable to tell "empty report" from "report that starts with our own meta"
     # — it would render a blank frame captioned as a successful preview.

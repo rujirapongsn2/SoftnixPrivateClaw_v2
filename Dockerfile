@@ -30,6 +30,9 @@ COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 # hand-written list historically missed (python-multipart, pypdf, python-docx).
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project --python /usr/local/bin/python
+# Static SVG/HTML export uses Chromium with scripts and network disabled.
+RUN python -m playwright install --with-deps chromium
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-thai-tlwg && rm -rf /var/lib/apt/lists/*
 
 COPY claw/ ./claw/
 COPY sbot/ ./sbot/

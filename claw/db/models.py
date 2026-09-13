@@ -238,6 +238,8 @@ class Skill(Base):
     shared_group_id: Mapped[str | None] = mapped_column(
         ForeignKey("user_groups.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    bundle_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bundle_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     name: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(String(500), default="")
     content: Mapped[str] = mapped_column(Text, default="")
@@ -254,6 +256,15 @@ class Skill(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class SkillBundleVersion(Base):
+    """Immutable imported resources, owned by a skill and gated by its access rules."""
+    __tablename__ = "skill_bundle_versions"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
+    files: Mapped[dict] = mapped_column(JSON)
+    source: Mapped[dict] = mapped_column(JSON)
 
 
 class SkillSubscription(Base):

@@ -596,6 +596,20 @@ async def get_workspace_file_preview(
     return await _bounded_preview(state, user, session_id, path, preview_table, response)
 
 
+@router.post("/api/sessions/{session_id}/file-preview/png")
+async def export_diagram_png(session_id: str, path: str, user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    from claw.skills.render import render_diagram
+    await _owned_session(state, user, session_id)
+    try:
+        return await render_diagram(_user_workspace(state, user.id), path, user_id=user.id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="PNG renderer unavailable; download the HTML/SVG source") from exc
+
+
 @router.get("/api/sessions/{session_id}/file-preview/html")
 async def get_workspace_html_preview(
     session_id: str,

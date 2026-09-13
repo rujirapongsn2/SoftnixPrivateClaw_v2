@@ -794,6 +794,11 @@ function SkillDetailModal({
 
 function SkillsPanel() {
   const t = useT();
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [repository, setRepository] = useState("");
+  const [commit, setCommit] = useState("");
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [skillTab, setSkillTab] = useState<"builtin" | "user" | "shared">("builtin");
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
@@ -832,6 +837,36 @@ function SkillsPanel() {
       ? sharedSkills
       : userSkills;
 
+  async function importBundle(file?: File) {
+    setImportBusy(true);
+    try {
+      await guard(async () => {
+        if (file) await api.importSkill(file);
+        else await api.importGithubSkill(repository.trim(), commit.trim());
+        await reload();
+        setSkillTab("user");
+        setImporting(false);
+      });
+    } finally { setImportBusy(false); }
+  }
+
+  if (importing) return (
+    <div className="claw-panel">
+      <Text weight="semibold">{t("settings.skills.import")}</Text>
+      <input ref={importFileRef} type="file" accept=".zip" hidden aria-label={t("settings.skills.zip")} disabled={importBusy}
+        onChange={(e) => { const file = e.target.files?.[0]; if (file) void importBundle(file); e.target.value = ""; }} />
+      <Button label={t("settings.skills.zip")} icon={<Icon icon={Upload} size="sm" />} isDisabled={importBusy} clickAction={() => importFileRef.current?.click()} />
+      <Divider />
+      <TextInput label="GitHub repository URL" value={repository} onChange={setRepository} isDisabled={importBusy} />
+      <TextInput label="Commit SHA (40 characters)" value={commit} onChange={setCommit} isDisabled={importBusy} />
+      {error && <ErrorText>{error}</ErrorText>}
+      <div className="claw-row">
+        <Button label={t("settings.skills.import")} isDisabled={importBusy || !repository || !/^[a-f0-9]{40}$/i.test(commit)} clickAction={() => importBundle()} />
+        <Button label={t("settings.common.cancel")} variant="ghost" isDisabled={importBusy} clickAction={() => setImporting(false)} />
+      </div>
+    </div>
+  );
+
   if (editing) {
     const readOnly = !!editing.builtin || !!editing.read_only;
     const sharingNeedsScope = sharing && (editing.visibility ?? "private") === "private";
@@ -852,15 +887,21 @@ function SkillsPanel() {
           label={t("settings.skills.description")}
           value={editing.description ?? ""}
           onChange={(v) => setEditing({ ...editing, description: v })}
-          isDisabled={readOnly}
+          isDisabled={readOnly || !!editing.bundle}
         />
         <TextArea
           label={t("settings.skills.instructions")}
           value={editing.content ?? ""}
           onChange={(v) => setEditing({ ...editing, content: v })}
           rows={10}
-          isDisabled={readOnly}
+          isDisabled={readOnly || !!editing.bundle}
         />
+        {editing.bundle && (
+          <details><summary>{t("settings.skills.packageFiles")} · {editing.bundle.files.length} · v{editing.bundle.version}</summary>
+            <ul>{editing.bundle.files.map((path) => <li key={path}>{path}</li>)}</ul>
+            <Text size="sm" color="secondary">{editing.bundle.source}</Text>
+          </details>
+        )}
         {!readOnly && (
           <div className="claw-field-group">
             <SegmentedControl
@@ -963,6 +1004,7 @@ function SkillsPanel() {
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
         <Text color="secondary">{t("settings.skills.intro")}</Text>
+        <Button label={t("settings.skills.import")} icon={<Icon icon={Upload} size="sm" />} size="sm" variant="secondary" clickAction={() => setImporting(true)} />
         <Button
           label={t("settings.skills.new")}
           icon={<Icon icon={Plus} size="sm" />}

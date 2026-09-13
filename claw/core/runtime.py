@@ -218,8 +218,10 @@ class ClawAgent:
             )
         elif browser is not None:
             self.tools.register(BrowserTool(browser, user_id))
+        from claw.tools.diagram import RenderDiagramTool
+        self.tools.register(RenderDiagramTool(workspace, user_id))
         if skills is not None:
-            self.tools.register(ReadSkillTool(skills, user_id))
+            self.tools.register(ReadSkillTool(skills, user_id, workspace=workspace))
             self.tools.register(ManageSkillTool(skills, user_id))
         if knowledge is not None:
             self.tools.register(SearchKnowledgeTool(knowledge, user_id))

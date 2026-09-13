@@ -110,6 +110,19 @@ def test_skill_scope_distinguishes_all_selected_and_none():
     assert scope_skills(available, []) == []
 
 
+def test_specialist_bundle_tools_have_workspace_and_ignore_bot_allowlist(tmp_path):
+    runner = SpecialistRunner(
+        provider=None,
+        sandbox=EphemeralSandbox(SandboxSettings(enabled=False)),
+        workspace=tmp_path,
+        owner_id='owner',
+        skills=object(),
+    )
+    registry = runner.build_tools([])
+    assert registry.has('render_diagram')
+    assert registry.get('read_skill').workspace == tmp_path
+
+
 def make_service(stores, provider, tmp_path, skills=None, memory=None) -> MissionService:
     return MissionService(
         stores["missions"],

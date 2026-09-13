@@ -257,6 +257,7 @@ export interface WorkingPlan {
 }
 
 export interface SkillInfo {
+  bundle?: { version: string; source: string; sha256: string; files: string[]; license: string } | null;
   visibility?: "private" | "group" | "public";
   owner_name?: string;
   read_only?: boolean;
@@ -1166,6 +1167,16 @@ export const api = {
     body: JSON.stringify({ session_id: sessionId, path, ...data }),
   }),
 
+  importSkill: async (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    const resp = await fetch(endpoint("/api/skills/import"), { method: "POST", headers: authHeaders(), body: form });
+    if (!resp.ok) throw new ApiError(resp.status, await resp.text());
+    return resp.json() as Promise<SkillInfo>;
+  },
+  importGithubSkill: (repository: string, commit: string) => request<SkillInfo>("/api/skills/import-github", {
+    method: "POST", body: JSON.stringify({ repository, commit }),
+  }),
   listSkills: () => request<SkillInfo[]>("/api/skills"),
   // Built-in skills come back from listSkills with an empty `content` — theirs
   // is static and large enough that shipping all of it on every panel open is
@@ -1735,7 +1746,7 @@ export type HtmlPreview = {
 
 /** Extensions rendered as a sandboxed HTML page. Kept in sync with
  * PREVIEWABLE_HTML_SUFFIXES in claw/api/file_preview.py. */
-export const PREVIEWABLE_HTML_RE = /\.html?$/i;
+export const PREVIEWABLE_HTML_RE = /\.(?:html?|svg)$/i;
 
 /** Bounded source of an HTML artifact. The caller MUST render this only inside
  * an iframe with a bare `sandbox` attribute — the markup is agent-authored and
@@ -1776,4 +1787,8 @@ export function fileDocumentPreview(
  * capability token in the path is the only credential. */
 export function shareFileUrl(token: string, name: string): string {
   return endpoint(`/api/share/${encodeURIComponent(token)}/files/${encodeURIComponent(name)}`);
+}
+
+export function filePngExport(sessionId: string, path: string): Promise<{path: string; warnings: string[]}> {
+  return request(`/api/sessions/${sessionId}/file-preview/png?path=${encodeURIComponent(path)}`, {method: "POST"});
 }
