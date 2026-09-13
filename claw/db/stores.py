@@ -2822,6 +2822,31 @@ class OAuthAppStore:
             await db.commit()
 
 
+class ProjectContainerConfigStore:
+    """Database-backed global switch; the environment is the initial fallback."""
+
+    _KEY = "project_containers"
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+        self.factory = factory
+
+    async def get(self, default_enabled: bool = False) -> dict[str, bool]:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+        value = dict(row.value or {}) if row is not None else {}
+        enabled = value.get("enabled", default_enabled)
+        return {"enabled": enabled if isinstance(enabled, bool) else default_enabled}
+
+    async def set_enabled(self, enabled: bool) -> None:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+            if row is None:
+                db.add(AppSetting(key=self._KEY, value={"enabled": enabled}))
+            else:
+                row.value = {"enabled": enabled}
+            await db.commit()
+
+
 class TelegramConfigStore:
     """Admin-configured Telegram bot token, so the integration is turned on
     self-service from the Admin console instead of an env var + server restart.

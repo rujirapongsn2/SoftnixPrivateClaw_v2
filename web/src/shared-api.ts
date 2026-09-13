@@ -777,6 +777,18 @@ export interface SmtpAdminConfigBody {
   enabled: boolean;
 }
 
+export interface ProjectContainerAdminStatus {
+  mode_available: boolean;
+  enabled: boolean;
+  docker_available: boolean;
+  image_available: boolean;
+  image: string;
+  building: boolean;
+  build_error: string;
+  build_started_at: string | null;
+  ready: boolean;
+}
+
 // Control Plane > Preferences (global branding & appearance).
 export type BrandingLanguage = "en" | "th";
 export type BrandingFontSize = "small" | "medium" | "large";
@@ -1509,6 +1521,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  adminGetProjectContainers: () =>
+    request<ProjectContainerAdminStatus>("/api/admin/project-containers"),
+  adminSetProjectContainers: (enabled: boolean) =>
+    request<ProjectContainerAdminStatus>("/api/admin/project-containers", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  adminBuildProjectContainerImage: () =>
+    request<ProjectContainerAdminStatus>("/api/admin/project-containers/build", { method: "POST" }),
   revokeShare: (id: string) => request<{ revoked: boolean }>(`/api/shares/${id}`, { method: "DELETE" }),
   getShare: (token: string) => request<SharedConversation>(`/api/share/${encodeURIComponent(token)}`),
 

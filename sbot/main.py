@@ -32,6 +32,7 @@ from sbot.db.stores import (
     ShareStore,
 )
 from sbot.logging_setup import configure_logging
+from sbot.sandbox.project_admin import ProjectContainerManager
 
 
 def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
@@ -72,6 +73,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     policy = shared.policy
     browser_broker = shared.browser_broker
     project_access = ProjectAccessPolicy(users)
+    project_containers = ProjectContainerManager(settings.sandbox, shared.project_container_config)
     browser_mgr = None
     if settings.browser.enabled:
         from sbot.browser.manager import BrowserManager
@@ -180,6 +182,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings.blueprints_root.mkdir(parents=True, exist_ok=True)
+        await project_containers.load()
         scheduler.start()
         heartbeat.start()
         local_deliveries.start()
@@ -196,6 +199,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
                 maintenance.cancel()
                 await asyncio.gather(maintenance, return_exceptions=True)
             await mission_service.stop()
+            await project_containers.close()
             await runtime.drain()
             if browser_mgr is not None:
                 await browser_mgr.close()
@@ -246,6 +250,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         blueprints=blueprints,
         shares=shares,
         project_access=project_access,
+        project_containers=project_containers,
     )
     app.include_router(router)
     app.include_router(manage_router)

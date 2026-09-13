@@ -78,6 +78,8 @@ class AppState:
     tts_rate_limiter: RateLimiter = None  # type: ignore[assignment]
     telegram: "TelegramChannel | None" = None
     blueprints: "BlueprintStore | None" = None
+    project_container_config: "ProjectContainerConfigStore | None" = None
+    project_containers: "ProjectContainerManager | None" = None
 
 
 def get_state(request: Request) -> AppState:

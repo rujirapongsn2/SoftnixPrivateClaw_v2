@@ -280,3 +280,52 @@ async def test_admin_reports_count_both_modes(integrated):
     assert hourly_week[0]["label"].endswith("T00")
     assert hourly_week[-1]["label"].endswith("T23")
     assert sum(point["count"] for point in hourly_week) == 2
+
+
+async def test_project_container_control_plane_requires_admin_and_starts_build(integrated):
+    app, client, user = integrated
+
+    class FakeProjectContainers:
+        enabled = False
+        build_requests = 0
+
+        async def status(self):
+            return {
+                "enabled": self.enabled,
+                "docker_available": True,
+                "image_available": False,
+                "image": "sbot-developer:latest",
+                "building": self.build_requests > 0,
+                "build_error": "",
+                "build_started_at": None,
+                "ready": False,
+            }
+
+        async def set_enabled(self, enabled):
+            self.enabled = enabled
+            if enabled:
+                self.build_requests += 1
+            return await self.status()
+
+        async def start_build(self):
+            self.build_requests += 1
+            return await self.status()
+
+    manager = FakeProjectContainers()
+    app.state.claw.project_containers = manager
+    assert (await client.get("/api/admin/project-containers")).status_code == 403
+
+    await app.state.claw.users.update_flags(user.id, is_admin=True)
+    enabled = await client.put("/api/admin/project-containers", json={"enabled": True})
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["enabled"] is True
+    assert enabled.json()["building"] is True
+    assert manager.build_requests == 1
+
+
+async def test_project_container_setting_persists(integrated):
+    app, _, _ = integrated
+    store = app.state.claw.project_container_config
+    assert (await store.get(default_enabled=True))["enabled"] is True
+    await store.set_enabled(False)
+    assert (await store.get(default_enabled=True))["enabled"] is False

@@ -1759,6 +1759,21 @@ html[data-chat-bg="grid"] .claw-chat {
   display: flex;
   align-items: center;
 }
+.claw-project-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.claw-project-status-grid > div {
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 7px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--color-border-subtle, #ebe9e4);
+  border-radius: 10px;
+}
 .claw-summary-heading {
   justify-content: space-between;
   gap: 16px;
@@ -1932,6 +1947,7 @@ html[data-chat-bg="grid"] .claw-chat {
   .claw-summary-week-axis { grid-template-columns: 38px minmax(0, 1fr); gap: 5px; }
   .claw-summary-week-hours { gap: 2px; }
   .claw-summary-week-hours span { border-radius: 2px; }
+  .claw-project-status-grid { grid-template-columns: 1fr; }
 }
 .claw-chart {
   display: flex;

@@ -93,6 +93,7 @@ import {
   ModelKind,
   ModelUsagePoint,
   OAuthAppsInfo,
+  type ProjectContainerAdminStatus,
   type PlanCreate,
   type PlanInfo,
   SessionsByUserPoint,
@@ -120,6 +121,7 @@ export type AdminSection =
   | "oauth"
   | "telegram"
   | "email"
+  | "projects"
   | "preferences"
   | "audit"
   | "users";
@@ -141,6 +143,7 @@ export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconTy
   { key: "providers", labelKey: "admin.nav.providers", icon: Cpu },
   { key: "connectors", labelKey: "admin.nav.connectors", icon: Plug },
   { key: "guardrails", labelKey: "admin.nav.guardrails", icon: ShieldCheck },
+  { key: "projects", labelKey: "admin.nav.projects", icon: Server },
   { key: "oauth", labelKey: "admin.nav.oauth", icon: KeyRound },
   { key: "telegram", labelKey: "admin.nav.telegram", icon: Send },
   { key: "email", labelKey: "admin.nav.email", icon: Mail },
@@ -166,7 +169,7 @@ export function AdminPanel({
   // soup. Overview is the same story: a stat grid + charts that read better
   // with more horizontal room. Widen just these sections rather than the
   // whole panel.
-  const isWide = section === "providers" || section === "overview" || section === "plans";
+  const isWide = section === "providers" || section === "overview" || section === "plans" || section === "projects";
   return (
     <div className="claw-settings-panel">
       <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
@@ -186,6 +189,7 @@ export function AdminPanel({
         {section === "connectors" && <PrebuiltConnectorsPanel />}
         {section === "plans" && <PlansPanel />}
         {section === "guardrails" && <GuardrailsPanel />}
+        {section === "projects" && <ProjectContainersAdminPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
         {section === "email" && <EmailConfigPanel />}
@@ -4097,6 +4101,113 @@ function PreferencesPanel() {
           <div>
             <Button label={t("admin.preferences.savePreferences")} isDisabled={!dirty || saving} clickAction={save} />
           </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function ProjectContainersAdminPanel() {
+  const t = useT();
+  const [status, setStatus] = useState<ProjectContainerAdminStatus | null>(null);
+  const [saving, setSaving] = useState(false);
+  const { error, guard } = useAsyncError();
+  const toast = useToast();
+  const reload = useCallback(() => api.adminGetProjectContainers().then(setStatus), []);
+
+  useEffect(() => {
+    void guard(async () => await reload());
+  }, [guard, reload]);
+
+  useEffect(() => {
+    if (!status?.building) return;
+    const timer = window.setInterval(() => void guard(async () => await reload()), 2000);
+    return () => window.clearInterval(timer);
+  }, [guard, reload, status?.building]);
+
+  if (error && !status) return <ErrorText>{error}</ErrorText>;
+  if (!status) return <Text color="secondary">{t("admin.common.loading")}</Text>;
+
+  const setEnabled = (enabled: boolean) => {
+    setSaving(true);
+    void guard(async () => {
+      try {
+        const next = await api.adminSetProjectContainers(enabled);
+        setStatus(next);
+        toast({
+          body: t(enabled ? "admin.projects.enabledToast" : "admin.projects.disabledToast"),
+          type: "info",
+          autoHideDuration: 2500,
+        });
+      } finally {
+        setSaving(false);
+      }
+    });
+  };
+
+  const build = () => void guard(async () => setStatus(await api.adminBuildProjectContainerImage()));
+  const readyLabel = status.ready
+    ? t("admin.projects.ready")
+    : status.building
+      ? t("admin.projects.building")
+      : t("admin.projects.notReady");
+
+  return (
+    <div className="claw-panel">
+      <div className="claw-row claw-row-between">
+        <div>
+          <Text weight="semibold">{t("admin.projects.title")}</Text>
+          <Text size="sm" color="secondary">{t("admin.projects.subtitle")}</Text>
+        </div>
+        <Badge variant={status.ready ? "success" : status.building ? "warning" : "neutral"} label={readyLabel} />
+      </div>
+
+      <Card padding={2}>
+        <div className="claw-panel">
+          <label className="claw-toggle-inline">
+            <Switch
+              value={status.enabled}
+              label={t("admin.projects.enable")}
+              isLabelHidden
+              isDisabled={!status.mode_available || saving}
+              changeAction={setEnabled}
+            />
+            <Text weight="semibold">{t("admin.projects.enable")}</Text>
+          </label>
+
+          <div className="claw-project-status-grid">
+            <div>
+              <Text size="sm" color="secondary">{t("admin.projects.botMode")}</Text>
+              <Badge variant={status.mode_available ? "success" : "error"} label={status.mode_available ? t("admin.projects.available") : t("admin.projects.unavailable")} />
+            </div>
+            <div>
+              <Text size="sm" color="secondary">Docker</Text>
+              <Badge variant={status.docker_available ? "success" : "error"} label={status.docker_available ? t("admin.projects.available") : t("admin.projects.unavailable")} />
+            </div>
+            <div>
+              <Text size="sm" color="secondary">{status.image}</Text>
+              <Badge
+                variant={status.image_available ? "success" : status.building ? "warning" : "neutral"}
+                label={status.image_available ? t("admin.projects.imageReady") : status.building ? t("admin.projects.building") : t("admin.projects.imageMissing")}
+              />
+            </div>
+          </div>
+
+          {status.build_error && <ErrorText>{status.build_error}</ErrorText>}
+          <div className="claw-row">
+            {!status.image_available && (
+              <Button
+                label={status.building ? t("admin.projects.building") : t("admin.projects.buildImage")}
+                icon={<Icon icon={Server} size="sm" />}
+                variant="secondary"
+                isDisabled={!status.docker_available || status.building}
+                isLoading={status.building}
+                clickAction={build}
+              />
+            )}
+            <Button label={t("admin.projects.refresh")} variant="ghost" clickAction={() => void guard(async () => await reload())} />
+          </div>
+          <Text size="sm" color="secondary">{t("admin.projects.policyHint")}</Text>
         </div>
       </Card>
     </div>
