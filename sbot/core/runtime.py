@@ -509,9 +509,8 @@ class ClawAgent:
             if bot_name
             else "You are sbot, the user's AI agent — a careful, reliable partner that finishes what it starts."
         )
+        identity = f"# {bot_name or 'sbot Agent'}\n\n{agent_identity}"
         core = (
-            f"# {bot_name or 'sbot Agent'}\n\n"
-            f"{agent_identity}\n\n"
             f"## Runtime\n{runtime}\n\n"
             f"## Workspace\nYour workspace is mounted for file tools; shell commands run "
             f"in an isolated sandbox with the same workspace at /workspace.\n"
@@ -566,7 +565,12 @@ class ClawAgent:
         elif persona:
             charter = f"# Persona\n\n{persona}"
         return [
-            PromptSection("core", core, pinned=True),
+            # Keep enough information to identify the agent, but allow the
+            # detailed operating guidance to fall away for a small-context
+            # model. Keeping the full core prompt pinned made an 800-token
+            # model receive a 900+-token system prompt before its user message.
+            PromptSection("identity", identity, pinned=True),
+            PromptSection("core", core),
             PromptSection("charter", charter, pinned=True),
             # Pinned for the same reason the charter is: for a Chief of Staff,
             # leading the team is not a capability it has, it is what it is. It

@@ -343,6 +343,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.sbot = sbot_app.state.sbot
         app.state.claw.project_containers = app.state.sbot.project_containers
         app.mount("/modes/sbot", sbot_app)
+        from claw.api.project_ingress import ProjectIngressMiddleware
+        app.add_middleware(
+            ProjectIngressMiddleware,
+            settings=mode_settings.sandbox,
+            projects=app.state.sbot.runtime.sandbox.projects,
+            workspaces_root=mode_settings.workspaces_root,
+            secret_key=mode_settings.secret_key,
+        )
         # Shared administration, including container policy, has one endpoint.
         from sbot.api.admin import router as mode_admin_router
         from dataclasses import replace

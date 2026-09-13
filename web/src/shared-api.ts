@@ -513,6 +513,7 @@ export interface ProjectContainerInfo {
   container: string;
   state: string;
   ports: Record<string, { HostIp: string; HostPort: string }[] | null>;
+  public_url: string | null;
 }
 
 export interface ProjectInventory {
@@ -787,6 +788,11 @@ export interface ProjectContainerAdminStatus {
   build_error: string;
   build_started_at: string | null;
   ready: boolean;
+  public_ingress_enabled: boolean;
+  public_ingress_configured: boolean;
+  public_ingress_domain: string;
+  public_ingress_scheme: "http" | "https";
+  public_ingress_port: number;
   metrics_available: boolean;
   containers: {
     running: number;
@@ -798,6 +804,22 @@ export interface ProjectContainerAdminStatus {
   memory_limit_bytes: number;
   disk_usage_bytes: number;
   disk_usage_complete: boolean;
+}
+
+export interface ProjectIngressVerifyCheck {
+  id: "privateclaw" | "configuration" | "dns" | "tls" | "tunnel";
+  status: "passed" | "failed" | "warning" | "skipped";
+  detail: string;
+  hint: string;
+  message_key: string;
+  hint_key: string;
+  params: Record<string, string>;
+}
+
+export interface ProjectIngressVerifyResult {
+  ready: boolean;
+  checked_at: string;
+  checks: ProjectIngressVerifyCheck[];
 }
 
 // Control Plane > Preferences (global branding & appearance).
@@ -1539,6 +1561,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+  adminSetProjectPublicIngress: (enabled: boolean) =>
+    request<ProjectContainerAdminStatus>("/api/admin/project-containers/public-ingress", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  adminVerifyProjectPublicIngress: () =>
+    request<ProjectIngressVerifyResult>("/api/admin/project-containers/public-ingress/verify", { method: "POST" }),
   adminBuildProjectContainerImage: () =>
     request<ProjectContainerAdminStatus>("/api/admin/project-containers/build", { method: "POST" }),
   revokeShare: (id: string) => request<{ revoked: boolean }>(`/api/shares/${id}`, { method: "DELETE" }),

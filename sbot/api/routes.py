@@ -230,6 +230,15 @@ async def _project_inventory(state: AppState, user: User) -> dict:
         projects = await state.runtime.sandbox.projects.list(_user_workspace(state, user.id))
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=f"project containers are unavailable: {exc}") from exc
+    from sbot.sandbox.project_ingress import project_ingress_url
+
+    public_ingress = bool(state.settings.sandbox.project_public_ingress_enabled)
+    for project in projects:
+        project["public_url"] = (
+            project_ingress_url(state.settings.sandbox, state.settings.secret_key, user.id, project["project"])
+            if public_ingress and project["state"] == "running"
+            else None
+        )
     return {
         "available": True,
         "allowed": access.allowed,

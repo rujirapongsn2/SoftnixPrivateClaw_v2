@@ -87,8 +87,14 @@ class ProjectContainerManager:
         self._disk_cached_at = 0.0
 
     async def load(self) -> None:
-        config = await self.config_store.get(default_enabled=self.settings.projects_enabled)
+        config = await self.config_store.get(
+            default_enabled=self.settings.projects_enabled,
+            default_public_ingress_enabled=getattr(self.settings, "project_public_ingress_enabled", False),
+        )
         self.settings.projects_enabled = config["enabled"]
+        self.settings.project_public_ingress_enabled = config.get(
+            "public_ingress_enabled", getattr(self.settings, "project_public_ingress_enabled", False)
+        )
         if self.settings.enabled and self.settings.projects_enabled:
             docker_available = await self._docker_ready()
             if docker_available and not await self._image_ready():
@@ -163,6 +169,11 @@ class ProjectContainerManager:
             "build_error": self._build_error,
             "build_started_at": self._build_started_at,
             "ready": bool(self.settings.enabled and self.settings.projects_enabled and docker_available and image_available),
+            "public_ingress_enabled": bool(getattr(self.settings, "project_public_ingress_enabled", False)),
+            "public_ingress_configured": bool(getattr(self.settings, "project_ingress_domain", "")),
+            "public_ingress_domain": getattr(self.settings, "project_ingress_domain", ""),
+            "public_ingress_scheme": getattr(self.settings, "project_ingress_scheme", "https"),
+            "public_ingress_port": getattr(self.settings, "project_ingress_port", 8000),
             **metrics,
         }
 
@@ -283,6 +294,13 @@ class ProjectContainerManager:
             await self.start_build()
             status = await self.status()
         return status
+
+    async def set_public_ingress_enabled(self, enabled: bool) -> dict:
+        if enabled and not self.settings.project_ingress_domain:
+            raise ValueError("Configure project_ingress_domain before enabling public ingress")
+        await self.config_store.set_public_ingress_enabled(enabled)
+        self.settings.project_public_ingress_enabled = enabled
+        return await self.status()
 
     async def start_build(self) -> dict:
         async with self._lock:

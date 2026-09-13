@@ -287,6 +287,7 @@ async def test_project_container_control_plane_requires_admin_and_starts_build(i
 
     class FakeProjectContainers:
         enabled = False
+        public_ingress_enabled = False
         build_requests = 0
 
         async def status(self):
@@ -299,6 +300,11 @@ async def test_project_container_control_plane_requires_admin_and_starts_build(i
                 "build_error": "",
                 "build_started_at": None,
                 "ready": False,
+                "public_ingress_enabled": self.public_ingress_enabled,
+                "public_ingress_configured": True,
+                "public_ingress_domain": "apps.example.com",
+                "public_ingress_scheme": "https",
+                "public_ingress_port": 8000,
                 "metrics_available": True,
                 "containers": {"running": 0, "stopped": 0, "total": 0},
                 "cpu_percent": 0.0,
@@ -318,6 +324,10 @@ async def test_project_container_control_plane_requires_admin_and_starts_build(i
             self.build_requests += 1
             return await self.status()
 
+        async def set_public_ingress_enabled(self, enabled):
+            self.public_ingress_enabled = enabled
+            return await self.status()
+
     manager = FakeProjectContainers()
     app.state.claw.project_containers = manager
     assert (await client.get("/api/admin/project-containers")).status_code == 403
@@ -328,6 +338,9 @@ async def test_project_container_control_plane_requires_admin_and_starts_build(i
     assert enabled.json()["enabled"] is True
     assert enabled.json()["building"] is True
     assert manager.build_requests == 1
+    ingress = await client.put("/api/admin/project-containers/public-ingress", json={"enabled": True})
+    assert ingress.status_code == 200, ingress.text
+    assert ingress.json()["public_ingress_enabled"] is True
 
 
 async def test_project_container_setting_persists(integrated):
@@ -336,3 +349,7 @@ async def test_project_container_setting_persists(integrated):
     assert (await store.get(default_enabled=True))["enabled"] is True
     await store.set_enabled(False)
     assert (await store.get(default_enabled=True))["enabled"] is False
+    await store.set_public_ingress_enabled(True)
+    value = await store.get(default_enabled=True)
+    assert value["enabled"] is False
+    assert value["public_ingress_enabled"] is True

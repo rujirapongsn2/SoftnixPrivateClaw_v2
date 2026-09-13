@@ -94,6 +94,7 @@ import {
   ModelUsagePoint,
   OAuthAppsInfo,
   type ProjectContainerAdminStatus,
+  type ProjectIngressVerifyResult,
   type PlanCreate,
   type PlanInfo,
   SessionsByUserPoint,
@@ -4110,6 +4111,8 @@ function PreferencesPanel() {
 function ProjectContainersAdminPanel() {
   const t = useT();
   const [status, setStatus] = useState<ProjectContainerAdminStatus | null>(null);
+  const [verifyResult, setVerifyResult] = useState<ProjectIngressVerifyResult | null>(null);
+  const [verifying, setVerifying] = useState(false);
   const [saving, setSaving] = useState(false);
   const { error, guard } = useAsyncError();
   const toast = useToast();
@@ -4137,6 +4140,7 @@ function ProjectContainersAdminPanel() {
       try {
         const next = await api.adminSetProjectContainers(enabled);
         setStatus(next);
+        setVerifyResult(null);
         toast({
           body: t(enabled ? "admin.projects.enabledToast" : "admin.projects.disabledToast"),
           type: "info",
@@ -4144,6 +4148,36 @@ function ProjectContainersAdminPanel() {
         });
       } finally {
         setSaving(false);
+      }
+    });
+  };
+
+  const setPublicIngressEnabled = (enabled: boolean) => {
+    if (enabled && !window.confirm(t("admin.projects.ingressEnableConfirm"))) return;
+    setSaving(true);
+    void guard(async () => {
+      try {
+        const next = await api.adminSetProjectPublicIngress(enabled);
+        setStatus(next);
+        setVerifyResult(null);
+        toast({
+          body: t(enabled ? "admin.projects.ingressEnabledToast" : "admin.projects.ingressDisabledToast"),
+          type: "info",
+          autoHideDuration: 2500,
+        });
+      } finally {
+        setSaving(false);
+      }
+    });
+  };
+
+  const verifyPublicIngress = () => {
+    setVerifying(true);
+    void guard(async () => {
+      try {
+        setVerifyResult(await api.adminVerifyProjectPublicIngress());
+      } finally {
+        setVerifying(false);
       }
     });
   };
@@ -4160,6 +4194,8 @@ function ProjectContainersAdminPanel() {
     const value = bytes / 1024 ** unit;
     return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: value < 10 ? 1 : 0 }).format(value)} ${["B", "KB", "MB", "GB", "TB"][unit]}`;
   };
+  const ingressDomain = status.public_ingress_domain || "apps.example.com";
+  const wildcardDomain = `*.${ingressDomain}`;
 
   return (
     <div className="claw-panel">
@@ -4186,6 +4222,154 @@ function ProjectContainersAdminPanel() {
             />
             <Text weight="semibold">{t("admin.projects.enable")}</Text>
           </label>
+          <label className="claw-toggle-inline">
+            <Switch
+              value={status.public_ingress_enabled}
+              label={t("admin.projects.publicIngress")}
+              isLabelHidden
+              isDisabled={
+                !status.mode_available || saving
+                || (!status.public_ingress_configured && !status.public_ingress_enabled)
+              }
+              changeAction={setPublicIngressEnabled}
+            />
+            <span>
+              <Text weight="semibold">{t("admin.projects.publicIngress")}</Text>
+              <Text size="sm" color="secondary">
+                {status.public_ingress_configured
+                  ? `*.${status.public_ingress_domain} → :${status.public_ingress_port}`
+                  : t("admin.projects.ingressNotConfigured")}
+              </Text>
+              {status.public_ingress_configured && (
+                <Text size="sm" color="secondary">{t("admin.projects.ingressExposure")}</Text>
+              )}
+            </span>
+          </label>
+
+          <details className="claw-guide">
+            <summary>{t("admin.projects.cloudflareGuide")}</summary>
+            <div className="claw-guide-body">
+              <Text size="sm" color="secondary">{t("admin.projects.cloudflareIntro")}</Text>
+              <ol className="claw-telegram-steps">
+                <li>
+                  {t("admin.projects.cloudflareStepDomain")} <code>CLAW_SANDBOX__PROJECT_INGRESS_DOMAIN={ingressDomain}</code>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepCheckCli")}
+                  <pre className="claw-project-ingress-config">{`cloudflared --version`}</pre>
+                  <Text size="sm" color="secondary">{t("admin.projects.cloudflareInstallLinux")}</Text>
+                  <pre className="claw-project-ingress-config">{`sudo mkdir -p --mode=0755 /usr/share/keyrings
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt-get update && sudo apt-get install cloudflared`}</pre>
+                  <Text size="sm" color="secondary">{t("admin.projects.cloudflareInstallMac")}</Text>
+                  <pre className="claw-project-ingress-config">{`brew install cloudflared`}</pre>
+                  <Text size="sm" color="secondary">{t("admin.projects.cloudflareInstallOther")}</Text>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepTunnel")}
+                  <pre className="claw-project-ingress-config">{`cloudflared tunnel login
+cloudflared tunnel create privateclaw-project-apps`}</pre>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepConfig")}
+                  <pre className="claw-project-ingress-config">{`sudo install -d -m 755 /etc/cloudflared
+sudo install -m 600 ~/.cloudflared/<PROJECT_INGRESS_TUNNEL_ID>.json /etc/cloudflared/<PROJECT_INGRESS_TUNNEL_ID>.json
+sudo nano /etc/cloudflared/privateclaw-project-apps.yml`}</pre>
+                  <pre className="claw-project-ingress-config">{`tunnel: <PROJECT_INGRESS_TUNNEL_ID>
+credentials-file: /etc/cloudflared/<PROJECT_INGRESS_TUNNEL_ID>.json
+ingress:
+  - hostname: "${wildcardDomain}"
+    service: http://127.0.0.1:8700
+  - service: http_status:404`}</pre>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepService")}
+                  <pre className="claw-project-ingress-config">{`sudo nano /etc/systemd/system/privateclaw-project-apps.service`}</pre>
+                  <pre className="claw-project-ingress-config">{`[Unit]
+Description=PrivateClaw project apps Cloudflare Tunnel
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/privateclaw-project-apps.yml tunnel run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target`}</pre>
+                  <pre className="claw-project-ingress-config">{`sudo systemctl daemon-reload
+sudo systemctl enable --now privateclaw-project-apps
+sudo systemctl status privateclaw-project-apps --no-pager`}</pre>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepDns")}
+                  <div className="claw-scope-chips">
+                    <code>Type: CNAME</code>
+                    <code>Name: {wildcardDomain}</code>
+                    <code>Target: &lt;TUNNEL_ID&gt;.cfargotunnel.com</code>
+                    <code>Proxy: On</code>
+                  </div>
+                </li>
+                <li>{t("admin.projects.cloudflareStepAccess")} <code>{wildcardDomain}</code></li>
+                <li>{t("admin.projects.cloudflareStepEnable")}</li>
+              </ol>
+              <Text size="sm" color="secondary">
+                <a href="https://developers.cloudflare.com/tunnel/downloads/" target="_blank" rel="noreferrer">
+                  {t("admin.projects.cloudflareDownloadDocs")}
+                </a>
+                {" · "}
+                <a href="https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/as-a-service/macos/" target="_blank" rel="noreferrer">
+                  {t("admin.projects.cloudflareMacServiceDocs")}
+                </a>
+              </Text>
+              <Text size="sm" color="secondary">{t("admin.projects.cloudflareTlsNote")}</Text>
+            </div>
+          </details>
+
+          <div className="claw-row claw-row-between claw-project-ingress-verify-action">
+            <Text size="sm" color="secondary">{t("admin.projects.verifyHint")}</Text>
+            <Button
+              label={t("admin.projects.verify")}
+              variant="secondary"
+              isLoading={verifying}
+              isDisabled={verifying || !status.public_ingress_configured}
+              clickAction={verifyPublicIngress}
+            />
+          </div>
+          {error && <ErrorText>{error}</ErrorText>}
+
+          {verifyResult && (
+            <Card padding={2}>
+              <div className="claw-panel" aria-live="polite">
+                <div className="claw-row claw-row-between">
+                  <Text weight="semibold">{t("admin.projects.verifyResults")}</Text>
+                  <Badge
+                    variant={verifyResult.ready ? "success" : "warning"}
+                    label={t(verifyResult.ready ? "admin.projects.verifyReady" : "admin.projects.verifyActionNeeded")}
+                  />
+                </div>
+                <div className="claw-project-ingress-checks">
+                  {verifyResult.checks.map((check) => (
+                    <div className="claw-project-ingress-check" key={check.id}>
+                      <div className="claw-row claw-row-between">
+                        <Text weight="semibold">{t(`admin.projects.verifyCheck.${check.id}`)}</Text>
+                        <Badge
+                          variant={check.status === "passed" ? "success" : check.status === "failed" ? "error" : check.status === "warning" ? "warning" : "neutral"}
+                          label={t(`admin.projects.verifyStatus.${check.status}`)}
+                        />
+                      </div>
+                      <Text size="sm" color="secondary">{t(check.message_key, check.params)}</Text>
+                      {check.hint_key && <Text size="sm" color="secondary">{t(check.hint_key, check.params)}</Text>}
+                    </div>
+                  ))}
+                </div>
+                <Text size="sm" color="secondary">
+                  {t("admin.projects.verifyCheckedAt", { time: new Date(verifyResult.checked_at).toLocaleString() })}
+                </Text>
+              </div>
+            </Card>
+          )}
 
           <div className="claw-project-status-grid">
             <div>

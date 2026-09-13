@@ -20,11 +20,17 @@ class ConfigStore:
     def __init__(self):
         self.enabled = None
 
-    async def get(self, default_enabled=False):
-        return {"enabled": default_enabled if self.enabled is None else self.enabled}
+    async def get(self, default_enabled=False, default_public_ingress_enabled=False):
+        return {
+            "enabled": default_enabled if self.enabled is None else self.enabled,
+            "public_ingress_enabled": default_public_ingress_enabled,
+        }
 
     async def set_enabled(self, enabled):
         self.enabled = enabled
+
+    async def set_public_ingress_enabled(self, enabled):
+        self.public_ingress_enabled = enabled
 
 
 async def test_enabling_missing_image_starts_background_build(monkeypatch, tmp_path):

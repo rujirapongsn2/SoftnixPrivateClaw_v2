@@ -6,8 +6,11 @@ security boundary; see docs/software-development.md.
 """
 import asyncio
 import hashlib
+import ipaddress
 import json
 import re
+import socket
+import time
 import uuid
 from pathlib import Path
 
@@ -54,6 +57,8 @@ class ProjectEnvironments:
     def __init__(self, settings):
         self.settings = settings
         self._locks = KeyedLocks()
+        self._proxy_networks: set[str] = set()
+        self._proxy_targets: dict[tuple[str, str, int], tuple[float, str]] = {}
 
     def identity(self, workspace: Path, project: str) -> tuple[str, Path]:
         if not _SLUG.fullmatch(project):
@@ -81,6 +86,118 @@ class ProjectEnvironments:
         if state and state['Config'].get('Labels', {}).get('sbot.project') != name:
             raise ValueError('container name is occupied by an unmanaged container')
         return state
+
+    def _network_name(self, name: str) -> str:
+        suffix = name.removeprefix('sbot-project-')
+        return f'{self.settings.project_network}-{suffix}'
+
+    async def _ensure_network(self, network: str) -> bool:
+        internal = self.settings.network == 'none'
+        inspected = await self._docker('network', 'inspect', network)
+        if not inspected.exit_code:
+            state = json.loads(inspected.stdout)[0]
+            if bool(state.get('Internal')) != internal:
+                raise RuntimeError(
+                    f'project network {network} has incompatible egress policy; '
+                    'remove the stopped project container and network before retrying'
+                )
+            return False
+
+        listed = await self._docker(
+            'network', 'ls', '--filter', 'label=sbot.project.network=true', '--format', '{{.Name}}'
+        )
+        if listed.exit_code:
+            raise RuntimeError(listed.render())
+        count = len([line for line in listed.stdout.splitlines() if line.strip()])
+        if count >= self.settings.project_network_limit:
+            raise RuntimeError('project network capacity reached; remove unused project networks')
+
+        pool = ipaddress.ip_network(self.settings.project_network_pool)
+        prefix = self.settings.project_network_prefix
+        subnet_size = 1 << (32 - prefix)
+        slots = 1 << (prefix - pool.prefixlen)
+        digest = hashlib.sha256(network.encode()).digest()
+        start = int.from_bytes(digest[:8], 'big') % slots
+        # The pool contains a power-of-two number of slots. An odd stride walks
+        # the entire pool and avoids wasting all probes inside one large CIDR
+        # that happens to overlap part of the configured range.
+        stride = (int.from_bytes(digest[8:16], 'big') % slots) | 1
+        last_error = None
+        # Probe enough alternate slots to survive ordinary collisions without
+        # turning one request into an unbounded Docker command loop.
+        for offset in range(min(slots, 256)):
+            slot = (start + offset * stride) % slots
+            subnet = ipaddress.ip_network((int(pool.network_address) + slot * subnet_size, prefix))
+            args = [
+                'network', 'create', '--driver', 'bridge', '--subnet', str(subnet),
+                '--label', 'sbot.project.network=true',
+            ]
+            if internal:
+                args.append('--internal')
+            created = await self._docker(*args, network)
+            if not created.exit_code:
+                return True
+            last_error = created
+            # A second process may have created this exact named network.
+            inspected = await self._docker('network', 'inspect', network)
+            if not inspected.exit_code:
+                state = json.loads(inspected.stdout)[0]
+                if bool(state.get('Internal')) != internal:
+                    raise RuntimeError(f'project network {network} has incompatible egress policy')
+                return False
+            if 'overlap' not in created.stderr.lower():
+                break
+        raise RuntimeError(last_error.render() if last_error is not None else 'project network unavailable')
+
+    async def _connect_network(self, name: str, state: dict) -> dict:
+        network = self._network_name(name)
+        if network not in (state['NetworkSettings'].get('Networks') or {}):
+            await self._ensure_network(network)
+            connected = await self._docker('network', 'connect', network, name)
+            if connected.exit_code and 'already exists' not in connected.stderr.lower():
+                raise RuntimeError(connected.render())
+            state = await self._owned(name)
+        if Path('/.dockerenv').exists() and network not in self._proxy_networks:
+            proxy = self.settings.project_proxy_container.strip() or socket.gethostname()
+            connected = await self._docker('network', 'connect', network, proxy)
+            if connected.exit_code and 'already exists' not in connected.stderr.lower():
+                raise RuntimeError(connected.render())
+            self._proxy_networks.add(network)
+        return state
+
+    async def proxy_target(self, workspace: Path, project: str, port: int) -> str | None:
+        """Return a managed running target; never accepts an arbitrary host."""
+        if port not in self.settings.project_ports:
+            return None
+        cache_key = (str(workspace.resolve()), project, port)
+        if len(self._proxy_targets) >= 2048:
+            now = time.monotonic()
+            self._proxy_targets = {
+                key: value for key, value in self._proxy_targets.items() if value[0] > now
+            }
+            if len(self._proxy_targets) >= 2048:
+                self._proxy_targets.pop(next(iter(self._proxy_targets)))
+        cached = self._proxy_targets.get(cache_key)
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1]
+        name, _ = self.identity(workspace, project)
+        state = await self._owned(name)
+        if state is None or not state['State']['Running']:
+            return None
+        if Path('/.dockerenv').exists():
+            state = await self._connect_network(name, state)
+            if self._network_name(name) not in (state['NetworkSettings'].get('Networks') or {}):
+                return None
+            target = f'http://{name}:{port}'
+            self._proxy_targets[cache_key] = (time.monotonic() + 5, target)
+            return target
+        bindings = (state['NetworkSettings'].get('Ports') or {}).get(f'{port}/tcp') or []
+        for binding in bindings:
+            if binding.get('HostPort'):
+                target = f"http://127.0.0.1:{binding['HostPort']}"
+                self._proxy_targets[cache_key] = (time.monotonic() + 5, target)
+                return target
+        return None
 
     async def list(self, workspace: Path) -> list[dict]:
         """Return only Sbot-managed project containers below this workspace.
@@ -116,11 +233,13 @@ class ProjectEnvironments:
         if state is None:
             path.mkdir(parents=True, exist_ok=True)
             s = self.settings
+            network = self._network_name(name)
+            network_created = await self._ensure_network(network)
             args = [
                 'run', '-d', '--name', name, '--label', f'sbot.project={name}',
                 '--restart', 'unless-stopped', '--cpus', str(s.project_cpu_limit),
                 '--memory', s.project_memory_limit, '--pids-limit', str(s.project_pids_limit),
-                '--network', s.network, '--workdir', '/workspace',
+                '--network', network, '--workdir', '/workspace',
                 '--mount', f'type=bind,source={path.resolve()},target=/workspace',
                 '--log-opt', 'max-size=10m', '--log-opt', 'max-file=3',
             ]
@@ -143,8 +262,14 @@ class ProjectEnvironments:
                 # uniqueness is the cross-process arbiter.
                 state = await self._owned(name)
                 if state is None:
+                    if network_created:
+                        # Safe and recoverable: this network was created by this
+                        # failed request and has never hosted a managed container.
+                        await self._docker('network', 'rm', network)
                     raise RuntimeError(created.render())
             state = await self._owned(name)
+        else:
+            state = await self._connect_network(name, state)
         if not state['State']['Running']:
             result = await self._docker('start', name)
             if result.exit_code:
@@ -160,6 +285,10 @@ class ProjectEnvironments:
         if isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 1800:
             raise ValueError('timeout_seconds must be between 1 and 1800')
         name, path = self.identity(workspace, project)
+        if action in {'start', 'stop'}:
+            for key in tuple(self._proxy_targets):
+                if key[:2] == (str(workspace.resolve()), project):
+                    self._proxy_targets.pop(key, None)
         # A quota check and a new project creation must share an owner-wide
         # lock. Per-project locks alone allow two simultaneous first requests
         # for different slugs to both see spare capacity.
@@ -188,6 +317,8 @@ class ProjectEnvironments:
                 return json.dumps({'project': project, 'container': name,
                                    'state': state['State']['Status'],
                                    'files': f'projects/{project}', 'shell_cwd': '/workspace',
+                                   'public_ingress_port': self.settings.project_ingress_port,
+                                   'public_bind': f'0.0.0.0:{self.settings.project_ingress_port}',
                                    'ports': state['NetworkSettings'].get('Ports', {})})
             if action.startswith('compose_'):
                 if not self.settings.project_docker_enabled:
