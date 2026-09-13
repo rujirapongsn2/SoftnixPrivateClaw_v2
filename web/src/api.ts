@@ -494,6 +494,7 @@ export interface AdminOverview {
   stats: Record<string, number | boolean>;
   activity_by_day: ActivityPoint[];
   activity_by_hour: ActivityPoint[];
+  activity_by_day_hour_7d: ActivityPoint[];
   usage_by_model: ModelUsagePoint[];
   providers: ProviderUsageSummary[];
   sessions_by_user_7d: SessionsByUserPoint[];

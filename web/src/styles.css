@@ -1875,23 +1875,40 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-summary-metrics > div { display: grid; gap: 2px; }
 .claw-summary-metrics strong { font-size: 18px; font-weight: 600; }
-.claw-summary-heatmap {
+.claw-summary-week-heatmap {
   display: grid;
-  grid-template-columns: repeat(24, minmax(7px, 1fr));
   gap: 4px;
 }
-.claw-summary-heatmap span {
-  aspect-ratio: 1;
-  max-height: 24px;
+.claw-summary-week-row,
+.claw-summary-week-axis {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+.claw-summary-week-day {
+  color: var(--color-text-secondary, #6b6760);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.claw-summary-week-hours {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(4px, 1fr));
+  gap: 3px;
+}
+.claw-summary-week-hours span {
+  height: 18px;
   border-radius: 4px;
   background: var(--color-primary, #4b6bfb);
 }
-.claw-summary-hour-axis {
-  display: flex;
-  justify-content: space-between;
+.claw-summary-week-axis {
   margin-top: 7px;
   color: var(--color-text-secondary, #6b6760);
   font-size: 10px;
+}
+.claw-summary-week-axis > div {
+  display: flex;
+  justify-content: space-between;
 }
 .claw-summary-status {
   flex-wrap: wrap;
@@ -1911,8 +1928,10 @@ html[data-chat-bg="grid"] .claw-chat {
 @media (max-width: 560px) {
   .claw-summary-heading { align-items: flex-start; }
   .claw-summary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .claw-summary-heatmap { gap: 2px; }
-  .claw-summary-heatmap span { border-radius: 2px; }
+  .claw-summary-week-row,
+  .claw-summary-week-axis { grid-template-columns: 38px minmax(0, 1fr); gap: 5px; }
+  .claw-summary-week-hours { gap: 2px; }
+  .claw-summary-week-hours span { border-radius: 2px; }
 }
 .claw-chart {
   display: flex;

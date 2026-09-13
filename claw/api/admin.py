@@ -704,6 +704,7 @@ async def overview(admin: User = Depends(require_admin), state: AppState = Depen
         "stats": await _build_stats(state),
         "activity_by_day": await state.messages.activity_by_day(14),
         "activity_by_hour": await state.messages.activity_by_hour(),
+        "activity_by_day_hour_7d": await state.messages.activity_by_day_hour(7),
         "usage_by_model": await state.usage.by_model(),
         "providers": await _provider_summaries(state),
         "sessions_by_user_7d": await state.sessions.by_user_since(7),

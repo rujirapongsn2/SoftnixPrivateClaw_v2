@@ -217,6 +217,41 @@ class MessageStore:
         counts = {int(r[0]): r[1] for r in rows if r[0] is not None}
         return [{"label": f"{h:02d}", "count": counts.get(h, 0)} for h in range(24)]
 
+    async def activity_by_day_hour(self, days: int = 7) -> list[dict[str, Any]]:
+        """Dense message counts for each UTC hour across the latest calendar days."""
+        today = datetime.now(timezone.utc).date()
+        first_day = today - timedelta(days=days - 1)
+        since = datetime(first_day.year, first_day.month, first_day.day, tzinfo=timezone.utc)
+        day_bucket = (
+            func.date_trunc("day", Message.created_at)
+            if self.is_postgres
+            else func.strftime("%Y-%m-%d", Message.created_at)
+        )
+        hour_bucket = (
+            func.extract("hour", Message.created_at)
+            if self.is_postgres
+            else func.strftime("%H", Message.created_at)
+        )
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(day_bucket.label("day"), hour_bucket.label("hour"), func.count())
+                    .where(Message.created_at >= since, Message.role.in_(("user", "assistant")))
+                    .group_by(day_bucket, hour_bucket)
+                )
+            ).all()
+        counts = {
+            (_day_key(row[0]), int(row[1])): row[2]
+            for row in rows
+            if row[0] is not None and row[1] is not None
+        }
+        return [
+            {"label": f"{day.isoformat()}T{hour:02d}", "count": counts.get((day.isoformat(), hour), 0)}
+            for offset in range(days)
+            for day in (first_day + timedelta(days=offset),)
+            for hour in range(24)
+        ]
+
 
 class SessionStore:
     def __init__(self, factory: async_sessionmaker[AsyncSession], is_postgres: bool = True):

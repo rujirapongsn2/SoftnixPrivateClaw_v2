@@ -267,9 +267,16 @@ def test_mode_can_be_disabled(tmp_path):
 async def test_admin_reports_count_both_modes(integrated):
     app, c, u = integrated
     await app.state.claw.users.update_flags(u.id, is_admin=True)
-    await app.state.claw.sessions.create(u.id)
-    await app.state.sbot.sessions.create(u.id)
+    claw_session = await app.state.claw.sessions.create(u.id)
+    sbot_session = await app.state.sbot.sessions.create(u.id)
+    await app.state.claw.messages.append(claw_session.id, [{"role": "user", "content": "normal"}])
+    await app.state.sbot.messages.append(sbot_session.id, [{"role": "user", "content": "bot"}])
     response = await c.get("/api/admin/overview")
     assert response.status_code == 200, response.text
     assert response.json()["stats"]["sessions"] == 2
     assert response.json()["stats"]["active_users"] == 1
+    hourly_week = response.json()["activity_by_day_hour_7d"]
+    assert len(hourly_week) == 7 * 24
+    assert hourly_week[0]["label"].endswith("T00")
+    assert hourly_week[-1]["label"].endswith("T23")
+    assert sum(point["count"] for point in hourly_week) == 2
