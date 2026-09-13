@@ -90,8 +90,8 @@ class ProjectContainerManager:
         config = await self.config_store.get(default_enabled=self.settings.projects_enabled)
         self.settings.projects_enabled = config["enabled"]
         if self.settings.enabled and self.settings.projects_enabled:
-            status = await self.status()
-            if status["docker_available"] and not status["image_available"]:
+            docker_available = await self._docker_ready()
+            if docker_available and not await self._image_ready():
                 await self.start_build()
 
     async def _run(self, *argv: str, timeout: float = 20, output_cap: int = 20_000) -> tuple[int, str]:
