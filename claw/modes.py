@@ -80,6 +80,7 @@ class CombinedReports:
             "totals",
             "activity_by_day",
             "activity_by_hour",
+            "activity_by_day_hour",
             "by_day_since",
             "by_user_since",
         }:
