@@ -1755,6 +1755,8 @@ class SkillStore:
             if skill is None:
                 skill = Skill(user_id=user_id, name=name)
                 db.add(skill)
+            if getattr(skill, "bundle_id", None) and any(key in fields and fields[key] != getattr(skill, key) for key in ("content", "description")):
+                raise ValueError("Imported bundle instructions are read only")
             for key in ("description", "content", "enabled", "visibility"):
                 if key in fields and fields[key] is not None:
                     setattr(skill, key, fields[key])

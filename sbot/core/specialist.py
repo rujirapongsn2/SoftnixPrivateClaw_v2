@@ -38,7 +38,7 @@ from sbot.tools.web import WebFetchTool, WebSearchTool
 DELEGATABLE_TOOLS = frozenset(
     {"read_file", "write_file", "edit_file", "list_dir", "exec", "project", "web_fetch", "web_search"}
 )
-SPECIALIST_ALWAYS_TOOLS = frozenset({'publish_artifact', 'read_docx', 'read_excel', 'read_csv', 'read_pdf'})
+SPECIALIST_ALWAYS_TOOLS = frozenset({'publish_artifact', 'read_docx', 'read_excel', 'read_csv', 'read_pdf', 'render_diagram'})
 
 _DEFAULT_BUDGET_SECONDS = 300.0
 
@@ -440,7 +440,9 @@ class SpecialistRunner:
             registry.register(MemoryTool(self.memory, self.owner_id, bot_id=own_doc))
             registry.register(RecallMemoryTool(self.memory, self.owner_id))
         if self.skills is not None and self.owner_id:
-            registry.register(ReadSkillTool(self.skills, self.owner_id))
+            registry.register(ReadSkillTool(self.skills, self.owner_id, workspace=self.workspace))
+            from claw.tools.diagram import RenderDiagramTool
+            registry.register(RenderDiagramTool(self.workspace, self.owner_id))
         # Not allowlist-gated either: these are granted by the caller (the
         # mission scheduler), not proposed by the bot's own configuration.
         for tool in extra or []:
@@ -556,7 +558,11 @@ class SpecialistRunner:
             # Apply after sync too: newly discovered connector tools must never
             # widen an explicit bot allowlist. Mission tools are caller grants.
             if bot.tool_allowlist is not None:
-                tools.restrict_to([*bot.tool_allowlist, *(t.name for t in extra_tools or [])])
+                tools.restrict_to([
+                    *bot.tool_allowlist,
+                    *SPECIALIST_ALWAYS_TOOLS,
+                    *(t.name for t in extra_tools or []),
+                ])
         budget = self._budget(max_seconds)
         if current_turn_deadline.get() is not None and current_turn_deadline.get() <= time.monotonic():
             return SpecialistOutcome(text="Parent turn deadline expired.", timed_out=True)

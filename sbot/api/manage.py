@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 
 from sbot.api import connector_shared as connectors
@@ -370,6 +370,7 @@ def _skill_json(
     s, builtin: bool = False, shadows_builtin: bool = False, with_content: bool = True, viewer_id: str | None = None, owner_name: str = ""
 ) -> dict:
     return {
+        "bundle": getattr(s, "bundle_metadata", None),
         "id": s.id,
         "name": s.name,
         "description": s.description,
@@ -391,6 +392,47 @@ def _skill_json(
         # the collision isn't silent.
         "shadows_builtin": shadows_builtin,
     }
+
+
+class SkillGitImport(BaseModel):
+    repository: str = Field(max_length=300)
+    commit: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
+
+
+@router.post("/skills/import-github")
+async def import_github_skill(body: SkillGitImport, user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    import asyncio
+    import httpx
+    from sqlalchemy.exc import IntegrityError
+    from claw.skills.github import download_bundle
+    from claw.skills.bundles import parse_bundle, install_bundle
+    try:
+        data = await download_bundle(body.repository, body.commit)
+        bundle = await asyncio.to_thread(parse_bundle, data, body.repository + "/tree/" + body.commit)
+        skill = await install_bundle(state.skills, user.id, bundle)
+    except (ValueError, UnicodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="GitHub download failed; try ZIP upload") from exc
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Skill name already exists") from exc
+    return _skill_json(skill, viewer_id=user.id)
+
+
+@router.post("/skills/import")
+async def import_skill(file: UploadFile = File(...), user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    import asyncio
+    from claw.skills.bundles import MAX_ARCHIVE, parse_bundle, install_bundle
+    from sqlalchemy.exc import IntegrityError
+    data = await file.read(MAX_ARCHIVE + 1)
+    try:
+        bundle = await asyncio.to_thread(parse_bundle, data)
+        skill = await install_bundle(state.skills, user.id, bundle)
+    except (ValueError, UnicodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Skill name already exists") from exc
+    return _skill_json(skill, viewer_id=user.id)
 
 
 @router.get("/skills")
@@ -462,6 +504,9 @@ async def upsert_skill(
         owned_skills = await state.skills.list_for_user(user.id)
         if not any(s.id == body.id and s.name == name.strip() for s in owned_skills):
             raise HTTPException(status_code=403, detail="Only the owner can edit this skill")
+    existing = await state.skills.get_by_name(user.id, name.strip())
+    if existing is not None and getattr(existing, "bundle_id", None) and (body.content != existing.content or body.description != existing.description):
+        raise HTTPException(status_code=400, detail="Imported bundle instructions are read only")
     if body.visibility == "group" and not user.group_id:
         raise HTTPException(status_code=400, detail="Join a group before sharing a skill with your group")
     if body.connector_id is not None:

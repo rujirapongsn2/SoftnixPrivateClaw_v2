@@ -28,6 +28,8 @@ class ReadSkillTool(Tool):
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "Skill name from the skills list"},
+            "materialize": {"type": "boolean", "description": "Copy a template/image/font resource to workspace instead of returning text. Requires path. Package scripts cannot be materialized."},
+            "path": {"type": "string", "description": "Bundle-relative resource path (references/..., assets/...). Omit for SKILL.md."},
             "section": {"type": "string", "description": "Optional Markdown heading to read."},
             "offset": {"type": "integer", "minimum": 0, "description": "Character offset within the selected content."},
             "limit": {"type": "integer", "minimum": 1, "maximum": MAX_READ_LIMIT, "description": "Characters to return (default 8000; maximum 10000)."},
@@ -35,11 +37,12 @@ class ReadSkillTool(Tool):
         "required": ["name"],
     }
 
-    def __init__(self, store: SkillStore, user_id: str):
+    def __init__(self, store: SkillStore, user_id: str, workspace=None):
         self.store = store
         self.user_id = user_id
+        self.workspace = workspace
 
-    async def execute(self, name: str, section: str | None = None, offset: int = 0, limit: int = DEFAULT_READ_LIMIT, **_: Any) -> str:
+    async def execute(self, name: str, section: str | None = None, offset: int = 0, limit: int = DEFAULT_READ_LIMIT, path: str | None = None, materialize: bool = False, **_: Any) -> str:
         name = name.strip()
         skill = await self.store.readable_by_name(self.user_id, name)
         if skill is not None and skill.enabled:
@@ -49,6 +52,31 @@ class ReadSkillTool(Tool):
             if builtin is None:
                 return f"Error: skill '{name}' not found or disabled"
             resolved_name, content = builtin.name, builtin.content
+        if path is not None:
+            from claw.skills.bundles import resource
+            try:
+                if materialize:
+                    import hashlib
+                    from pathlib import Path
+                    if self.workspace is None or not path or Path(path).suffix.lower() in {'.py', '.js', '.sh'}:
+                        return "Error: this resource cannot be materialized"
+                    raw = await resource(self.store, self.user_id, name, path, binary=True)
+                    root = Path(self.workspace).resolve()
+                    target = root / ('skill-asset-' + hashlib.sha256(raw).hexdigest()[:24] + Path(path).suffix.lower())
+                    # Never follow an existing link or overwrite a workspace file.
+                    try:
+                        with target.open('xb') as out:
+                            out.write(raw)
+                    except FileExistsError:
+                        if target.is_symlink() or target.read_bytes() != raw:
+                            return "Error: resource destination already exists"
+                    return f"Resource copied to /workspace/{target.name}"
+                content = await resource(self.store, self.user_id, name, path)
+            except ValueError as exc:
+                return f"Error: {exc}"
+        elif skill is not None and getattr(skill, 'bundle_id', None):
+            content += "\n\nBundle resources (read_skill with path; relative to bundle root):\n" + "\n".join(skill.bundle_metadata.get('files', []))
+            content = "Create static HTML with inline SVG/CSS. External fonts and scripts are disabled in chat previews. Use render_diagram to validate and export a PNG. Package scripts are reference-only; no install hooks or plugin commands are executed. For brand settings, create a project-local copy; never modify shared package files.\n\n" + content
         selected, selected_section = select_section(content, section)
         if section and selected_section is None:
             return f"Error: section '{section}' was not found in skill '{resolved_name}'."

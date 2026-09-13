@@ -107,6 +107,7 @@ export interface WorkingPlan {
 }
 
 export interface SkillInfo {
+  bundle?: { version: string; source: string; sha256: string; files: string[]; license: string } | null;
   visibility?: "private" | "group" | "public";
   owner_name?: string;
   read_only?: boolean;
@@ -1475,7 +1476,7 @@ export type HtmlPreview = {
 
 /** Extensions rendered as a sandboxed HTML page. Kept in sync with
  * PREVIEWABLE_HTML_SUFFIXES in claw/api/file_preview.py. */
-export const PREVIEWABLE_HTML_RE = /\.html?$/i;
+export const PREVIEWABLE_HTML_RE = /\.(?:html?|svg)$/i;
 
 /** Bounded source of an HTML artifact. The caller MUST render this only inside
  * an iframe with a bare `sandbox` attribute — the markup is agent-authored and
@@ -1495,4 +1496,8 @@ export function fileHtmlPreview(
  * capability token in the path is the only credential. */
 export function shareFileUrl(token: string, name: string): string {
   return `/api/share/${encodeURIComponent(token)}/files/${encodeURIComponent(name)}`;
+}
+
+export function filePngExport(sessionId: string, path: string): Promise<{path: string; warnings: string[]}> {
+  return request(`/api/sessions/${sessionId}/file-preview/png?path=${encodeURIComponent(path)}`, {method: "POST"});
 }
