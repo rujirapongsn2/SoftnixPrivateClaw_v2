@@ -4120,8 +4120,11 @@ function ProjectContainersAdminPanel() {
   }, [guard, reload]);
 
   useEffect(() => {
-    if (!status?.building) return;
-    const timer = window.setInterval(() => void guard(async () => await reload()), 2000);
+    if (!status) return;
+    const timer = window.setInterval(
+      () => void guard(async () => await reload()),
+      status.building ? 2000 : 5000,
+    );
     return () => window.clearInterval(timer);
   }, [guard, reload, status?.building]);
 
@@ -4151,6 +4154,12 @@ function ProjectContainersAdminPanel() {
     : status.building
       ? t("admin.projects.building")
       : t("admin.projects.notReady");
+  const formatBytes = (bytes: number) => {
+    if (bytes <= 0) return "0 B";
+    const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 4);
+    const value = bytes / 1024 ** unit;
+    return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: value < 10 ? 1 : 0 }).format(value)} ${["B", "KB", "MB", "GB", "TB"][unit]}`;
+  };
 
   return (
     <div className="claw-panel">
@@ -4159,7 +4168,10 @@ function ProjectContainersAdminPanel() {
           <Text weight="semibold">{t("admin.projects.title")}</Text>
           <Text size="sm" color="secondary">{t("admin.projects.subtitle")}</Text>
         </div>
-        <Badge variant={status.ready ? "success" : status.building ? "warning" : "neutral"} label={readyLabel} />
+        <div className="claw-row">
+          <Text size="sm" color="secondary">{t("admin.projects.overallReadiness")}</Text>
+          <Badge variant={status.ready ? "success" : status.building ? "warning" : "neutral"} label={readyLabel} />
+        </div>
       </div>
 
       <Card padding={2}>
@@ -4190,6 +4202,46 @@ function ProjectContainersAdminPanel() {
                 variant={status.image_available ? "success" : status.building ? "warning" : "neutral"}
                 label={status.image_available ? t("admin.projects.imageReady") : status.building ? t("admin.projects.building") : t("admin.projects.imageMissing")}
               />
+            </div>
+          </div>
+
+          <div className="claw-project-metric-grid" aria-label={t("admin.projects.usage")}>
+            <div className="claw-project-metric">
+              <Text size="sm" color="secondary">{t("admin.projects.containers")}</Text>
+              <strong>{status.metrics_available ? status.containers.total.toLocaleString() : "—"}</strong>
+              {status.metrics_available ? (
+                <div className="claw-project-container-counts">
+                  <span><i className="is-running" />{status.containers.running} {t("admin.projects.running")}</span>
+                  <span><i />{status.containers.stopped} {t("admin.projects.stopped")}</span>
+                </div>
+              ) : <Text size="sm" color="secondary">{t("admin.projects.unavailable")}</Text>}
+            </div>
+            <div className="claw-project-metric">
+              <Text size="sm" color="secondary">CPU</Text>
+              <strong>{status.metrics_available ? `${status.cpu_percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}%` : "—"}</strong>
+              <Text size="sm" color="secondary">
+                {t(status.metrics_available ? "admin.projects.currentUsage" : "admin.projects.unavailable")}
+              </Text>
+            </div>
+            <div className="claw-project-metric">
+              <Text size="sm" color="secondary">{t("admin.projects.memory")}</Text>
+              <strong>{status.metrics_available ? formatBytes(status.memory_usage_bytes) : "—"}</strong>
+              <Text size="sm" color="secondary">
+                {!status.metrics_available
+                  ? t("admin.projects.unavailable")
+                  : status.memory_limit_bytes > 0
+                  ? t("admin.projects.ofLimit").replace("{limit}", formatBytes(status.memory_limit_bytes))
+                  : t("admin.projects.currentUsage")}
+              </Text>
+            </div>
+            <div className="claw-project-metric">
+              <Text size="sm" color="secondary">{t("admin.projects.disk")}</Text>
+              <strong>{status.metrics_available ? formatBytes(status.disk_usage_bytes) : "—"}</strong>
+              <Text size="sm" color="secondary">
+                {!status.metrics_available
+                  ? t("admin.projects.unavailable")
+                  : status.disk_usage_complete ? t("admin.projects.projectData") : t("admin.projects.partialData")}
+              </Text>
             </div>
           </div>
 

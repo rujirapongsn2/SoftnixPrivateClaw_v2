@@ -787,6 +787,17 @@ export interface ProjectContainerAdminStatus {
   build_error: string;
   build_started_at: string | null;
   ready: boolean;
+  metrics_available: boolean;
+  containers: {
+    running: number;
+    stopped: number;
+    total: number;
+  };
+  cpu_percent: number;
+  memory_usage_bytes: number;
+  memory_limit_bytes: number;
+  disk_usage_bytes: number;
+  disk_usage_complete: boolean;
 }
 
 // Control Plane > Preferences (global branding & appearance).

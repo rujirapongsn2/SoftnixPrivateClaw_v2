@@ -24,6 +24,13 @@ def _unavailable() -> dict:
         "build_error": "",
         "build_started_at": None,
         "ready": False,
+        "metrics_available": False,
+        "containers": {"running": 0, "stopped": 0, "total": 0},
+        "cpu_percent": 0.0,
+        "memory_usage_bytes": 0,
+        "memory_limit_bytes": 0,
+        "disk_usage_bytes": 0,
+        "disk_usage_complete": True,
     }
 
 
