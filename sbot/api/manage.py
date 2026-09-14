@@ -512,8 +512,6 @@ async def upsert_skill(
         if not any(s.id == body.id and s.name == name.strip() for s in owned_skills):
             raise HTTPException(status_code=403, detail="Only the owner can edit this skill")
     existing = await state.skills.get_by_name(user.id, name.strip())
-    if existing is not None and getattr(existing, "bundle_id", None) and (body.content != existing.content or body.description != existing.description):
-        raise HTTPException(status_code=400, detail="Imported bundle instructions are read only")
     if body.visibility == "group" and not user.group_id:
         raise HTTPException(status_code=400, detail="Join a group before sharing a skill with your group")
     if body.connector_id is not None:
@@ -524,25 +522,32 @@ async def upsert_skill(
         global_ones = await state.connectors.list_for_global()
         if not any(c.id == body.connector_id for c in (*owned, *global_ones)):
             raise HTTPException(status_code=404, detail="connector not found")
-    from claw.skills.bundles import plain_skill_save_error, reference_warnings
+    from claw.skills.bundles import reference_warnings, skill_update_error, skill_update_values
 
-    save_error = plain_skill_save_error(
+    description, content, updates = skill_update_values(
         existing,
-        state.settings.workspaces_root / user.id,
-        name.strip(),
-        body.content,
-    )
-    if save_error:
-        raise HTTPException(status_code=400, detail=save_error)
-    warnings = await reference_warnings(state.skills, user.id, name.strip(), body.content)
-    skill = await state.skills.upsert(
-        user.id,
-        name.strip(),
+        body.model_fields_set,
         description=body.description,
         content=body.content,
         enabled=body.enabled,
         visibility=body.visibility,
         connector_id=body.connector_id,
+    )
+
+    save_error = skill_update_error(
+        existing,
+        state.settings.workspaces_root / user.id,
+        name.strip(),
+        description,
+        content,
+    )
+    if save_error:
+        raise HTTPException(status_code=400, detail=save_error)
+    warnings = await reference_warnings(state.skills, user.id, name.strip(), content)
+    skill = await state.skills.upsert(
+        user.id,
+        name.strip(),
+        **updates,
     )
     result = _skill_json(skill)
     result["warnings"] = warnings
@@ -558,7 +563,7 @@ async def delete_skill(
     existing = next((s for s in await state.skills.list_for_user(user.id) if s.id == skill_id), None)
     if existing is None:
         raise HTTPException(status_code=404, detail="skill not found")
-    from claw.skills.workspace import delete_skill_with_workspace
+    from claw.skills.workspace import archive_failure_detail, delete_skill_with_workspace
 
     try:
         deleted, archived = await delete_skill_with_workspace(
@@ -567,7 +572,7 @@ async def delete_skill(
     except OSError as exc:
         raise HTTPException(
             status_code=409,
-            detail="Managed workspace directory could not be archived; the skill was not deleted",
+            detail=archive_failure_detail(exc),
         ) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="skill not found")
@@ -593,7 +598,7 @@ async def archive_skill_workspace_orphan(
     user: User = Depends(require_operator),
     state: AppState = Depends(get_state),
 ) -> dict:
-    from claw.skills.workspace import archive_orphan
+    from claw.skills.workspace import archive_failure_detail, archive_orphan
     skills = await state.skills.list_for_user(user.id)
     try:
         archive_orphan(
@@ -602,7 +607,9 @@ async def archive_skill_workspace_orphan(
             body.name,
             {skill.name: skill.id for skill in skills},
         )
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail=archive_failure_detail(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"archived": True}
 
@@ -613,7 +620,7 @@ async def delete_skill_workspace_orphan(
     user: User = Depends(require_operator),
     state: AppState = Depends(get_state),
 ) -> dict:
-    from claw.skills.workspace import delete_managed_orphan
+    from claw.skills.workspace import archive_failure_detail, delete_managed_orphan
     skills = await state.skills.list_for_user(user.id)
     try:
         delete_managed_orphan(
@@ -622,7 +629,12 @@ async def delete_skill_workspace_orphan(
             body.name,
             {skill.name: skill.id for skill in skills},
         )
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=archive_failure_detail(exc, operation="deleted"),
+        ) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": True}
 

@@ -182,13 +182,15 @@ class ManageSkillTool(Tool):
             content = str(kwargs.get("content") or "").strip()
             if not content:
                 return "Error: save requires 'content' (the skill instructions)."
+            description = str(kwargs.get("description") or "").strip()
             existing = await self.store.get_by_name(self.user_id, name)
-            from claw.skills.bundles import plain_skill_save_error
+            from claw.skills.bundles import skill_update_error
 
-            save_error = plain_skill_save_error(existing, self.workspace, name, content)
+            save_error = skill_update_error(
+                existing, self.workspace, name, description, content
+            )
             if save_error:
                 return f"Error: {save_error}"
-            description = str(kwargs.get("description") or "").strip()
             enabled_raw = kwargs.get("enabled")
             enabled = True if enabled_raw is None else bool(enabled_raw)
             await self.store.upsert(
@@ -206,14 +208,14 @@ class ManageSkillTool(Tool):
             existing = await self.store.get_by_name(self.user_id, name)
             if existing is None:
                 return f"Error: skill '{name}' not found."
-            from claw.skills.workspace import delete_skill_with_workspace
+            from claw.skills.workspace import archive_failure_detail, delete_skill_with_workspace
 
             try:
                 deleted, archived = await delete_skill_with_workspace(
                     self.store, self.workspace, self.user_id, existing
                 )
-            except OSError:
-                return "Error: the managed workspace directory could not be archived; the skill was not deleted."
+            except OSError as exc:
+                return f"Error: {archive_failure_detail(exc)}"
             if not deleted:
                 return f"Error: skill '{name}' could not be deleted."
             suffix = " Its PrivateClaw-managed workspace directory was archived." if archived else ""

@@ -82,7 +82,10 @@ async def reference_warnings(store, user_id: str, current_name: str, content: st
 
 
 def plain_skill_save_error(existing, workspace: Path | None, name: str, content: str) -> str | None:
-    """Reject a new plain skill that is attempting to stand in for a package."""
+    """Reject plain-skill creation/content changes that imitate a package."""
+    if existing is not None:
+        if getattr(existing, "bundle_id", None) or content == existing.content:
+            return None
     if workspace is not None:
         root = workspace.resolve() / "skills"
         candidate = root / name
@@ -99,12 +102,58 @@ def plain_skill_save_error(existing, workspace: Path | None, name: str, content:
                 f"Workspace directory skills/{name} already exists. It is not a registered package; "
                 "import the GitHub repository with import_github or archive the orphan in Settings."
             )
-    if existing is None and name in skill_path_references(content):
+    if name in skill_path_references(content):
         return (
             f"New skill '{name}' depends on workspace/skills files. "
             "Import the package with import_github or ZIP upload instead."
         )
     return None
+
+
+def skill_update_error(
+    existing,
+    workspace: Path | None,
+    name: str,
+    description: str,
+    content: str,
+) -> str | None:
+    """Validate content separately from metadata-only skill updates."""
+    if existing is not None and getattr(existing, "bundle_id", None):
+        if content != existing.content or description != existing.description:
+            return "Imported bundle instructions are read only"
+        return None
+    return plain_skill_save_error(existing, workspace, name, content)
+
+
+def skill_update_values(
+    existing,
+    provided_fields: set[str],
+    *,
+    description: str,
+    content: str,
+    enabled: bool,
+    visibility: str | None,
+    connector_id: str | None,
+) -> tuple[str, str, dict]:
+    """Resolve immutable values and persist only fields supplied by an update."""
+    creating = existing is None
+    resolved_description = (
+        description if creating or "description" in provided_fields else existing.description
+    )
+    resolved_content = content if creating or "content" in provided_fields else existing.content
+    submitted = {
+        "description": description,
+        "content": content,
+        "enabled": enabled,
+        "visibility": visibility,
+        "connector_id": connector_id,
+    }
+    updates = {
+        field: value
+        for field, value in submitted.items()
+        if creating or field in provided_fields
+    }
+    return resolved_description, resolved_content, updates
 
 
 async def prepare_bundle(store, user_id: str, bundle: dict) -> dict:
