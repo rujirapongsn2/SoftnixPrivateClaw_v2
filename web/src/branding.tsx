@@ -478,6 +478,14 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.skills.orphansHint": "These folders are not active skills. Archive them after checking their files.",
     "settings.skills.orphansUnavailable": "Workspace folder status is unavailable: {error}",
     "settings.skills.archiveOrphan": "Archive",
+    "settings.skills.legacyOrphan": "Legacy · archive only",
+    "settings.skills.archives": "Archived folders ({count})",
+    "settings.skills.archivesHint": "Restore a folder or permanently delete its archived copy.",
+    "settings.skills.archivesUnavailable": "Archived folder status is unavailable: {error}",
+    "settings.skills.archiveStatusArchived": "Archived",
+    "settings.skills.archiveStatusDeleting": "Deletion pending",
+    "settings.skills.restoreArchive": "Restore",
+    "settings.skills.deleteArchiveConfirm": "Permanently delete the archived folder {name}?",
     "settings.skills.deleteOrphanConfirm": "Permanently delete managed folder “{name}”? This cannot be undone.",
 
     "settings.memory.intro":
@@ -1698,6 +1706,14 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.skills.orphansHint": "โฟลเดอร์เหล่านี้ไม่ใช่สกิลที่ใช้งานอยู่ โปรดตรวจไฟล์ก่อนเก็บเข้าคลัง",
     "settings.skills.orphansUnavailable": "ไม่สามารถตรวจสถานะโฟลเดอร์ workspace ได้: {error}",
     "settings.skills.archiveOrphan": "เก็บเข้าคลัง",
+    "settings.skills.legacyOrphan": "ข้อมูลเก่า · เก็บเข้าคลังเท่านั้น",
+    "settings.skills.archives": "โฟลเดอร์ที่เก็บเข้าคลัง ({count})",
+    "settings.skills.archivesHint": "กู้คืนโฟลเดอร์หรือลบสำเนาในคลังอย่างถาวร",
+    "settings.skills.archivesUnavailable": "ไม่สามารถตรวจสถานะคลังได้: {error}",
+    "settings.skills.archiveStatusArchived": "อยู่ในคลัง",
+    "settings.skills.archiveStatusDeleting": "รอลบต่อ",
+    "settings.skills.restoreArchive": "กู้คืน",
+    "settings.skills.deleteArchiveConfirm": "ลบโฟลเดอร์ {name} ออกจากคลังอย่างถาวรหรือไม่?",
     "settings.skills.deleteOrphanConfirm": "ลบโฟลเดอร์ที่ระบบจัดการ “{name}” ถาวรหรือไม่? การดำเนินการนี้ย้อนกลับไม่ได้",
 
     "settings.memory.intro":

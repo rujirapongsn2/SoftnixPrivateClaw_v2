@@ -138,6 +138,14 @@ export interface SkillWorkspaceOrphan {
   name: string;
   managed: boolean;
   registered: boolean;
+  legacy?: boolean;
+}
+
+export interface SkillWorkspaceArchive {
+  archive_id: string;
+  name: string;
+  status: "archived" | "deleting";
+  recoverable: boolean;
 }
 
 export interface MemoryInfo {
@@ -949,14 +957,21 @@ export const api = {
   deleteSkill: (id: string) => request(`/api/skills/${id}`, { method: "DELETE" }),
   listSkillWorkspaceOrphans: () => request<SkillWorkspaceOrphan[]>("/api/skills-workspace/orphans"),
   archiveSkillWorkspaceOrphan: (name: string) =>
-    request<{ archived: boolean }>("/api/skills-workspace/orphans/archive", {
+    request<{ archived: boolean; archive_id: string }>("/api/skills-workspace/orphans/archive", {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
-  deleteSkillWorkspaceOrphan: (name: string) =>
+  listSkillWorkspaceArchives: () =>
+    request<SkillWorkspaceArchive[]>("/api/skills-workspace/archives"),
+  restoreSkillWorkspaceArchive: (archiveId: string) =>
+    request<{ restored: boolean }>("/api/skills-workspace/archives/restore", {
+      method: "POST",
+      body: JSON.stringify({ archive_id: archiveId }),
+    }),
+  deleteSkillWorkspaceArchive: (archiveId: string) =>
     request<{ deleted: boolean }>("/api/skills-workspace/orphans/delete", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ archive_id: archiveId }),
     }),
 
   getMemory: () => request<MemoryInfo>("/api/memory"),
