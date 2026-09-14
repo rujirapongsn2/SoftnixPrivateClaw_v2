@@ -29,6 +29,7 @@ from sqlalchemy.orm import aliased
 
 from sbot.core.keyed_locks import KeyedLocks
 from sbot.core.plans import cost_allowed, cost_rank
+from claw.db.models import SkillBundleVersion
 from sbot.db.models import (
     AppSetting,
     AuditEvent,
@@ -1839,6 +1840,12 @@ class SkillStore:
             skill = await db.get(Skill, skill_id)
             if skill is None or skill.user_id != user_id:
                 return False
+            await db.execute(
+                SkillSubscription.__table__.delete().where(SkillSubscription.skill_id == skill_id)
+            )
+            await db.execute(
+                SkillBundleVersion.__table__.delete().where(SkillBundleVersion.skill_id == skill_id)
+            )
             await db.delete(skill)
             await db.commit()
             return True

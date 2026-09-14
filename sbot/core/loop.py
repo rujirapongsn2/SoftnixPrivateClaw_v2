@@ -33,6 +33,7 @@ from sbot.providers.base import ChatResult, LLMProvider, ProviderError, TextDelt
 from sbot.core.turn_context import current_turn_locale
 from sbot.i18n import t
 from sbot.providers.registry import context_window
+from sbot.tools.project import PROJECT_ACTIONS_REQUIRING_CONFIRMATION
 from sbot.tools.registry import ToolRegistry
 
 Emit = Callable[[AgentEvent], None]
@@ -56,6 +57,11 @@ ConfirmFn = Callable[[str, str, str], Awaitable[bool]]
 UNSAFE_TOOLS = {
     "exec", "project", "delegate", "delegate_many", "workflow", "spawn", "create_bot", "send_external", "mission_gate",
 }
+
+# A card must remain readable even when a model supplies a pathological command.
+# Longer commands are rejected rather than hiding their tail behind a truncation
+# marker that a user might approve without seeing.
+_MAX_PROJECT_CONFIRM_COMMAND_CHARS = 4_000
 
 _PREVIEW_CHARS = 200
 
@@ -380,6 +386,23 @@ def _elapsed_ms(started: float, mark: float | None) -> int:
 def _args_preview(arguments: dict[str, Any]) -> str:
     text = json.dumps(arguments, ensure_ascii=False)
     return text[:_PREVIEW_CHARS] + ("…" if len(text) > _PREVIEW_CHARS else "")
+
+
+def _project_confirmation_preview(arguments: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return an approval-card preview, or a safe block reason for a long command."""
+    command = arguments.get("command")
+    if isinstance(command, str) and len(command) > _MAX_PROJECT_CONFIRM_COMMAND_CHARS:
+        return None, (
+            "Project command is too long to approve safely. Split it into commands of at most "
+            f"{_MAX_PROJECT_CONFIRM_COMMAND_CHARS} characters."
+        )
+    details = {
+        "project": arguments.get("project"),
+        "action": arguments.get("action"),
+    }
+    if isinstance(command, str) and command:
+        details["command"] = command
+    return json.dumps(details, ensure_ascii=False, indent=2), None
 
 
 class AgentLoop:
@@ -754,10 +777,22 @@ class AgentLoop:
             for tc in result.tool_calls:
                 tool_call_count += 1
                 args_preview = _args_preview(tc.arguments)
-                emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
-                logger.info("Tool call: {}({})", tc.name, args_preview)
                 args = tc.arguments
                 block_message: str | None = None
+                project_confirmation_required = (
+                    tc.name == "project"
+                    and str(tc.arguments.get("action") or "") in PROJECT_ACTIONS_REQUIRING_CONFIRMATION
+                )
+                confirmation_preview = args_preview
+                if project_confirmation_required:
+                    confirmation_preview, block_message = _project_confirmation_preview(tc.arguments)
+                # Keep the existing execution timeline for every other tool.
+                # Only a project action that needs a user decision is delayed:
+                # showing it as running before that decision is misleading.
+                tool_started = not project_confirmation_required
+                if tool_started:
+                    emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
+                    logger.info("Tool call: {}({})", tc.name, args_preview)
                 if finalize_only and tc.name != 'finish_step':
                     block_message = 'Only recording the existing result is allowed during output recovery.'
                 # Loop-breaker identity: only back-to-back repeats count — any
@@ -768,21 +803,27 @@ class AgentLoop:
                 if signature != last_signature:
                     last_signature = signature
                     repeats = 0
-                # Ask-mode gate: pause for user approval before an unsafe tool.
-                # Checked before the loop breaker below — a human re-approving
-                # the same call each time is this call's safety gate, not the
-                # loop, so it must keep being asked rather than getting silently
-                # auto-blocked once the repeat count crosses the limit.
-                gated_by_confirm = (
-                    permission_mode == "ask" and confirm is not None
+                # Project actions that can implicitly create/start a persistent
+                # container are always confirmed, including Auto mode. A status
+                # lookup and a stop never call _ensure() in ProjectEnvironments,
+                # so they stay immediate. Checked before the loop breaker below:
+                # each human decision is the safety gate for that exact action.
+                ask_mode_confirmation_required = (
+                    permission_mode == "ask"
                     and (tc.name in UNSAFE_TOOLS or (
                         tc.name.startswith("mcp_") and tc.name.endswith(
                             ("_publish_files", "_create_pull_request", "_dispatch_workflow")
                         )
                     ))
                 )
-                if gated_by_confirm:
-                    approved = await confirm(turn_id, tc.name, args_preview)
+                gated_by_confirm = (project_confirmation_required or ask_mode_confirmation_required) and confirm is not None
+                if block_message is None and (project_confirmation_required or ask_mode_confirmation_required) and confirm is None:
+                    # Delegated/background loops do not have a client that can
+                    # receive the approval card. Fail closed so they cannot
+                    # create a project environment without the owner's decision.
+                    block_message = "This action requires user approval, but confirmation is unavailable."
+                elif block_message is None and gated_by_confirm:
+                    approved = await confirm(turn_id, tc.name, confirmation_preview or args_preview)
                     if not approved:
                         block_message = "The user declined to run this action."
                 # Loop breaker: only counts as a runaway loop for calls nothing
@@ -893,6 +934,13 @@ class AgentLoop:
                     # actually left here instead of granting itself a fresh full
                     # max_turn_seconds regardless of how much of the turn is spent.
                     turn_deadline = started + self.max_turn_seconds if self.max_turn_seconds > 0 else None
+                    # A project proposal is not running while its approval card
+                    # is pending. Emit this only once execution can actually
+                    # begin, so the timeline never claims an unapproved
+                    # container was started.
+                    emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
+                    tool_started = True
+                    logger.info("Tool call: {}({})", tc.name, args_preview)
                     tool_result = await self.tools.execute(
                         tc.name, args, progress=_progress, deadline=turn_deadline
                     )
@@ -931,14 +979,15 @@ class AgentLoop:
                             steps=steps,
                         )
                     )
-                emit(
-                    ToolFinished(
-                        turn_id=turn_id,
-                        tool=tc.name,
-                        result_preview=tool_result[:_PREVIEW_CHARS],
-                        is_error=tool_result.startswith("Error"),
+                if tool_started:
+                    emit(
+                        ToolFinished(
+                            turn_id=turn_id,
+                            tool=tc.name,
+                            result_preview=tool_result[:_PREVIEW_CHARS],
+                            is_error=tool_result.startswith("Error"),
+                        )
                     )
-                )
                 if tc.id not in sent_results:
                     sent_order.append(tc.id)
                 sent_results[tc.id] = _truncate_tool_result(tool_result, _MAX_TOOL_RESULT_CHARS)

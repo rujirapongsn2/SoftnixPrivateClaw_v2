@@ -3,6 +3,20 @@ from typing import ClassVar
 
 from sbot.tools.base import Tool
 
+PROJECT_ACTIONS = (
+    "start",
+    "status",
+    "stop",
+    "exec",
+    "compose_up",
+    "compose_ps",
+    "compose_logs",
+    "compose_down",
+)
+# Every action except an inspection or an explicit stop reaches
+# ProjectEnvironments._ensure(), which can create and start a container.
+PROJECT_ACTIONS_REQUIRING_CONFIRMATION = frozenset(PROJECT_ACTIONS) - {"status", "stop"}
+
 
 class ProjectTool(Tool):
     name = 'project'
@@ -18,8 +32,7 @@ class ProjectTool(Tool):
         'type': 'object',
         'properties': {
             'project': {'type': 'string', 'description': 'Stable lowercase project slug'},
-            'action': {'type': 'string', 'enum': ['start', 'status', 'stop', 'exec', 'compose_up',
-                                                'compose_ps', 'compose_logs', 'compose_down']},
+            'action': {'type': 'string', 'enum': list(PROJECT_ACTIONS)},
             'command': {'type': 'string'},
             'timeout_seconds': {'type': 'integer', 'description': '1–1800 seconds; default 90'},
         },

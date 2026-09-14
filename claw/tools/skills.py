@@ -3,14 +3,19 @@
 `read_skill` — enabled skills are summarized in the system prompt; the agent
 pulls full content on demand instead of paying for it every call.
 
-`manage_skill` — lets the agent create/update/list/delete its own skills so they
+`manage_skill` — lets the agent create/update/import/list/delete its own skills so they
 persist in the store and show up in Settings → Skills. Writing a workspace file
 does NOT create a skill; this tool is the only way.
 """
 
+import asyncio
+from pathlib import Path
 from typing import Any
 
-from claw.core.builtin_skills import builtin_skills, get_builtin_skill
+import httpx
+from sqlalchemy.exc import IntegrityError
+
+from claw.core.builtin_skills import get_builtin_skill
 from claw.db.stores import SkillStore
 from claw.tools.base import Tool
 from claw.tools.skill_reader import DEFAULT_READ_LIMIT, MAX_READ_LIMIT, page_skill_content, select_section
@@ -93,15 +98,16 @@ class ReadSkillTool(Tool):
 class ManageSkillTool(Tool):
     name = "manage_skill"
     description = (
-        "Create, update, list, or delete your reusable skills — the ones shown in Settings → Skills "
-        "and offered to you in future chats. Use action 'save' to persist a skill: this is the ONLY way "
-        "to create one (writing a file does not). Use 'list' to see them and 'delete' to remove one. "
+        "Create, update, import, list, or delete reusable skills shown in Settings → Skills. "
+        "Use 'import_github' for a public GitHub skill at an exact commit. Never clone or copy a "
+        "repository into workspace/skills and never use 'save' to simulate a package import. "
+        "Use 'save' only for a new plain-text skill authored in chat. "
         "Read the 'skill-creator' skill first for how to author a good skill."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["save", "list", "delete"]},
+            "action": {"type": "string", "enum": ["save", "import_github", "list", "delete"]},
             "name": {
                 "type": "string",
                 "description": "Skill name in kebab-case (required for save/delete)",
@@ -118,13 +124,22 @@ class ManageSkillTool(Tool):
                 "type": "boolean",
                 "description": "Whether the skill is active (for save; defaults to true)",
             },
+            "repository": {
+                "type": "string",
+                "description": "Public https://github.com/owner/repository URL (for import_github)",
+            },
+            "commit": {
+                "type": "string",
+                "description": "Exact full 40-character commit SHA (for import_github)",
+            },
         },
         "required": ["action"],
     }
 
-    def __init__(self, store: SkillStore, user_id: str):
+    def __init__(self, store: SkillStore, user_id: str, workspace: Path | None = None):
         self.store = store
         self.user_id = user_id
+        self.workspace = Path(workspace) if workspace is not None else None
 
     async def execute(self, action: str, **kwargs: Any) -> str:
         action = str(action or "").strip()
@@ -139,6 +154,30 @@ class ManageSkillTool(Tool):
             ]
             return "Your skills:\n" + "\n".join(lines)
 
+        if action == "import_github":
+            repository = str(kwargs.get("repository") or "").strip()
+            commit = str(kwargs.get("commit") or "").strip()
+            if not repository or not commit:
+                return "Error: import_github requires 'repository' and a full 40-character 'commit' SHA."
+            from claw.skills.bundles import install_bundle, parse_bundle, prepare_bundle
+            from claw.skills.github import download_bundle
+            try:
+                data = await download_bundle(repository, commit)
+                bundle = await asyncio.to_thread(parse_bundle, data, repository + "/tree/" + commit)
+                bundle = await prepare_bundle(self.store, self.user_id, bundle)
+                skill = await install_bundle(self.store, self.user_id, bundle)
+            except (ValueError, UnicodeError) as exc:
+                return f"Error: {exc}"
+            except httpx.HTTPError:
+                return "Error: GitHub download failed; ask the user to import a ZIP in Settings → Skills."
+            except IntegrityError:
+                return "Error: a skill with this name already exists."
+            warning_text = ""
+            warnings = (skill.bundle_metadata or {}).get("warnings", [])
+            if warnings:
+                warning_text = "\nWarnings:\n" + "\n".join(f"- {item}" for item in warnings)
+            return f"Skill bundle '{skill.name}' imported and enabled.{warning_text}"
+
         name = str(kwargs.get("name") or "").strip()
 
         if action == "save":
@@ -151,6 +190,12 @@ class ManageSkillTool(Tool):
             content = str(kwargs.get("content") or "").strip()
             if not content:
                 return "Error: save requires 'content' (the skill instructions)."
+            existing = await self.store.get_by_name(self.user_id, name)
+            from claw.skills.bundles import plain_skill_save_error
+
+            save_error = plain_skill_save_error(existing, self.workspace, name, content)
+            if save_error:
+                return f"Error: {save_error}"
             description = str(kwargs.get("description") or "").strip()
             enabled_raw = kwargs.get("enabled")
             enabled = True if enabled_raw is None else bool(enabled_raw)
@@ -158,7 +203,12 @@ class ManageSkillTool(Tool):
                 self.user_id, name, description=description, content=content, enabled=enabled
             )
             state = "enabled" if enabled else "disabled"
-            return f"Skill '{name}' saved ({state}). It now appears in Settings → Skills."
+            from claw.skills.bundles import reference_warnings
+            warnings = await reference_warnings(self.store, self.user_id, name, content)
+            warning_text = ""
+            if warnings:
+                warning_text = "\nWarnings:\n" + "\n".join(f"- {item}" for item in warnings)
+            return f"Skill '{name}' saved ({state}). It now appears in Settings → Skills.{warning_text}"
 
         if action == "delete":
             if not name:
@@ -166,8 +216,18 @@ class ManageSkillTool(Tool):
             existing = await self.store.get_by_name(self.user_id, name)
             if existing is None:
                 return f"Error: skill '{name}' not found."
-            await self.store.delete(self.user_id, existing.id)
-            return f"Skill '{name}' deleted."
+            from claw.skills.workspace import delete_skill_with_workspace
+
+            try:
+                deleted, archived = await delete_skill_with_workspace(
+                    self.store, self.workspace, self.user_id, existing
+                )
+            except OSError:
+                return "Error: the managed workspace directory could not be archived; the skill was not deleted."
+            if not deleted:
+                return f"Error: skill '{name}' could not be deleted."
+            suffix = " Its PrivateClaw-managed workspace directory was archived." if archived else ""
+            return f"Skill '{name}' deleted.{suffix}"
 
         return f"Error: unknown action '{action}'."
 

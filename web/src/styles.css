@@ -2612,6 +2612,7 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-confirm-cmd {
   margin: 0;
+  max-height: 280px;
   padding: 10px 12px;
   border-radius: 8px;
   background: var(--color-surface-2, #f3f1ea);
@@ -2620,7 +2621,7 @@ html[data-chat-bg="grid"] .claw-chat {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
-  overflow-x: auto;
+  overflow: auto;
 }
 .claw-confirm-actions {
   display: flex;

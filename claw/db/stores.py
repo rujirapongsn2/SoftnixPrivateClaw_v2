@@ -45,6 +45,7 @@ from claw.db.models import (
     Schedule,
     Share,
     Skill,
+    SkillBundleVersion,
     SkillSubscription,
     UsageDaily,
     UsageRecord,
@@ -638,6 +639,15 @@ class SkillStore:
             skill = await db.get(Skill, skill_id)
             if skill is None or skill.user_id != user_id:
                 return False
+            # Explicit dependent deletes keep the lifecycle correct even when
+            # a SQLite deployment was created without FK enforcement. They
+            # share this transaction with the registry row deletion.
+            await db.execute(
+                SkillSubscription.__table__.delete().where(SkillSubscription.skill_id == skill_id)
+            )
+            await db.execute(
+                SkillBundleVersion.__table__.delete().where(SkillBundleVersion.skill_id == skill_id)
+            )
             await db.delete(skill)
             await db.commit()
             return True

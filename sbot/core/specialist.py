@@ -21,7 +21,7 @@ from sbot.core.events import DelegatedTask, TurnCompleted, TurnError, TurnStarte
 from sbot.core.keyed_locks import KeyedLocks
 from sbot.core.loop import AgentLoop
 from sbot.core.memory import memory_scope
-from sbot.core.turn_context import current_turn_deadline
+from sbot.core.turn_context import current_turn_confirmation, current_turn_deadline
 from sbot.tools.documents import build_document_tools
 from sbot.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from sbot.tools.memory import MemoryTool, RecallMemoryTool
@@ -613,6 +613,7 @@ class SpecialistRunner:
             fallback_api_key=fallback["api_key"] if fallback else None,
             fallback_api_base=fallback["api_base"] if fallback else None,
             fallback_context_window=fallback["context_window"] if fallback else None,
+            confirm=current_turn_confirmation.get(),
         )
         usage = outcome.usage or {}
         return SpecialistOutcome(

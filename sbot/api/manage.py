@@ -366,11 +366,16 @@ class SkillSubscriptionBody(BaseModel):
     enabled: bool
 
 
+class SkillOrphanBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9ก-๙_\- ]+$")
+
+
 def _skill_json(
     s, builtin: bool = False, shadows_builtin: bool = False, with_content: bool = True, viewer_id: str | None = None, owner_name: str = ""
 ) -> dict:
     return {
         "bundle": getattr(s, "bundle_metadata", None),
+        "warnings": (getattr(s, "bundle_metadata", None) or {}).get("warnings", []),
         "id": s.id,
         "name": s.name,
         "description": s.description,
@@ -405,10 +410,11 @@ async def import_github_skill(body: SkillGitImport, user: User = Depends(current
     import httpx
     from sqlalchemy.exc import IntegrityError
     from claw.skills.github import download_bundle
-    from claw.skills.bundles import parse_bundle, install_bundle
+    from claw.skills.bundles import parse_bundle, install_bundle, prepare_bundle
     try:
         data = await download_bundle(body.repository, body.commit)
         bundle = await asyncio.to_thread(parse_bundle, data, body.repository + "/tree/" + body.commit)
+        bundle = await prepare_bundle(state.skills, user.id, bundle)
         skill = await install_bundle(state.skills, user.id, bundle)
     except (ValueError, UnicodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -422,11 +428,12 @@ async def import_github_skill(body: SkillGitImport, user: User = Depends(current
 @router.post("/skills/import")
 async def import_skill(file: UploadFile = File(...), user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
     import asyncio
-    from claw.skills.bundles import MAX_ARCHIVE, parse_bundle, install_bundle
+    from claw.skills.bundles import MAX_ARCHIVE, parse_bundle, install_bundle, prepare_bundle
     from sqlalchemy.exc import IntegrityError
     data = await file.read(MAX_ARCHIVE + 1)
     try:
         bundle = await asyncio.to_thread(parse_bundle, data)
+        bundle = await prepare_bundle(state.skills, user.id, bundle)
         skill = await install_bundle(state.skills, user.id, bundle)
     except (ValueError, UnicodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -517,6 +524,17 @@ async def upsert_skill(
         global_ones = await state.connectors.list_for_global()
         if not any(c.id == body.connector_id for c in (*owned, *global_ones)):
             raise HTTPException(status_code=404, detail="connector not found")
+    from claw.skills.bundles import plain_skill_save_error, reference_warnings
+
+    save_error = plain_skill_save_error(
+        existing,
+        state.settings.workspaces_root / user.id,
+        name.strip(),
+        body.content,
+    )
+    if save_error:
+        raise HTTPException(status_code=400, detail=save_error)
+    warnings = await reference_warnings(state.skills, user.id, name.strip(), body.content)
     skill = await state.skills.upsert(
         user.id,
         name.strip(),
@@ -526,7 +544,9 @@ async def upsert_skill(
         visibility=body.visibility,
         connector_id=body.connector_id,
     )
-    return _skill_json(skill)
+    result = _skill_json(skill)
+    result["warnings"] = warnings
+    return result
 
 
 @router.delete("/skills/{skill_id}")
@@ -535,8 +555,75 @@ async def delete_skill(
 ) -> dict:
     if skill_id.startswith("builtin:"):
         raise HTTPException(status_code=400, detail="built-in skills cannot be deleted")
-    if not await state.skills.delete(user.id, skill_id):
+    existing = next((s for s in await state.skills.list_for_user(user.id) if s.id == skill_id), None)
+    if existing is None:
         raise HTTPException(status_code=404, detail="skill not found")
+    from claw.skills.workspace import delete_skill_with_workspace
+
+    try:
+        deleted, archived = await delete_skill_with_workspace(
+            state.skills, state.settings.workspaces_root / user.id, user.id, existing
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Managed workspace directory could not be archived; the skill was not deleted",
+        ) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="skill not found")
+    return {"deleted": True, "workspace_archived": archived}
+
+
+@router.get("/skills-workspace/orphans")
+async def list_skill_workspace_orphans(
+    user: User = Depends(require_operator), state: AppState = Depends(get_state)
+) -> list[dict]:
+    from claw.skills.workspace import find_orphans
+    skills = await state.skills.list_for_user(user.id)
+    return find_orphans(
+        state.settings.workspaces_root / user.id,
+        user.id,
+        {skill.name: skill.id for skill in skills},
+    )
+
+
+@router.post("/skills-workspace/orphans/archive")
+async def archive_skill_workspace_orphan(
+    body: SkillOrphanBody,
+    user: User = Depends(require_operator),
+    state: AppState = Depends(get_state),
+) -> dict:
+    from claw.skills.workspace import archive_orphan
+    skills = await state.skills.list_for_user(user.id)
+    try:
+        archive_orphan(
+            state.settings.workspaces_root / user.id,
+            user.id,
+            body.name,
+            {skill.name: skill.id for skill in skills},
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"archived": True}
+
+
+@router.post("/skills-workspace/orphans/delete")
+async def delete_skill_workspace_orphan(
+    body: SkillOrphanBody,
+    user: User = Depends(require_operator),
+    state: AppState = Depends(get_state),
+) -> dict:
+    from claw.skills.workspace import delete_managed_orphan
+    skills = await state.skills.list_for_user(user.id)
+    try:
+        delete_managed_orphan(
+            state.settings.workspaces_root / user.id,
+            user.id,
+            body.name,
+            {skill.name: skill.id for skill in skills},
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": True}
 
 

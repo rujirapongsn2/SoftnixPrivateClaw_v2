@@ -257,6 +257,7 @@ export interface WorkingPlan {
 }
 
 export interface SkillInfo {
+  warnings?: string[];
   bundle?: { version: string; source: string; sha256: string; files: string[]; license: string } | null;
   visibility?: "private" | "group" | "public";
   owner_name?: string;
@@ -281,6 +282,12 @@ export interface SkillInfo {
   // True when this (user-owned) skill's name matches a built-in's, hiding
   // that built-in from the list — surfaced so the collision isn't silent.
   shadows_builtin?: boolean;
+}
+
+export interface SkillWorkspaceOrphan {
+  name: string;
+  managed: boolean;
+  registered: boolean;
 }
 
 export interface MemoryInfo {
@@ -1240,6 +1247,17 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
   deleteSkill: (id: string) => request(`/api/skills/${id}`, { method: "DELETE" }),
+  listSkillWorkspaceOrphans: () => request<SkillWorkspaceOrphan[]>("/api/skills-workspace/orphans"),
+  archiveSkillWorkspaceOrphan: (name: string) =>
+    request<{ archived: boolean }>("/api/skills-workspace/orphans/archive", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  deleteSkillWorkspaceOrphan: (name: string) =>
+    request<{ deleted: boolean }>("/api/skills-workspace/orphans/delete", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
 
   getMemory: () => request<MemoryInfo>("/api/memory"),
   saveMemory: (content: string) =>

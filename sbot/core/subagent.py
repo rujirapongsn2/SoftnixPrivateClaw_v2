@@ -17,7 +17,7 @@ from typing import Any
 from loguru import logger
 
 from sbot.core.loop import AgentLoop
-from sbot.core.turn_context import current_turn_deadline
+from sbot.core.turn_context import current_turn_confirmation, current_turn_deadline
 from sbot.providers.base import LLMProvider, ProviderError
 from sbot.sandbox.ephemeral import EphemeralSandbox
 from sbot.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -189,6 +189,7 @@ class SubagentManager:
                     fallback_api_key=fallback["api_key"] if fallback else None,
                     fallback_api_base=fallback["api_base"] if fallback else None,
                     fallback_context_window=fallback["context_window"] if fallback else None,
+                    confirm=current_turn_confirmation.get(),
                 )
             except ProviderError as exc:
                 logger.warning("Subagent failed: {}", exc)

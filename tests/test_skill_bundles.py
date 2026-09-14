@@ -1,10 +1,20 @@
 import io
+import stat
 import zipfile
 import pytest
-from claw.skills.bundles import parse_bundle, install_bundle
+from sqlalchemy import select
+from claw.skills.bundles import parse_bundle, install_bundle, reference_warnings
+from claw.skills.workspace import (
+    archive_owned_directory,
+    delete_managed_orphan,
+    delete_skill_with_workspace,
+    find_orphans,
+    record_managed_directory,
+)
+from claw.db.models import Skill, SkillBundleVersion
 from claw.db.stores import SkillStore
-from claw.tools.skills import ReadSkillTool
-from sbot.tools.skills import ReadSkillTool as SbotReader
+from claw.tools.skills import ManageSkillTool, ReadSkillTool
+from sbot.tools.skills import ManageSkillTool as SbotManager, ReadSkillTool as SbotReader
 
 
 def bundle(extra=None, name="demo"):
@@ -55,6 +65,18 @@ def test_reject_escape(path):
         parse_bundle(bundle({path: "x"}))
 
 
+def test_reject_symlink():
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr("demo/SKILL.md", "---\nname: demo\ndescription: Demo\n---\n")
+        link = zipfile.ZipInfo("demo/references/link.md")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(link, "../../outside")
+    with pytest.raises(ValueError, match="Symlinks"):
+        parse_bundle(out.getvalue())
+
+
 def test_missing_reference():
     with pytest.raises(ValueError, match="missing reference"):
         parse_bundle(bundle({"demo/references/style.md": "[missing](absent.md)"}))
@@ -79,6 +101,241 @@ async def test_resources_follow_subscription_and_immutable_content(db_factory, s
     assert "Error" in await tool.execute(name="demo", path="../SKILL.md")
     await store.set_subscription(peer.id, skill.id, False)
     assert "Error" in await tool.execute(name="demo", path="references/style.md")
+
+
+@pytest.mark.parametrize("manager", [ManageSkillTool, SbotManager])
+async def test_agent_github_import_uses_bundle_pipeline(db_factory, stores, monkeypatch, tmp_path, manager):
+    owner = await stores["users"].get_or_create_by_email(f"agent-import-{manager.__module__}@test.local")
+    store = SkillStore(db_factory)
+
+    async def fake_download(repository, commit):
+        assert repository == "https://github.com/example/demo"
+        assert commit == "a" * 40
+        return bundle()
+
+    monkeypatch.setattr("claw.skills.github.download_bundle", fake_download)
+    tool = manager(store, owner.id, workspace=tmp_path)
+    result = await tool.execute(
+        action="import_github",
+        repository="https://github.com/example/demo",
+        commit="a" * 40,
+    )
+    assert "imported" in result
+    skill = await store.get_by_name(owner.id, "demo")
+    assert skill is not None and skill.bundle_id
+    async with db_factory() as db:
+        version = await db.get(SkillBundleVersion, skill.bundle_id)
+        assert version is not None and version.skill_id == skill.id
+    assert "Use blue" in await ReadSkillTool(store, owner.id).execute(
+        name="demo", path="references/style.md"
+    )
+    assert not (tmp_path / "skills" / "demo").exists()
+    duplicate = await tool.execute(
+        action="import_github",
+        repository="https://github.com/example/demo",
+        commit="a" * 40,
+    )
+    assert "already exists" in duplicate
+
+
+async def test_bundle_delete_cascades_and_does_not_delete_unowned_workspace(db_factory, stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("bundle-delete@test.local")
+    store = SkillStore(db_factory)
+    skill = await install_bundle(store, owner.id, parse_bundle(bundle()))
+    arbitrary = tmp_path / "skills" / skill.name
+    arbitrary.mkdir(parents=True)
+    (arbitrary / "user.txt").write_text("keep", encoding="utf-8")
+
+    result = await ManageSkillTool(store, owner.id, workspace=tmp_path).execute(
+        action="delete", name=skill.name
+    )
+    assert result == "Skill 'demo' deleted."
+    assert arbitrary.joinpath("user.txt").read_text(encoding="utf-8") == "keep"
+    assert "not found" in await ReadSkillTool(store, owner.id).execute(name="demo")
+    assert "not found" in await ReadSkillTool(store, owner.id).execute(
+        name="demo", path="references/style.md"
+    )
+    async with db_factory() as db:
+        assert await db.scalar(select(Skill).where(Skill.id == skill.id)) is None
+        assert await db.scalar(select(SkillBundleVersion).where(SkillBundleVersion.skill_id == skill.id)) is None
+
+
+async def test_delete_archives_only_matching_managed_directory(db_factory, stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("managed-delete@test.local")
+    store = SkillStore(db_factory)
+    skill = await store.upsert(owner.id, "managed", content="instructions")
+    directory = tmp_path / "skills" / skill.name
+    directory.mkdir(parents=True)
+    record_managed_directory(tmp_path, owner.id, skill.id, skill.name)
+    (directory / "asset.txt").write_text("data", encoding="utf-8")
+
+    result = await ManageSkillTool(store, owner.id, workspace=tmp_path).execute(
+        action="delete", name=skill.name
+    )
+    assert "archived" in result
+    assert not directory.exists()
+    assert any(path.joinpath("asset.txt").exists() for path in (tmp_path / ".skill-archive").iterdir())
+
+
+async def test_forged_workspace_manifest_is_not_ownership_evidence(db_factory, stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("wrong-owner@test.local")
+    skill = await SkillStore(db_factory).upsert(owner.id, "owned", content="instructions")
+    directory = tmp_path / "skills" / skill.name
+    directory.mkdir(parents=True)
+    (directory / ".privateclaw-managed-skill.json").write_text(
+        '{"version":1,"user_id":"%s","skill_id":"%s","name":"%s"}'
+        % (owner.id, skill.id, skill.name),
+        encoding="utf-8",
+    )
+    assert archive_owned_directory(tmp_path, owner.id, skill.id, skill.name) is None
+    assert directory.exists()
+
+
+async def test_only_managed_orphan_can_be_permanently_deleted(db_factory, stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("managed-orphan@test.local")
+    managed = tmp_path / "skills" / "managed-orphan"
+    managed.mkdir(parents=True)
+    record_managed_directory(tmp_path, owner.id, "deleted-skill", managed.name)
+    unmanaged = tmp_path / "skills" / "user-folder"
+    unmanaged.mkdir()
+
+    detected = find_orphans(tmp_path, owner.id, {})
+    assert {item["name"]: item["managed"] for item in detected} == {
+        "managed-orphan": True, "user-folder": False,
+    }
+    delete_managed_orphan(tmp_path, owner.id, managed.name, {})
+    assert not managed.exists()
+    with pytest.raises(ValueError, match="ownership-verified"):
+        delete_managed_orphan(tmp_path, owner.id, unmanaged.name, {})
+    assert unmanaged.exists()
+
+
+async def test_stale_ownership_record_does_not_authorize_recreated_directory(stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("stale-owner@test.local")
+    directory = tmp_path / "skills" / "recreated"
+    directory.mkdir(parents=True)
+    record_managed_directory(tmp_path, owner.id, "old-skill", directory.name)
+    directory.rmdir()
+    directory.mkdir()
+
+    assert find_orphans(tmp_path, owner.id, {}) == [
+        {"name": "recreated", "managed": False, "registered": False}
+    ]
+    with pytest.raises(ValueError, match="ownership-verified"):
+        delete_managed_orphan(tmp_path, owner.id, directory.name, {})
+    assert directory.is_dir()
+
+
+async def test_orphans_are_detected_but_not_enabled(db_factory, stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("orphan@test.local")
+    orphan = tmp_path / "skills" / "old-clone"
+    orphan.mkdir(parents=True)
+    (orphan / "SKILL.md").write_text("old", encoding="utf-8")
+    store = SkillStore(db_factory)
+    assert find_orphans(tmp_path, owner.id, {}) == [
+        {"name": "old-clone", "managed": False, "registered": False}
+    ]
+    assert await store.enabled_for_user(owner.id) == []
+
+
+async def test_failed_install_rolls_back_partial_skill(db_factory, stores):
+    owner = await stores["users"].get_or_create_by_email("rollback@test.local")
+    store = SkillStore(db_factory)
+    broken = parse_bundle(bundle())
+    del broken["files"]
+    with pytest.raises(KeyError):
+        await install_bundle(store, owner.id, broken)
+    assert await store.list_for_user(owner.id) == []
+
+
+async def test_workspace_skill_references_warn_without_rewriting(db_factory, stores):
+    owner = await stores["users"].get_or_create_by_email("reference-warning@test.local")
+    warnings = await reference_warnings(
+        SkillStore(db_factory), owner.id, "demo", "Read skills/demo/references/a.md and skills/missing/x.md"
+    )
+    assert len(warnings) == 2
+    assert "bundle-relative" in warnings[0]
+    assert "not registered" in warnings[1]
+
+
+async def test_workspace_skill_reference_detection_supports_real_names(db_factory, stores):
+    owner = await stores["users"].get_or_create_by_email("reference-names@test.local")
+    warnings = await reference_warnings(
+        SkillStore(db_factory),
+        owner.id,
+        "demo",
+        "Read skills/Upper_Name/a.md, skills/ทักษะ/x.md, and `skills/Name With Space/ref.md`.",
+    )
+    assert len(warnings) == 3
+    assert all("not registered" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("manager", [ManageSkillTool, SbotManager])
+async def test_plain_save_cannot_register_workspace_package(
+    db_factory, stores, tmp_path, manager
+):
+    owner = await stores["users"].get_or_create_by_email(
+        f"plain-package-{manager.__module__}@test.local"
+    )
+    store = SkillStore(db_factory)
+    package = tmp_path / "skills" / "copied-package"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("package", encoding="utf-8")
+    tool = manager(store, owner.id, workspace=tmp_path)
+    result = await tool.execute(action="save", name="copied-package", content="instructions")
+    assert "import_github" in result
+    assert await store.get_by_name(owner.id, "copied-package") is None
+
+    legacy = await store.upsert(owner.id, "legacy", content="old")
+    result = await tool.execute(action="save", name=legacy.name, content="updated")
+    assert "saved" in result
+
+
+async def test_archive_failure_keeps_skill_registered(db_factory, stores, tmp_path, monkeypatch):
+    owner = await stores["users"].get_or_create_by_email("archive-failure@test.local")
+    store = SkillStore(db_factory)
+    skill = await store.upsert(owner.id, "managed", content="instructions")
+    directory = tmp_path / "skills" / skill.name
+    directory.mkdir(parents=True)
+    record_managed_directory(tmp_path, owner.id, skill.id, skill.name)
+
+    def fail_replace(source, destination):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr("claw.skills.workspace.os.replace", fail_replace)
+    with pytest.raises(OSError, match="disk unavailable"):
+        await delete_skill_with_workspace(store, tmp_path, owner.id, skill)
+    assert await store.get_by_name(owner.id, skill.name) is not None
+    assert directory.is_dir()
+
+
+async def test_database_delete_failure_restores_staged_directory(
+    db_factory, stores, tmp_path, monkeypatch
+):
+    owner = await stores["users"].get_or_create_by_email("delete-rollback@test.local")
+    store = SkillStore(db_factory)
+    skill = await store.upsert(owner.id, "managed", content="instructions")
+    directory = tmp_path / "skills" / skill.name
+    directory.mkdir(parents=True)
+    record_managed_directory(tmp_path, owner.id, skill.id, skill.name)
+
+    async def fail_delete(user_id, skill_id):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "delete", fail_delete)
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await delete_skill_with_workspace(store, tmp_path, owner.id, skill)
+    assert directory.is_dir()
+
+
+def test_skill_creator_documents_github_bundle_import():
+    from claw.core.builtin_skills import get_builtin_skill
+    from sbot.core.builtin_skills import get_builtin_skill as get_sbot_builtin_skill
+
+    for lookup in (get_builtin_skill, get_sbot_builtin_skill):
+        content = lookup("skill-creator").content
+        assert 'action="import_github"' in content
+        assert "Do not clone" in content
 
 
 def test_svg_preview_is_sandbox_document(tmp_path):

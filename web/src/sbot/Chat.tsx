@@ -239,6 +239,7 @@ interface ConfirmRow {
 // any future gated tool without a code change.
 const CONFIRM_COPY_KEY: Record<string, { pending: string; approved: string }> = {
   exec: { pending: "chat.confirm.exec.pending", approved: "chat.confirm.exec.approved" },
+  project: { pending: "chat.confirm.project.pending", approved: "chat.confirm.project.approved" },
   workflow: { pending: "chat.confirm.workflow.pending", approved: "chat.confirm.workflow.approved" },
   spawn: { pending: "chat.confirm.spawn.pending", approved: "chat.confirm.spawn.approved" },
 };
@@ -2864,6 +2865,8 @@ export function Chat({
                           : item.row.status === "approved"
                             ? item.row.tool === "exec"
                               ? Terminal
+                              : item.row.tool === "project"
+                                ? Box
                               : item.row.tool === "workflow" || item.row.tool === "spawn"
                                 ? GitBranch
                                 : ShieldCheck
