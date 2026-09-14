@@ -17,6 +17,20 @@ OWNERSHIP_DIR = ".privateclaw-managed-skills"
 ARCHIVE_DIR = ".skill-archive"
 
 
+def archive_failure_detail(exc: OSError, operation: str = "archived") -> str:
+    """Return an actionable workspace error without promising rollback state."""
+    action = "deleted" if operation == "deleted" else "archived"
+    if isinstance(exc, PermissionError):
+        return (
+            f"Workspace folder could not be {action} because the service account lacks permission. "
+            "Ask an administrator to repair the workspace owner or use the maintenance tool."
+        )
+    return (
+        f"Workspace folder could not be {action}. Refresh the orphan list before retrying; "
+        "the folder may have been moved to the archive."
+    )
+
+
 def _skill_root(workspace: Path) -> Path:
     return workspace.resolve() / "skills"
 

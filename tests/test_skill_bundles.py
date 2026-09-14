@@ -354,11 +354,11 @@ def test_svg_preview_is_sandbox_document(tmp_path):
 
 
 @pytest.mark.parametrize("bot_mode", [False, True])
-async def test_import_api_and_sharing_roundtrip(db_factory, bot_mode):
+async def test_import_api_and_sharing_roundtrip(db_factory, bot_mode, tmp_path):
     from tests.conftest_app import build_api_app, client
     from tests.test_manage import _register, _bearer
 
-    app = build_api_app(db_factory)
+    app = build_api_app(db_factory, workspaces_root=tmp_path)
     if bot_mode:
         from sbot.api.manage import router
         from sbot.api.deps import get_state as bs, current_user as bu
@@ -373,7 +373,7 @@ async def test_import_api_and_sharing_roundtrip(db_factory, bot_mode):
         app.dependency_overrides[bu] = current_user
         app.state.claw.skills = BS(db_factory)
     async with client(app) as c:
-        token, _ = await _register(c, "bundle@example.com")
+        token, user = await _register(c, f"bundle-{bot_mode}@example.com")
         headers = _bearer(token)
         response = await c.post(
             "/api/skills/import", files={"file": ("skill.zip", bundle(), "application/zip")}, headers=headers
@@ -381,18 +381,234 @@ async def test_import_api_and_sharing_roundtrip(db_factory, bot_mode):
         assert response.status_code == 200, response.text
         skill = response.json()
         assert skill["bundle"]["files"] == ["SKILL.md", "references/style.md"]
-        saved = await c.put("/api/skills/demo", json={**skill, "visibility": "public"}, headers=headers)
+        async with db_factory() as db:
+            stored = await db.scalar(select(Skill).where(Skill.id == skill["id"]))
+            version = await db.get(SkillBundleVersion, stored.bundle_id)
+            original = {
+                "bundle_id": stored.bundle_id,
+                "content": stored.content,
+                "description": stored.description,
+                "source": dict(version.source),
+                "files": dict(version.files),
+            }
+        same_name_directory = tmp_path / user["id"] / "skills" / "demo"
+        same_name_directory.mkdir(parents=True)
+        marker = same_name_directory / "legacy.txt"
+        marker.write_text("leave unchanged", encoding="utf-8")
+
+        saved = await c.put(
+            "/api/skills/demo",
+            json={"name": "demo", "visibility": "public"},
+            headers=headers,
+        )
         assert saved.status_code == 200, saved.text
         assert saved.json()["bundle"] == skill["bundle"]
+        async with db_factory() as db:
+            stored = await db.scalar(select(Skill).where(Skill.id == skill["id"]))
+            version = await db.get(SkillBundleVersion, stored.bundle_id)
+            assert stored.visibility == "public"
+            assert stored.bundle_id == original["bundle_id"]
+            assert stored.content == original["content"]
+            assert stored.description == original["description"]
+            assert version.source == original["source"]
+            assert version.files == original["files"]
+        assert marker.read_text(encoding="utf-8") == "leave unchanged"
+
+        connector = await app.state.claw.connectors.upsert(
+            user["id"], "bundle-connector", transport="http", url="https://example.test/mcp"
+        )
+        disabled = await c.put(
+            "/api/skills/demo",
+            json={**skill, "visibility": "public", "enabled": False, "connector_id": connector.id},
+            headers=headers,
+        )
+        assert disabled.status_code == 200, disabled.text
+        assert not disabled.json()["enabled"]
+        assert disabled.json()["connector_id"] == connector.id
+        enabled = await c.put(
+            "/api/skills/demo",
+            json={**skill, "visibility": "public", "enabled": True, "connector_id": None},
+            headers=headers,
+        )
+        assert enabled.status_code == 200, enabled.text
+        assert enabled.json()["enabled"]
+        assert enabled.json()["connector_id"] is None
+        ignored_bundle_edit = await c.put(
+            "/api/skills/demo",
+            json={
+                **skill,
+                "visibility": "public",
+                "bundle": {"source": "tampered", "version": "999", "files": {}},
+            },
+            headers=headers,
+        )
+        assert ignored_bundle_edit.status_code == 200, ignored_bundle_edit.text
+
+        unshared = await c.put(
+            "/api/skills/demo", json={**skill, "visibility": "private"}, headers=headers
+        )
+        assert unshared.status_code == 200, unshared.text
+        async with db_factory() as db:
+            stored = await db.get(Skill, skill["id"])
+            version = await db.get(SkillBundleVersion, stored.bundle_id)
+            assert stored.visibility == "private"
+            assert stored.bundle_id == original["bundle_id"]
+            assert stored.content == original["content"]
+            assert stored.description == original["description"]
+            assert version.source == original["source"]
+            assert version.files == original["files"]
         assert (
             await c.put("/api/skills/demo", json={**skill, "content": "changed"}, headers=headers)
         ).status_code == 400
+        assert (
+            await c.put(
+                "/api/skills/demo",
+                json={**skill, "description": "changed"},
+                headers=headers,
+            )
+        ).status_code == 400
+
+        plain_directory = tmp_path / user["id"] / "skills" / "copied-package"
+        plain_directory.mkdir()
+        blocked = await c.put(
+            "/api/skills/copied-package",
+            json={"name": "copied-package", "content": "pretend package"},
+            headers=headers,
+        )
+        assert blocked.status_code == 400
+        assert "import_github" in blocked.text
+        assert await app.state.claw.skills.get_by_name(user["id"], "copied-package") is None
+
+        plain = await app.state.claw.skills.upsert(
+            user["id"],
+            "plain-existing",
+            description="keep description",
+            content="plain",
+            enabled=False,
+            connector_id=connector.id,
+        )
+        plain_same_name_directory = tmp_path / user["id"] / "skills" / plain.name
+        plain_same_name_directory.mkdir()
+        plain_shared = await c.put(
+            f"/api/skills/{plain.name}",
+            json={"name": plain.name, "visibility": "public"},
+            headers=headers,
+        )
+        assert plain_shared.status_code == 200, plain_shared.text
+        assert plain_shared.json()["visibility"] == "public"
+        assert plain_shared.json()["description"] == "keep description"
+        assert plain_shared.json()["content"] == "plain"
+        assert not plain_shared.json()["enabled"]
+        assert plain_shared.json()["connector_id"] == connector.id
+        plain_content_change = await c.put(
+            f"/api/skills/{plain.name}",
+            json={"id": plain.id, "name": plain.name, "content": "changed"},
+            headers=headers,
+        )
+        assert plain_content_change.status_code == 400
         invalid = await c.post(
             "/api/skills/import-github",
             json={"repository": "http://127.0.0.1", "commit": "a" * 40},
             headers=headers,
         )
         assert invalid.status_code == 400
+
+
+@pytest.mark.parametrize("bot_mode", [False, True])
+async def test_archive_permission_error_is_clear_and_keeps_registered_skill(
+    db_factory, bot_mode, tmp_path, monkeypatch
+):
+    from tests.conftest_app import build_api_app, client
+    from tests.test_manage import _bearer, _register
+
+    app = build_api_app(db_factory, workspaces_root=tmp_path)
+    if bot_mode:
+        from claw.api.deps import current_user, get_state
+        from sbot.api.deps import current_user as sbot_user
+        from sbot.api.deps import get_state as sbot_state
+        from sbot.api.manage import router
+        from sbot.db.stores import SkillStore as SbotSkillStore
+
+        app.router.routes = [
+            route
+            for route in app.router.routes
+            if not getattr(route, "path", "").startswith("/api/skills")
+        ]
+        app.include_router(router)
+        app.dependency_overrides[sbot_state] = get_state
+        app.dependency_overrides[sbot_user] = current_user
+        app.state.claw.skills = SbotSkillStore(db_factory)
+
+    async with client(app) as c:
+        token, user = await _register(c, f"archive-permission-{bot_mode}@example.com")
+        skill = await app.state.claw.skills.upsert(
+            user["id"], "permission-skill", content="instructions"
+        )
+        workspace = tmp_path / user["id"]
+        directory = workspace / "skills" / skill.name
+        directory.mkdir(parents=True)
+        record_managed_directory(workspace, user["id"], skill.id, skill.name)
+
+        def deny_archive(source, destination):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("claw.skills.workspace.os.replace", deny_archive)
+        response = await c.delete(f"/api/skills/{skill.id}", headers=_bearer(token))
+        assert response.status_code == 409
+        assert "service account lacks permission" in response.json()["detail"]
+        assert await app.state.claw.skills.get_by_name(user["id"], skill.name) is not None
+        assert directory.is_dir()
+
+
+@pytest.mark.parametrize("bot_mode", [False, True])
+async def test_orphan_archive_permission_error_is_clear_and_keeps_state(
+    db_factory, bot_mode, tmp_path, monkeypatch
+):
+    from tests.conftest_app import build_api_app, client
+    from tests.test_manage import _bearer, _register
+
+    app = build_api_app(db_factory, workspaces_root=tmp_path)
+    if bot_mode:
+        from claw.api.deps import current_user, get_state
+        from sbot.api.deps import current_user as sbot_user
+        from sbot.api.deps import get_state as sbot_state
+        from sbot.api.manage import router
+        from sbot.db.stores import SkillStore as SbotSkillStore
+
+        app.router.routes = [
+            route
+            for route in app.router.routes
+            if not getattr(route, "path", "").startswith("/api/skills")
+        ]
+        app.include_router(router)
+        app.dependency_overrides[sbot_state] = get_state
+        app.dependency_overrides[sbot_user] = current_user
+        app.state.claw.skills = SbotSkillStore(db_factory)
+
+    async with client(app) as c:
+        token, user = await _register(c, f"orphan-permission-{bot_mode}@example.com")
+        skill = await app.state.claw.skills.upsert(
+            user["id"], "same-name-orphan", content="registered instructions"
+        )
+        directory = tmp_path / user["id"] / "skills" / skill.name
+        directory.mkdir(parents=True)
+        marker = directory / "legacy.txt"
+        marker.write_text("keep", encoding="utf-8")
+
+        def deny_archive(source, destination):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("claw.skills.workspace.os.replace", deny_archive)
+        response = await c.post(
+            "/api/skills-workspace/orphans/archive",
+            json={"name": skill.name},
+            headers=_bearer(token),
+        )
+        assert response.status_code == 409
+        assert "service account lacks permission" in response.json()["detail"]
+        stored = await app.state.claw.skills.get_by_name(user["id"], skill.name)
+        assert stored is not None and stored.id == skill.id
+        assert marker.read_text(encoding="utf-8") == "keep"
 
 
 def test_migration_keeps_existing_text_skill():
