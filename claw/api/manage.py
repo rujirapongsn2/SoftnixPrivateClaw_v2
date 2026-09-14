@@ -44,6 +44,10 @@ class SkillOrphanBody(BaseModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9ก-๙_\- ]+$")
 
 
+class SkillArchiveBody(BaseModel):
+    archive_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+
+
 def _skill_json(
     s, builtin: bool = False, shadows_builtin: bool = False, with_content: bool = True, viewer_id: str | None = None, owner_name: str = ""
 ) -> dict:
@@ -275,7 +279,7 @@ async def archive_skill_workspace_orphan(
     from claw.skills.workspace import archive_failure_detail, archive_orphan
     skills = await state.skills.list_for_user(user.id)
     try:
-        archive_orphan(
+        archive_id = archive_orphan(
             state.settings.workspaces_root / user.id,
             user.id,
             body.name,
@@ -285,23 +289,53 @@ async def archive_skill_workspace_orphan(
         raise HTTPException(status_code=409, detail=archive_failure_detail(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"archived": True}
+    return {"archived": True, "archive_id": archive_id}
+
+
+@router.get("/skills-workspace/archives")
+async def list_skill_workspace_archives(
+    user: User = Depends(require_operator), state: AppState = Depends(get_state)
+) -> list[dict]:
+    from claw.skills.workspace import list_archived_orphans
+
+    return list_archived_orphans(state.settings.workspaces_root / user.id, user.id)
+
+
+@router.post("/skills-workspace/archives/restore")
+async def restore_skill_workspace_archive(
+    body: SkillArchiveBody,
+    user: User = Depends(require_operator),
+    state: AppState = Depends(get_state),
+) -> dict:
+    from claw.skills.workspace import archive_failure_detail, restore_archived_orphan
+
+    try:
+        restore_archived_orphan(
+            state.settings.workspaces_root / user.id,
+            user.id,
+            body.archive_id,
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=409, detail=archive_failure_detail(exc, operation="restored")
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"restored": True}
 
 
 @router.post("/skills-workspace/orphans/delete")
 async def delete_skill_workspace_orphan(
-    body: SkillOrphanBody,
+    body: SkillArchiveBody,
     user: User = Depends(require_operator),
     state: AppState = Depends(get_state),
 ) -> dict:
-    from claw.skills.workspace import archive_failure_detail, delete_managed_orphan
-    skills = await state.skills.list_for_user(user.id)
+    from claw.skills.workspace import archive_failure_detail, delete_archived_orphan
     try:
-        delete_managed_orphan(
+        delete_archived_orphan(
             state.settings.workspaces_root / user.id,
             user.id,
-            body.name,
-            {skill.name: skill.id for skill in skills},
+            body.archive_id,
         )
     except OSError as exc:
         raise HTTPException(

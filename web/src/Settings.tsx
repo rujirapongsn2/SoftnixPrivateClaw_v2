@@ -74,6 +74,7 @@ import {
   ProjectInventory,
   SimpleGroup,
   SkillInfo,
+  SkillWorkspaceArchive,
   SkillWorkspaceOrphan,
   USER_LLM_API,
   api,
@@ -813,6 +814,8 @@ function SkillsPanel() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [orphans, setOrphans] = useState<SkillWorkspaceOrphan[]>([]);
   const [orphanError, setOrphanError] = useState<string | null>(null);
+  const [archives, setArchives] = useState<SkillWorkspaceArchive[]>([]);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const [skillTab, setSkillTab] = useState<"builtin" | "user" | "shared">("builtin");
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [globalConnectors, setGlobalConnectors] = useState<ConnectorGlobalSummary[]>([]);
@@ -832,15 +835,25 @@ function SkillsPanel() {
       setOrphanError(reason instanceof Error ? reason.message : String(reason));
     }
   }, []);
+  const reloadArchives = useCallback(async () => {
+    try {
+      setArchives(await api.listSkillWorkspaceArchives());
+      setArchiveError(null);
+    } catch (reason) {
+      setArchives([]);
+      setArchiveError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, []);
   useEffect(() => {
     void reload();
     void reloadOrphans();
+    void reloadArchives();
     void api.listConnectors().then(setConnectors);
     // Admin-global ("Pre-built") connectors are picked from a separate
     // endpoint since they have no owner_id row of this user's own — a skill
     // can link to either kind, so both lists feed the picker below.
     void api.listGlobalConnectors().then(setGlobalConnectors).catch(() => setGlobalConnectors([]));
-  }, [reload, reloadOrphans]);
+  }, [reload, reloadArchives, reloadOrphans]);
 
   // A user's own ENABLED connector shadows a global one of the same name
   // (mirrors the backend's own-vs-global tie-break, which only shadows with
@@ -1215,7 +1228,12 @@ function SkillsPanel() {
             {orphans.map((orphan) => (
               <Card key={orphan.name} padding={2}>
                 <div className="claw-row claw-row-between">
-                  <Text>{orphan.name}</Text>
+                  <div className="claw-row">
+                    <Text>{orphan.name}</Text>
+                    {orphan.legacy && (
+                      <Badge variant="warning" label={t("settings.skills.legacyOrphan")} />
+                    )}
+                  </div>
                   <Button
                     label={t("settings.skills.archiveOrphan")}
                     size="sm"
@@ -1223,22 +1241,62 @@ function SkillsPanel() {
                     clickAction={() => guard(async () => {
                       await api.archiveSkillWorkspaceOrphan(orphan.name);
                       await reloadOrphans();
+                      await reloadArchives();
                     })}
                   />
-                  {orphan.managed && (
+                </div>
+              </Card>
+            ))}
+          </div>
+        </details>
+      )}
+      {skillTab === "user" && (archives.length > 0 || archiveError) && (
+        <details>
+          <summary>{t("settings.skills.archives", { count: archives.length.toLocaleString() })}</summary>
+          <Text size="sm" color="secondary" as="p">{t("settings.skills.archivesHint")}</Text>
+          {archiveError && (
+            <ErrorText>{t("settings.skills.archivesUnavailable", { error: archiveError })}</ErrorText>
+          )}
+          <div className="claw-skill-list">
+            {archives.map((archive) => (
+              <Card key={archive.archive_id} padding={2}>
+                <div className="claw-row claw-row-between">
+                  <div className="claw-row">
+                    <Text>{archive.name}</Text>
+                    <Badge
+                      variant={archive.status === "deleting" ? "warning" : "neutral"}
+                      label={t(archive.status === "deleting"
+                        ? "settings.skills.archiveStatusDeleting"
+                        : "settings.skills.archiveStatusArchived")}
+                    />
+                  </div>
+                  <div className="claw-row">
+                    {archive.recoverable && (
+                      <Button
+                        label={t("settings.skills.restoreArchive")}
+                        size="sm"
+                        variant="secondary"
+                        clickAction={() => guard(async () => {
+                          await api.restoreSkillWorkspaceArchive(archive.archive_id);
+                          await reloadArchives();
+                          await reloadOrphans();
+                        })}
+                      />
+                    )}
                     <Button
                       label={t("settings.common.delete")}
+                      icon={<Icon icon={Trash2} size="sm" />}
                       size="sm"
                       variant="destructive"
                       clickAction={() => {
-                        if (!window.confirm(t("settings.skills.deleteOrphanConfirm", { name: orphan.name }))) return;
-                        void guard(async () => {
-                          await api.deleteSkillWorkspaceOrphan(orphan.name);
-                          await reloadOrphans();
+                        if (!window.confirm(t("settings.skills.deleteArchiveConfirm", { name: archive.name }))) return;
+                        guard(async () => {
+                          await api.deleteSkillWorkspaceArchive(archive.archive_id);
+                          await reloadArchives();
                         });
                       }}
                     />
-                  )}
+                  </div>
                 </div>
               </Card>
             ))}

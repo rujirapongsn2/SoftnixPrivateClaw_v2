@@ -1,15 +1,21 @@
 import io
+import json
 import stat
 import zipfile
+from pathlib import Path
 import pytest
 from sqlalchemy import select
 from claw.skills.bundles import parse_bundle, install_bundle, reference_warnings
 from claw.skills.workspace import (
+    archive_orphan,
     archive_owned_directory,
+    delete_archived_orphan,
     delete_managed_orphan,
     delete_skill_with_workspace,
     find_orphans,
+    list_archived_orphans,
     record_managed_directory,
+    restore_archived_orphan,
 )
 from claw.db.models import Skill, SkillBundleVersion
 from claw.db.stores import SkillStore
@@ -191,7 +197,7 @@ async def test_forged_workspace_manifest_is_not_ownership_evidence(db_factory, s
     assert directory.exists()
 
 
-async def test_only_managed_orphan_can_be_permanently_deleted(db_factory, stores, tmp_path):
+async def test_orphan_must_be_archived_before_permanent_deletion(db_factory, stores, tmp_path):
     owner = await stores["users"].get_or_create_by_email("managed-orphan@test.local")
     managed = tmp_path / "skills" / "managed-orphan"
     managed.mkdir(parents=True)
@@ -203,8 +209,14 @@ async def test_only_managed_orphan_can_be_permanently_deleted(db_factory, stores
     assert {item["name"]: item["managed"] for item in detected} == {
         "managed-orphan": True, "user-folder": False,
     }
-    delete_managed_orphan(tmp_path, owner.id, managed.name, {})
-    assert not managed.exists()
+    with pytest.raises(ValueError, match="Archive the managed folder"):
+        delete_managed_orphan(tmp_path, owner.id, managed.name, {})
+    assert managed.exists()
+    archive_id = archive_orphan(tmp_path, owner.id, managed.name, {})
+    archived = next((tmp_path / ".skill-archive").iterdir())
+    assert not managed.exists() and archived.is_dir()
+    delete_archived_orphan(tmp_path, owner.id, archive_id)
+    assert not archived.exists()
     with pytest.raises(ValueError, match="ownership-verified"):
         delete_managed_orphan(tmp_path, owner.id, unmanaged.name, {})
     assert unmanaged.exists()
@@ -215,6 +227,8 @@ async def test_stale_ownership_record_does_not_authorize_recreated_directory(sto
     directory = tmp_path / "skills" / "recreated"
     directory.mkdir(parents=True)
     record_managed_directory(tmp_path, owner.id, "old-skill", directory.name)
+    for child in directory.iterdir():
+        child.unlink()
     directory.rmdir()
     directory.mkdir()
 
@@ -223,6 +237,177 @@ async def test_stale_ownership_record_does_not_authorize_recreated_directory(sto
     ]
     with pytest.raises(ValueError, match="ownership-verified"):
         delete_managed_orphan(tmp_path, owner.id, directory.name, {})
+    assert directory.is_dir()
+
+
+async def test_generation_rejects_stale_record_when_inode_is_reused(stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("inode-reuse@test.local")
+    directory = tmp_path / "skills" / "reused-inode"
+    directory.mkdir(parents=True)
+    record_managed_directory(tmp_path, owner.id, "old-skill", directory.name)
+    record_path = next(
+        path
+        for path in (tmp_path.parent / ".privateclaw-managed-skills").rglob("*.json")
+        if json.loads(path.read_text(encoding="utf-8")).get("name") == directory.name
+    )
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+
+    for child in directory.iterdir():
+        child.unlink()
+    directory.rmdir()
+    directory.mkdir()
+    recreated = directory.stat()
+    record["device"] = recreated.st_dev
+    record["inode"] = recreated.st_ino
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    assert find_orphans(tmp_path, owner.id, {}) == [
+        {"name": "reused-inode", "managed": False, "registered": False}
+    ]
+    with pytest.raises(ValueError, match="ownership-verified"):
+        delete_managed_orphan(tmp_path, owner.id, directory.name, {})
+    assert directory.is_dir()
+
+
+async def test_legacy_ownership_record_is_archive_only(stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("legacy-owner@test.local")
+    directory = tmp_path / "skills" / "legacy"
+    directory.mkdir(parents=True)
+    record_managed_directory(tmp_path, owner.id, "legacy-skill", directory.name)
+    record_path = next(
+        path
+        for path in (tmp_path.parent / ".privateclaw-managed-skills").rglob("*.json")
+        if json.loads(path.read_text(encoding="utf-8")).get("name") == directory.name
+    )
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["version"] = 1
+    record.pop("generation")
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    assert find_orphans(tmp_path, owner.id, {}) == [
+        {"name": "legacy", "managed": False, "registered": False, "legacy": True}
+    ]
+    with pytest.raises(ValueError, match="ownership-verified"):
+        delete_managed_orphan(tmp_path, owner.id, directory.name, {})
+    assert directory.is_dir()
+
+
+async def test_archive_record_cannot_redirect_deletion(stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("archive-forgery@test.local")
+    directory = tmp_path / "skills" / "orphan"
+    directory.mkdir(parents=True)
+    (directory / "skill.txt").write_text("skill", encoding="utf-8")
+    archive_id = archive_orphan(tmp_path, owner.id, directory.name, {})
+    record_path = next(
+        path
+        for path in (tmp_path.parent / ".privateclaw-managed-skills").rglob(f"{archive_id}.json")
+    )
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    valuable = tmp_path / "valuable"
+    valuable.mkdir()
+    (valuable / "keep.txt").write_text("keep", encoding="utf-8")
+    record["relative_path"] = "valuable"
+    record.update({"device": valuable.stat().st_dev, "inode": valuable.stat().st_ino})
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid skill archive record"):
+        delete_archived_orphan(tmp_path, owner.id, archive_id)
+    assert valuable.joinpath("keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+async def test_archive_record_cannot_redirect_restore(stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("restore-forgery@test.local")
+    directory = tmp_path / "skills" / "orphan"
+    directory.mkdir(parents=True)
+    archive_id = archive_orphan(tmp_path, owner.id, directory.name, {})
+    record_path = next(
+        path
+        for path in (tmp_path.parent / ".privateclaw-managed-skills").rglob(f"{archive_id}.json")
+    )
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["name"] = "../../outside"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid skill archive record"):
+        restore_archived_orphan(tmp_path, owner.id, archive_id)
+    assert not tmp_path.parent.joinpath("outside").exists()
+    assert len(list((tmp_path / ".skill-archive").iterdir())) == 1
+
+
+async def test_archive_generation_and_symlink_tampering_block_deletion(stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("archive-tamper@test.local")
+    directory = tmp_path / "skills" / "orphan"
+    directory.mkdir(parents=True)
+    archive_id = archive_orphan(tmp_path, owner.id, directory.name, {})
+    archived = next((tmp_path / ".skill-archive").iterdir())
+    generation_marker = archived / ".privateclaw-archive-generation"
+    original_generation = generation_marker.read_text(encoding="ascii")
+    generation_marker.write_text("0" * 64, encoding="ascii")
+    with pytest.raises(ValueError, match="Invalid skill archive record"):
+        delete_archived_orphan(tmp_path, owner.id, archive_id)
+    assert archived.is_dir()
+
+    generation_marker.write_text(original_generation, encoding="ascii")
+    moved = tmp_path / "original-archive"
+    archived.rename(moved)
+    valuable = tmp_path / "valuable"
+    valuable.mkdir()
+    (valuable / "keep.txt").write_text("keep", encoding="utf-8")
+    archived.symlink_to(valuable, target_is_directory=True)
+    with pytest.raises(ValueError, match="Skill archive not found"):
+        delete_archived_orphan(tmp_path, owner.id, archive_id)
+    assert valuable.joinpath("keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+async def test_archive_delete_retries_after_partial_rmtree_failure(stores, tmp_path, monkeypatch):
+    import claw.skills.workspace as workspace_module
+
+    owner = await stores["users"].get_or_create_by_email("archive-retry@test.local")
+    directory = tmp_path / "skills" / "retry"
+    directory.mkdir(parents=True)
+    (directory / "data.txt").write_text("data", encoding="utf-8")
+    archive_id = archive_orphan(tmp_path, owner.id, directory.name, {})
+    real_rmtree = workspace_module.shutil.rmtree
+
+    def partial_failure(path):
+        Path(path, ".privateclaw-archive-generation").unlink(missing_ok=True)
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(workspace_module.shutil, "rmtree", partial_failure)
+    with pytest.raises(OSError, match="interrupted"):
+        delete_archived_orphan(tmp_path, owner.id, archive_id)
+    assert list_archived_orphans(tmp_path, owner.id) == [
+        {"archive_id": archive_id, "name": "retry", "status": "deleting", "recoverable": False}
+    ]
+
+    monkeypatch.setattr(workspace_module.shutil, "rmtree", real_rmtree)
+    delete_archived_orphan(tmp_path, owner.id, archive_id)
+    assert list_archived_orphans(tmp_path, owner.id) == []
+
+
+async def test_archived_orphan_can_be_restored(stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("archive-restore@test.local")
+    directory = tmp_path / "skills" / "restore"
+    directory.mkdir(parents=True)
+    (directory / "data.txt").write_text("recoverable", encoding="utf-8")
+    archive_id = archive_orphan(tmp_path, owner.id, directory.name, {})
+
+    restore_archived_orphan(tmp_path, owner.id, archive_id)
+
+    assert directory.joinpath("data.txt").read_text(encoding="utf-8") == "recoverable"
+    assert list_archived_orphans(tmp_path, owner.id) == []
+
+
+async def test_archive_does_not_overwrite_reserved_user_file(stores, tmp_path):
+    owner = await stores["users"].get_or_create_by_email("archive-marker@test.local")
+    directory = tmp_path / "skills" / "marker-collision"
+    directory.mkdir(parents=True)
+    marker = directory / ".privateclaw-archive-generation"
+    marker.write_text("user-data", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        archive_orphan(tmp_path, owner.id, directory.name, {})
+    assert marker.read_text(encoding="utf-8") == "user-data"
     assert directory.is_dir()
 
 
@@ -609,6 +794,112 @@ async def test_orphan_archive_permission_error_is_clear_and_keeps_state(
         stored = await app.state.claw.skills.get_by_name(user["id"], skill.name)
         assert stored is not None and stored.id == skill.id
         assert marker.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("bot_mode", [False, True])
+async def test_orphan_api_requires_archive_id_before_permanent_deletion(
+    db_factory, bot_mode, tmp_path
+):
+    from tests.conftest_app import build_api_app, client
+    from tests.test_manage import _bearer, _register
+
+    app = build_api_app(db_factory, workspaces_root=tmp_path)
+    if bot_mode:
+        from claw.api.deps import current_user, get_state
+        from sbot.api.deps import current_user as sbot_user
+        from sbot.api.deps import get_state as sbot_state
+        from sbot.api.manage import router
+        from sbot.db.stores import SkillStore as SbotSkillStore
+
+        app.router.routes = [
+            route
+            for route in app.router.routes
+            if not getattr(route, "path", "").startswith("/api/skills")
+        ]
+        app.include_router(router)
+        app.dependency_overrides[sbot_state] = get_state
+        app.dependency_overrides[sbot_user] = current_user
+        app.state.claw.skills = SbotSkillStore(db_factory)
+
+    async with client(app) as c:
+        token, user = await _register(c, f"archive-delete-{bot_mode}@example.com")
+        headers = _bearer(token)
+        directory = tmp_path / user["id"] / "skills" / "recover-first"
+        directory.mkdir(parents=True)
+        (directory / "data.txt").write_text("recoverable", encoding="utf-8")
+
+        direct_delete = await c.post(
+            "/api/skills-workspace/orphans/delete",
+            json={"name": directory.name},
+            headers=headers,
+        )
+        assert direct_delete.status_code == 422
+        assert directory.is_dir()
+
+        archived = await c.post(
+            "/api/skills-workspace/orphans/archive",
+            json={"name": directory.name},
+            headers=headers,
+        )
+        assert archived.status_code == 200, archived.text
+        archive_id = archived.json()["archive_id"]
+        archive_directories = list((tmp_path / user["id"] / ".skill-archive").iterdir())
+        assert len(archive_directories) == 1
+        assert archive_directories[0].joinpath("data.txt").read_text(encoding="utf-8") == "recoverable"
+
+        listed = await c.get("/api/skills-workspace/archives", headers=headers)
+        assert listed.status_code == 200, listed.text
+        assert listed.json() == [
+            {
+                "archive_id": archive_id,
+                "name": "recover-first",
+                "status": "archived",
+                "recoverable": True,
+            }
+        ]
+
+        peer_token, _ = await _register(c, f"archive-peer-{bot_mode}@example.com")
+        peer_headers = _bearer(peer_token)
+        peer_restore = await c.post(
+            "/api/skills-workspace/archives/restore",
+            json={"archive_id": archive_id},
+            headers=peer_headers,
+        )
+        peer_delete = await c.post(
+            "/api/skills-workspace/orphans/delete",
+            json={"archive_id": archive_id},
+            headers=peer_headers,
+        )
+        assert peer_restore.status_code == 400
+        assert peer_delete.status_code == 400
+        assert archive_directories[0].is_dir()
+
+        restored = await c.post(
+            "/api/skills-workspace/archives/restore",
+            json={"archive_id": archive_id},
+            headers=headers,
+        )
+        assert restored.status_code == 200, restored.text
+        assert directory.joinpath("data.txt").read_text(encoding="utf-8") == "recoverable"
+        assert (await c.get("/api/skills-workspace/archives", headers=headers)).json() == []
+
+        archived_again = await c.post(
+            "/api/skills-workspace/orphans/archive",
+            json={"name": directory.name},
+            headers=headers,
+        )
+        assert archived_again.status_code == 200, archived_again.text
+        archive_id = archived_again.json()["archive_id"]
+        archive_directories = list((tmp_path / user["id"] / ".skill-archive").iterdir())
+        assert len(archive_directories) == 1
+
+        deleted = await c.post(
+            "/api/skills-workspace/orphans/delete",
+            json={"archive_id": archive_id},
+            headers=headers,
+        )
+        assert deleted.status_code == 200, deleted.text
+        assert not archive_directories[0].exists()
 
 
 def test_migration_keeps_existing_text_skill():
