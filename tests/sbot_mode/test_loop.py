@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 
 from sbot.core.events import AgentEvent, TextDeltaEvent, ToolFinished, ToolStarted
+from sbot.core.turn_context import current_turn_confirmation
 from sbot.core.loop import (
     _DEFAULT_COMPACTION_CEILING_CHARS,
     _ESTIMATED_CHARS_PER_TOKEN,
@@ -233,6 +234,177 @@ class FakeRunTool(Tool):
     async def execute(self, command: str, **_: Any) -> str:
         self.runs += 1
         return f"[exit code: 1] run {self.runs}"
+
+
+class FakeProjectTool(Tool):
+    """Records calls that would create or manage a persistent project."""
+
+    name = "project"
+    description = "Manage a project environment"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "project": {"type": "string"},
+            "action": {"type": "string"},
+        },
+        "required": ["project", "action"],
+    }
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def execute(self, project: str, action: str, **_: Any) -> str:
+        self.calls.append((project, action))
+        return f"{action} completed for {project}"
+
+
+async def test_project_creation_requires_confirmation_even_in_auto_mode():
+    call = ToolCall(id="project-create", name="project", arguments={"project": "portal", "action": "compose_up"})
+    provider = FakeProvider([
+        [ChatResult(content=None, tool_calls=[call])],
+        text_turn("The project is running."),
+    ])
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+    sequence: list[str] = []
+    events, emit = collector()
+
+    async def confirm(turn_id: str, tool: str, preview: str) -> bool:
+        assert turn_id == "project-confirm"
+        assert tool == "project"
+        assert '"project": "portal"' in preview
+        assert '"action": "compose_up"' in preview
+        sequence.append("confirmed")
+        return True
+
+    def capture(event: AgentEvent) -> None:
+        if isinstance(event, ToolStarted):
+            sequence.append("started")
+        emit(event)
+
+    outcome = await AgentLoop(provider, tools).run_turn(
+        "project-confirm",
+        [{"role": "user", "content": "Create the portal application"}],
+        capture,
+        permission_mode="auto",
+        confirm=confirm,
+    )
+
+    assert outcome.final_content == "The project is running."
+    assert sequence[:2] == ["confirmed", "started"]
+    assert any(isinstance(event, ToolStarted) for event in events)
+    assert project.calls == [("portal", "compose_up")]
+
+
+async def test_project_status_remains_immediate_in_auto_mode():
+    call = ToolCall(id="project-status", name="project", arguments={"project": "portal", "action": "status"})
+    provider = FakeProvider([
+        [ChatResult(content=None, tool_calls=[call])],
+        text_turn("The project is stopped."),
+    ])
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+
+    async def unexpected_confirm(*_args: Any) -> bool:
+        raise AssertionError("status must not open a confirmation card")
+
+    outcome = await AgentLoop(provider, tools).run_turn(
+        "project-status",
+        [{"role": "user", "content": "Check the portal project"}],
+        lambda _event: None,
+        permission_mode="auto",
+        confirm=unexpected_confirm,
+    )
+
+    assert outcome.final_content == "The project is stopped."
+    assert project.calls == [("portal", "status")]
+
+
+async def test_project_creation_fails_closed_without_a_confirmation_channel():
+    call = ToolCall(id="project-create", name="project", arguments={"project": "portal", "action": "start"})
+    provider = FakeProvider([
+        [ChatResult(content=None, tool_calls=[call])],
+        text_turn("I need approval before creating the project environment."),
+    ])
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+
+    outcome = await AgentLoop(provider, tools).run_turn(
+        "project-no-confirmation",
+        [{"role": "user", "content": "Start the portal project"}],
+        lambda _event: None,
+        permission_mode="auto",
+    )
+
+    assert outcome.final_content == "I need approval before creating the project environment."
+    assert project.calls == []
+    result = next(message["content"] for message in outcome.new_messages if message["role"] == "tool")
+    assert "requires user approval" in result
+
+
+async def test_project_command_too_long_to_show_is_not_presented_for_approval():
+    call = ToolCall(
+        id="project-exec",
+        name="project",
+        arguments={"project": "portal", "action": "exec", "command": "x" * 4_001},
+    )
+    provider = FakeProvider([
+        [ChatResult(content=None, tool_calls=[call])],
+        text_turn("I need a shorter command before requesting approval."),
+    ])
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+
+    async def unexpected_confirm(*_args: Any) -> bool:
+        raise AssertionError("a hidden command must not reach the approval card")
+
+    outcome = await AgentLoop(provider, tools).run_turn(
+        "project-command-too-long",
+        [{"role": "user", "content": "Run the command"}],
+        lambda _event: None,
+        permission_mode="auto",
+        confirm=unexpected_confirm,
+    )
+
+    assert outcome.final_content == "I need a shorter command before requesting approval."
+    assert project.calls == []
+    result = next(message["content"] for message in outcome.new_messages if message["role"] == "tool")
+    assert "too long to approve safely" in result
+
+
+async def test_specialist_project_creation_uses_the_parent_confirmation_channel(monkeypatch, tmp_path):
+    from sbot.core.specialist import SpecialistRunner
+
+    call = ToolCall(id="project-create", name="project", arguments={"project": "portal", "action": "start"})
+    provider = FakeProvider([
+        [ChatResult(content=None, tool_calls=[call])],
+        text_turn("The project is running."),
+    ])
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+    runner = SpecialistRunner(provider, None, tmp_path, model="fake")
+    monkeypatch.setattr(runner, "build_tools", lambda *_args, **_kwargs: tools)
+    approved: list[tuple[str, str]] = []
+
+    async def confirm(turn_id: str, tool: str, _preview: str) -> bool:
+        approved.append((turn_id, tool))
+        return True
+
+    token = current_turn_confirmation.set(confirm)
+    try:
+        bot = type("Bot", (), {"model": None, "tool_allowlist": ["project"], "id": "bot-1", "kind": "specialist"})()
+        outcome = await runner.run(bot, "You are a developer.", "Start the portal.", lambda _event: None, "delegate-1")
+    finally:
+        current_turn_confirmation.reset(token)
+
+    assert outcome.text == "The project is running."
+    assert approved == [("delegate-1", "project")]
+    assert project.calls == [("portal", "start")]
 
 
 async def test_the_edit_then_rerun_cycle_is_not_treated_as_a_loop():

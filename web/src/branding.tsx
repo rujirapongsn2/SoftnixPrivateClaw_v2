@@ -154,6 +154,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
 
     "chat.confirm.exec.pending": "Run this command in the sandbox?",
     "chat.confirm.exec.approved": "Approved — command ran",
+    "chat.confirm.project.pending": "Create or start this project environment?",
+    "chat.confirm.project.approved": "Approved — project environment started",
     "chat.confirm.workflow.pending": "Start this multi-step workflow?",
     "chat.confirm.workflow.approved": "Approved — workflow started",
     "chat.confirm.spawn.pending": "Run this delegated task?",
@@ -472,6 +474,11 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.skills.view": "View",
     "settings.skills.capabilities": "Capabilities covered",
     "settings.skills.subtitle": "Skill",
+    "settings.skills.orphans": "Unregistered workspace folders ({count})",
+    "settings.skills.orphansHint": "These folders are not active skills. Archive them after checking their files.",
+    "settings.skills.orphansUnavailable": "Workspace folder status is unavailable: {error}",
+    "settings.skills.archiveOrphan": "Archive",
+    "settings.skills.deleteOrphanConfirm": "Permanently delete managed folder “{name}”? This cannot be undone.",
 
     "settings.memory.intro":
       "Core memory is included in every conversation. Edit it to correct or remove what Sbot remembers about you.",
@@ -1371,6 +1378,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
 
     "chat.confirm.exec.pending": "รันคำสั่งนี้ใน sandbox หรือไม่?",
     "chat.confirm.exec.approved": "อนุมัติแล้ว — รันคำสั่งเสร็จสิ้น",
+    "chat.confirm.project.pending": "สร้างหรือเริ่มสภาพแวดล้อมโปรเจกต์นี้หรือไม่?",
+    "chat.confirm.project.approved": "อนุมัติแล้ว — เริ่มสภาพแวดล้อมโปรเจกต์แล้ว",
     "chat.confirm.workflow.pending": "เริ่ม workflow หลายขั้นตอนนี้หรือไม่?",
     "chat.confirm.workflow.approved": "อนุมัติแล้ว — เริ่ม workflow แล้ว",
     "chat.confirm.spawn.pending": "รันงานที่มอบหมายนี้หรือไม่?",
@@ -1685,6 +1694,11 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.skills.view": "ดู",
     "settings.skills.capabilities": "ความสามารถที่ครอบคลุม",
     "settings.skills.subtitle": "สกิล",
+    "settings.skills.orphans": "โฟลเดอร์ workspace ที่ไม่ได้ลงทะเบียน ({count})",
+    "settings.skills.orphansHint": "โฟลเดอร์เหล่านี้ไม่ใช่สกิลที่ใช้งานอยู่ โปรดตรวจไฟล์ก่อนเก็บเข้าคลัง",
+    "settings.skills.orphansUnavailable": "ไม่สามารถตรวจสถานะโฟลเดอร์ workspace ได้: {error}",
+    "settings.skills.archiveOrphan": "เก็บเข้าคลัง",
+    "settings.skills.deleteOrphanConfirm": "ลบโฟลเดอร์ที่ระบบจัดการ “{name}” ถาวรหรือไม่? การดำเนินการนี้ย้อนกลับไม่ได้",
 
     "settings.memory.intro":
       "ความจำหลักจะถูกรวมอยู่ในทุกบทสนทนา แก้ไขเพื่อแก้ไขหรือลบสิ่งที่ Sbot จดจำเกี่ยวกับคุณ",

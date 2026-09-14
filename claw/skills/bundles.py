@@ -8,6 +8,7 @@ import re
 import stat
 import uuid
 import zipfile
+from pathlib import Path
 from pathlib import PurePosixPath
 
 import yaml
@@ -43,6 +44,75 @@ ALLOWED = {
     ".excalidraw",
     ".drawio",
 }
+
+_WORKSPACE_SKILL_REF = re.compile(r"(?<![\w.-])skills/([^/\s`\"'<>()[\]]+)/", re.UNICODE)
+_QUOTED_WORKSPACE_SKILL_REF = re.compile(r"[`\"']skills/([^/`\"'\r\n]+?)/", re.UNICODE)
+
+
+def skill_path_references(content: str) -> set[str]:
+    """Return legacy workspace skill names mentioned by instructions."""
+    text = content or ""
+    return {
+        name.strip()
+        for pattern in (_WORKSPACE_SKILL_REF, _QUOTED_WORKSPACE_SKILL_REF)
+        for name in pattern.findall(text)
+        if name.strip()
+    }
+
+
+async def reference_warnings(store, user_id: str, current_name: str, content: str) -> list[str]:
+    """Warn about workspace-style references without rewriting user content."""
+    warnings: list[str] = []
+    available = {skill.name for skill in await store.enabled_for_user(user_id)}
+    for referenced_name in sorted(skill_path_references(content))[:20]:
+        if referenced_name == current_name:
+            warnings.append(
+                f"Reference skills/{referenced_name}/... points at the workspace. "
+                "Imported package resources should use bundle-relative paths with read_skill(path=...)."
+            )
+        elif referenced_name not in available:
+            warnings.append(
+                f"Reference skills/{referenced_name}/... names a skill that is not registered or enabled."
+            )
+        else:
+            warnings.append(
+                f"Reference skills/{referenced_name}/... points at another skill; use read_skill for that skill instead."
+            )
+    return warnings
+
+
+def plain_skill_save_error(existing, workspace: Path | None, name: str, content: str) -> str | None:
+    """Reject a new plain skill that is attempting to stand in for a package."""
+    if workspace is not None:
+        root = workspace.resolve() / "skills"
+        candidate = root / name
+        try:
+            is_direct_directory = (
+                not candidate.is_symlink()
+                and candidate.is_dir()
+                and candidate.resolve(strict=True).parent == root
+            )
+        except OSError:
+            is_direct_directory = False
+        if is_direct_directory:
+            return (
+                f"Workspace directory skills/{name} already exists. It is not a registered package; "
+                "import the GitHub repository with import_github or archive the orphan in Settings."
+            )
+    if existing is None and name in skill_path_references(content):
+        return (
+            f"New skill '{name}' depends on workspace/skills files. "
+            "Import the package with import_github or ZIP upload instead."
+        )
+    return None
+
+
+async def prepare_bundle(store, user_id: str, bundle: dict) -> dict:
+    """Attach non-blocking reference diagnostics before installation."""
+    warnings = await reference_warnings(store, user_id, bundle["name"], bundle["content"])
+    if warnings:
+        bundle = {**bundle, "metadata": {**bundle["metadata"], "warnings": warnings}}
+    return bundle
 
 
 def safe_path(path):

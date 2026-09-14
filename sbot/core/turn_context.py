@@ -11,6 +11,7 @@ turns, whereas a ContextVar is isolated per async task and propagates across
 """
 
 import contextvars
+from collections.abc import Awaitable, Callable
 
 current_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "claw_current_session_id", default=None
@@ -39,3 +40,12 @@ current_turn_deadline: contextvars.ContextVar[float | None] = contextvars.Contex
 current_turn_locale: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "claw_current_turn_locale", default=None
 )
+
+# The root web turn installs this callback while it has a connected user who
+# can decide on a confirmation card. Nested delegate/spawn loops inherit the
+# context, so a specialist can ask that same user instead of silently creating
+# a persistent project environment. Background missions have no callback and
+# therefore remain fail-closed.
+current_turn_confirmation: contextvars.ContextVar[
+    Callable[[str, str, str], Awaitable[bool]] | None
+] = contextvars.ContextVar("sbot_current_turn_confirmation", default=None)

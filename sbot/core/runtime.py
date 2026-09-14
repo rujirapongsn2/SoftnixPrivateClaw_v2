@@ -48,7 +48,13 @@ from sbot.core.memory import MemoryService, memory_scope
 from sbot.core.scheduler import SchedulerService
 from sbot.core.specialist import DelegationMirror
 from sbot.core.subagent import SubagentManager
-from sbot.core.turn_context import current_session_id, current_turn_id, current_turn_deadline, current_turn_locale
+from sbot.core.turn_context import (
+    current_session_id,
+    current_turn_confirmation,
+    current_turn_deadline,
+    current_turn_id,
+    current_turn_locale,
+)
 from sbot.db.stores import (
     AuditStore,
     BlueprintStore,
@@ -262,7 +268,7 @@ class ClawAgent:
         self.tools.register(RenderDiagramTool(workspace, user_id))
         if skills is not None:
             self.tools.register(ReadSkillTool(skills, user_id, workspace=workspace))
-            self.tools.register(ManageSkillTool(skills, user_id))
+            self.tools.register(ManageSkillTool(skills, user_id, workspace=workspace))
         if knowledge is not None:
             self.tools.register(SearchKnowledgeTool(knowledge, user_id))
         if schedules is not None:
@@ -1523,6 +1529,7 @@ class AgentRuntime:
                 # model — `delegate` turns a specialist's reply into a message
                 # row, so its fallback text has to be in the user's language.
                 _locale_token = current_turn_locale.set(locale)
+                _confirmation_token = current_turn_confirmation.set(_confirm)
                 try:
                     model_used = effective_model or self.settings.llm.model
 
@@ -1581,6 +1588,7 @@ class AgentRuntime:
                     current_turn_id.reset(_turn_token)
                     current_turn_deadline.reset(_deadline_token)
                     current_turn_locale.reset(_locale_token)
+                    current_turn_confirmation.reset(_confirmation_token)
 
                 final = outcome.final_content
                 # loop.py never appends anything to history for an empty-content

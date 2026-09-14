@@ -78,6 +78,14 @@ create or update a skill is the `manage_skill` tool.
    - Sensible defaults and edge cases (default period, currency, data source).
 4. Call `manage_skill` with action="save" and those fields.
 
+## Import a packaged skill from GitHub
+- Use `manage_skill` with action="import_github", the public
+  `https://github.com/owner/repository` URL, and an exact full 40-character
+  commit SHA. This validates and installs the repository as an immutable bundle.
+- Do not clone, download, or copy a repository into `workspace/skills`, and do
+  not use action="save" for a package. Package references and assets must be
+  read with `read_skill(name=..., path=...)`.
+
 ## What makes a good skill
 - One skill = one clear procedure. Don't bundle unrelated tasks.
 - Capture the reusable *method*, not one-off data from this chat.
@@ -89,6 +97,7 @@ create or update a skill is the `manage_skill` tool.
 ## Manage existing skills
 - action="list" — list your saved skills.
 - action="save" — create, or overwrite one with the same name.
+- action="import_github" — install a public GitHub skill bundle at an exact commit.
 - action="delete" — remove a skill by name.
 
 Never try to "install" a skill by writing files or editing the database — always

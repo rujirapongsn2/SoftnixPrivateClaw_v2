@@ -222,7 +222,7 @@ class ClawAgent:
         self.tools.register(RenderDiagramTool(workspace, user_id))
         if skills is not None:
             self.tools.register(ReadSkillTool(skills, user_id, workspace=workspace))
-            self.tools.register(ManageSkillTool(skills, user_id))
+            self.tools.register(ManageSkillTool(skills, user_id, workspace=workspace))
         if knowledge is not None:
             self.tools.register(SearchKnowledgeTool(knowledge, user_id))
         if schedules is not None:

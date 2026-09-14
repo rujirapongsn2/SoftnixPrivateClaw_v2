@@ -74,6 +74,7 @@ import {
   ProjectInventory,
   SimpleGroup,
   SkillInfo,
+  SkillWorkspaceOrphan,
   USER_LLM_API,
   api,
   blueprintFileUrl,
@@ -803,12 +804,15 @@ function SkillDetailModal({
 
 function SkillsPanel() {
   const t = useT();
+  const toast = useToast();
   const importFileRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [repository, setRepository] = useState("");
   const [commit, setCommit] = useState("");
   const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [orphans, setOrphans] = useState<SkillWorkspaceOrphan[]>([]);
+  const [orphanError, setOrphanError] = useState<string | null>(null);
   const [skillTab, setSkillTab] = useState<"builtin" | "user" | "shared">("builtin");
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [globalConnectors, setGlobalConnectors] = useState<ConnectorGlobalSummary[]>([]);
@@ -819,14 +823,24 @@ function SkillsPanel() {
   const { error, guard } = useAsyncError();
 
   const reload = useCallback(() => api.listSkills().then(setSkills), []);
+  const reloadOrphans = useCallback(async () => {
+    try {
+      setOrphans(await api.listSkillWorkspaceOrphans());
+      setOrphanError(null);
+    } catch (reason) {
+      setOrphans([]);
+      setOrphanError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, []);
   useEffect(() => {
     void reload();
+    void reloadOrphans();
     void api.listConnectors().then(setConnectors);
     // Admin-global ("Pre-built") connectors are picked from a separate
     // endpoint since they have no owner_id row of this user's own — a skill
     // can link to either kind, so both lists feed the picker below.
     void api.listGlobalConnectors().then(setGlobalConnectors).catch(() => setGlobalConnectors([]));
-  }, [reload]);
+  }, [reload, reloadOrphans]);
 
   // A user's own ENABLED connector shadows a global one of the same name
   // (mirrors the backend's own-vs-global tie-break, which only shadows with
@@ -850,8 +864,12 @@ function SkillsPanel() {
     setImportBusy(true);
     try {
       await guard(async () => {
-        if (file) await api.importSkill(file);
-        else await api.importGithubSkill(repository.trim(), commit.trim());
+        const imported = file
+          ? await api.importSkill(file)
+          : await api.importGithubSkill(repository.trim(), commit.trim());
+        if (imported.warnings?.length) {
+          toast({ body: imported.warnings.join("\n"), type: "info" });
+        }
         await reload();
         setSkillTab("user");
         setImporting(false);
@@ -987,6 +1005,9 @@ function SkillsPanel() {
                   });
                   if (saved.visibility !== visibility) {
                     throw new Error(t("settings.skills.saveVisibilityFailed"));
+                  }
+                  if (saved.warnings?.length) {
+                    toast({ body: saved.warnings.join("\n"), type: "info" });
                   }
                   setEditing(null);
                   setSharing(false);
@@ -1171,6 +1192,7 @@ function SkillsPanel() {
                         guard(async () => {
                           await api.deleteSkill(skill.id);
                           await reload();
+                          await reloadOrphans();
                         })
                       }
                     />
@@ -1181,6 +1203,47 @@ function SkillsPanel() {
             </Fragment>
           ))}
         </div>
+      )}
+      {skillTab === "user" && (orphans.length > 0 || orphanError) && (
+        <details>
+          <summary>{t("settings.skills.orphans", { count: orphans.length.toLocaleString() })}</summary>
+          <Text size="sm" color="secondary" as="p">{t("settings.skills.orphansHint")}</Text>
+          {orphanError && (
+            <ErrorText>{t("settings.skills.orphansUnavailable", { error: orphanError })}</ErrorText>
+          )}
+          <div className="claw-skill-list">
+            {orphans.map((orphan) => (
+              <Card key={orphan.name} padding={2}>
+                <div className="claw-row claw-row-between">
+                  <Text>{orphan.name}</Text>
+                  <Button
+                    label={t("settings.skills.archiveOrphan")}
+                    size="sm"
+                    variant="secondary"
+                    clickAction={() => guard(async () => {
+                      await api.archiveSkillWorkspaceOrphan(orphan.name);
+                      await reloadOrphans();
+                    })}
+                  />
+                  {orphan.managed && (
+                    <Button
+                      label={t("settings.common.delete")}
+                      size="sm"
+                      variant="destructive"
+                      clickAction={() => {
+                        if (!window.confirm(t("settings.skills.deleteOrphanConfirm", { name: orphan.name }))) return;
+                        void guard(async () => {
+                          await api.deleteSkillWorkspaceOrphan(orphan.name);
+                          await reloadOrphans();
+                        });
+                      }}
+                    />
+                  )}
+                </div>
+              </Card>
+            ))}
+          </div>
+        </details>
       )}
       <SkillDetailModal skill={viewingDetail} isOpen={detailOpen} onOpenChange={setDetailOpen} />
     </div>
