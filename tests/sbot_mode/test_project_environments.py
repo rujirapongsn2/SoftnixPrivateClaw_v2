@@ -11,7 +11,7 @@ import pytest
 
 from sbot.config import SandboxSettings
 from sbot.core.specialist import SpecialistRunner
-from sbot.sandbox.ephemeral import EphemeralSandbox
+from sbot.sandbox.ephemeral import EphemeralSandbox, SandboxResult
 from sbot.sandbox.projects import ProjectEnvironments, run_process
 from sbot.tools.filesystem import ReadFileTool, WriteFileTool
 from sbot.tools.project import ProjectTool
@@ -37,6 +37,43 @@ def test_project_identity_is_stable_scoped_and_rejects_traversal(tmp_path):
     (tmp_path / 'projects').symlink_to(tmp_path.parent)
     with pytest.raises(ValueError):
         manager.identity(tmp_path, 'demo')
+
+
+@pytest.mark.asyncio
+async def test_project_network_is_small_labeled_and_internal_when_egress_is_disabled(monkeypatch):
+    manager = ProjectEnvironments(SandboxSettings(network="none"))
+    calls = []
+
+    async def docker(*args, timeout=120):
+        calls.append(args)
+        if args[:2] == ("network", "inspect"):
+            return SandboxResult(1, "", "No such network", False)
+        if args[:2] == ("network", "ls"):
+            return SandboxResult(0, "", "", False)
+        if args[:2] == ("network", "create"):
+            return SandboxResult(0, "network-id", "", False)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(manager, "_docker", docker)
+    assert await manager._ensure_network("sbot-project-ingress-test") is True
+
+    create = next(args for args in calls if args[:2] == ("network", "create"))
+    assert "--internal" in create
+    assert "sbot.project.network=true" in create
+    subnet = create[create.index("--subnet") + 1]
+    assert subnet.endswith("/28")
+
+
+@pytest.mark.asyncio
+async def test_existing_project_network_cannot_bypass_no_egress_policy(monkeypatch):
+    manager = ProjectEnvironments(SandboxSettings(network="none"))
+
+    async def docker(*args, timeout=120):
+        return SandboxResult(0, json.dumps([{"Internal": False}]), "", False)
+
+    monkeypatch.setattr(manager, "_docker", docker)
+    with pytest.raises(RuntimeError, match="incompatible egress policy"):
+        await manager._ensure_network("sbot-project-ingress-test")
 
 
 @pytest.mark.asyncio

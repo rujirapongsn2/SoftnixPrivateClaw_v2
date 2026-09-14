@@ -620,7 +620,8 @@ async def test_a_turn_on_a_small_model_is_packed_to_that_models_window(stores, t
 
     prompt = system_text(provider.calls[0])
     assert runtime.assembler.count_tokens([{"role": "system", "content": prompt}]) <= 800
-    # The charter is pinned, so trimming is visible rather than total.
+    # Identity and charter are pinned, while operating guidance can be dropped.
+    assert "You are Researcher" in prompt
     assert "ตอบสั้นๆ" in prompt
 
 

@@ -22,8 +22,11 @@ that the developer image needs rebuilding; do not silently edit the shared check
 
 Write compose.yaml with healthchecks, restart: unless-stopped and named database
 volumes. Use project compose_up, compose_ps and compose_logs. Bind service ports
-to 0.0.0.0 inside the environment; project status returns outer localhost port
-mappings. Use project exec for builds, tests, migrations and curl. stop preserves
+to 0.0.0.0 inside the environment. The project start/status result includes
+`public_ingress_port` and `public_bind`; every publicly reachable app must listen
+on that exact address and port (do not assume framework defaults such as 3000).
+The result also returns outer localhost port mappings for operator diagnostics.
+Use project exec for builds, tests, migrations and curl. stop preserves
 data; compose_down preserves named volumes. Do not remove data to fix an error.
 
 Commit and verify the working tree. GitHub publish_files sends up to 100 text

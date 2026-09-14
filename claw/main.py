@@ -12,6 +12,7 @@ from claw.api.browser_ext import router as browser_ext_router
 from claw.api.connector_oauth import router as connector_oauth_router
 from claw.api.deps import AppState
 from claw.api.knowledge import router as knowledge_router
+from claw.api.project_containers import router as project_containers_router
 from claw.api.manage import router as manage_router
 from claw.api.routes import router
 from claw.api.telegram import router as telegram_router
@@ -46,6 +47,7 @@ from claw.db.stores import (
     MessageStore,
     OAuthAppStore,
     PolicyPlanStore,
+    ProjectContainerConfigStore,
     ScheduleStore,
     SessionStore,
     ShareStore,
@@ -106,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     shares = ShareStore(factory)
     plans = PolicyPlanStore(factory)
     branding = BrandingStore(factory)
+    project_container_config = ProjectContainerConfigStore(factory)
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
 
     browser_mgr = None
@@ -314,6 +317,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         knowledge=knowledge,
         knowledge_service=knowledge_service,
         shares=shares,
+        project_container_config=project_container_config,
+        project_containers=None,
     )
     app.state.claw.blueprints = blueprints
     from sbot.api.blueprints import router as blueprint_router
@@ -336,7 +341,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mode_settings = SbotSettings(_env_file=None, **values)
         sbot_app = create_sbot_app(mode_settings, shared=app.state.claw)
         app.state.sbot = sbot_app.state.sbot
+        app.state.claw.project_containers = app.state.sbot.project_containers
         app.mount("/modes/sbot", sbot_app)
+        from claw.api.project_ingress import ProjectIngressMiddleware
+        app.add_middleware(
+            ProjectIngressMiddleware,
+            settings=mode_settings.sandbox,
+            projects=app.state.sbot.runtime.sandbox.projects,
+            workspaces_root=mode_settings.workspaces_root,
+            secret_key=mode_settings.secret_key,
+        )
         # Shared administration, including container policy, has one endpoint.
         from sbot.api.admin import router as mode_admin_router
         from dataclasses import replace
@@ -362,6 +376,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(browser_ext_router)
     app.include_router(connector_oauth_router)
     app.include_router(knowledge_router)
+    app.include_router(project_containers_router)
     app.include_router(router)
     app.include_router(manage_router)
     app.include_router(telegram_router)

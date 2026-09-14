@@ -523,6 +523,7 @@ export interface ProjectContainerInfo {
   container: string;
   state: string;
   ports: Record<string, { HostIp: string; HostPort: string }[] | null>;
+  public_url: string | null;
 }
 
 export interface ProjectInventory {

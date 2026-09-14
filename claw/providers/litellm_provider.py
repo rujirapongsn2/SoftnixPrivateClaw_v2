@@ -69,6 +69,84 @@ _LOCAL_KEY_PLACEHOLDER = "sk-local"
 # litellm.acompletion entirely; see LiteLLMProvider._cloudflare_chat.
 _CLOUDFLARE_PREFIX = "cloudflare/"
 
+_ERROR_TYPE_RE = re.compile(r"['\"]error_type['\"]\s*:\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+_UPSTREAM_PROVIDER_RE = re.compile(
+    r"upstream error from\s+([^:\n,]+)",
+    re.IGNORECASE,
+)
+
+
+def _exception_chain(exc: Exception) -> list[Exception]:
+    """Return LiteLLM's wrapped exception chain without following cycles."""
+    chain: list[Exception] = []
+    current: Exception | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        chain.append(current)
+        seen.add(id(current))
+        nested = getattr(current, "original_exception", None) or current.__cause__
+        current = nested if isinstance(nested, Exception) else None
+    return chain
+
+
+def _provider_error(exc: Exception, model: str, transport_stream_started: bool) -> ProviderError:
+    """Preserve safe routing metadata that LiteLLM normally hides in str(exc)."""
+    detail = str(exc)
+    chain = _exception_chain(exc)
+    for item in chain:
+        is_pre_first_chunk = getattr(item, "is_pre_first_chunk", None)
+        if is_pre_first_chunk is False:
+            transport_stream_started = True
+            break
+    error_type: str | None = None
+    error_types: list[str] = []
+    status_code: int | None = None
+    for item in chain:
+        candidate = getattr(item, "error_type", None)
+        if isinstance(candidate, str) and candidate:
+            error_types.append(candidate.strip().lower())
+        metadata = getattr(item, "metadata", None)
+        if isinstance(metadata, dict) and isinstance(metadata.get("error_type"), str):
+            error_types.append(metadata["error_type"].strip().lower())
+    if error_types:
+        error_type = (
+            "provider_unavailable"
+            if "provider_unavailable" in error_types
+            else error_types[0]
+        )
+    if error_type is None:
+        match = _ERROR_TYPE_RE.search(detail)
+        if match:
+            error_type = match.group(1).strip().lower()
+    for item in chain:
+        candidate = getattr(item, "status_code", None)
+        if isinstance(candidate, int):
+            status_code = candidate
+            break
+    if error_type is None and status_code in {502, 503, 504}:
+        error_type = "provider_unavailable"
+    upstream_match = _UPSTREAM_PROVIDER_RE.search(detail)
+    upstream_provider = upstream_match.group(1).strip() if upstream_match else None
+    lowered = detail.lower()
+    retryable = bool(
+        error_type == "provider_unavailable"
+        or "upstream error from" in lowered
+        or "h2 protocol error" in lowered
+        or "error reading a body from connection" in lowered
+        or "timeout" in lowered
+        or "timed out" in lowered
+        or status_code in {408, 500, 502, 503, 504}
+    )
+    return ProviderError(
+        detail,
+        error_type=error_type,
+        gateway=model.split("/", 1)[0] if "/" in model else None,
+        upstream_provider=upstream_provider,
+        status_code=status_code,
+        transport_stream_started=transport_stream_started,
+        retryable=retryable,
+    )
+
 
 def _parse_cloudflare_base(api_base: str) -> tuple[str, str]:
     """Split the configured base URL from an optional ``?gateway=<id>`` query
@@ -353,9 +431,11 @@ class LiteLLMProvider(LLMProvider):
         truncated_repeat = False
 
         stream = None
+        transport_stream_started = False
         try:
             stream = await acompletion(**kwargs)
             async for chunk in stream:
+                transport_stream_started = True
                 chunk_usage = getattr(chunk, "usage", None)
                 if chunk_usage:
                     usage = {
@@ -406,8 +486,16 @@ class LiteLLMProvider(LLMProvider):
                         if getattr(fn, "arguments", None):
                             slot["arguments"] += fn.arguments
         except Exception as exc:
-            logger.warning("LLM stream failed for {}: {}", model, exc)
-            raise ProviderError(str(exc)) from exc
+            error = _provider_error(exc, model, transport_stream_started)
+            logger.bind(
+                model=model,
+                gateway=error.gateway,
+                upstream_provider=error.upstream_provider,
+                error_type=error.error_type,
+                status_code=error.status_code,
+                transport_stream_started=error.transport_stream_started,
+            ).warning("LLM provider stream failed")
+            raise error from exc
         finally:
             # Every exit but a clean end-of-stream abandons the response
             # mid-flight: the turn's deadline cancels the `async for`, the

@@ -317,6 +317,15 @@ function ProjectsPanel() {
                 </div>
                 {ports.length > 0 && <Text size="xsm" color="secondary">{ports.join(" · ")}</Text>}
                 <div className="claw-row">
+                  {item.public_url && (
+                    <Button
+                      label={t("settings.projects.openApp")}
+                      icon={<Icon icon={ExternalLink} size="xsm" />}
+                      size="sm"
+                      variant="secondary"
+                      clickAction={() => { window.open(item.public_url!, "_blank", "noopener,noreferrer"); }}
+                    />
+                  )}
                   {running ? (
                     <Button
                       label={t("settings.projects.stop")}

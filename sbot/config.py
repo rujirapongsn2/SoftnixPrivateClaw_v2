@@ -1,6 +1,9 @@
 """Application configuration — single source of truth, env-driven (SBOT_*)."""
 
+import ipaddress
+import re
 from pathlib import Path
+from typing import Literal
 
 from pydantic import PositiveInt, BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -73,11 +76,57 @@ class SandboxSettings(BaseModel):
     project_memory_limit: str = "4g"
     project_pids_limit: int = Field(default=1024, gt=0)
     project_ports: list[int] = [3000, 8000, 8080]
+    # Prefix for one isolated ingress bridge per project. Only that project and
+    # the control-plane proxy join it, preventing lateral tenant access.
+    project_network: str = Field(
+        default="sbot-project-ingress", pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,35}$"
+    )
+    # Allocate small, deterministic tenant bridges from a dedicated pool instead
+    # of consuming Docker's default /16 networks. /12 -> /28 supports 65k slots.
+    project_network_pool: str = "10.240.0.0/12"
+    project_network_prefix: int = Field(default=28, ge=24, le=30)
+    project_network_limit: int = Field(default=4096, ge=1, le=65536)
+    # Optional Docker name/id for the control-plane container. Empty auto-detects
+    # Docker's default container-id hostname; host-native installs do not use it.
+    project_proxy_container: str = Field(
+        default="", pattern=r"^(?:|[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127})$"
+    )
+    project_ingress_domain: str = ""
+    project_ingress_scheme: Literal["http", "https"] = "https"
+    project_ingress_port: int = Field(default=8000, ge=1, le=65535)
+    project_public_ingress_enabled: bool = False
+    project_ingress_ws_max_bytes: int = Field(default=1_048_576, ge=65_536, le=16_777_216)
+    project_ingress_max_connections: int = Field(default=256, ge=1, le=10_000)
+    project_ingress_max_connections_per_project: int = Field(default=32, ge=1, le=1_000)
 
     @model_validator(mode="after")
     def _project_ports(self):
         if len(self.project_ports) > 20 or any(p < 1 or p > 65535 for p in self.project_ports):
             raise ValueError("project_ports must contain at most 20 valid TCP ports")
+        if self.project_ingress_port not in self.project_ports:
+            raise ValueError("project_ingress_port must be included in project_ports")
+        try:
+            pool = ipaddress.ip_network(self.project_network_pool, strict=True)
+        except ValueError as exc:
+            raise ValueError("project_network_pool must be a canonical private IPv4 CIDR") from exc
+        if pool.version != 4 or not pool.is_private:
+            raise ValueError("project_network_pool must be a private IPv4 CIDR")
+        if self.project_network_prefix <= pool.prefixlen:
+            raise ValueError("project_network_prefix must be longer than project_network_pool")
+        slots = 1 << (self.project_network_prefix - pool.prefixlen)
+        if self.project_network_limit > slots:
+            raise ValueError("project_network_limit exceeds the configured subnet pool")
+        if self.project_ingress_max_connections_per_project > self.project_ingress_max_connections:
+            raise ValueError("per-project ingress connections cannot exceed the global limit")
+        domain = self.project_ingress_domain.strip().lower().rstrip(".")
+        if domain and (
+            "://" in domain or "/" in domain or ":" in domain
+            or len(domain) > 253
+            or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                   for label in domain.split("."))
+        ):
+            raise ValueError("project_ingress_domain must be a DNS hostname without scheme, port, or path")
+        self.project_ingress_domain = domain
         return self
 
     # Longer default: pip install / network fetches can be slow.

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claw.providers.base import ChatResult, TextDelta
+from claw.providers.base import ChatResult, ProviderError, TextDelta
 from claw.providers.litellm_provider import (
     LiteLLMProvider,
     _extract_text_tool_calls,
@@ -190,6 +190,41 @@ async def test_fully_consumed_stream_is_also_closed(monkeypatch, tools):
     await _drain(provider, tools)
 
     assert stream.closed
+
+
+@pytest.mark.asyncio
+async def test_litellm_error_preserves_safe_upstream_and_transport_metadata(monkeypatch, tools):
+    class UpstreamError(Exception):
+        metadata = {"error_type": "provider_unavailable"}
+        status_code = 503
+        is_pre_first_chunk = False
+
+    async def fake_acompletion(**kwargs):
+        async def gen():
+            # LiteLLM emits usage/metadata chunks without choices. The provider
+            # consumes them internally, but recovery still needs to know that
+            # the transport stream had started.
+            yield SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=3))
+            raise UpstreamError(
+                "Upstream error from Together: h2 protocol error: "
+                "error reading a body from connection"
+            )
+
+        return gen()
+
+    monkeypatch.setattr("litellm.acompletion", fake_acompletion)
+    provider = LiteLLMProvider(default_model="openrouter/deepseek/test")
+
+    with pytest.raises(ProviderError) as raised:
+        await _drain(provider, tools)
+
+    error = raised.value
+    assert error.error_type == "provider_unavailable"
+    assert error.gateway == "openrouter"
+    assert error.upstream_provider == "Together"
+    assert error.status_code == 503
+    assert error.transport_stream_started
+    assert error.retryable
 
 
 @pytest.mark.asyncio

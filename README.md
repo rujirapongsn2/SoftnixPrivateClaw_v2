@@ -98,6 +98,32 @@ Serves on `127.0.0.1:8700` — put your reverse proxy / tunnel in front for TLS.
 Both containers restart automatically on crash or host reboot. Single instance only
 (in-process session state); back up the `pgdata` volume with `pg_dump`.
 
+For multi-tenant project apps, set `CLAW_SANDBOX__PROJECT_INGRESS_DOMAIN`
+(for example `apps.example.com`), point wildcard DNS and a wildcard TLS certificate
+for `*.apps.example.com` at the same reverse proxy, and forward HTTP plus WebSocket
+traffic to `127.0.0.1:8700` while preserving `Host`. Then enable **Public project
+ingress** in Control Plane → Project containers. Each running project receives a
+stable signed URL; its random host ports stay bound to `127.0.0.1`, so they neither
+conflict nor become directly reachable from the network. The public application
+must listen on `0.0.0.0:8000` inside its project container (configurable with
+`CLAW_SANDBOX__PROJECT_INGRESS_PORT`).
+
+Each project receives an isolated `/28` bridge from
+`CLAW_SANDBOX__PROJECT_NETWORK_POOL` (default `10.240.0.0/12`) instead of a
+Docker-default `/16`; choose a pool that does not overlap the host or VPN. The
+global network and proxy connection limits are configurable with
+`CLAW_SANDBOX__PROJECT_NETWORK_LIMIT` and the
+`CLAW_SANDBOX__PROJECT_INGRESS_MAX_CONNECTIONS*` settings. When
+`CLAW_SANDBOX__NETWORK=none`, project ingress bridges are also internal and
+cannot provide outbound network access.
+
+Cloudflare Tunnel can use one wildcard published-hostname rule for this design.
+Keep its HTTP Host Header override empty so the signed project hostname reaches
+the application. Note that Cloudflare Universal SSL on a full zone covers only
+the apex and first-level subdomains: `*.apps.example.com` therefore needs an
+Advanced/Total TLS certificate, or use a dedicated zone whose apex is the value
+of `CLAW_SANDBOX__PROJECT_INGRESS_DOMAIN`.
+
 ### Option C — Manual dev setup (for local development)
 
 ```bash

@@ -53,6 +53,25 @@ class ProviderError(Exception):
     errors poison session history (legacy lesson).
     """
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str | None = None,
+        gateway: str | None = None,
+        upstream_provider: str | None = None,
+        status_code: int | None = None,
+        transport_stream_started: bool = False,
+        retryable: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.gateway = gateway
+        self.upstream_provider = upstream_provider
+        self.status_code = status_code
+        self.transport_stream_started = transport_stream_started
+        self.retryable = retryable
+
 
 class LLMProvider(ABC):
     @abstractmethod

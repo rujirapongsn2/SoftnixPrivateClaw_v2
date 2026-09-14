@@ -93,6 +93,8 @@ import {
   ModelKind,
   ModelUsagePoint,
   OAuthAppsInfo,
+  type ProjectContainerAdminStatus,
+  type ProjectIngressVerifyResult,
   type PlanCreate,
   type PlanInfo,
   SessionsByUserPoint,
@@ -120,6 +122,7 @@ export type AdminSection =
   | "oauth"
   | "telegram"
   | "email"
+  | "projects"
   | "preferences"
   | "audit"
   | "users";
@@ -141,6 +144,7 @@ export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconTy
   { key: "providers", labelKey: "admin.nav.providers", icon: Cpu },
   { key: "connectors", labelKey: "admin.nav.connectors", icon: Plug },
   { key: "guardrails", labelKey: "admin.nav.guardrails", icon: ShieldCheck },
+  { key: "projects", labelKey: "admin.nav.projects", icon: Server },
   { key: "oauth", labelKey: "admin.nav.oauth", icon: KeyRound },
   { key: "telegram", labelKey: "admin.nav.telegram", icon: Send },
   { key: "email", labelKey: "admin.nav.email", icon: Mail },
@@ -166,7 +170,7 @@ export function AdminPanel({
   // soup. Overview is the same story: a stat grid + charts that read better
   // with more horizontal room. Widen just these sections rather than the
   // whole panel.
-  const isWide = section === "providers" || section === "overview" || section === "plans";
+  const isWide = section === "providers" || section === "overview" || section === "plans" || section === "projects";
   return (
     <div className="claw-settings-panel">
       <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
@@ -186,6 +190,7 @@ export function AdminPanel({
         {section === "connectors" && <PrebuiltConnectorsPanel />}
         {section === "plans" && <PlansPanel />}
         {section === "guardrails" && <GuardrailsPanel />}
+        {section === "projects" && <ProjectContainersAdminPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
         {section === "email" && <EmailConfigPanel />}
@@ -4097,6 +4102,348 @@ function PreferencesPanel() {
           <div>
             <Button label={t("admin.preferences.savePreferences")} isDisabled={!dirty || saving} clickAction={save} />
           </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function ProjectContainersAdminPanel() {
+  const t = useT();
+  const [status, setStatus] = useState<ProjectContainerAdminStatus | null>(null);
+  const [verifyResult, setVerifyResult] = useState<ProjectIngressVerifyResult | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const { error, guard } = useAsyncError();
+  const toast = useToast();
+  const reload = useCallback(() => api.adminGetProjectContainers().then(setStatus), []);
+
+  useEffect(() => {
+    void guard(async () => await reload());
+  }, [guard, reload]);
+
+  useEffect(() => {
+    if (!status) return;
+    const timer = window.setInterval(
+      () => void guard(async () => await reload()),
+      status.building ? 2000 : 5000,
+    );
+    return () => window.clearInterval(timer);
+  }, [guard, reload, status?.building]);
+
+  if (error && !status) return <ErrorText>{error}</ErrorText>;
+  if (!status) return <Text color="secondary">{t("admin.common.loading")}</Text>;
+
+  const setEnabled = (enabled: boolean) => {
+    setSaving(true);
+    void guard(async () => {
+      try {
+        const next = await api.adminSetProjectContainers(enabled);
+        setStatus(next);
+        setVerifyResult(null);
+        toast({
+          body: t(enabled ? "admin.projects.enabledToast" : "admin.projects.disabledToast"),
+          type: "info",
+          autoHideDuration: 2500,
+        });
+      } finally {
+        setSaving(false);
+      }
+    });
+  };
+
+  const setPublicIngressEnabled = (enabled: boolean) => {
+    if (enabled && !window.confirm(t("admin.projects.ingressEnableConfirm"))) return;
+    setSaving(true);
+    void guard(async () => {
+      try {
+        const next = await api.adminSetProjectPublicIngress(enabled);
+        setStatus(next);
+        setVerifyResult(null);
+        toast({
+          body: t(enabled ? "admin.projects.ingressEnabledToast" : "admin.projects.ingressDisabledToast"),
+          type: "info",
+          autoHideDuration: 2500,
+        });
+      } finally {
+        setSaving(false);
+      }
+    });
+  };
+
+  const verifyPublicIngress = () => {
+    setVerifying(true);
+    void guard(async () => {
+      try {
+        setVerifyResult(await api.adminVerifyProjectPublicIngress());
+      } finally {
+        setVerifying(false);
+      }
+    });
+  };
+
+  const build = () => void guard(async () => setStatus(await api.adminBuildProjectContainerImage()));
+  const readyLabel = status.ready
+    ? t("admin.projects.ready")
+    : status.building
+      ? t("admin.projects.building")
+      : t("admin.projects.notReady");
+  const formatBytes = (bytes: number) => {
+    if (bytes <= 0) return "0 B";
+    const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 4);
+    const value = bytes / 1024 ** unit;
+    return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: value < 10 ? 1 : 0 }).format(value)} ${["B", "KB", "MB", "GB", "TB"][unit]}`;
+  };
+  const ingressDomain = status.public_ingress_domain || "apps.example.com";
+  const wildcardDomain = `*.${ingressDomain}`;
+
+  return (
+    <div className="claw-panel">
+      <div className="claw-row claw-row-between">
+        <div>
+          <Text weight="semibold">{t("admin.projects.title")}</Text>
+          <Text size="sm" color="secondary">{t("admin.projects.subtitle")}</Text>
+        </div>
+        <div className="claw-row">
+          <Text size="sm" color="secondary">{t("admin.projects.overallReadiness")}</Text>
+          <Badge variant={status.ready ? "success" : status.building ? "warning" : "neutral"} label={readyLabel} />
+        </div>
+      </div>
+
+      <Card padding={2}>
+        <div className="claw-panel">
+          <label className="claw-toggle-inline">
+            <Switch
+              value={status.enabled}
+              label={t("admin.projects.enable")}
+              isLabelHidden
+              isDisabled={!status.mode_available || saving}
+              changeAction={setEnabled}
+            />
+            <Text weight="semibold">{t("admin.projects.enable")}</Text>
+          </label>
+          <label className="claw-toggle-inline">
+            <Switch
+              value={status.public_ingress_enabled}
+              label={t("admin.projects.publicIngress")}
+              isLabelHidden
+              isDisabled={
+                !status.mode_available || saving
+                || (!status.public_ingress_configured && !status.public_ingress_enabled)
+              }
+              changeAction={setPublicIngressEnabled}
+            />
+            <span>
+              <Text weight="semibold">{t("admin.projects.publicIngress")}</Text>
+              <Text size="sm" color="secondary">
+                {status.public_ingress_configured
+                  ? `*.${status.public_ingress_domain} → :${status.public_ingress_port}`
+                  : t("admin.projects.ingressNotConfigured")}
+              </Text>
+              {status.public_ingress_configured && (
+                <Text size="sm" color="secondary">{t("admin.projects.ingressExposure")}</Text>
+              )}
+            </span>
+          </label>
+
+          <details className="claw-guide">
+            <summary>{t("admin.projects.cloudflareGuide")}</summary>
+            <div className="claw-guide-body">
+              <Text size="sm" color="secondary">{t("admin.projects.cloudflareIntro")}</Text>
+              <ol className="claw-telegram-steps">
+                <li>
+                  {t("admin.projects.cloudflareStepDomain")} <code>CLAW_SANDBOX__PROJECT_INGRESS_DOMAIN={ingressDomain}</code>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepCheckCli")}
+                  <pre className="claw-project-ingress-config">{`cloudflared --version`}</pre>
+                  <Text size="sm" color="secondary">{t("admin.projects.cloudflareInstallLinux")}</Text>
+                  <pre className="claw-project-ingress-config">{`sudo mkdir -p --mode=0755 /usr/share/keyrings
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt-get update && sudo apt-get install cloudflared`}</pre>
+                  <Text size="sm" color="secondary">{t("admin.projects.cloudflareInstallMac")}</Text>
+                  <pre className="claw-project-ingress-config">{`brew install cloudflared`}</pre>
+                  <Text size="sm" color="secondary">{t("admin.projects.cloudflareInstallOther")}</Text>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepTunnel")}
+                  <pre className="claw-project-ingress-config">{`cloudflared tunnel login
+cloudflared tunnel create privateclaw-project-apps`}</pre>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepConfig")}
+                  <pre className="claw-project-ingress-config">{`sudo install -d -m 755 /etc/cloudflared
+sudo install -m 600 ~/.cloudflared/<PROJECT_INGRESS_TUNNEL_ID>.json /etc/cloudflared/<PROJECT_INGRESS_TUNNEL_ID>.json
+sudo nano /etc/cloudflared/privateclaw-project-apps.yml`}</pre>
+                  <pre className="claw-project-ingress-config">{`tunnel: <PROJECT_INGRESS_TUNNEL_ID>
+credentials-file: /etc/cloudflared/<PROJECT_INGRESS_TUNNEL_ID>.json
+ingress:
+  - hostname: "${wildcardDomain}"
+    service: http://127.0.0.1:8700
+  - service: http_status:404`}</pre>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepService")}
+                  <pre className="claw-project-ingress-config">{`sudo nano /etc/systemd/system/privateclaw-project-apps.service`}</pre>
+                  <pre className="claw-project-ingress-config">{`[Unit]
+Description=PrivateClaw project apps Cloudflare Tunnel
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/privateclaw-project-apps.yml tunnel run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target`}</pre>
+                  <pre className="claw-project-ingress-config">{`sudo systemctl daemon-reload
+sudo systemctl enable --now privateclaw-project-apps
+sudo systemctl status privateclaw-project-apps --no-pager`}</pre>
+                </li>
+                <li>
+                  {t("admin.projects.cloudflareStepDns")}
+                  <div className="claw-scope-chips">
+                    <code>Type: CNAME</code>
+                    <code>Name: {wildcardDomain}</code>
+                    <code>Target: &lt;TUNNEL_ID&gt;.cfargotunnel.com</code>
+                    <code>Proxy: On</code>
+                  </div>
+                </li>
+                <li>{t("admin.projects.cloudflareStepAccess")} <code>{wildcardDomain}</code></li>
+                <li>{t("admin.projects.cloudflareStepEnable")}</li>
+              </ol>
+              <Text size="sm" color="secondary">
+                <a href="https://developers.cloudflare.com/tunnel/downloads/" target="_blank" rel="noreferrer">
+                  {t("admin.projects.cloudflareDownloadDocs")}
+                </a>
+                {" · "}
+                <a href="https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/as-a-service/macos/" target="_blank" rel="noreferrer">
+                  {t("admin.projects.cloudflareMacServiceDocs")}
+                </a>
+              </Text>
+              <Text size="sm" color="secondary">{t("admin.projects.cloudflareTlsNote")}</Text>
+            </div>
+          </details>
+
+          <div className="claw-row claw-row-between claw-project-ingress-verify-action">
+            <Text size="sm" color="secondary">{t("admin.projects.verifyHint")}</Text>
+            <Button
+              label={t("admin.projects.verify")}
+              variant="secondary"
+              isLoading={verifying}
+              isDisabled={verifying || !status.public_ingress_configured}
+              clickAction={verifyPublicIngress}
+            />
+          </div>
+          {error && <ErrorText>{error}</ErrorText>}
+
+          {verifyResult && (
+            <Card padding={2}>
+              <div className="claw-panel" aria-live="polite">
+                <div className="claw-row claw-row-between">
+                  <Text weight="semibold">{t("admin.projects.verifyResults")}</Text>
+                  <Badge
+                    variant={verifyResult.ready ? "success" : "warning"}
+                    label={t(verifyResult.ready ? "admin.projects.verifyReady" : "admin.projects.verifyActionNeeded")}
+                  />
+                </div>
+                <div className="claw-project-ingress-checks">
+                  {verifyResult.checks.map((check) => (
+                    <div className="claw-project-ingress-check" key={check.id}>
+                      <div className="claw-row claw-row-between">
+                        <Text weight="semibold">{t(`admin.projects.verifyCheck.${check.id}`)}</Text>
+                        <Badge
+                          variant={check.status === "passed" ? "success" : check.status === "failed" ? "error" : check.status === "warning" ? "warning" : "neutral"}
+                          label={t(`admin.projects.verifyStatus.${check.status}`)}
+                        />
+                      </div>
+                      <Text size="sm" color="secondary">{t(check.message_key, check.params)}</Text>
+                      {check.hint_key && <Text size="sm" color="secondary">{t(check.hint_key, check.params)}</Text>}
+                    </div>
+                  ))}
+                </div>
+                <Text size="sm" color="secondary">
+                  {t("admin.projects.verifyCheckedAt", { time: new Date(verifyResult.checked_at).toLocaleString() })}
+                </Text>
+              </div>
+            </Card>
+          )}
+
+          <div className="claw-project-status-grid">
+            <div>
+              <Text size="sm" color="secondary">{t("admin.projects.botMode")}</Text>
+              <Badge variant={status.mode_available ? "success" : "error"} label={status.mode_available ? t("admin.projects.available") : t("admin.projects.unavailable")} />
+            </div>
+            <div>
+              <Text size="sm" color="secondary">Docker</Text>
+              <Badge variant={status.docker_available ? "success" : "error"} label={status.docker_available ? t("admin.projects.available") : t("admin.projects.unavailable")} />
+            </div>
+            <div>
+              <Text size="sm" color="secondary">{status.image}</Text>
+              <Badge
+                variant={status.image_available ? "success" : status.building ? "warning" : "neutral"}
+                label={status.image_available ? t("admin.projects.imageReady") : status.building ? t("admin.projects.building") : t("admin.projects.imageMissing")}
+              />
+            </div>
+          </div>
+
+          <div className="claw-project-metric-grid" aria-label={t("admin.projects.usage")}>
+            <div className="claw-project-metric">
+              <Text size="sm" color="secondary">{t("admin.projects.containers")}</Text>
+              <strong>{status.metrics_available ? status.containers.total.toLocaleString() : "—"}</strong>
+              {status.metrics_available ? (
+                <div className="claw-project-container-counts">
+                  <span><i className="is-running" />{status.containers.running} {t("admin.projects.running")}</span>
+                  <span><i />{status.containers.stopped} {t("admin.projects.stopped")}</span>
+                </div>
+              ) : <Text size="sm" color="secondary">{t("admin.projects.unavailable")}</Text>}
+            </div>
+            <div className="claw-project-metric">
+              <Text size="sm" color="secondary">CPU</Text>
+              <strong>{status.metrics_available ? `${status.cpu_percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}%` : "—"}</strong>
+              <Text size="sm" color="secondary">
+                {t(status.metrics_available ? "admin.projects.currentUsage" : "admin.projects.unavailable")}
+              </Text>
+            </div>
+            <div className="claw-project-metric">
+              <Text size="sm" color="secondary">{t("admin.projects.memory")}</Text>
+              <strong>{status.metrics_available ? formatBytes(status.memory_usage_bytes) : "—"}</strong>
+              <Text size="sm" color="secondary">
+                {!status.metrics_available
+                  ? t("admin.projects.unavailable")
+                  : status.memory_limit_bytes > 0
+                  ? t("admin.projects.ofLimit").replace("{limit}", formatBytes(status.memory_limit_bytes))
+                  : t("admin.projects.currentUsage")}
+              </Text>
+            </div>
+            <div className="claw-project-metric">
+              <Text size="sm" color="secondary">{t("admin.projects.disk")}</Text>
+              <strong>{status.metrics_available ? formatBytes(status.disk_usage_bytes) : "—"}</strong>
+              <Text size="sm" color="secondary">
+                {!status.metrics_available
+                  ? t("admin.projects.unavailable")
+                  : status.disk_usage_complete ? t("admin.projects.projectData") : t("admin.projects.partialData")}
+              </Text>
+            </div>
+          </div>
+
+          {status.build_error && <ErrorText>{status.build_error}</ErrorText>}
+          <div className="claw-row">
+            {!status.image_available && (
+              <Button
+                label={status.building ? t("admin.projects.building") : t("admin.projects.buildImage")}
+                icon={<Icon icon={Server} size="sm" />}
+                variant="secondary"
+                isDisabled={!status.docker_available || status.building}
+                isLoading={status.building}
+                clickAction={build}
+              />
+            )}
+            <Button label={t("admin.projects.refresh")} variant="ghost" clickAction={() => void guard(async () => await reload())} />
+          </div>
+          <Text size="sm" color="secondary">{t("admin.projects.policyHint")}</Text>
         </div>
       </Card>
     </div>

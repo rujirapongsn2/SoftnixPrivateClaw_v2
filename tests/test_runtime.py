@@ -94,6 +94,65 @@ async def test_provider_error_does_not_poison_history(stores, tmp_path):
     assert [m["role"] for m in history] == ["user"]
 
 
+async def test_provider_unavailable_gets_specific_user_message(stores, tmp_path):
+    class UnavailableProvider(FakeProvider):
+        async def stream_chat(self, *args, **kwargs):
+            raise ProviderError(
+                "h2 protocol error: error reading a body from connection",
+                error_type="provider_unavailable",
+                retryable=False,
+            )
+            yield  # pragma: no cover
+
+    runtime = make_runtime(stores, UnavailableProvider([]), tmp_path)
+    user = await stores["users"].get_or_create_by_email("unavailable@x.y")
+    session = await stores["sessions"].create(user.id)
+
+    result = await runtime.handle_message(user.id, session.id, "hello")
+
+    assert result == t("error.provider_unavailable", "en")
+    history = await stores["messages"].recent(session.id)
+    assert [message["role"] for message in history] == ["user"]
+
+
+async def test_local_dns_failure_remains_a_network_error(stores, tmp_path):
+    class DnsFailureProvider(FakeProvider):
+        async def stream_chat(self, *args, **kwargs):
+            raise ProviderError("DNS lookup failed for local gateway", retryable=False)
+            yield  # pragma: no cover
+
+    runtime = make_runtime(stores, DnsFailureProvider([]), tmp_path)
+    user = await stores["users"].get_or_create_by_email("dns@x.y")
+    session = await stores["sessions"].create(user.id)
+
+    result = await runtime.handle_message(user.id, session.id, "hello")
+
+    assert t("reason.network", "en") in result
+    assert t("error.provider_unavailable", "en") != result
+
+
+async def test_provider_failure_after_text_keeps_and_marks_partial_answer(stores, tmp_path):
+    class PartialProvider(FakeProvider):
+        async def stream_chat(self, *args, **kwargs):
+            yield TextDelta(text="Completed the safe first part")
+            raise ProviderError(
+                "upstream provider unavailable",
+                error_type="provider_unavailable",
+                retryable=True,
+            )
+
+    runtime = make_runtime(stores, PartialProvider([]), tmp_path)
+    user = await stores["users"].get_or_create_by_email("partial-provider@x.y")
+    session = await stores["sessions"].create(user.id)
+
+    final = await runtime.handle_message(user.id, session.id, "do work")
+
+    assert final.startswith("Completed the safe first part")
+    assert t("error.provider_stream_partial", "en") in final
+    history = await stores["messages"].recent(session.id)
+    assert [message for message in history if message["role"] == "assistant"][-1]["content"] == final
+
+
 async def test_unhandled_exception_raises_turn_failed(stores, tmp_path):
     """A non-ProviderError exception must raise TurnFailed (not return a
     plain string) so callers that branch on success/failure by return value

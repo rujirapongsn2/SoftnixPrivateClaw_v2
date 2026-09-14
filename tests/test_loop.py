@@ -16,7 +16,7 @@ from claw.core.loop import (
     _prompt_size,
     visible_artifacts,
 )
-from claw.providers.base import ChatResult, ProviderError, TextDelta, ToolCall
+from claw.providers.base import ChatResult, ProviderError, TextDelta, ThinkingDelta, ToolCall
 from claw.tools.base import Tool
 from claw.tools.registry import ToolRegistry
 from tests.conftest import FakeProvider, text_turn
@@ -91,7 +91,7 @@ async def test_provider_failure_before_stream_switches_to_configured_fallback():
     assert switched == ["backup/model"]
 
 
-async def test_provider_failure_after_stream_started_does_not_retry_or_duplicate_output():
+async def test_provider_failure_after_visible_output_keeps_partial_without_fallback():
     class PartialFailure:
         def __init__(self):
             self.models = []
@@ -107,8 +107,176 @@ async def test_provider_failure_after_stream_started_does_not_retry_or_duplicate
     provider = PartialFailure()
     loop = AgentLoop(provider, ToolRegistry())
 
-    with pytest.raises(ProviderError, match="connection reset"):
-        await loop.run_turn(
+    outcome = await loop.run_turn(
+        "t1",
+        [{"role": "user", "content": "hi"}],
+        lambda _event: None,
+        model="primary/model",
+        fallback_model="backup/model",
+    )
+
+    assert provider.models == ["primary/model"]
+    assert outcome.final_content == "already visible"
+    assert outcome.interrupted
+    assert outcome.new_messages == [{"role": "assistant", "content": "already visible"}]
+
+
+async def test_provider_unavailable_retries_then_uses_fallback(monkeypatch):
+    calls: list[str] = []
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("claw.core.loop.asyncio.sleep", no_sleep)
+
+    class Provider:
+        async def stream_chat(self, messages, **kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "openrouter/primary":
+                raise ProviderError(
+                    "upstream unavailable",
+                    error_type="provider_unavailable",
+                    retryable=True,
+                )
+            yield TextDelta(text="fallback answer")
+            yield ChatResult(content="fallback answer")
+
+        def count_tokens(self, messages, model=None):
+            return 1
+
+    outcome = await AgentLoop(Provider(), ToolRegistry()).run_turn(
+        "t1",
+        [{"role": "user", "content": "hi"}],
+        lambda _event: None,
+        model="openrouter/primary",
+        fallback_model="openrouter/fallback",
+    )
+
+    assert calls == [
+        "openrouter/primary",
+        "openrouter/primary",
+        "openrouter/primary",
+        "openrouter/fallback",
+    ]
+    assert outcome.final_content == "fallback answer"
+
+
+async def test_http2_failure_before_visible_output_retries_then_falls_back(monkeypatch):
+    calls: list[str] = []
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("claw.core.loop.asyncio.sleep", no_sleep)
+
+    class Provider:
+        async def stream_chat(self, messages, **kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "primary/model":
+                raise ProviderError("h2 protocol error: error reading a body from connection")
+            yield ChatResult(content="recovered")
+
+        def count_tokens(self, messages, model=None):
+            return 1
+
+    outcome = await AgentLoop(Provider(), ToolRegistry()).run_turn(
+        "t1",
+        [{"role": "user", "content": "hi"}],
+        lambda _event: None,
+        model="primary/model",
+        fallback_model="backup/model",
+    )
+
+    assert calls.count("primary/model") == 3
+    assert calls[-1] == "backup/model"
+    assert outcome.final_content == "recovered"
+
+
+async def test_filtered_metadata_before_failure_does_not_block_fallback():
+    calls: list[str] = []
+
+    class Provider:
+        async def stream_chat(self, messages, **kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "primary/model":
+                raise ProviderError(
+                    "metadata arrived before failure",
+                    error_type="provider_unavailable",
+                    transport_stream_started=True,
+                    retryable=False,
+                )
+            yield ChatResult(content="fallback")
+
+        def count_tokens(self, messages, model=None):
+            return 1
+
+    outcome = await AgentLoop(Provider(), ToolRegistry()).run_turn(
+        "t1",
+        [{"role": "user", "content": "metadata transport started"}],
+        lambda _event: None,
+        model="primary/model",
+        fallback_model="backup/model",
+    )
+
+    assert calls == ["primary/model", "backup/model"]
+    assert outcome.final_content == "fallback"
+    assert outcome.usage["prompt_tokens"] > 0
+
+
+async def test_thinking_only_failure_can_fallback_without_mixing_visible_text():
+    calls: list[str] = []
+    events, emit = collector()
+
+    class Provider:
+        async def stream_chat(self, messages, **kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "primary/model":
+                yield ThinkingDelta(text="private reasoning")
+                raise ProviderError(
+                    "provider unavailable",
+                    error_type="provider_unavailable",
+                    retryable=False,
+                )
+            yield TextDelta(text="visible fallback")
+            yield ChatResult(content="visible fallback")
+
+        def count_tokens(self, messages, model=None):
+            return 1
+
+    outcome = await AgentLoop(Provider(), ToolRegistry()).run_turn(
+        "t1",
+        [{"role": "user", "content": "hi"}],
+        emit,
+        model="primary/model",
+        fallback_model="backup/model",
+    )
+
+    visible = [event.text for event in events if isinstance(event, TextDeltaEvent)]
+    assert calls == ["primary/model", "backup/model"]
+    assert visible == ["visible fallback"]
+    assert outcome.final_content == "visible fallback"
+
+
+async def test_fallback_failure_is_terminal_and_does_not_loop():
+    calls: list[str] = []
+
+    class Provider:
+        async def stream_chat(self, messages, **kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "primary/model":
+                raise ProviderError("429 rate limit", error_type="rate_limit")
+            raise ProviderError(
+                "fallback unavailable",
+                error_type="provider_unavailable",
+                retryable=True,
+            )
+            yield  # pragma: no cover
+
+        def count_tokens(self, messages, model=None):
+            return 1
+
+    with pytest.raises(ProviderError, match="fallback unavailable"):
+        await AgentLoop(Provider(), ToolRegistry()).run_turn(
             "t1",
             [{"role": "user", "content": "hi"}],
             lambda _event: None,
@@ -116,7 +284,7 @@ async def test_provider_failure_after_stream_started_does_not_retry_or_duplicate
             fallback_model="backup/model",
         )
 
-    assert provider.models == ["primary/model"]
+    assert calls == ["primary/model", "backup/model"]
 
 
 async def test_tool_call_turn_executes_and_iterates():
@@ -142,6 +310,78 @@ async def test_tool_call_turn_executes_and_iterates():
     assert any(isinstance(e, ToolFinished) and not e.is_error for e in events)
     # The second LLM call must include the tool result.
     assert provider.calls[1][-1]["role"] == "tool"
+
+
+async def test_fallback_after_successful_tool_reuses_result_without_executing_again():
+    repeated = ToolCall(id="fallback-call", name="counter", arguments={"value": "x"})
+    first = ToolCall(id="primary-call", name="counter", arguments={"value": "x"})
+
+    class CounterTool(Tool):
+        name = "counter"
+        description = "Mutate once"
+        parameters = {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        }
+
+        def __init__(self):
+            self.executions = 0
+
+        async def execute(self, value: str, **_: Any) -> str:
+            self.executions += 1
+            return f"completed {value} execution {self.executions}"
+
+    class Provider:
+        def __init__(self):
+            self.calls: list[tuple[str, list[dict[str, Any]]]] = []
+            self.fallback_calls = 0
+
+        async def stream_chat(self, messages, **kwargs):
+            model = kwargs["model"]
+            self.calls.append((model, list(messages)))
+            if len(self.calls) == 1:
+                yield ChatResult(content=None, tool_calls=[first])
+                return
+            if model == "primary/model":
+                raise ProviderError(
+                    "upstream unavailable",
+                    error_type="provider_unavailable",
+                    retryable=False,
+                )
+            self.fallback_calls += 1
+            if self.fallback_calls == 1:
+                yield ChatResult(content=None, tool_calls=[repeated])
+                return
+            yield TextDelta(text="done")
+            yield ChatResult(content="done")
+
+        def count_tokens(self, messages, model=None):
+            return 1
+
+    provider = Provider()
+    counter = CounterTool()
+    tools = ToolRegistry()
+    tools.register(counter)
+
+    outcome = await AgentLoop(provider, tools).run_turn(
+        "t1",
+        [{"role": "user", "content": "mutate"}],
+        lambda _event: None,
+        model="primary/model",
+        fallback_model="backup/model",
+    )
+
+    assert outcome.final_content == "done"
+    assert counter.executions == 1
+    first_fallback_prompt = next(messages for model, messages in provider.calls if model == "backup/model")
+    assert any(
+        message.get("role") == "tool"
+        and message.get("content") == "completed x execution 1"
+        for message in first_fallback_prompt
+    )
+    replayed = [message for message in outcome.new_messages if message.get("tool_call_id") == "fallback-call"]
+    assert replayed[0]["content"] == "completed x execution 1"
 
 
 async def test_max_iterations_guard():
@@ -177,6 +417,59 @@ class CountingWriteTool(Tool):
     async def execute(self, path: str, content: str, **_: Any) -> str:
         self.writes.append(path)
         return f"Wrote {len(content)} chars to {path}"
+
+
+async def test_recovery_executes_a_changed_write_to_the_same_path():
+    first = ToolCall(
+        id="first",
+        name="write_file",
+        arguments={"path": "report.md", "content": "first"},
+    )
+    changed = ToolCall(
+        id="changed",
+        name="write_file",
+        arguments={"path": "report.md", "content": "updated"},
+    )
+
+    class Provider:
+        def __init__(self):
+            self.calls = 0
+            self.fallback_calls = 0
+
+        async def stream_chat(self, messages, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield ChatResult(content=None, tool_calls=[first])
+                return
+            if kwargs["model"] == "primary/model":
+                raise ProviderError(
+                    "provider unavailable",
+                    error_type="provider_unavailable",
+                    retryable=False,
+                )
+            self.fallback_calls += 1
+            if self.fallback_calls == 1:
+                yield ChatResult(content=None, tool_calls=[changed])
+                return
+            yield ChatResult(content="done")
+
+        def count_tokens(self, messages, model=None):
+            return 1
+
+    tool = CountingWriteTool()
+    tools = ToolRegistry()
+    tools.register(tool)
+
+    outcome = await AgentLoop(Provider(), tools).run_turn(
+        "t1",
+        [{"role": "user", "content": "write"}],
+        lambda _event: None,
+        model="primary/model",
+        fallback_model="backup/model",
+    )
+
+    assert outcome.final_content == "done"
+    assert tool.writes == ["report.md", "report.md"]
 
 
 async def test_rewriting_the_same_file_is_blocked_after_the_repeat_limit():

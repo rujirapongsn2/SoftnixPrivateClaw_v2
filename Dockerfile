@@ -36,6 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends fonts-thai-tlwg
 
 COPY claw/ ./claw/
 COPY sbot/ ./sbot/
+COPY docker/developer.Dockerfile ./docker/developer.Dockerfile
+COPY scripts/project-worktree.py ./scripts/project-worktree.py
 COPY migrations/ ./migrations/
 COPY alembic.ini ./
 COPY --from=web /web/dist ./web/dist

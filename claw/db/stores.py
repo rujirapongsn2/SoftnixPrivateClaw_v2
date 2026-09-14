@@ -2822,6 +2822,58 @@ class OAuthAppStore:
             await db.commit()
 
 
+class ProjectContainerConfigStore:
+    """Database-backed global switch; the environment is the initial fallback."""
+
+    _KEY = "project_containers"
+    _INGRESS_KEY = "project_public_ingress"
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+        self.factory = factory
+
+    async def get(
+        self, default_enabled: bool = False, default_public_ingress_enabled: bool = False
+    ) -> dict[str, bool]:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+            ingress_row = await db.get(AppSetting, self._INGRESS_KEY)
+        value = dict(row.value or {}) if row is not None else {}
+        ingress_value = dict(ingress_row.value or {}) if ingress_row is not None else {}
+        enabled = value.get("enabled", default_enabled)
+        # Read the original combined-row field as a migration fallback. New
+        # writes use an independent row, so simultaneous admin toggles cannot
+        # overwrite one another through JSON read-modify-write races.
+        public_ingress_enabled = ingress_value.get(
+            "enabled", value.get("public_ingress_enabled", default_public_ingress_enabled)
+        )
+        return {
+            "enabled": enabled if isinstance(enabled, bool) else default_enabled,
+            "public_ingress_enabled": (
+                public_ingress_enabled if isinstance(public_ingress_enabled, bool)
+                else default_public_ingress_enabled
+            ),
+        }
+
+    async def _set(self, setting_key: str, enabled: bool) -> None:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, setting_key)
+            # Preserve legacy fields on the container row until every install
+            # has performed at least one ingress write to the new row.
+            value = dict(row.value or {}) if row is not None and setting_key == self._KEY else {}
+            value["enabled"] = enabled
+            if row is None:
+                db.add(AppSetting(key=setting_key, value=value))
+            else:
+                row.value = value
+            await db.commit()
+
+    async def set_enabled(self, enabled: bool) -> None:
+        await self._set(self._KEY, enabled)
+
+    async def set_public_ingress_enabled(self, enabled: bool) -> None:
+        await self._set(self._INGRESS_KEY, enabled)
+
+
 class TelegramConfigStore:
     """Admin-configured Telegram bot token, so the integration is turned on
     self-service from the Admin console instead of an env var + server restart.

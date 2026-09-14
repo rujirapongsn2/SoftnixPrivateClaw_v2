@@ -7,6 +7,7 @@ per session and adapters consume events from the bus.
 
 import asyncio
 import json
+import random
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -53,6 +54,12 @@ _PREVIEW_CHARS = 200
 # forever, which burns the whole token budget and the wall clock without making
 # progress; observed in the wild as four full rewrites of the same file.
 _REPEAT_LIMIT = 3
+
+# Retry only transient provider failures, and keep the retry window deliberately
+# small so a broken upstream cannot trap a turn. The configured fallback is
+# attempted once after these primary attempts are exhausted.
+_MAX_TRANSIENT_RETRIES = 2
+_RETRY_BASE_SECONDS = 0.25
 
 # Tools whose repetition is judged by target path rather than by the whole
 # argument set: a stuck rewrite loop produces slightly different content each
@@ -224,6 +231,49 @@ def _call_signature(name: str, arguments: dict[str, Any]) -> str:
     return f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
+def _exact_call_signature(name: str, arguments: dict[str, Any]) -> str:
+    """Exact identity used only to prevent replay after provider recovery.
+
+    This must include every argument. The regular loop-breaker intentionally
+    groups writes by path, but a fallback model may legitimately write new
+    content to the same path and that must still execute.
+    """
+    return f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
+
+
+def _gateway_for_model(model: str | None) -> str | None:
+    if not model or "/" not in model:
+        return None
+    return model.split("/", 1)[0]
+
+
+def _provider_error_type(exc: ProviderError) -> str:
+    if exc.error_type:
+        return exc.error_type
+    detail = str(exc).lower()
+    if any(
+        marker in detail
+        for marker in (
+            "provider_unavailable",
+            "upstream error from",
+            "h2 protocol error",
+            "error reading a body from connection",
+        )
+    ):
+        return "provider_unavailable"
+    if any(marker in detail for marker in ("timeout", "timed out", "deadline")):
+        return "timeout"
+    if any(marker in detail for marker in ("429", "rate limit", "too many requests")):
+        return "rate_limit"
+    return "provider_error"
+
+
+def _is_transient_provider_error(exc: ProviderError) -> bool:
+    if exc.retryable is not None:
+        return exc.retryable
+    return _provider_error_type(exc) in {"provider_unavailable", "timeout"}
+
+
 # Directories/suffixes we never surface as artifacts when scanning for files an
 # `exec` command created (build/cache noise, VCS internals, hidden dotfiles).
 _ARTIFACT_IGNORE_DIRS = {"__pycache__", "node_modules"}
@@ -328,6 +378,10 @@ class TurnOutcome:
     # limit — a few slow tool calls are enough — and the user needs to be told
     # which limit actually stopped the work.
     timed_out: bool = False
+    # The provider stream failed after visible text had already reached the UI.
+    # The partial answer is returned and persisted; the runtime appends a
+    # localized marker so it cannot be mistaken for a complete response.
+    interrupted: bool = False
     # Why the final call stopped. Only meaningful when final_content is empty:
     # it separates "cut off at the output cap" from "answered with nothing",
     # which need different messages. The runtime does that mapping (it owns the
@@ -414,13 +468,15 @@ class AgentLoop:
         `model`/`api_key`/`api_base` override the loop defaults for this turn only
         (per-chat model selection), falling back to the agent's configured model.
         `context_window` is the admin's per-model input-window override, if set.
-        A configured fallback is adopted for the rest of the turn only when an
-        upstream call fails before emitting any stream event.
+        A configured fallback is adopted for the rest of the turn when an
+        upstream call fails before emitting user-visible text. Transport-only
+        events (usage metadata or hidden thinking) do not block recovery.
         """
         working = list(messages)
         base_len = len(working)
         usage_total: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         effective_model = model or self.model
+        requested_model = effective_model
         fallback_available = bool(
             fallback_model
             and (
@@ -453,6 +509,12 @@ class AgentLoop:
         # appending rather than by being rewritten.
         sent_results: dict[str, str] = {}
         sent_order: list[str] = []
+        # Successful tool results survive provider recovery. If a retried or
+        # fallback model repeats the exact call it just received in the prompt,
+        # reuse the result instead of executing the side effect a second time.
+        successful_tool_results: dict[str, str] = {}
+        recovery_generation = False
+        fallback_selected = False
         ceiling = _compaction_ceiling_chars(effective_model, self.max_tokens, context_window)
         if fallback_available:
             ceiling = min(
@@ -490,14 +552,16 @@ class AgentLoop:
             # a 600s turn past 700s, and the user is told "too long" only after
             # waiting all of it. `None` = no budget, which asyncio.timeout
             # treats as no deadline.
-            remaining = (
-                max(0.0, self.max_turn_seconds - (time.monotonic() - started))
-                if self.max_turn_seconds > 0
-                else None
-            )
-            stream_started = False
+            retry_count = 0
             try:
                 while True:
+                    transport_stream_started = False
+                    attempt_generated_chars = 0
+                    remaining = (
+                        max(0.0, self.max_turn_seconds - (time.monotonic() - started))
+                        if self.max_turn_seconds > 0
+                        else None
+                    )
                     try:
                         async with asyncio.timeout(remaining) as budget:
                             async for event in self.provider.stream_chat(
@@ -509,38 +573,115 @@ class AgentLoop:
                                 api_key=api_key,
                                 api_base=api_base,
                             ):
-                                stream_started = True
+                                transport_stream_started = True
                                 if isinstance(event, TextDelta):
+                                    attempt_generated_chars += len(event.text)
                                     if first_text_at is None:
                                         first_text_at = time.monotonic()
                                     partial.append(event.text)
                                     emit(TextDeltaEvent(turn_id=turn_id, text=event.text))
                                 elif isinstance(event, ThinkingDelta):
+                                    attempt_generated_chars += len(event.text)
                                     emit(ThinkingDeltaEvent(turn_id=turn_id, text=event.text))
                                 elif isinstance(event, ChatResult):
                                     result = event
                         break
                     except ProviderError as exc:
-                        if fallback_available and not stream_started:
-                            logger.warning(
-                                "Turn {} switching from model {} to fallback {} after upstream failure: {}",
-                                turn_id,
-                                effective_model,
-                                fallback_model,
-                                exc,
+                        transport_stream_started = (
+                            transport_stream_started or exc.transport_stream_started
+                        )
+                        visible_output_started = bool(partial)
+                        committed_output_started = bool(successful_tool_results)
+                        transient = _is_transient_provider_error(exc)
+                        retry_delay = _RETRY_BASE_SECONDS * (2**retry_count)
+                        retry_delay += random.uniform(0, retry_delay * 0.2)
+                        remaining_after_failure = (
+                            max(0.0, self.max_turn_seconds - (time.monotonic() - started))
+                            if self.max_turn_seconds > 0
+                            else None
+                        )
+                        has_retry_budget = bool(
+                            remaining_after_failure is None
+                            or remaining_after_failure > retry_delay
+                        )
+                        will_retry = bool(
+                            transient
+                            and not fallback_selected
+                            and not visible_output_started
+                            and retry_count < _MAX_TRANSIENT_RETRIES
+                            and has_retry_budget
+                        )
+                        will_fallback = bool(
+                            fallback_available and not visible_output_started and not will_retry
+                        )
+                        logger.bind(
+                            turn_id=turn_id,
+                            requested_model=requested_model,
+                            effective_model=effective_model,
+                            gateway=exc.gateway or _gateway_for_model(effective_model),
+                            provider=exc.gateway or _gateway_for_model(effective_model),
+                            upstream_provider=exc.upstream_provider,
+                            error_type=_provider_error_type(exc),
+                            retry_count=retry_count,
+                            transport_stream_started=transport_stream_started,
+                            visible_output_started=visible_output_started,
+                            committed_output_started=committed_output_started,
+                            fallback_available=fallback_available,
+                            fallback_selected=fallback_selected or will_fallback,
+                            tool_side_effect_state=(
+                                "completed" if committed_output_started else "none"
+                            ),
+                        ).warning("LLM provider attempt failed")
+
+                        # Usage normally arrives only with ChatResult. Account
+                        # for an interrupted transport attempt, but do not bill
+                        # a request rejected before the stream produced anything.
+                        if transport_stream_started:
+                            _add_estimated_usage(usage_total, size, attempt_generated_chars)
+
+                        if visible_output_started:
+                            streamed = "".join(partial)
+                            working.append({"role": "assistant", "content": streamed})
+                            shown, suppressed = _split_artifacts(written)
+                            return TurnOutcome(
+                                final_content=streamed,
+                                finish_reason="provider_error",
+                                new_messages=working[base_len:],
+                                usage=usage_total,
+                                interrupted=True,
+                                artifacts=shown,
+                                hidden_artifacts=suppressed,
+                                iterations=iterations,
+                                tool_calls=tool_call_count,
+                                ttft_ms=_elapsed_ms(started, first_text_at),
+                                duration_ms=_elapsed_ms(started, time.monotonic()),
+                                tool_defs_chars=tool_defs_chars,
+                                prompt_chars=prompt_chars,
                             )
+
+                        if will_retry:
+                            retry_count += 1
+                            recovery_generation = bool(successful_tool_results)
+                            await asyncio.sleep(retry_delay)
+                            continue
+
+                        if will_fallback:
+                            logger.bind(
+                                turn_id=turn_id,
+                                requested_model=requested_model,
+                                failed_model=effective_model,
+                                fallback_model=fallback_model,
+                                retry_count=retry_count,
+                            ).warning("Switching turn to configured fallback model")
                             effective_model = fallback_model
                             api_key = fallback_api_key
                             api_base = fallback_api_base
                             context_window = fallback_context_window
                             fallback_available = False
+                            fallback_selected = True
+                            recovery_generation = bool(successful_tool_results)
                             if on_fallback is not None:
                                 on_fallback(effective_model)
-                            remaining = (
-                                max(0.0, self.max_turn_seconds - (time.monotonic() - started))
-                                if self.max_turn_seconds > 0
-                                else None
-                            )
                             continue
                         raise
             except TimeoutError:
@@ -637,70 +778,96 @@ class AgentLoop:
                 # reads (edit a script, then re-run it), which makes the repeat
                 # legitimate.
                 signature = _call_signature(tc.name, tc.arguments)
-                if signature != last_signature:
-                    last_signature = signature
-                    repeats = 0
-                # Ask-mode gate: pause for user approval before an unsafe tool.
-                # Checked before the loop breaker below — a human re-approving
-                # the same call each time is this call's safety gate, not the
-                # loop, so it must keep being asked rather than getting silently
-                # auto-blocked once the repeat count crosses the limit.
-                gated_by_confirm = (
-                    permission_mode == "ask" and tc.name in UNSAFE_TOOLS and confirm is not None
+                replay_signature = _exact_call_signature(tc.name, tc.arguments)
+                replayed_result = (
+                    successful_tool_results.get(replay_signature)
+                    if recovery_generation
+                    else None
                 )
-                if gated_by_confirm:
-                    approved = await confirm(turn_id, tc.name, args_preview)
-                    if not approved:
-                        block_message = "The user declined to run this action."
-                # Loop breaker: only counts as a runaway loop for calls nothing
-                # human gated this turn (auto mode, or tools outside
-                # UNSAFE_TOOLS) — a call the user just explicitly approved above
-                # isn't that.
-                if block_message is None and not gated_by_confirm and repeats >= _REPEAT_LIMIT:
-                    logger.warning(
-                        "Turn {} blocked repeated tool call: {} (x{})",
-                        turn_id,
-                        signature[:_PREVIEW_CHARS],
-                        repeats + 1,
-                    )
-                    block_message = (
-                        f"Repeated call blocked: `{tc.name}` just ran {_REPEAT_LIMIT} times in a row "
-                        "with the same arguments and nothing happened in between, so running it "
-                        "again produces the same result. Do something different: take the next "
-                        "step, or answer the user with what you have."
-                    )
-                if block_message is None and self.arg_guard is not None:
-                    args, block_message = self.arg_guard(tc.name, tc.arguments)
-                if block_message is not None:
-                    tool_result = f"Error: {block_message}"
+                if replayed_result is not None:
+                    tool_result = replayed_result
+                    logger.bind(
+                        turn_id=turn_id,
+                        tool=tc.name,
+                        tool_call_id=tc.id,
+                    ).warning("Reused successful tool result during provider recovery")
                 else:
-                    # Counted here, not at the gates above: a call the user
-                    # declined or the guardrail masked never ran, so it must not
-                    # push the tool toward a limit that claims it already has.
-                    repeats += 1
-
-                    # Sub-step progress for long tools (workflow) → Execution panel.
-                    def _progress(payload: dict, _name: str = tc.name) -> None:
-                        emit(
-                            ToolProgress(
-                                turn_id=turn_id,
-                                tool=_name,
-                                label=str(payload.get("label") or ""),
-                                stage=str(payload.get("stage") or ""),
-                                index=int(payload.get("index") or 0),
-                                total=int(payload.get("total") or 0),
-                                status=str(payload.get("status") or "running"),
-                            )
-                        )
-
-                    # Absolute deadline for the whole turn, so a tool that opts in
-                    # (e.g. workflow) can bound its own multi-step budget by what's
-                    # actually left here instead of granting itself a fresh full
-                    # max_turn_seconds regardless of how much of the turn is spent.
-                    turn_deadline = started + self.max_turn_seconds if self.max_turn_seconds > 0 else None
-                    tool_result = await self.tools.execute(
-                        tc.name, args, progress=_progress, deadline=turn_deadline
+                    if signature != last_signature:
+                        last_signature = signature
+                        repeats = 0
+                    # Ask-mode gate: pause for user approval before an unsafe tool.
+                    # Checked before the loop breaker below — a human re-approving
+                    # the same call each time is this call's safety gate, not the
+                    # loop, so it must keep being asked rather than getting silently
+                    # auto-blocked once the repeat count crosses the limit.
+                    gated_by_confirm = (
+                        permission_mode == "ask"
+                        and tc.name in UNSAFE_TOOLS
+                        and confirm is not None
                     )
+                    if gated_by_confirm:
+                        approved = await confirm(turn_id, tc.name, args_preview)
+                        if not approved:
+                            block_message = "The user declined to run this action."
+                    # Loop breaker: only counts as a runaway loop for calls nothing
+                    # human gated this turn (auto mode, or tools outside
+                    # UNSAFE_TOOLS) — a call the user just explicitly approved above
+                    # isn't that.
+                    if (
+                        block_message is None
+                        and not gated_by_confirm
+                        and repeats >= _REPEAT_LIMIT
+                    ):
+                        logger.warning(
+                            "Turn {} blocked repeated tool call: {} (x{})",
+                            turn_id,
+                            signature[:_PREVIEW_CHARS],
+                            repeats + 1,
+                        )
+                        block_message = (
+                            f"Repeated call blocked: `{tc.name}` just ran {_REPEAT_LIMIT} times in a row "
+                            "with the same arguments and nothing happened in between, so running it "
+                            "again produces the same result. Do something different: take the next "
+                            "step, or answer the user with what you have."
+                        )
+                    if block_message is None and self.arg_guard is not None:
+                        args, block_message = self.arg_guard(tc.name, tc.arguments)
+                    if block_message is not None:
+                        tool_result = f"Error: {block_message}"
+                    else:
+                        # Counted here, not at the gates above: a call the user
+                        # declined or the guardrail masked never ran, so it must not
+                        # push the tool toward a limit that claims it already has.
+                        repeats += 1
+
+                        # Sub-step progress for long tools (workflow) → Execution panel.
+                        def _progress(payload: dict, _name: str = tc.name) -> None:
+                            emit(
+                                ToolProgress(
+                                    turn_id=turn_id,
+                                    tool=_name,
+                                    label=str(payload.get("label") or ""),
+                                    stage=str(payload.get("stage") or ""),
+                                    index=int(payload.get("index") or 0),
+                                    total=int(payload.get("total") or 0),
+                                    status=str(payload.get("status") or "running"),
+                                )
+                            )
+
+                        # Absolute deadline for the whole turn, so a tool that opts in
+                        # (e.g. workflow) can bound its own multi-step budget by what's
+                        # actually left here instead of granting itself a fresh full
+                        # max_turn_seconds regardless of how much of the turn is spent.
+                        turn_deadline = (
+                            started + self.max_turn_seconds
+                            if self.max_turn_seconds > 0
+                            else None
+                        )
+                        tool_result = await self.tools.execute(
+                            tc.name, args, progress=_progress, deadline=turn_deadline
+                        )
+                        if not tool_result.startswith("Error"):
+                            successful_tool_results[replay_signature] = tool_result
                 # Track files the agent created/edited (successful write_file /
                 # edit_file) so the UI can offer them as artifacts.
                 if (
@@ -750,6 +917,7 @@ class AgentLoop:
                         "content": tool_result,
                     }
                 )
+            recovery_generation = False
 
         if timed_out:
             logger.warning(

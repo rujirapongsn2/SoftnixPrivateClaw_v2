@@ -74,6 +74,7 @@ class AppState:
     telegram_mgr: "TelegramManager"
     smtp_config: SmtpConfigStore
     project_access: "ProjectAccessPolicy"
+    project_containers: "ProjectContainerManager"
     # Usage-tier plans (model cost ceilings + daily/per-minute quotas).
     plans: PolicyPlanStore = None  # type: ignore[assignment]
     # Global branding & appearance (Control Plane > Preferences).
