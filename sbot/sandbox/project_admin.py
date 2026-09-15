@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -90,10 +91,14 @@ class ProjectContainerManager:
         config = await self.config_store.get(
             default_enabled=self.settings.projects_enabled,
             default_public_ingress_enabled=getattr(self.settings, "project_public_ingress_enabled", False),
+            default_host_bind_ip=getattr(self.settings, "project_host_bind_ip", "127.0.0.1"),
         )
         self.settings.projects_enabled = config["enabled"]
         self.settings.project_public_ingress_enabled = config.get(
             "public_ingress_enabled", getattr(self.settings, "project_public_ingress_enabled", False)
+        )
+        self.settings.project_host_bind_ip = str(
+            config.get("host_bind_ip", getattr(self.settings, "project_host_bind_ip", "127.0.0.1"))
         )
         if self.settings.enabled and self.settings.projects_enabled:
             docker_available = await self._docker_ready()
@@ -169,6 +174,12 @@ class ProjectContainerManager:
             "build_error": self._build_error,
             "build_started_at": self._build_started_at,
             "ready": bool(self.settings.enabled and self.settings.projects_enabled and docker_available and image_available),
+            "host_bind_ip": getattr(self.settings, "project_host_bind_ip", "127.0.0.1"),
+            "access_scope": (
+                "host" if getattr(self.settings, "project_host_bind_ip", "127.0.0.1") == "127.0.0.1"
+                else "lan"
+            ),
+            "project_ports": list(getattr(self.settings, "project_ports", [3000, 8000, 8080])),
             "public_ingress_enabled": bool(getattr(self.settings, "project_public_ingress_enabled", False)),
             "public_ingress_configured": bool(getattr(self.settings, "project_ingress_domain", "")),
             "public_ingress_domain": getattr(self.settings, "project_ingress_domain", ""),
@@ -300,6 +311,18 @@ class ProjectContainerManager:
             raise ValueError("Configure project_ingress_domain before enabling public ingress")
         await self.config_store.set_public_ingress_enabled(enabled)
         self.settings.project_public_ingress_enabled = enabled
+        return await self.status()
+
+    async def set_host_bind_ip(self, host_bind_ip: str) -> dict:
+        try:
+            address = ipaddress.ip_address(host_bind_ip.strip())
+        except ValueError as exc:
+            raise ValueError("Enter a private or loopback IPv4 address") from exc
+        if address.version != 4 or address.is_unspecified or not (address.is_private or address.is_loopback):
+            raise ValueError("Enter a private or loopback IPv4 address")
+        normalized = str(address)
+        await self.config_store.set_host_bind_ip(normalized)
+        self.settings.project_host_bind_ip = normalized
         return await self.status()
 
     async def start_build(self) -> dict:

@@ -22,7 +22,7 @@ async def test_usage_store_records_and_aggregates(db_factory, stores):
 async def test_background_spend_is_billed_but_is_not_a_turn(db_factory):
     """Memory consolidation spends real tokens without the user taking a turn.
 
-    Every turn figure has to agree on that: the quota reads UsageDaily.turns
+    Every turn figure has to agree on that: the quota reads UsageDaily.plan_turns
     while the admin and per-user reports count usage_records, so if only one
     side excluded background work a user would see more turns billed than
     their own quota shows.

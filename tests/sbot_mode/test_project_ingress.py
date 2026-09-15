@@ -285,4 +285,8 @@ async def test_project_container_toggles_use_independent_rows(db_factory):
 
     await asyncio.gather(store.set_enabled(True), store.set_public_ingress_enabled(True))
 
-    assert await store.get() == {"enabled": True, "public_ingress_enabled": True}
+    assert await store.get() == {
+        "enabled": True,
+        "public_ingress_enabled": True,
+        "host_bind_ip": "127.0.0.1",
+    }

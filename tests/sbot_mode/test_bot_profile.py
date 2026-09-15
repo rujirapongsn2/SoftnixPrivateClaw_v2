@@ -23,8 +23,9 @@ from sbot.core.context import (
 from sbot.core.memory import MemoryService
 from sbot.core.runtime import AgentRuntime
 from sbot.core.turn_context import current_session_id
-from sbot.db.stores import SkillStore
-from sbot.providers.base import ChatResult, ToolCall
+from sbot.core.plans import builtin_plan_seeds
+from sbot.db.stores import LLMConfigStore, PolicyPlanStore, SkillStore, UsageStore
+from sbot.providers.base import ChatResult, ProviderError, ToolCall
 from sbot.tools.plan import PlanTool
 from tests.sbot_mode.conftest import FakeProvider, text_turn
 
@@ -95,6 +96,119 @@ async def _bot_session(stores, email: str, **bot_fields):
 
 def system_text(call: list[dict]) -> str:
     return next(m["content"] for m in call if m["role"] == "system")
+
+
+@pytest.mark.asyncio
+async def test_my_model_bypasses_plan_message_and_rpm_quotas(stores, db_factory, tmp_path):
+    plans = PolicyPlanStore(db_factory)
+    await plans.seed(builtin_plan_seeds())
+    default = await plans.default_plan()
+    await plans.update(default["id"], messages_per_day=1, turns_per_minute=1)
+    usage = UsageStore(db_factory, is_postgres=False)
+    llm_config = LLMConfigStore(db_factory)
+
+    user, _, session = await _bot_session(stores, "byok@sbot.ai")
+    private_provider = await llm_config.create_provider(
+        "mine", "sk-test", "", True, "openrouter", owner_id=user.id
+    )
+    await llm_config.create_model(
+        private_provider.id,
+        "vendor/private",
+        "Private",
+        True,
+        "very_high",
+        "",
+        kind="chat",
+        owner_id=user.id,
+    )
+    await usage.record(user.id, None, "already-used", {"prompt_tokens": 1, "completion_tokens": 1})
+
+    provider = FakeProvider([text_turn("first"), text_turn("second")])
+    runtime = make_runtime(stores, provider, tmp_path)
+    runtime.plans = plans
+    runtime.usage = usage
+    runtime.llm_config = llm_config
+
+    first = await runtime.handle_message(user.id, session.id, "one", model="vendor/private")
+    second = await runtime.handle_message(user.id, session.id, "two", model="vendor/private")
+
+    assert (first, second) == ("first", "second")
+    assert provider.models == ["vendor/private", "vendor/private"]
+    await runtime.drain()
+    today = await usage.usage_today(user.id)
+    assert today["turns"] == 3
+    assert today["plan_turns"] == 1
+
+
+@pytest.mark.asyncio
+async def test_my_model_turns_do_not_fill_global_model_plan_rpm(stores, db_factory, tmp_path):
+    plans = PolicyPlanStore(db_factory)
+    await plans.seed(builtin_plan_seeds())
+    default = await plans.default_plan()
+    await plans.update(
+        default["id"], messages_per_day=0, turns_per_minute=1, max_chat_cost="very_high"
+    )
+    llm_config = LLMConfigStore(db_factory)
+    user, _, session = await _bot_session(stores, "mixed@sbot.ai")
+    private_provider = await llm_config.create_provider(
+        "mine", "sk", "", True, "openrouter", owner_id=user.id
+    )
+    await llm_config.create_model(
+        private_provider.id, "vendor/private", "Private", True, "very_high", "",
+        kind="chat", owner_id=user.id,
+    )
+    global_provider = await llm_config.create_provider("shared", "sk", "", True, "openrouter")
+    await llm_config.create_model(
+        global_provider.id, "vendor/global", "Global", True, "low", "", kind="chat"
+    )
+
+    provider = FakeProvider([text_turn("p1"), text_turn("p2"), text_turn("g1")])
+    runtime = make_runtime(stores, provider, tmp_path)
+    runtime.plans = plans
+    runtime.llm_config = llm_config
+
+    assert await runtime.handle_message(user.id, session.id, "p1", model="vendor/private") == "p1"
+    assert await runtime.handle_message(user.id, session.id, "p2", model="vendor/private") == "p2"
+    assert await runtime.handle_message(user.id, session.id, "g1", model="vendor/global") == "g1"
+    blocked = await runtime.handle_message(user.id, session.id, "g2", model="vendor/global")
+
+    assert "too fast" in blocked.lower() or "ถี่" in blocked
+    assert provider.models == ["vendor/private", "vendor/private", "vendor/global"]
+
+
+@pytest.mark.asyncio
+async def test_my_model_does_not_use_operator_fallback(stores, db_factory, tmp_path):
+    plans = PolicyPlanStore(db_factory)
+    await plans.seed(builtin_plan_seeds())
+    llm_config = LLMConfigStore(db_factory)
+    user, _, session = await _bot_session(stores, "private-failure@sbot.ai")
+    private_provider = await llm_config.create_provider(
+        "mine", "sk", "", True, "openrouter", owner_id=user.id
+    )
+    await llm_config.create_model(
+        private_provider.id, "vendor/private", "Private", True, "very_high", "",
+        kind="chat", owner_id=user.id,
+    )
+    global_provider = await llm_config.create_provider("shared", "sk", "", True, "openrouter")
+    fallback = await llm_config.create_model(
+        global_provider.id, "vendor/fallback", "Fallback", True, "low", "", kind="chat"
+    )
+    await llm_config.update_model(fallback.id, owner_id=None, is_fallback=True)
+
+    class FailingPrivateProvider(FakeProvider):
+        async def stream_chat(self, messages, tools=None, model=None, **kwargs):
+            self.models.append(model)
+            raise ProviderError("private provider unavailable", retryable=False)
+            yield  # pragma: no cover
+
+    provider = FailingPrivateProvider([])
+    runtime = make_runtime(stores, provider, tmp_path)
+    runtime.plans = plans
+    runtime.llm_config = llm_config
+
+    await runtime.handle_message(user.id, session.id, "hello", model="vendor/private")
+
+    assert provider.models == ["vendor/private"]
 
 
 @pytest.mark.asyncio

@@ -528,6 +528,7 @@ export interface ProjectContainerInfo {
   container: string;
   state: string;
   ports: Record<string, { HostIp: string; HostPort: string }[] | null>;
+  access_urls: { container_port: number; host_port: number; url: string }[];
   public_url: string | null;
 }
 
@@ -561,7 +562,7 @@ export type PlanPatch = Partial<PlanCreate>;
 // GET /api/my/plan — the caller's effective plan + today's consumption.
 export interface MyPlan {
   plan: PlanInfo | null;
-  used: { turns: number; images: number };
+  used: { turns: number; images: number; plan_turns?: number };
   messages_remaining?: number | null;
   images_remaining?: number | null;
 }
@@ -803,6 +804,9 @@ export interface ProjectContainerAdminStatus {
   build_error: string;
   build_started_at: string | null;
   ready: boolean;
+  host_bind_ip: string;
+  access_scope: "host" | "lan";
+  project_ports: number[];
   public_ingress_enabled: boolean;
   public_ingress_configured: boolean;
   public_ingress_domain: string;
@@ -1593,6 +1597,11 @@ export const api = {
     request<ProjectContainerAdminStatus>("/api/admin/project-containers", {
       method: "PUT",
       body: JSON.stringify({ enabled }),
+    }),
+  adminSetProjectInternalAccess: (hostBindIp: string) =>
+    request<ProjectContainerAdminStatus>("/api/admin/project-containers/internal-access", {
+      method: "PUT",
+      body: JSON.stringify({ host_bind_ip: hostBindIp }),
     }),
   adminSetProjectPublicIngress: (enabled: boolean) =>
     request<ProjectContainerAdminStatus>("/api/admin/project-containers/public-ingress", {

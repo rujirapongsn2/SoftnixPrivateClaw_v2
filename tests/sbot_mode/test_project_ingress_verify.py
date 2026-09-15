@@ -14,6 +14,13 @@ class _DnsResponse:
         return {"Answer": [{"type": 5, "data": "tunnel-id.cfargotunnel.com."}]}
 
 
+class _FlattenedDnsResponse(_DnsResponse):
+    def json(self):
+        # Proxied Cloudflare records resolve to edge A/AAAA records and do not
+        # expose the underlying cfargotunnel.com CNAME to recursive resolvers.
+        return {"Answer": []}
+
+
 class _PublicResponse:
     status_code = 404
     text = "Project route not found"
@@ -74,6 +81,33 @@ async def test_verify_public_ingress_reports_missing_domain_without_network_call
     assert result["ready"] is False
     assert [check["id"] for check in result["checks"]] == ["privateclaw", "configuration"]
     assert result["checks"][1]["status"] == "failed"
+
+
+async def test_verify_public_ingress_accepts_cloudflare_cname_flattening(monkeypatch):
+    settings = SimpleNamespace(
+        enabled=True,
+        projects_enabled=True,
+        project_public_ingress_enabled=True,
+        project_ingress_domain="apps.example.com",
+        project_ingress_scheme="https",
+    )
+
+    monkeypatch.setattr(project_containers.socket, "getaddrinfo", lambda *args, **kwargs: [
+        (None, None, None, None, ("104.21.22.93", 443)),
+    ])
+
+    responses = iter([_FlattenedDnsResponse(), _PublicResponse()])
+    monkeypatch.setattr(
+        project_containers.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: _FakeClient(next(responses)),
+    )
+
+    result = await project_containers._verify_public_ingress(settings)
+
+    assert result["ready"] is True
+    assert [check["status"] for check in result["checks"]] == ["passed"] * 5
+    assert result["checks"][2]["id"] == "dns"
 
 
 async def test_verify_endpoint_throttles_repeated_checks(monkeypatch):

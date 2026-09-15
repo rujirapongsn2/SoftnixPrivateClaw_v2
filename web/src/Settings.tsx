@@ -5,6 +5,7 @@ import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Divider } from "@astryxdesign/core/Divider";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon, type IconName, type IconType } from "@astryxdesign/core/Icon";
+import { IconButton } from "@astryxdesign/core/IconButton";
 import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { MoreMenu } from "@astryxdesign/core/MoreMenu";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
@@ -301,9 +302,6 @@ function ProjectsPanel() {
       ) : (
         inventory.projects.map((item) => {
           const running = item.state === "running";
-          const ports = Object.entries(item.ports).flatMap(([containerPort, bindings]) =>
-            (bindings ?? []).map((binding) => `${binding.HostIp}:${binding.HostPort} → ${containerPort}`),
-          );
           return (
             <Card key={item.project} padding={2}>
               <div className="claw-panel">
@@ -317,17 +315,35 @@ function ProjectsPanel() {
                     label={running ? t("settings.projects.running") : t("settings.projects.stopped")}
                   />
                 </div>
-                {ports.length > 0 && <Text size="xsm" color="secondary">{ports.join(" · ")}</Text>}
+                {running && item.access_urls.length > 0 && (
+                  <div className="claw-panel">
+                    {item.access_urls.map((access) => (
+                      <div className="claw-row claw-row-between" key={access.container_port}>
+                        <div>
+                          <Text size="sm">{access.url}</Text>
+                          <Text size="xsm" color="secondary">
+                            {t("settings.projects.containerPort", { port: String(access.container_port) })}
+                          </Text>
+                        </div>
+                        <div className="claw-row">
+                          <IconButton
+                            label={t("settings.projects.copyLink")}
+                            icon={<Icon icon={Copy} size="xsm" />}
+                            clickAction={() => void navigator.clipboard.writeText(access.url)}
+                          />
+                          <Button
+                            label={t("settings.projects.openApp")}
+                            icon={<Icon icon={ExternalLink} size="xsm" />}
+                            size="sm"
+                            variant="secondary"
+                            clickAction={() => { window.open(access.url, "_blank", "noopener,noreferrer"); }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="claw-row">
-                  {item.public_url && (
-                    <Button
-                      label={t("settings.projects.openApp")}
-                      icon={<Icon icon={ExternalLink} size="xsm" />}
-                      size="sm"
-                      variant="secondary"
-                      clickAction={() => { window.open(item.public_url!, "_blank", "noopener,noreferrer"); }}
-                    />
-                  )}
                   {running ? (
                     <Button
                       label={t("settings.projects.stop")}

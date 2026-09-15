@@ -300,6 +300,9 @@ async def test_project_container_control_plane_requires_admin_and_starts_build(i
                 "build_error": "",
                 "build_started_at": None,
                 "ready": False,
+                "host_bind_ip": getattr(self, "host_bind_ip", "127.0.0.1"),
+                "access_scope": "host" if getattr(self, "host_bind_ip", "127.0.0.1") == "127.0.0.1" else "lan",
+                "project_ports": [3000, 8000, 8080],
                 "public_ingress_enabled": self.public_ingress_enabled,
                 "public_ingress_configured": True,
                 "public_ingress_domain": "apps.example.com",
@@ -328,6 +331,10 @@ async def test_project_container_control_plane_requires_admin_and_starts_build(i
             self.public_ingress_enabled = enabled
             return await self.status()
 
+        async def set_host_bind_ip(self, host_bind_ip):
+            self.host_bind_ip = host_bind_ip
+            return await self.status()
+
     manager = FakeProjectContainers()
     app.state.claw.project_containers = manager
     assert (await client.get("/api/admin/project-containers")).status_code == 403
@@ -341,6 +348,11 @@ async def test_project_container_control_plane_requires_admin_and_starts_build(i
     ingress = await client.put("/api/admin/project-containers/public-ingress", json={"enabled": True})
     assert ingress.status_code == 200, ingress.text
     assert ingress.json()["public_ingress_enabled"] is True
+    internal = await client.put(
+        "/api/admin/project-containers/internal-access", json={"host_bind_ip": "192.168.1.24"}
+    )
+    assert internal.status_code == 200, internal.text
+    assert internal.json()["host_bind_ip"] == "192.168.1.24"
 
 
 async def test_project_container_setting_persists(integrated):
@@ -350,6 +362,8 @@ async def test_project_container_setting_persists(integrated):
     await store.set_enabled(False)
     assert (await store.get(default_enabled=True))["enabled"] is False
     await store.set_public_ingress_enabled(True)
+    await store.set_host_bind_ip("192.168.1.24")
     value = await store.get(default_enabled=True)
     assert value["enabled"] is False
     assert value["public_ingress_enabled"] is True
+    assert value["host_bind_ip"] == "192.168.1.24"
