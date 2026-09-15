@@ -49,6 +49,8 @@ from sbot.core.scheduler import SchedulerService
 from sbot.core.specialist import DelegationMirror
 from sbot.core.subagent import SubagentManager
 from sbot.core.turn_context import (
+    ProjectApprovalScope,
+    current_project_approval_grants,
     current_session_id,
     current_turn_confirmation,
     current_turn_deadline,
@@ -521,7 +523,10 @@ class ClawAgent:
             f"## Workspace\nYour workspace is mounted for file tools; shell commands run "
             f"in an isolated sandbox with the same workspace at /workspace.\n"
             "For software development use project, which keeps packages and services across calls. "
-            "Its /workspace maps to projects/<slug>/ in file tools. Give all teammates the same slug. "
+            "Its /workspace maps to projects/<slug>/ in file tools. A slug belongs to one application: "
+            "give teammates the same slug only while continuing that application, and choose a new slug "
+            "for every new application. Create new applications with project action=create; it rejects an "
+            "existing slug. Never reuse an unrelated project to evade a container limit. "
             "Use mission dependencies or separate git worktrees to avoid concurrent edits. "
             "Deliver code, test results and service health evidence; a prose answer is not a working project.\n\n"
             "## Answering directly\n"
@@ -1535,6 +1540,9 @@ class AgentRuntime:
                 # row, so its fallback text has to be in the user's language.
                 _locale_token = current_turn_locale.set(locale)
                 _confirmation_token = current_turn_confirmation.set(_confirm)
+                _project_approval_token = current_project_approval_grants.set(
+                    ProjectApprovalScope()
+                )
                 try:
                     model_used = effective_model or self.settings.llm.model
 
@@ -1589,11 +1597,12 @@ class AgentRuntime:
                             await self.messages.append(session_id, answered)
                     return message
                 finally:
-                    current_session_id.reset(_session_token)
-                    current_turn_id.reset(_turn_token)
-                    current_turn_deadline.reset(_deadline_token)
-                    current_turn_locale.reset(_locale_token)
+                    current_project_approval_grants.reset(_project_approval_token)
                     current_turn_confirmation.reset(_confirmation_token)
+                    current_turn_locale.reset(_locale_token)
+                    current_turn_deadline.reset(_deadline_token)
+                    current_turn_id.reset(_turn_token)
+                    current_session_id.reset(_session_token)
 
                 final = outcome.final_content
                 # loop.py never appends anything to history for an empty-content

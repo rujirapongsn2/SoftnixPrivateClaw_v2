@@ -234,8 +234,12 @@ function confirmTitle(
   t: (key: string) => string,
   tool: string,
   status: ConfirmRow["status"],
+  argsPreview?: string,
 ): string {
-  const copy = CONFIRM_COPY_KEY[tool] ?? {
+  const projectDelete = tool === "project" && argsPreview?.includes('"action": "delete"');
+  const copy = projectDelete
+    ? { pending: "chat.confirm.projectDelete.pending", approved: "chat.confirm.projectDelete.approved" }
+    : CONFIRM_COPY_KEY[tool] ?? {
     pending: "chat.confirm.default.pending",
     approved: "chat.confirm.default.approved",
   };
@@ -2363,7 +2367,7 @@ export function Chat({
                       color={item.row.status === "denied" ? "error" : item.row.status === "approved" ? "success" : "secondary"}
                     />
                     <Text size="sm" weight="semibold">
-                      {confirmTitle(t, item.row.tool, item.row.status)}
+                      {confirmTitle(t, item.row.tool, item.row.status, item.row.argsPreview)}
                     </Text>
                   </div>
                   {item.row.argsPreview && (

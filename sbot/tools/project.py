@@ -4,34 +4,48 @@ from typing import ClassVar
 from sbot.tools.base import Tool
 
 PROJECT_ACTIONS = (
+    "create",
     "start",
     "status",
     "stop",
+    "delete",
     "exec",
     "compose_up",
     "compose_ps",
     "compose_logs",
     "compose_down",
 )
-# Every action except an inspection or an explicit stop reaches
-# ProjectEnvironments._ensure(), which can create and start a container.
+# Every action except an inspection or an explicit stop can start or remove a container.
 PROJECT_ACTIONS_REQUIRING_CONFIRMATION = frozenset(PROJECT_ACTIONS) - {"status", "stop"}
+# Destructive lifecycle operations always get their own explicit decision, even
+# after the user granted ordinary access to this project for the turn.
+PROJECT_ACTIONS_COVERED_BY_TASK_APPROVAL = (
+    PROJECT_ACTIONS_REQUIRING_CONFIRMATION - {"delete"}
+)
 
 
 class ProjectTool(Tool):
     name = 'project'
     description = (
         'Manage a persistent software project environment. Packages, files and services survive tool calls '
-        'and Sbot restarts. Use the SAME project slug across team members. File tools access projects/<slug>/; '
+        'and Sbot restarts. One slug identifies one application: never reuse an existing slug for an unrelated '
+        'new application or to work around the container limit. Create every new application with action=create; '
+        'that action rejects an existing slug. Use the SAME slug only when continuing that '
+        'application across team members. File tools access projects/<slug>/; '
         'project exec runs there at /workspace. Write compose.yaml then compose_up for persistent services; '
         'status returns localhost port mappings. Use exec for git, builds, tests and curl. '
         'Use separate git worktrees for parallel edits and report commit/test evidence. '
-        'stop preserves data; compose_down preserves named volumes. Never claim deployment from a dispatch alone.'
+        'stop preserves the container. delete removes the project container and its network but preserves files '
+        'and named volumes, so create can rebuild it with current settings. compose_down preserves named volumes. '
+        'Never claim deployment from a dispatch alone.'
     )
     parameters: ClassVar[dict] = {
         'type': 'object',
         'properties': {
-            'project': {'type': 'string', 'description': 'Stable lowercase project slug'},
+            'project': {
+                'type': 'string',
+                'description': 'Stable lowercase slug unique to this application; do not reuse for another app',
+            },
             'action': {'type': 'string', 'enum': list(PROJECT_ACTIONS)},
             'command': {'type': 'string'},
             'timeout_seconds': {'type': 'integer', 'description': '1–1800 seconds; default 90'},

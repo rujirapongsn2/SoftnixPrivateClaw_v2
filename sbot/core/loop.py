@@ -30,10 +30,17 @@ from sbot.core.events import (
     ToolStarted,
 )
 from sbot.providers.base import ChatResult, LLMProvider, ProviderError, TextDelta, ThinkingDelta
-from sbot.core.turn_context import current_turn_locale
+from sbot.core.turn_context import (
+    ProjectApprovalScope,
+    current_project_approval_grants,
+    current_turn_locale,
+)
 from sbot.i18n import t
 from sbot.providers.registry import context_window
-from sbot.tools.project import PROJECT_ACTIONS_REQUIRING_CONFIRMATION
+from sbot.tools.project import (
+    PROJECT_ACTIONS_COVERED_BY_TASK_APPROVAL,
+    PROJECT_ACTIONS_REQUIRING_CONFIRMATION,
+)
 from sbot.tools.registry import ToolRegistry
 
 Emit = Callable[[AgentEvent], None]
@@ -492,6 +499,12 @@ class AgentLoop:
         # times in a row it has been executed.
         last_signature: str | None = None
         repeats = 0
+        # The runtime supplies a root-turn scope shared with nested team bots. A
+        # directly constructed loop (tests and background jobs) gets an isolated
+        # local scope, preserving the same one-turn lifetime.
+        project_approval_scope = current_project_approval_grants.get()
+        if project_approval_scope is None:
+            project_approval_scope = ProjectApprovalScope()
         timed_out = False
         tool_defs_chars = 0
         prompt_chars = 0
@@ -779,10 +792,26 @@ class AgentLoop:
                 args_preview = _args_preview(tc.arguments)
                 args = tc.arguments
                 block_message: str | None = None
-                project_confirmation_required = (
+                project_slug = (
+                    str(tc.arguments.get("project") or "").strip()
+                    if tc.name == "project"
+                    else ""
+                )
+                project_scope_requested = (
                     tc.name == "project"
                     and str(tc.arguments.get("action") or "") in PROJECT_ACTIONS_REQUIRING_CONFIRMATION
                 )
+                project_task_grant_eligible = (
+                    tc.name == "project"
+                    and str(tc.arguments.get("action") or "")
+                    in PROJECT_ACTIONS_COVERED_BY_TASK_APPROVAL
+                )
+                project_grant_active = bool(
+                    project_task_grant_eligible
+                    and project_slug
+                    and project_approval_scope.is_approved(project_slug)
+                )
+                project_confirmation_required = project_scope_requested and not project_grant_active
                 confirmation_preview = args_preview
                 if project_confirmation_required:
                     confirmation_preview, block_message = _project_confirmation_preview(tc.arguments)
@@ -803,18 +832,23 @@ class AgentLoop:
                 if signature != last_signature:
                     last_signature = signature
                     repeats = 0
-                # Project actions that can implicitly create/start a persistent
-                # container are always confirmed, including Auto mode. A status
-                # lookup and a stop never call _ensure() in ProjectEnvironments,
-                # so they stay immediate. Checked before the loop breaker below:
-                # each human decision is the safety gate for that exact action.
+                # The first project action that can create/start a persistent
+                # container is confirmed even in Auto mode. Its approval grants
+                # the rest of this turn access to that exact project slug; a new
+                # turn or another slug asks again. Status/stop stay immediate in
+                # Auto mode because they never call _ensure().
                 ask_mode_confirmation_required = (
                     permission_mode == "ask"
-                    and (tc.name in UNSAFE_TOOLS or (
+                    and (
+                        (tc.name in UNSAFE_TOOLS and not (
+                            tc.name == "project" and project_grant_active
+                        ))
+                        or (
                         tc.name.startswith("mcp_") and tc.name.endswith(
                             ("_publish_files", "_create_pull_request", "_dispatch_workflow")
                         )
-                    ))
+                        )
+                    )
                 )
                 gated_by_confirm = (project_confirmation_required or ask_mode_confirmation_required) and confirm is not None
                 if block_message is None and (project_confirmation_required or ask_mode_confirmation_required) and confirm is None:
@@ -823,7 +857,21 @@ class AgentLoop:
                     # create a project environment without the owner's decision.
                     block_message = "This action requires user approval, but confirmation is unavailable."
                 elif block_message is None and gated_by_confirm:
-                    approved = await confirm(turn_id, tc.name, confirmation_preview or args_preview)
+                    if project_task_grant_eligible and project_slug:
+                        approved = await project_approval_scope.request(
+                            project_slug,
+                            lambda: confirm(
+                                turn_id,
+                                tc.name,
+                                confirmation_preview or args_preview,
+                            ),
+                        )
+                    else:
+                        approved = await confirm(
+                            turn_id,
+                            tc.name,
+                            confirmation_preview or args_preview,
+                        )
                     if not approved:
                         block_message = "The user declined to run this action."
                 # Loop breaker: only counts as a runaway loop for calls nothing

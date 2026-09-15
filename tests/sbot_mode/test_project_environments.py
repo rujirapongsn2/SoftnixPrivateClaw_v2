@@ -98,6 +98,176 @@ async def test_host_proxy_uses_the_actual_lan_binding(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_project_limit_blocks_a_second_slug_but_allows_the_existing_project(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(projects_enabled=True))
+    first_name, _ = manager.identity(tmp_path, "first-app")
+    running = {
+        "State": {"Running": True, "Status": "running"},
+        "NetworkSettings": {"Networks": {}, "Ports": {}},
+    }
+
+    async def owned(name):
+        return running if name == first_name else None
+
+    async def list_projects(_workspace):
+        return [{"project": "first-app", "container": first_name, "state": "running", "ports": {}}]
+
+    async def ensure(name, _path):
+        if name != first_name:
+            raise AssertionError("a second container must not be created after reaching the limit")
+        return running
+
+    monkeypatch.setattr(manager, "_owned", owned)
+    monkeypatch.setattr(manager, "list", list_projects)
+    monkeypatch.setattr(manager, "_ensure", ensure)
+
+    blocked = await manager.execute(tmp_path, "second-app", "create", max_projects=1)
+    continued = json.loads(await manager.execute(tmp_path, "first-app", "start", max_projects=1))
+
+    assert blocked.startswith("Error: project container limit reached (1).")
+    assert "Do not reuse an unrelated existing project" in blocked
+    assert continued["project"] == "first-app"
+    assert continued["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_an_existing_slug_and_commands_reject_missing_project(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(projects_enabled=True))
+    existing_name, _ = manager.identity(tmp_path, "existing-app")
+    running = {
+        "State": {"Running": True, "Status": "running"},
+        "NetworkSettings": {"Networks": {}, "Ports": {}},
+    }
+
+    async def owned(name):
+        return running if name == existing_name else None
+
+    monkeypatch.setattr(manager, "_owned", owned)
+
+    duplicate = await manager.execute(tmp_path, "existing-app", "create", max_projects=2)
+    missing = await manager.execute(tmp_path, "new-app", "exec", "true", max_projects=2)
+
+    assert "already exists" in duplicate
+    assert "Choose a new slug" in duplicate
+    assert "has not been created" in missing
+    assert "action=create" in missing
+
+
+@pytest.mark.asyncio
+async def test_create_provisions_a_new_project_within_the_limit(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(projects_enabled=True))
+    running = {
+        "State": {"Running": True, "Status": "running"},
+        "NetworkSettings": {"Networks": {}, "Ports": {}},
+    }
+    ensured: list[Path] = []
+
+    async def owned(_name):
+        return None
+
+    async def list_projects(_workspace):
+        return []
+
+    async def ensure(_name, path):
+        ensured.append(path)
+        return running
+
+    monkeypatch.setattr(manager, "_owned", owned)
+    monkeypatch.setattr(manager, "list", list_projects)
+    monkeypatch.setattr(manager, "_ensure", ensure)
+
+    created = json.loads(await manager.execute(tmp_path, "new-app", "create", max_projects=1))
+
+    assert created["project"] == "new-app"
+    assert created["state"] == "running"
+    assert ensured == [tmp_path.resolve() / "projects" / "new-app"]
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_environment_and_network_but_preserves_project_data(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(projects_enabled=True))
+    name, path = manager.identity(tmp_path, "existing-app")
+    path.mkdir(parents=True)
+    marker = path / "source.txt"
+    marker.write_text("preserve me")
+    running = {
+        "State": {"Running": True, "Status": "running"},
+        "NetworkSettings": {"Networks": {}, "Ports": {}},
+    }
+    calls: list[tuple[str, ...]] = []
+
+    async def owned(candidate):
+        return running if candidate == name else None
+
+    async def docker(*args, timeout=120):
+        calls.append(args)
+        return SandboxResult(0, args[-1], "", False)
+
+    monkeypatch.setattr(manager, "_owned", owned)
+    monkeypatch.setattr(manager, "_docker", docker)
+    monkeypatch.setattr(manager, "_proxy_container", lambda: "sbot-proxy")
+
+    result = json.loads(await manager.execute(tmp_path, "existing-app", "delete", max_projects=1))
+
+    assert result["state"] == "deleted"
+    assert result["files_preserved"] is True
+    assert result["named_volumes_preserved"] is True
+    assert result["container_deleted"] is True
+    assert result["network_deleted"] is True
+    assert marker.read_text() == "preserve me"
+    assert ("rm", "-f", name) in calls
+    assert ("network", "disconnect", "-f", manager._network_name(name), "sbot-proxy") in calls
+    assert ("network", "rm", manager._network_name(name)) in calls
+    assert calls.index(
+        ("network", "disconnect", "-f", manager._network_name(name), "sbot-proxy")
+    ) < calls.index(("network", "rm", manager._network_name(name)))
+
+
+@pytest.mark.asyncio
+async def test_delete_reports_network_cleanup_failure_and_can_retry_orphan_cleanup(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(projects_enabled=True))
+    name, _ = manager.identity(tmp_path, "existing-app")
+    running = {
+        "State": {"Running": True, "Status": "running"},
+        "NetworkSettings": {"Networks": {}, "Ports": {}},
+    }
+    container_exists = True
+    network_remove_attempts = 0
+
+    async def owned(candidate):
+        return running if candidate == name and container_exists else None
+
+    async def docker(*args, timeout=120):
+        nonlocal container_exists, network_remove_attempts
+        if args[:2] == ("rm", "-f"):
+            container_exists = False
+            return SandboxResult(0, name, "", False)
+        if args[:2] == ("network", "disconnect"):
+            return SandboxResult(0, "", "", False)
+        if args[:2] == ("network", "rm"):
+            network_remove_attempts += 1
+            if network_remove_attempts == 1:
+                return SandboxResult(1, "", "network has active endpoints", False)
+            return SandboxResult(0, args[-1], "", False)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(manager, "_owned", owned)
+    monkeypatch.setattr(manager, "_docker", docker)
+    monkeypatch.setattr(manager, "_proxy_container", lambda: "sbot-proxy")
+
+    first = json.loads(await manager.execute(tmp_path, "existing-app", "delete", max_projects=1))
+    retried = json.loads(await manager.execute(tmp_path, "existing-app", "delete", max_projects=1))
+
+    assert first["state"] == "container_deleted_network_cleanup_failed"
+    assert first["container_deleted"] is True
+    assert first["network_deleted"] is False
+    assert "active endpoints" in first["network_cleanup_error"]
+    assert retried["state"] == "deleted"
+    assert retried["container_deleted"] is False
+    assert retried["network_deleted"] is True
+
+
+@pytest.mark.asyncio
 async def test_project_network_is_small_labeled_and_internal_when_egress_is_disabled(monkeypatch):
     manager = ProjectEnvironments(SandboxSettings(network="none"))
     calls = []
@@ -196,7 +366,7 @@ async def test_real_persistent_compose_restart_timeout_and_cancellation(tmp_path
     name, path = manager.identity(tmp_path, 'smoke')
     shutil.copytree(Path(__file__).parents[1] / 'examples/software-team', path)
     try:
-        status = json.loads(await manager.execute(tmp_path, 'smoke', 'start'))
+        status = json.loads(await manager.execute(tmp_path, 'smoke', 'create'))
         assert status['state'] == 'running'
         assert status['ports']['8000/tcp'][0]['HostIp'] == '127.0.0.1'
         result = await manager.execute(tmp_path, 'smoke', 'exec', 'echo persisted >/opt/marker')

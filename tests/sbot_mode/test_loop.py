@@ -297,6 +297,263 @@ async def test_project_creation_requires_confirmation_even_in_auto_mode():
     assert project.calls == [("portal", "compose_up")]
 
 
+async def test_one_project_approval_covers_later_actions_in_the_same_turn():
+    calls = [
+        ToolCall(id="project-start", name="project", arguments={"project": "portal", "action": "start"}),
+        ToolCall(
+            id="project-exec",
+            name="project",
+            arguments={"project": "portal", "action": "exec", "command": "pytest -q"},
+        ),
+        ToolCall(id="project-ps", name="project", arguments={"project": "portal", "action": "compose_ps"}),
+    ]
+    provider = FakeProvider([
+        [ChatResult(content=None, tool_calls=[calls[0]])],
+        [ChatResult(content=None, tool_calls=[calls[1]])],
+        [ChatResult(content=None, tool_calls=[calls[2]])],
+        text_turn("The project is ready."),
+    ])
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+    approvals: list[str] = []
+
+    async def confirm(_turn_id: str, _tool: str, preview: str) -> bool:
+        approvals.append(preview)
+        return True
+
+    outcome = await AgentLoop(provider, tools).run_turn(
+        "project-one-grant",
+        [{"role": "user", "content": "Build and test the portal"}],
+        lambda _event: None,
+        permission_mode="ask",
+        confirm=confirm,
+    )
+
+    assert outcome.final_content == "The project is ready."
+    assert len(approvals) == 1
+    assert '"action": "start"' in approvals[0]
+    assert project.calls == [
+        ("portal", "start"),
+        ("portal", "exec"),
+        ("portal", "compose_ps"),
+    ]
+
+
+async def test_project_approval_does_not_cover_another_project():
+    provider = FakeProvider([
+        [ChatResult(content=None, tool_calls=[
+            ToolCall(id="portal", name="project", arguments={"project": "portal", "action": "start"})
+        ])],
+        [ChatResult(content=None, tool_calls=[
+            ToolCall(id="api", name="project", arguments={"project": "api", "action": "start"})
+        ])],
+        text_turn("Both projects are ready."),
+    ])
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+    approvals: list[str] = []
+
+    async def confirm(_turn_id: str, _tool: str, preview: str) -> bool:
+        approvals.append(preview)
+        return True
+
+    await AgentLoop(provider, tools).run_turn(
+        "project-two-grants",
+        [{"role": "user", "content": "Start both projects"}],
+        lambda _event: None,
+        permission_mode="auto",
+        confirm=confirm,
+    )
+
+    assert len(approvals) == 2
+    assert '"project": "portal"' in approvals[0]
+    assert '"project": "api"' in approvals[1]
+
+
+async def test_project_approval_expires_when_the_turn_ends():
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+    loop = AgentLoop(
+        FakeProvider([
+            [ChatResult(content=None, tool_calls=[
+                ToolCall(id="first", name="project", arguments={"project": "portal", "action": "start"})
+            ])],
+            text_turn("Started."),
+            [ChatResult(content=None, tool_calls=[
+                ToolCall(id="second", name="project", arguments={"project": "portal", "action": "exec"})
+            ])],
+            text_turn("Checked."),
+        ]),
+        tools,
+    )
+    approvals: list[str] = []
+
+    async def confirm(_turn_id: str, _tool: str, preview: str) -> bool:
+        approvals.append(preview)
+        return True
+
+    await loop.run_turn(
+        "project-turn-one",
+        [{"role": "user", "content": "Start the portal"}],
+        lambda _event: None,
+        confirm=confirm,
+    )
+    await loop.run_turn(
+        "project-turn-two",
+        [{"role": "user", "content": "Check the portal"}],
+        lambda _event: None,
+        confirm=confirm,
+    )
+
+    assert len(approvals) == 2
+
+
+async def test_nested_loops_share_the_root_turn_project_approval():
+    from sbot.core.turn_context import ProjectApprovalScope, current_project_approval_grants
+
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+    approvals: list[str] = []
+
+    async def confirm(_turn_id: str, _tool: str, preview: str) -> bool:
+        approvals.append(preview)
+        return True
+
+    token = current_project_approval_grants.set(ProjectApprovalScope())
+    try:
+        first = AgentLoop(
+            FakeProvider([
+                [ChatResult(content=None, tool_calls=[
+                    ToolCall(id="start", name="project", arguments={"project": "portal", "action": "start"})
+                ])],
+                text_turn("Started."),
+            ]),
+            tools,
+        )
+        second = AgentLoop(
+            FakeProvider([
+                [ChatResult(content=None, tool_calls=[
+                    ToolCall(id="test", name="project", arguments={"project": "portal", "action": "exec"})
+                ])],
+                text_turn("Tested."),
+            ]),
+            tools,
+        )
+
+        await first.run_turn(
+            "root-bot",
+            [{"role": "user", "content": "Start the project"}],
+            lambda _event: None,
+            confirm=confirm,
+        )
+        await second.run_turn(
+            "specialist-bot",
+            [{"role": "user", "content": "Test the project"}],
+            lambda _event: None,
+            permission_mode="ask",
+            confirm=confirm,
+        )
+    finally:
+        current_project_approval_grants.reset(token)
+
+    assert len(approvals) == 1
+    assert project.calls == [("portal", "start"), ("portal", "exec")]
+
+
+async def test_concurrent_nested_loops_share_one_pending_project_approval():
+    from sbot.core.turn_context import ProjectApprovalScope, current_project_approval_grants
+
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+    approval_started = asyncio.Event()
+    release_approval = asyncio.Event()
+    approvals = 0
+
+    async def confirm(_turn_id: str, _tool: str, _preview: str) -> bool:
+        nonlocal approvals
+        approvals += 1
+        approval_started.set()
+        await release_approval.wait()
+        return True
+
+    def project_loop(call_id: str, action: str) -> AgentLoop:
+        return AgentLoop(
+            FakeProvider([
+                [ChatResult(content=None, tool_calls=[
+                    ToolCall(
+                        id=call_id,
+                        name="project",
+                        arguments={"project": "portal", "action": action},
+                    )
+                ])],
+                text_turn(f"{action} complete."),
+            ]),
+            tools,
+        )
+
+    token = current_project_approval_grants.set(ProjectApprovalScope())
+    try:
+        first = asyncio.create_task(project_loop("start", "start").run_turn(
+            "first-specialist",
+            [{"role": "user", "content": "Start the project"}],
+            lambda _event: None,
+            confirm=confirm,
+        ))
+        await approval_started.wait()
+        second = asyncio.create_task(project_loop("test", "exec").run_turn(
+            "second-specialist",
+            [{"role": "user", "content": "Test the project"}],
+            lambda _event: None,
+            confirm=confirm,
+        ))
+        await asyncio.sleep(0)
+        release_approval.set()
+        await asyncio.gather(first, second)
+    finally:
+        current_project_approval_grants.reset(token)
+
+    assert approvals == 1
+    assert sorted(project.calls) == [("portal", "exec"), ("portal", "start")]
+
+
+async def test_delete_requires_its_own_approval_after_project_access_was_granted():
+    provider = FakeProvider([
+        [ChatResult(content=None, tool_calls=[
+            ToolCall(id="start", name="project", arguments={"project": "portal", "action": "start"})
+        ])],
+        [ChatResult(content=None, tool_calls=[
+            ToolCall(id="delete", name="project", arguments={"project": "portal", "action": "delete"})
+        ])],
+        text_turn("The environment was rebuilt."),
+    ])
+    project = FakeProjectTool()
+    tools = ToolRegistry()
+    tools.register(project)
+    approvals: list[str] = []
+
+    async def confirm(_turn_id: str, _tool: str, preview: str) -> bool:
+        approvals.append(preview)
+        return True
+
+    await AgentLoop(provider, tools).run_turn(
+        "project-delete-own-gate",
+        [{"role": "user", "content": "Start and then delete the project"}],
+        lambda _event: None,
+        permission_mode="auto",
+        confirm=confirm,
+    )
+
+    assert len(approvals) == 2
+    assert '"action": "start"' in approvals[0]
+    assert '"action": "delete"' in approvals[1]
+    assert project.calls == [("portal", "start"), ("portal", "delete")]
+
+
 async def test_project_status_remains_immediate_in_auto_mode():
     call = ToolCall(id="project-status", name="project", arguments={"project": "portal", "action": "status"})
     provider = FakeProvider([
