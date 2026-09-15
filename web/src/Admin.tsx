@@ -94,7 +94,6 @@ import {
   ModelUsagePoint,
   OAuthAppsInfo,
   type ProjectContainerAdminStatus,
-  type ProjectIngressVerifyResult,
   type PlanCreate,
   type PlanInfo,
   SessionsByUserPoint,
@@ -4111,8 +4110,7 @@ function PreferencesPanel() {
 function ProjectContainersAdminPanel() {
   const t = useT();
   const [status, setStatus] = useState<ProjectContainerAdminStatus | null>(null);
-  const [verifyResult, setVerifyResult] = useState<ProjectIngressVerifyResult | null>(null);
-  const [verifying, setVerifying] = useState(false);
+  const [hostBindIp, setHostBindIp] = useState("");
   const [saving, setSaving] = useState(false);
   const { error, guard } = useAsyncError();
   const toast = useToast();
@@ -4131,8 +4129,17 @@ function ProjectContainersAdminPanel() {
     return () => window.clearInterval(timer);
   }, [guard, reload, status?.building]);
 
+  useEffect(() => {
+    if (status) setHostBindIp(status.host_bind_ip || "127.0.0.1");
+  }, [status?.host_bind_ip]);
+
   if (error && !status) return <ErrorText>{error}</ErrorText>;
   if (!status) return <Text color="secondary">{t("admin.common.loading")}</Text>;
+  // Keep this page usable during a rolling restart where a freshly-built web
+  // bundle may briefly talk to an older API process without these fields.
+  const configuredHostBindIp = status.host_bind_ip || "127.0.0.1";
+  const accessScope = status.access_scope || "host";
+  const projectPorts = status.project_ports || [3000, 8000, 8080];
 
   const setEnabled = (enabled: boolean) => {
     setSaving(true);
@@ -4140,7 +4147,6 @@ function ProjectContainersAdminPanel() {
       try {
         const next = await api.adminSetProjectContainers(enabled);
         setStatus(next);
-        setVerifyResult(null);
         toast({
           body: t(enabled ? "admin.projects.enabledToast" : "admin.projects.disabledToast"),
           type: "info",
@@ -4152,32 +4158,19 @@ function ProjectContainersAdminPanel() {
     });
   };
 
-  const setPublicIngressEnabled = (enabled: boolean) => {
-    if (enabled && !window.confirm(t("admin.projects.ingressEnableConfirm"))) return;
+  const saveInternalAccess = () => {
     setSaving(true);
     void guard(async () => {
       try {
-        const next = await api.adminSetProjectPublicIngress(enabled);
+        const next = await api.adminSetProjectInternalAccess(hostBindIp);
         setStatus(next);
-        setVerifyResult(null);
         toast({
-          body: t(enabled ? "admin.projects.ingressEnabledToast" : "admin.projects.ingressDisabledToast"),
+          body: t("admin.projects.internalAccessSaved"),
           type: "info",
           autoHideDuration: 2500,
         });
       } finally {
         setSaving(false);
-      }
-    });
-  };
-
-  const verifyPublicIngress = () => {
-    setVerifying(true);
-    void guard(async () => {
-      try {
-        setVerifyResult(await api.adminVerifyProjectPublicIngress());
-      } finally {
-        setVerifying(false);
       }
     });
   };
@@ -4194,9 +4187,6 @@ function ProjectContainersAdminPanel() {
     const value = bytes / 1024 ** unit;
     return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: value < 10 ? 1 : 0 }).format(value)} ${["B", "KB", "MB", "GB", "TB"][unit]}`;
   };
-  const ingressDomain = status.public_ingress_domain || "apps.example.com";
-  const wildcardDomain = `*.${ingressDomain}`;
-
   return (
     <div className="claw-panel">
       <div className="claw-row claw-row-between">
@@ -4222,154 +4212,40 @@ function ProjectContainersAdminPanel() {
             />
             <Text weight="semibold">{t("admin.projects.enable")}</Text>
           </label>
-          <label className="claw-toggle-inline">
-            <Switch
-              value={status.public_ingress_enabled}
-              label={t("admin.projects.publicIngress")}
-              isLabelHidden
-              isDisabled={
-                !status.mode_available || saving
-                || (!status.public_ingress_configured && !status.public_ingress_enabled)
-              }
-              changeAction={setPublicIngressEnabled}
-            />
-            <span>
-              <Text weight="semibold">{t("admin.projects.publicIngress")}</Text>
-              <Text size="sm" color="secondary">
-                {status.public_ingress_configured
-                  ? `*.${status.public_ingress_domain} → :${status.public_ingress_port}`
-                  : t("admin.projects.ingressNotConfigured")}
-              </Text>
-              {status.public_ingress_configured && (
-                <Text size="sm" color="secondary">{t("admin.projects.ingressExposure")}</Text>
-              )}
-            </span>
-          </label>
-
-          <details className="claw-guide">
-            <summary>{t("admin.projects.cloudflareGuide")}</summary>
-            <div className="claw-guide-body">
-              <Text size="sm" color="secondary">{t("admin.projects.cloudflareIntro")}</Text>
-              <ol className="claw-telegram-steps">
-                <li>
-                  {t("admin.projects.cloudflareStepDomain")} <code>CLAW_SANDBOX__PROJECT_INGRESS_DOMAIN={ingressDomain}</code>
-                </li>
-                <li>
-                  {t("admin.projects.cloudflareStepCheckCli")}
-                  <pre className="claw-project-ingress-config">{`cloudflared --version`}</pre>
-                  <Text size="sm" color="secondary">{t("admin.projects.cloudflareInstallLinux")}</Text>
-                  <pre className="claw-project-ingress-config">{`sudo mkdir -p --mode=0755 /usr/share/keyrings
-curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
-echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
-sudo apt-get update && sudo apt-get install cloudflared`}</pre>
-                  <Text size="sm" color="secondary">{t("admin.projects.cloudflareInstallMac")}</Text>
-                  <pre className="claw-project-ingress-config">{`brew install cloudflared`}</pre>
-                  <Text size="sm" color="secondary">{t("admin.projects.cloudflareInstallOther")}</Text>
-                </li>
-                <li>
-                  {t("admin.projects.cloudflareStepTunnel")}
-                  <pre className="claw-project-ingress-config">{`cloudflared tunnel login
-cloudflared tunnel create privateclaw-project-apps`}</pre>
-                </li>
-                <li>
-                  {t("admin.projects.cloudflareStepConfig")}
-                  <pre className="claw-project-ingress-config">{`sudo install -d -m 755 /etc/cloudflared
-sudo install -m 600 ~/.cloudflared/<PROJECT_INGRESS_TUNNEL_ID>.json /etc/cloudflared/<PROJECT_INGRESS_TUNNEL_ID>.json
-sudo nano /etc/cloudflared/privateclaw-project-apps.yml`}</pre>
-                  <pre className="claw-project-ingress-config">{`tunnel: <PROJECT_INGRESS_TUNNEL_ID>
-credentials-file: /etc/cloudflared/<PROJECT_INGRESS_TUNNEL_ID>.json
-ingress:
-  - hostname: "${wildcardDomain}"
-    service: http://127.0.0.1:8700
-  - service: http_status:404`}</pre>
-                </li>
-                <li>
-                  {t("admin.projects.cloudflareStepService")}
-                  <pre className="claw-project-ingress-config">{`sudo nano /etc/systemd/system/privateclaw-project-apps.service`}</pre>
-                  <pre className="claw-project-ingress-config">{`[Unit]
-Description=PrivateClaw project apps Cloudflare Tunnel
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/privateclaw-project-apps.yml tunnel run
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target`}</pre>
-                  <pre className="claw-project-ingress-config">{`sudo systemctl daemon-reload
-sudo systemctl enable --now privateclaw-project-apps
-sudo systemctl status privateclaw-project-apps --no-pager`}</pre>
-                </li>
-                <li>
-                  {t("admin.projects.cloudflareStepDns")}
-                  <div className="claw-scope-chips">
-                    <code>Type: CNAME</code>
-                    <code>Name: {wildcardDomain}</code>
-                    <code>Target: &lt;TUNNEL_ID&gt;.cfargotunnel.com</code>
-                    <code>Proxy: On</code>
-                  </div>
-                </li>
-                <li>{t("admin.projects.cloudflareStepAccess")} <code>{wildcardDomain}</code></li>
-                <li>{t("admin.projects.cloudflareStepEnable")}</li>
-              </ol>
-              <Text size="sm" color="secondary">
-                <a href="https://developers.cloudflare.com/tunnel/downloads/" target="_blank" rel="noreferrer">
-                  {t("admin.projects.cloudflareDownloadDocs")}
-                </a>
-                {" · "}
-                <a href="https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/as-a-service/macos/" target="_blank" rel="noreferrer">
-                  {t("admin.projects.cloudflareMacServiceDocs")}
-                </a>
-              </Text>
-              <Text size="sm" color="secondary">{t("admin.projects.cloudflareTlsNote")}</Text>
-            </div>
-          </details>
-
-          <div className="claw-row claw-row-between claw-project-ingress-verify-action">
-            <Text size="sm" color="secondary">{t("admin.projects.verifyHint")}</Text>
-            <Button
-              label={t("admin.projects.verify")}
-              variant="secondary"
-              isLoading={verifying}
-              isDisabled={verifying || !status.public_ingress_configured}
-              clickAction={verifyPublicIngress}
-            />
-          </div>
-          {error && <ErrorText>{error}</ErrorText>}
-
-          {verifyResult && (
-            <Card padding={2}>
-              <div className="claw-panel" aria-live="polite">
-                <div className="claw-row claw-row-between">
-                  <Text weight="semibold">{t("admin.projects.verifyResults")}</Text>
-                  <Badge
-                    variant={verifyResult.ready ? "success" : "warning"}
-                    label={t(verifyResult.ready ? "admin.projects.verifyReady" : "admin.projects.verifyActionNeeded")}
-                  />
-                </div>
-                <div className="claw-project-ingress-checks">
-                  {verifyResult.checks.map((check) => (
-                    <div className="claw-project-ingress-check" key={check.id}>
-                      <div className="claw-row claw-row-between">
-                        <Text weight="semibold">{t(`admin.projects.verifyCheck.${check.id}`)}</Text>
-                        <Badge
-                          variant={check.status === "passed" ? "success" : check.status === "failed" ? "error" : check.status === "warning" ? "warning" : "neutral"}
-                          label={t(`admin.projects.verifyStatus.${check.status}`)}
-                        />
-                      </div>
-                      <Text size="sm" color="secondary">{t(check.message_key, check.params)}</Text>
-                      {check.hint_key && <Text size="sm" color="secondary">{t(check.hint_key, check.params)}</Text>}
-                    </div>
-                  ))}
-                </div>
+          <div className="claw-project-internal-access">
+            <div className="claw-row claw-row-between">
+              <div>
+                <Text weight="semibold">{t("admin.projects.internalAccess")}</Text>
                 <Text size="sm" color="secondary">
-                  {t("admin.projects.verifyCheckedAt", { time: new Date(verifyResult.checked_at).toLocaleString() })}
+                  {t(accessScope === "lan" ? "admin.projects.internalAccessLan" : "admin.projects.internalAccessHost")}
                 </Text>
               </div>
-            </Card>
-          )}
+              <Badge
+                variant={accessScope === "lan" ? "success" : "neutral"}
+                label={t(accessScope === "lan" ? "admin.projects.lan" : "admin.projects.thisHost")}
+              />
+            </div>
+            <div className="claw-row claw-row-between">
+              <div className="claw-project-bind-input">
+                <TextInput
+                  label={t("admin.projects.hostBindIp")}
+                  value={hostBindIp}
+                  placeholder="192.168.1.10"
+                  onChange={setHostBindIp}
+                />
+              </div>
+              <Button
+                label={t("admin.projects.save")}
+                isLoading={saving}
+                isDisabled={saving || hostBindIp.trim() === configuredHostBindIp}
+                clickAction={saveInternalAccess}
+              />
+            </div>
+            <Text size="sm" color="secondary">
+              {t("admin.projects.portAssignment", { ports: projectPorts.join(", ") })}
+            </Text>
+          </div>
+          {error && <ErrorText>{error}</ErrorText>}
 
           <div className="claw-project-status-grid">
             <div>

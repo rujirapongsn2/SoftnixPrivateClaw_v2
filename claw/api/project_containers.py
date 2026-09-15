@@ -21,6 +21,10 @@ class ProjectContainersBody(BaseModel):
     enabled: bool
 
 
+class ProjectInternalAccessBody(BaseModel):
+    host_bind_ip: str
+
+
 _VERIFY_MIN_INTERVAL = 15.0
 _verify_gate = asyncio.Lock()
 _verify_last_started = 0.0
@@ -92,6 +96,8 @@ async def _verify_public_ingress(settings) -> dict:
     probe_host = f"pc-verify-{secrets.token_hex(4)}.{domain}"
     dns_resolves = False
     dns_cname_ok = False
+    dns_check: dict | None = None
+    dns_endpoint_confirmed = False
     try:
         addresses = await asyncio.wait_for(
             asyncio.to_thread(socket.getaddrinfo, probe_host, 443, type=socket.SOCK_STREAM), timeout=5
@@ -117,27 +123,33 @@ async def _verify_public_ingress(settings) -> dict:
             dns_cname_ok = any(target.endswith(".cfargotunnel.com") for target in cname_targets)
         except (httpx.HTTPError, ValueError, TypeError):
             pass
-        dns_status = "passed" if dns_resolves and dns_cname_ok else "failed" if cname_checked else "warning"
+        # Cloudflare's proxied CNAME records are flattened at recursive DNS
+        # resolvers: a valid tunnel route can resolve to Cloudflare A/AAAA
+        # addresses without exposing the *.cfargotunnel.com target. Keep this
+        # as a warning until the HTTPS probe confirms that the request reached
+        # PrivateClaw, rather than reporting a false DNS failure.
+        dns_status = "passed" if dns_resolves and dns_cname_ok else "warning"
         if dns_resolves and dns_cname_ok:
             dns_message = f"{probe_host} resolves to {', '.join(cname_targets[:2])}."
         elif dns_resolves and cname_checked:
-            dns_message = f"{probe_host} resolves, but it does not point to a Cloudflare Tunnel."
+            dns_message = f"{probe_host} resolves via Cloudflare; the proxied CNAME target is hidden."
         elif dns_resolves:
             dns_message = f"{probe_host} resolves, but the CNAME target could not be verified."
         else:
             dns_message = "The wildcard hostname did not resolve."
-        checks.append(_verify_check(
+        dns_check = _verify_check(
             "dns", dns_status, dns_message,
             f"Create a proxied wildcard CNAME for *.{domain} pointing to the Tunnel hostname.",
             message_key=(
                 "admin.projects.verifyMessage.dnsPassed" if dns_resolves and dns_cname_ok
-                else "admin.projects.verifyMessage.dnsTargetFailed" if cname_checked
+                else "admin.projects.verifyMessage.dnsProxied" if dns_resolves and cname_checked
                 else "admin.projects.verifyMessage.dnsTargetUnknown" if dns_resolves
                 else "admin.projects.verifyMessage.dnsFailed"
             ),
-            hint_key="admin.projects.verifyHintText.dnsFailed" if not (dns_resolves and dns_cname_ok) else "",
+            hint_key="admin.projects.verifyHintText.dnsFailed" if not dns_resolves else "",
             params={"host": probe_host, "target": ", ".join(cname_targets[:2])},
-        ))
+        )
+        checks.append(dns_check)
     except (OSError, TimeoutError, asyncio.TimeoutError):
         checks.append(_verify_check(
             "dns", "failed", f"{probe_host} could not be resolved.",
@@ -175,6 +187,15 @@ async def _verify_public_ingress(settings) -> dict:
             ))
             if reached_app:
                 tunnel_ok = True
+                if dns_check is not None and dns_resolves and not dns_cname_ok:
+                    dns_endpoint_confirmed = True
+                    dns_check.update(
+                        status="passed",
+                        detail="Hostname resolved through Cloudflare and reached PrivateClaw.",
+                        hint="",
+                        message_key="admin.projects.verifyMessage.dnsPassed",
+                        hint_key="",
+                    )
                 checks.append(_verify_check(
                     "tunnel", "passed", "The request reached PrivateClaw through Cloudflare Tunnel.",
                     message_key="admin.projects.verifyMessage.tunnelPassed",
@@ -229,7 +250,7 @@ async def _verify_public_ingress(settings) -> dict:
             message_key="admin.projects.verifyMessage.tunnelSkipped",
         ))
     return {
-        "ready": bool(feature_enabled and dns_cname_ok and tls_ok and tunnel_ok),
+        "ready": bool(feature_enabled and (dns_cname_ok or dns_endpoint_confirmed) and tls_ok and tunnel_ok),
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "checks": checks,
     }
@@ -246,6 +267,9 @@ def _unavailable() -> dict:
         "build_error": "",
         "build_started_at": None,
         "ready": False,
+        "host_bind_ip": "127.0.0.1",
+        "access_scope": "host",
+        "project_ports": [3000, 8000, 8080],
         "public_ingress_enabled": False,
         "public_ingress_configured": False,
         "public_ingress_domain": "",
@@ -322,6 +346,27 @@ async def set_project_containers(
     await state.audit.log(
         "admin",
         {"event": "project_containers_updated", "enabled": body.enabled, "by": admin.id},
+        user_id=admin.id,
+    )
+    return {"mode_available": True, **result}
+
+
+@router.put("/internal-access")
+async def set_project_internal_access(
+    body: ProjectInternalAccessBody,
+    admin: User = Depends(require_admin),
+    state: AppState = Depends(get_state),
+) -> dict:
+    manager = state.project_containers
+    if manager is None:
+        raise HTTPException(status_code=409, detail="Bot Mode is disabled")
+    try:
+        result = await manager.set_host_bind_ip(body.host_bind_ip)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await state.audit.log(
+        "admin",
+        {"event": "project_internal_access_updated", "host_bind_ip": result["host_bind_ip"], "by": admin.id},
         user_id=admin.id,
     )
     return {"mode_available": True, **result}

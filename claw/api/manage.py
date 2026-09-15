@@ -662,14 +662,20 @@ async def my_plan(user: User = Depends(current_user), state: AppState = Depends(
     """The caller's effective usage plan + today's consumption/remaining, for
     the composer's quota hint. Null plan = no restriction."""
     plan = await state.plans.resolve_for_user(user.id) if state.plans is not None else None
-    today = await state.usage.usage_today(user.id) if state.usage is not None else {"turns": 0, "images": 0}
+    today = (
+        await state.usage.usage_today(user.id)
+        if state.usage is not None
+        else {"turns": 0, "images": 0, "plan_turns": 0}
+    )
     if plan is None:
         return {"plan": None, "used": today}
     return {
         "plan": plan,
         "used": today,
         "messages_remaining": (
-            max(0, plan["messages_per_day"] - today["turns"]) if plan["messages_per_day"] else None
+            max(0, plan["messages_per_day"] - today["plan_turns"])
+            if plan["messages_per_day"]
+            else None
         ),
         "images_remaining": (
             max(0, plan["images_per_day"] - today["images"]) if plan["images_per_day"] else None

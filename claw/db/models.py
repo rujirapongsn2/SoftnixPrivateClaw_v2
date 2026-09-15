@@ -413,6 +413,9 @@ class UsageDaily(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     turns: Mapped[int] = mapped_column(Integer, default=0)
+    # Turns charged against a usage-tier plan. My Models (BYOK) turns remain
+    # visible in `turns` and token reports but do not consume this quota.
+    plan_turns: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     # Text-to-image generations for this bucket (the /images path doesn't emit
     # tokens, so it's counted separately here for the images/day plan quota).
     images: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))

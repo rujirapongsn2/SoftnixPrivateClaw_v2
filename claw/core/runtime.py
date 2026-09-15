@@ -423,6 +423,7 @@ class AgentRuntime:
         self._agents: "OrderedDict[str, ClawAgent]" = OrderedDict()
         self._session_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
         self._rate_limiter = RateLimiter(settings.turns_per_minute)
+        self._plan_rate_limiter = RateLimiter(0)
         self._background: set[asyncio.Task] = set()
         self._inflight = 0
         # session_id -> in-flight turn count, so the UI can show "processing"
@@ -639,50 +640,6 @@ class AgentRuntime:
         # model cost ceiling used further down.
         plan = await self.plans.resolve_for_user(user_id) if self.plans is not None else None
 
-        # Daily message quota (plan.messages_per_day; 0 = unlimited). Soft cap:
-        # UsageDaily is written in a background task after the turn, so a burst
-        # can overshoot slightly — acceptable for tiering. Checked BEFORE the
-        # rate limiter below so a user who's already over their daily cap
-        # doesn't also burn a per-minute slot on every rejected retry.
-        if plan and plan["messages_per_day"] > 0 and self.usage is not None:
-            used_today = (await self.usage.usage_today(user_id))["turns"]
-            if used_today >= plan["messages_per_day"]:
-                await self.audit.log(
-                    "quota",
-                    {
-                        "event": "messages_per_day",
-                        "plan": plan["name"],
-                        "limit": plan["messages_per_day"],
-                    },
-                    user_id=user_id,
-                    session_id=session_id,
-                )
-                msg = t("error.daily_limit", locale)
-                self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
-                self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
-                return msg
-
-        # Per-user rate limit — reject before doing any work or calling the
-        # model. A plan can only TIGHTEN the global per-minute cap, never exceed
-        # it: Settings.turns_per_minute is the operator's hard safety backstop
-        # against overloading shared infrastructure, and applies even to a plan
-        # whose own turns_per_minute is 0. Plan 0 = "no plan-specific throttle,
-        # inherit the global backstop" (NOT "ignore the global backstop") —
-        # global 0 = the backstop itself is off. So the effective cap is the
-        # stricter of the two, treating 0 as "no limit on that side."
-        global_rpm = self._rate_limiter.per_minute
-        plan_rpm = plan["turns_per_minute"] if plan else 0
-        if plan_rpm and global_rpm:
-            effective_rpm = min(plan_rpm, global_rpm)
-        else:
-            # One side unlimited: plan_rpm (if set) applies, else fall to global.
-            effective_rpm = plan_rpm or global_rpm
-        if not self._rate_limiter.allow(user_id, per_minute=effective_rpm):
-            msg = t("error.rate_limited", locale)
-            self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
-            self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
-            return msg
-
         agent = self.get_agent(user_id)
 
         # Enforce the control policy on the way in. Blocked input never reaches
@@ -725,6 +682,7 @@ class AgentRuntime:
                 model_key: str | None = None
                 model_base: str | None = None
                 model_window: int | None = None
+                model_scope = "global"
                 fallback_model: str | None = None
                 fallback_key: str | None = None
                 fallback_base: str | None = None
@@ -739,6 +697,7 @@ class AgentRuntime:
                             model_key = resolved["api_key"] or None
                             model_base = resolved["api_base"] or None
                             model_window = resolved["context_window"]
+                            model_scope = resolved.get("scope", "global")
                         else:
                             requested_unavailable = True
                     if effective_model is None:
@@ -788,7 +747,15 @@ class AgentRuntime:
                             msg = t("error.no_model_for_plan", locale)
                             self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
                             return msg
-                    fallback_resolver = getattr(self.llm_config, "fallback_model_for", None)
+                    # A My Models turn uses the caller's credentials. Do not
+                    # silently move it onto the operator-funded global fallback;
+                    # that would make a nominally exempt turn consume shared
+                    # capacity without a safe point to reserve Plan quota.
+                    fallback_resolver = (
+                        getattr(self.llm_config, "fallback_model_for", None)
+                        if model_scope != "private"
+                        else None
+                    )
                     fallback_model = (
                         await fallback_resolver(plan_chat_cost) if fallback_resolver is not None else None
                     )
@@ -808,6 +775,7 @@ class AgentRuntime:
                                 model_key = fallback_key
                                 model_base = fallback_base
                                 model_window = fallback_window
+                                model_scope = "global"
                                 fallback_model = None
                     # About to fall through to the operator's env-configured default
                     # (effective_model is None, no DB model available). If that env
@@ -830,6 +798,48 @@ class AgentRuntime:
                         return msg
                     if model and session is not None and session.model != model:
                         self._spawn_background(self.sessions.set_model(session_id, model))
+
+                # My Models use credentials owned by the caller, so plan-level
+                # message and RPM quotas do not apply to those turns. The global
+                # RPM backstop remains active to protect shared application
+                # resources regardless of who pays the model provider.
+                uses_private_model = model_scope == "private"
+                if (
+                    not uses_private_model
+                    and plan
+                    and plan["messages_per_day"] > 0
+                    and self.usage is not None
+                ):
+                    used_today = (await self.usage.usage_today(user_id))["plan_turns"]
+                    if used_today >= plan["messages_per_day"]:
+                        await self.audit.log(
+                            "quota",
+                            {
+                                "event": "messages_per_day",
+                                "plan": plan["name"],
+                                "limit": plan["messages_per_day"],
+                            },
+                            user_id=user_id,
+                            session_id=session_id,
+                        )
+                        msg = t("error.daily_limit", locale)
+                        self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
+                        return msg
+
+                # Separate counters are required: private turns count against
+                # the global capacity backstop but must never fill the Plan RPM
+                # bucket used by later global-model turns.
+                if not self._rate_limiter.allow(user_id):
+                    msg = t("error.rate_limited", locale)
+                    self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
+                    return msg
+                plan_rpm = plan["turns_per_minute"] if plan and not uses_private_model else 0
+                if plan_rpm and not self._plan_rate_limiter.allow(
+                    user_id, per_minute=plan_rpm
+                ):
+                    msg = t("error.rate_limited", locale)
+                    self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg))
+                    return msg
                 # Everything the prompt needs, fetched concurrently. These reads
                 # are independent, and the user waits for all of them before the
                 # first token — serializing them just adds their latencies up.
@@ -1271,6 +1281,7 @@ class AgentRuntime:
                     session_id,
                     model_used,
                     outcome.usage,
+                    count_plan_turn=not uses_private_model,
                     metrics={
                         "iterations": outcome.iterations,
                         "tool_calls": outcome.tool_calls,

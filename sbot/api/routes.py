@@ -230,15 +230,23 @@ async def _project_inventory(state: AppState, user: User) -> dict:
         projects = await state.runtime.sandbox.projects.list(_user_workspace(state, user.id))
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=f"project containers are unavailable: {exc}") from exc
-    from sbot.sandbox.project_ingress import project_ingress_url
-
-    public_ingress = bool(state.settings.sandbox.project_public_ingress_enabled)
     for project in projects:
-        project["public_url"] = (
-            project_ingress_url(state.settings.sandbox, state.settings.secret_key, user.id, project["project"])
-            if public_ingress and project["state"] == "running"
-            else None
-        )
+        access_urls = []
+        if project["state"] == "running":
+            for container_port, bindings in (project.get("ports") or {}).items():
+                port_text = str(container_port).split("/", 1)[0]
+                for binding in bindings or []:
+                    if not binding.get("HostPort"):
+                        continue
+                    host_ip = binding.get("HostIp") or state.settings.sandbox.project_host_bind_ip
+                    access_urls.append({
+                        "container_port": int(port_text),
+                        "host_port": int(binding["HostPort"]),
+                        "url": f"http://{host_ip}:{binding['HostPort']}",
+                    })
+        project["access_urls"] = sorted(access_urls, key=lambda item: item["container_port"])
+        # Kept in the response during the UI migration for older clients.
+        project["public_url"] = None
     return {
         "available": True,
         "allowed": access.allowed,

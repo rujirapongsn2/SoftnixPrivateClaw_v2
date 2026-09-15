@@ -194,7 +194,8 @@ class ProjectEnvironments:
         bindings = (state['NetworkSettings'].get('Ports') or {}).get(f'{port}/tcp') or []
         for binding in bindings:
             if binding.get('HostPort'):
-                target = f"http://127.0.0.1:{binding['HostPort']}"
+                host_ip = binding.get('HostIp') or self.settings.project_host_bind_ip
+                target = f"http://{host_ip}:{binding['HostPort']}"
                 self._proxy_targets[cache_key] = (time.monotonic() + 5, target)
                 return target
         return None
@@ -244,7 +245,7 @@ class ProjectEnvironments:
                 '--log-opt', 'max-size=10m', '--log-opt', 'max-file=3',
             ]
             for port in s.project_ports:
-                args += ['-p', f'127.0.0.1::{port}']
+                args += ['-p', f'{s.project_host_bind_ip}::{port}']
             if s.project_docker_enabled:
                 args += ['--privileged', '--mount', f'type=volume,source={name}-docker,target=/var/lib/docker',
                          '-e', 'DOCKER_TLS_CERTDIR=', '-e', 'DOCKER_HOST=unix:///var/run/docker.sock']
@@ -317,6 +318,7 @@ class ProjectEnvironments:
                 return json.dumps({'project': project, 'container': name,
                                    'state': state['State']['Status'],
                                    'files': f'projects/{project}', 'shell_cwd': '/workspace',
+                                   'host_bind_ip': self.settings.project_host_bind_ip,
                                    'public_ingress_port': self.settings.project_ingress_port,
                                    'public_bind': f'0.0.0.0:{self.settings.project_ingress_port}',
                                    'ports': state['NetworkSettings'].get('Ports', {})})

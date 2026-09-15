@@ -76,6 +76,9 @@ class SandboxSettings(BaseModel):
     project_memory_limit: str = "4g"
     project_pids_limit: int = Field(default=1024, gt=0)
     project_ports: list[int] = [3000, 8000, 8080]
+    # Docker assigns collision-free host ports and binds them to this address.
+    # Use a private LAN IPv4 address to make project apps available on the LAN.
+    project_host_bind_ip: str = "127.0.0.1"
     # Prefix for one isolated ingress bridge per project. Only that project and
     # the control-plane proxy join it, preventing lateral tenant access.
     project_network: str = Field(
@@ -118,6 +121,13 @@ class SandboxSettings(BaseModel):
             raise ValueError("project_network_limit exceeds the configured subnet pool")
         if self.project_ingress_max_connections_per_project > self.project_ingress_max_connections:
             raise ValueError("per-project ingress connections cannot exceed the global limit")
+        try:
+            bind_ip = ipaddress.ip_address(self.project_host_bind_ip)
+        except ValueError as exc:
+            raise ValueError("project_host_bind_ip must be a private or loopback IPv4 address") from exc
+        if bind_ip.version != 4 or bind_ip.is_unspecified or not (bind_ip.is_private or bind_ip.is_loopback):
+            raise ValueError("project_host_bind_ip must be a private or loopback IPv4 address")
+        self.project_host_bind_ip = str(bind_ip)
         domain = self.project_ingress_domain.strip().lower().rstrip(".")
         if domain and (
             "://" in domain or "/" in domain or ":" in domain

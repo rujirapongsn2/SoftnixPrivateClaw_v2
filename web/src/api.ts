@@ -390,7 +390,7 @@ export type PlanPatch = Partial<PlanCreate>;
 // GET /api/my/plan — the caller's effective plan + today's consumption.
 export interface MyPlan {
   plan: PlanInfo | null;
-  used: { turns: number; images: number };
+  used: { turns: number; images: number; plan_turns?: number };
   messages_remaining?: number | null;
   images_remaining?: number | null;
 }

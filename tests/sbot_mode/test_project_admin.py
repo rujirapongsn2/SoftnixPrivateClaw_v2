@@ -1,6 +1,7 @@
+import json
 from types import SimpleNamespace
 
-import json
+import pytest
 
 from sbot.sandbox.project_admin import ProjectContainerManager, _size_bytes
 
@@ -20,10 +21,14 @@ class ConfigStore:
     def __init__(self):
         self.enabled = None
 
-    async def get(self, default_enabled=False, default_public_ingress_enabled=False):
+    async def get(
+        self, default_enabled=False, default_public_ingress_enabled=False,
+        default_host_bind_ip="127.0.0.1",
+    ):
         return {
             "enabled": default_enabled if self.enabled is None else self.enabled,
             "public_ingress_enabled": default_public_ingress_enabled,
+            "host_bind_ip": default_host_bind_ip,
         }
 
     async def set_enabled(self, enabled):
@@ -31,6 +36,27 @@ class ConfigStore:
 
     async def set_public_ingress_enabled(self, enabled):
         self.public_ingress_enabled = enabled
+
+    async def set_host_bind_ip(self, host_bind_ip):
+        self.host_bind_ip = host_bind_ip
+
+
+async def test_internal_access_accepts_private_ipv4_and_rejects_public_address(monkeypatch, tmp_path):
+    settings = SimpleNamespace(
+        enabled=True, projects_enabled=True, project_image="developer:test",
+        project_host_bind_ip="127.0.0.1", project_ports=[3000, 8000],
+    )
+    store = ConfigStore()
+    manager = ProjectContainerManager(settings, store, source_root=tmp_path)
+    monkeypatch.setattr(manager, "_docker_ready", lambda: _async_value(False))
+
+    status = await manager.set_host_bind_ip("192.168.1.24")
+
+    assert store.host_bind_ip == "192.168.1.24"
+    assert status["host_bind_ip"] == "192.168.1.24"
+    assert status["access_scope"] == "lan"
+    with pytest.raises(ValueError, match="private or loopback"):
+        await manager.set_host_bind_ip("8.8.8.8")
 
 
 async def test_enabling_missing_image_starts_background_build(monkeypatch, tmp_path):

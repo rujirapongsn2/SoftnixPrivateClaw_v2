@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from claw.core.plans import builtin_plan_seeds, cost_allowed
 from claw.db.models import UserGroup
 from claw.db.stores import LLMConfigStore, PolicyPlanStore, UsageStore, UserStore, GroupStore
+from claw.providers.base import ProviderError
 from tests.conftest import FakeProvider, text_turn
 from tests.conftest_app import build_api_app, client
 from tests.test_runtime import make_runtime
@@ -90,6 +91,8 @@ async def test_enabled_models_byok_exempt_from_ceiling(db_factory):
     await _add_chat_model(store, "my/pricey", "very_high", owner_id="user-1")  # BYOK
     ids = {m["model_id"] for m in await store.enabled_models(user_id="user-1", max_cost="low")}
     assert ids == {"my/pricey"}  # own BYOK kept, global pricey dropped
+    resolved = await store.resolve("my/pricey", user_id="user-1", max_cost="low")
+    assert resolved is not None and resolved["scope"] == "private"
 
 
 async def test_resolve_denies_over_ceiling_global(db_factory):
@@ -252,7 +255,12 @@ async def test_assign_plan_and_models_filter(db_factory):
         # a low-ceiling plan, assigned to the user
         pr = await c.post(
             "/api/admin/plans",
-            json={"name": "Lite", "max_chat_cost": "low", "allow_image": False},
+            json={
+                "name": "Lite",
+                "max_chat_cost": "low",
+                "allow_image": False,
+                "messages_per_day": 2,
+            },
             headers=_bearer(admin_token),
         )
         pid = pr.json()["id"]
@@ -261,8 +269,15 @@ async def test_assign_plan_and_models_filter(db_factory):
         models = (await c.get("/api/models", headers=_bearer(user_token))).json()["models"]
         assert {m["model_id"] for m in models} == {"vendor/cheap"}
         # my/plan reflects the assignment
+        await app.state.claw.usage.record(
+            user["id"], None, "private", {"prompt_tokens": 1}, count_plan_turn=False
+        )
+        await app.state.claw.usage.record(user["id"], None, "global", {"prompt_tokens": 1})
         mine = (await c.get("/api/my/plan", headers=_bearer(user_token))).json()
         assert mine["plan"]["name"] == "Lite"
+        assert mine["used"]["turns"] == 2
+        assert mine["used"]["plan_turns"] == 1
+        assert mine["messages_remaining"] == 1
 
 
 async def test_models_endpoint_hides_env_default_without_credentials(db_factory):
@@ -622,3 +637,88 @@ async def test_messages_per_day_gate(db_factory, stores, tmp_path):
 
     out = await runtime.handle_message(user.id, session.id, "third")
     assert "daily" in out.lower() or "โควตา" in out  # localized daily-limit message
+
+
+async def test_my_model_bypasses_plan_message_and_rpm_quotas(db_factory, stores, tmp_path):
+    plans = await _seed_plans(db_factory)
+    default = await plans.default_plan()
+    await plans.update(default["id"], messages_per_day=1, turns_per_minute=1)
+    usage = UsageStore(db_factory, is_postgres=False)
+
+    provider = FakeProvider([text_turn("first"), text_turn("second")])
+    runtime = make_runtime(stores, provider, tmp_path)
+    runtime.plans = plans
+    runtime.usage = usage
+    runtime.llm_config = LLMConfigStore(db_factory)
+
+    user = await stores["users"].get_or_create_by_email("byok@x.io")
+    await _add_chat_model(runtime.llm_config, "vendor/private", "very_high", owner_id=user.id)
+    session = await stores["sessions"].create(user.id)
+    await usage.record(user.id, None, "already-used", {"prompt_tokens": 1, "completion_tokens": 1})
+
+    first = await runtime.handle_message(user.id, session.id, "one", model="vendor/private")
+    second = await runtime.handle_message(user.id, session.id, "two", model="vendor/private")
+
+    assert (first, second) == ("first", "second")
+    assert len(provider.calls) == 2
+    await runtime.drain()
+    today = await usage.usage_today(user.id)
+    assert today["turns"] == 3
+    assert today["plan_turns"] == 1
+    assert (await usage.top_users_today())[0]["turns"] == 1
+
+
+async def test_my_model_turns_do_not_fill_global_model_plan_rpm(db_factory, stores, tmp_path):
+    plans = await _seed_plans(db_factory)
+    default = await plans.default_plan()
+    await plans.update(
+        default["id"], messages_per_day=0, turns_per_minute=1, max_chat_cost="very_high"
+    )
+    llm_config = LLMConfigStore(db_factory)
+
+    user = await stores["users"].get_or_create_by_email("mixed@x.io")
+    await _add_chat_model(llm_config, "vendor/private", "very_high", owner_id=user.id)
+    await _add_chat_model(llm_config, "vendor/global", "low")
+    session = await stores["sessions"].create(user.id)
+
+    provider = FakeProvider([text_turn("p1"), text_turn("p2"), text_turn("g1")])
+    runtime = make_runtime(stores, provider, tmp_path)
+    runtime.plans = plans
+    runtime.llm_config = llm_config
+
+    assert await runtime.handle_message(user.id, session.id, "p1", model="vendor/private") == "p1"
+    assert await runtime.handle_message(user.id, session.id, "p2", model="vendor/private") == "p2"
+    assert await runtime.handle_message(user.id, session.id, "g1", model="vendor/global") == "g1"
+    blocked = await runtime.handle_message(user.id, session.id, "g2", model="vendor/global")
+
+    assert "too fast" in blocked.lower() or "ถี่" in blocked
+    assert len(provider.calls) == 3
+
+
+async def test_my_model_does_not_use_operator_fallback(db_factory, stores, tmp_path):
+    plans = await _seed_plans(db_factory)
+    llm_config = LLMConfigStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("private-failure@x.io")
+    await _add_chat_model(llm_config, "vendor/private", "very_high", owner_id=user.id)
+    fallback = await _add_chat_model(llm_config, "vendor/fallback", "low")
+    await llm_config.update_model(fallback.id, owner_id=None, is_fallback=True)
+    session = await stores["sessions"].create(user.id)
+
+    class FailingPrivateProvider(FakeProvider):
+        def __init__(self):
+            super().__init__([])
+            self.models: list[str | None] = []
+
+        async def stream_chat(self, messages, tools=None, model=None, **kwargs):
+            self.models.append(model)
+            raise ProviderError("private provider unavailable", retryable=False)
+            yield  # pragma: no cover
+
+    provider = FailingPrivateProvider()
+    runtime = make_runtime(stores, provider, tmp_path)
+    runtime.plans = plans
+    runtime.llm_config = llm_config
+
+    await runtime.handle_message(user.id, session.id, "hello", model="vendor/private")
+
+    assert provider.models == ["vendor/private"]

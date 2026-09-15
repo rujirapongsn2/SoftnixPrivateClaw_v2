@@ -1574,15 +1574,16 @@ class UsageStore:
         model: str,
         usage: dict[str, int],
         count_turn: bool = True,
+        count_plan_turn: bool = True,
         metrics: dict[str, int] | None = None,
     ) -> None:
         """Record token spend. `count_turn=False` for background work (memory
         consolidation): the tokens are real and belong in the bill, but they are
         not a chat turn the user took. It is persisted on the raw row as well as
         applied to the rollup, because every turn figure has to agree — the
-        quota reads UsageDaily.turns while the admin and per-user reports count
-        usage_records, and a user seeing more turns billed than their own quota
-        shows would be reporting a bug we wrote.
+        reports continue to use UsageDaily.turns. UsageDaily.plan_turns is the
+        plan-quota subset and excludes My Models turns when
+        `count_plan_turn=False`.
 
         `metrics` carries the turn's shape (iterations, tool_calls, ttft_ms,
         duration_ms) onto the raw row only — the daily rollup stays a pure cost
@@ -1633,6 +1634,8 @@ class UsageStore:
                             prompt_tokens=UsageDaily.prompt_tokens + prompt,
                             completion_tokens=UsageDaily.completion_tokens + completion,
                             turns=UsageDaily.turns + (1 if count_turn else 0),
+                            plan_turns=UsageDaily.plan_turns
+                            + (1 if count_turn and count_plan_turn else 0),
                         )
                     )
                     if res.rowcount == 0:
@@ -1644,6 +1647,7 @@ class UsageStore:
                                 prompt_tokens=prompt,
                                 completion_tokens=completion,
                                 turns=1 if count_turn else 0,
+                                plan_turns=1 if count_turn and count_plan_turn else 0,
                             )
                         )
                     await db.commit()
@@ -1683,21 +1687,19 @@ class UsageStore:
                 continue
 
     async def top_users_today(self, limit: int = 15) -> list[dict[str, int]]:
-        """Today's highest-volume users (by chat turns), bounded to `limit`
-        rows — feeds the admin Plans overview's "who's near their quota" list
-        without an unbounded per-user scan."""
+        """Users nearest their Plan quotas today, bounded to ``limit`` rows."""
         today = datetime.now(timezone.utc).date()
         async with self.factory() as db:
             rows = (
                 await db.execute(
                     select(
                         UsageDaily.user_id,
-                        func.coalesce(func.sum(UsageDaily.turns), 0).label("turns"),
+                        func.coalesce(func.sum(UsageDaily.plan_turns), 0).label("turns"),
                         func.coalesce(func.sum(UsageDaily.images), 0).label("images"),
                     )
                     .where(UsageDaily.day == today)
                     .group_by(UsageDaily.user_id)
-                    .order_by(func.sum(UsageDaily.turns).desc())
+                    .order_by(func.sum(UsageDaily.plan_turns).desc())
                     .limit(limit)
                 )
             ).all()
@@ -1726,9 +1728,7 @@ class UsageStore:
             await db.commit()
 
     async def usage_today(self, user_id: str) -> dict[str, int]:
-        """Today's summed chat turns + image generations for a user — the
-        counters the daily plan quotas (messages_per_day / images_per_day) are
-        checked against."""
+        """Today's total usage plus the chat-turn subset charged to a plan."""
         today = datetime.now(timezone.utc).date()
         async with self.factory() as db:
             row = (
@@ -1736,10 +1736,15 @@ class UsageStore:
                     select(
                         func.coalesce(func.sum(UsageDaily.turns), 0),
                         func.coalesce(func.sum(UsageDaily.images), 0),
+                        func.coalesce(func.sum(UsageDaily.plan_turns), 0),
                     ).where(UsageDaily.day == today, UsageDaily.user_id == user_id)
                 )
             ).one()
-        return {"turns": int(row[0] or 0), "images": int(row[1] or 0)}
+        return {
+            "turns": int(row[0] or 0),
+            "images": int(row[1] or 0),
+            "plan_turns": int(row[2] or 0),
+        }
 
     # Label format per granularity — used to normalize a PG bucket (a
     # datetime, period start) into the same shape SQLite's strftime-based
@@ -2582,6 +2587,7 @@ class LLMConfigStore:
             "api_key": self._clean_key(self._dec(p.api_key)),
             "api_base": p.api_base,
             "context_window": m.context_window,
+            "scope": "private" if p.owner_id else "global",
         }
 
     async def resolve_image(
@@ -2837,18 +2843,22 @@ class ProjectContainerConfigStore:
 
     _KEY = "project_containers"
     _INGRESS_KEY = "project_public_ingress"
+    _ACCESS_KEY = "project_internal_access"
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
         self.factory = factory
 
     async def get(
-        self, default_enabled: bool = False, default_public_ingress_enabled: bool = False
-    ) -> dict[str, bool]:
+        self, default_enabled: bool = False, default_public_ingress_enabled: bool = False,
+        default_host_bind_ip: str = "127.0.0.1",
+    ) -> dict[str, bool | str]:
         async with self.factory() as db:
             row = await db.get(AppSetting, self._KEY)
             ingress_row = await db.get(AppSetting, self._INGRESS_KEY)
+            access_row = await db.get(AppSetting, self._ACCESS_KEY)
         value = dict(row.value or {}) if row is not None else {}
         ingress_value = dict(ingress_row.value or {}) if ingress_row is not None else {}
+        access_value = dict(access_row.value or {}) if access_row is not None else {}
         enabled = value.get("enabled", default_enabled)
         # Read the original combined-row field as a migration fallback. New
         # writes use an independent row, so simultaneous admin toggles cannot
@@ -2861,6 +2871,11 @@ class ProjectContainerConfigStore:
             "public_ingress_enabled": (
                 public_ingress_enabled if isinstance(public_ingress_enabled, bool)
                 else default_public_ingress_enabled
+            ),
+            "host_bind_ip": (
+                access_value.get("host_bind_ip")
+                if isinstance(access_value.get("host_bind_ip"), str)
+                else default_host_bind_ip
             ),
         }
 
@@ -2882,6 +2897,16 @@ class ProjectContainerConfigStore:
 
     async def set_public_ingress_enabled(self, enabled: bool) -> None:
         await self._set(self._INGRESS_KEY, enabled)
+
+    async def set_host_bind_ip(self, host_bind_ip: str) -> None:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._ACCESS_KEY)
+            value = {"host_bind_ip": host_bind_ip}
+            if row is None:
+                db.add(AppSetting(key=self._ACCESS_KEY, value=value))
+            else:
+                row.value = value
+            await db.commit()
 
 
 class TelegramConfigStore:

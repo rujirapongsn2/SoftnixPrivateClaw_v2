@@ -39,6 +39,64 @@ def test_project_identity_is_stable_scoped_and_rejects_traversal(tmp_path):
         manager.identity(tmp_path, 'demo')
 
 
+def test_project_host_bind_ip_accepts_lan_and_rejects_public_addresses():
+    assert SandboxSettings(project_host_bind_ip="192.168.1.10").project_host_bind_ip == "192.168.1.10"
+    for address in ("0.0.0.0", "8.8.8.8", "not-an-ip", "::1"):
+        with pytest.raises(ValueError, match="project_host_bind_ip"):
+            SandboxSettings(project_host_bind_ip=address)
+
+
+@pytest.mark.asyncio
+async def test_new_project_ports_bind_to_configured_lan_ip(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(project_host_bind_ip="192.168.1.10"))
+    running = {
+        "State": {"Running": True, "Status": "running"},
+        "NetworkSettings": {"Networks": {}, "Ports": {}},
+    }
+    owned_results = iter([None, running, running])
+    calls = []
+
+    async def owned(_name):
+        return next(owned_results)
+
+    async def docker(*args, timeout=120):
+        calls.append(args)
+        return SandboxResult(0, "container-id", "", False)
+
+    async def ensure_network(_network):
+        return True
+
+    monkeypatch.setattr(manager, "_owned", owned)
+    monkeypatch.setattr(manager, "_ensure_network", ensure_network)
+    monkeypatch.setattr(manager, "_docker", docker)
+
+    await manager._ensure("managed-project", tmp_path / "project")
+
+    run = next(args for args in calls if args[0] == "run")
+    published = [run[index + 1] for index, value in enumerate(run) if value == "-p"]
+    assert published == ["192.168.1.10::3000", "192.168.1.10::8000", "192.168.1.10::8080"]
+
+
+@pytest.mark.asyncio
+async def test_host_proxy_uses_the_actual_lan_binding(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(project_host_bind_ip="192.168.1.10"))
+    state = {
+        "State": {"Running": True, "Status": "running"},
+        "NetworkSettings": {
+            "Networks": {},
+            "Ports": {"8000/tcp": [{"HostIp": "192.168.1.10", "HostPort": "49152"}]},
+        },
+    }
+
+    async def owned(_name):
+        return state
+
+    monkeypatch.setattr(manager, "_owned", owned)
+    monkeypatch.setattr("sbot.sandbox.projects.Path.exists", lambda _path: False)
+
+    assert await manager.proxy_target(tmp_path, "demo", 8000) == "http://192.168.1.10:49152"
+
+
 @pytest.mark.asyncio
 async def test_project_network_is_small_labeled_and_internal_when_egress_is_disabled(monkeypatch):
     manager = ProjectEnvironments(SandboxSettings(network="none"))
