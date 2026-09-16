@@ -263,6 +263,12 @@ function ProjectsPanel() {
     void guard(async () => await reload());
   }, [guard, reload]);
 
+  useEffect(() => {
+    if (!inventory?.available || inventory.runtime_state !== "building") return;
+    const timer = window.setInterval(() => void guard(async () => await reload()), 2000);
+    return () => window.clearInterval(timer);
+  }, [guard, inventory?.available, inventory?.runtime_state, reload]);
+
   const act = (project: string, action: "start" | "stop") =>
     void guard(async () => {
       setBusyProject(project);
@@ -284,6 +290,16 @@ function ProjectsPanel() {
     return <EmptyState title={t("settings.projects.unavailableTitle")} description={t("settings.projects.unavailableDesc")} />;
   }
 
+  // Older API processes do not include readiness fields. Keep Start usable
+  // during a rolling deployment and let the server remain the final gate.
+  const runtimeReady = inventory.ready ?? true;
+  const runtimeState = inventory.runtime_state ?? (runtimeReady ? "ready" : "building");
+  const runtimeStatus = runtimeState === "building"
+    ? { label: t("settings.projects.preparing"), description: t("settings.projects.preparingDesc"), variant: "warning" as const }
+    : runtimeState === "error"
+      ? { label: t("settings.projects.runtimeError"), description: t("settings.projects.runtimeErrorDesc"), variant: "error" as const }
+      : { label: t("settings.projects.runtimeUnavailable"), description: t("settings.projects.runtimeUnavailableDesc"), variant: "error" as const };
+
   const policy = inventory.allowed
     ? t("settings.projects.policyAllowed", { count: String(inventory.max_containers) })
     : t("settings.projects.policyDenied");
@@ -297,8 +313,17 @@ function ProjectsPanel() {
         </div>
         <Button label={t("settings.projects.refresh")} size="sm" variant="secondary" clickAction={() => void guard(async () => await reload())} />
       </div>
+      {!runtimeReady && inventory.projects.length > 0 && (
+        <div className="claw-row">
+          <Badge variant={runtimeStatus.variant} label={runtimeStatus.label} />
+          <Text size="sm" color="secondary">{runtimeStatus.description}</Text>
+        </div>
+      )}
       {inventory.projects.length === 0 ? (
-        <EmptyState title={t("settings.projects.emptyTitle")} description={t("settings.projects.emptyDesc")} />
+        <EmptyState
+          title={runtimeReady ? t("settings.projects.emptyTitle") : runtimeStatus.label}
+          description={runtimeReady ? t("settings.projects.emptyDesc") : runtimeStatus.description}
+        />
       ) : (
         inventory.projects.map((item) => {
           const running = item.state === "running";
@@ -358,7 +383,7 @@ function ProjectsPanel() {
                       label={t("settings.projects.start")}
                       icon={<Icon icon={Play} size="xsm" />}
                       size="sm"
-                      isDisabled={!inventory.allowed || busyProject === item.project}
+                      isDisabled={!inventory.allowed || !runtimeReady || busyProject === item.project}
                       isLoading={busyProject === item.project}
                       clickAction={() => act(item.project, "start")}
                     />

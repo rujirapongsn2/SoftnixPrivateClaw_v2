@@ -21,6 +21,10 @@ _CAP = 20_000
 _SLUG = re.compile(r"[a-z][a-z0-9-]{0,47}\Z")
 
 
+class ProjectImageUnavailable(RuntimeError):
+    """The shared developer image is not ready to create or start a project."""
+
+
 async def run_process(argv: list[str], timeout: float = 120) -> SandboxResult:
     """Drain both pipes while retaining only a bounded tail."""
     proc = await asyncio.create_subprocess_exec(
@@ -86,6 +90,23 @@ class ProjectEnvironments:
         if state and state['Config'].get('Labels', {}).get('sbot.project') != name:
             raise ValueError('container name is occupied by an unmanaged container')
         return state
+
+    async def _image_ready(self) -> bool:
+        try:
+            result = await self._docker(
+                'image', 'inspect', self.settings.project_image, '--format', '{{.Id}}', timeout=10
+            )
+            return result.exit_code == 0
+        except (OSError, RuntimeError):
+            return False
+
+    async def _require_image(self) -> None:
+        if not await self._image_ready():
+            raise ProjectImageUnavailable(
+                f"project containers are not ready: developer image "
+                f"'{self.settings.project_image}' is not ready. Wait for Control Plane → "
+                "Project containers to show Ready, or retry the image build there."
+            )
 
     def _network_name(self, name: str) -> str:
         suffix = name.removeprefix('sbot-project-')
@@ -258,6 +279,10 @@ class ProjectEnvironments:
     async def _ensure(self, name, path):
         state = await self._owned(name)
         if state is None:
+            # Fail before creating the project folder or network. Enabling the
+            # feature starts an asynchronous image build, so a create request
+            # can legitimately arrive while the control plane says Preparing.
+            await self._require_image()
             path.mkdir(parents=True, exist_ok=True)
             s = self.settings
             network = self._network_name(name)
@@ -296,6 +321,8 @@ class ProjectEnvironments:
                     raise RuntimeError(created.render())
             state = await self._owned(name)
         else:
+            if not state['State']['Running']:
+                await self._require_image()
             state = await self._connect_network(name, state)
         if not state['State']['Running']:
             result = await self._docker('start', name)
@@ -396,7 +423,10 @@ class ProjectEnvironments:
                             "Do not reuse an unrelated existing project; remove an unused project "
                             "or ask an administrator to raise the limit."
                         )
-                state = await self._ensure(name, path)
+                try:
+                    state = await self._ensure(name, path)
+                except ProjectImageUnavailable as exc:
+                    return f'Error: {exc}'
             if action in {'create', 'start', 'status'}:
                 access_urls = self._access_urls(state)
                 app_url = next((

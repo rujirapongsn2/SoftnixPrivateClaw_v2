@@ -110,6 +110,30 @@ async def test_status_is_ready_only_when_enabled_docker_and_image_are_ready(monk
     assert status["image"] == "developer:test"
 
 
+async def test_readiness_probe_is_cached_without_collecting_metrics(monkeypatch, tmp_path):
+    settings = SimpleNamespace(enabled=True, projects_enabled=True, project_image="developer:test")
+    manager = ProjectContainerManager(settings, ConfigStore(), source_root=tmp_path)
+    calls = {"docker": 0, "image": 0}
+
+    async def docker_available():
+        calls["docker"] += 1
+        return True
+
+    async def image_available():
+        calls["image"] += 1
+        return True
+
+    monkeypatch.setattr(manager, "_docker_ready", docker_available)
+    monkeypatch.setattr(manager, "_image_ready", image_available)
+
+    first = await manager.readiness()
+    second = await manager.readiness()
+
+    assert first["runtime_state"] == "ready"
+    assert second["ready"] is True
+    assert calls == {"docker": 1, "image": 1}
+
+
 async def _async_value(value):
     return value
 

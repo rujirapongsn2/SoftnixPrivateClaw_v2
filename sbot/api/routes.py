@@ -221,12 +221,20 @@ async def _project_inventory(state: AppState, user: User) -> dict:
     if not enabled:
         return {
             "available": False,
+            "ready": False,
+            "runtime_state": "disabled",
             "allowed": access.allowed,
             "source": access.source,
             "max_containers": access.max_containers,
             "projects": [],
         }
     try:
+        manager = getattr(state, "project_containers", None)
+        readiness = (
+            await manager.readiness()
+            if manager is not None
+            else {"ready": False, "runtime_state": "unavailable"}
+        )
         projects = await state.runtime.sandbox.projects.list(_user_workspace(state, user.id))
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=f"project containers are unavailable: {exc}") from exc
@@ -249,6 +257,8 @@ async def _project_inventory(state: AppState, user: User) -> dict:
         project["public_url"] = None
     return {
         "available": True,
+        "ready": bool(readiness["ready"]),
+        "runtime_state": str(readiness["runtime_state"]),
         "allowed": access.allowed,
         "source": access.source,
         "max_containers": access.max_containers,
@@ -269,6 +279,16 @@ async def start_project(project: str, user: User = Depends(current_user), state:
         raise HTTPException(status_code=409, detail="persistent project containers are disabled")
     if not inventory["allowed"]:
         raise HTTPException(status_code=403, detail="project containers are not allowed for this account")
+    if not inventory["ready"]:
+        runtime_detail = {
+            "building": "project containers are preparing; wait for the developer image to become ready",
+            "error": "the developer image build failed; ask an administrator to retry it in Control Plane",
+            "unavailable": "the project container runtime is unavailable; ask an administrator to check Docker",
+        }.get(inventory["runtime_state"], "project containers are not ready")
+        raise HTTPException(
+            status_code=409,
+            detail=runtime_detail,
+        )
     try:
         result = await state.runtime.sandbox.projects.execute(
             _user_workspace(state, user.id), project, "start", max_projects=inventory["max_containers"]
