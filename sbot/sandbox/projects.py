@@ -91,6 +91,12 @@ class ProjectEnvironments:
         suffix = name.removeprefix('sbot-project-')
         return f'{self.settings.project_network}-{suffix}'
 
+    def _proxy_container(self) -> str | None:
+        """Return the Docker-host proxy that may be attached to project networks."""
+        if not Path('/.dockerenv').exists():
+            return None
+        return self.settings.project_proxy_container.strip() or socket.gethostname()
+
     async def _ensure_network(self, network: str) -> bool:
         internal = self.settings.network == 'none'
         inspected = await self._docker('network', 'inspect', network)
@@ -157,8 +163,8 @@ class ProjectEnvironments:
             if connected.exit_code and 'already exists' not in connected.stderr.lower():
                 raise RuntimeError(connected.render())
             state = await self._owned(name)
-        if Path('/.dockerenv').exists() and network not in self._proxy_networks:
-            proxy = self.settings.project_proxy_container.strip() or socket.gethostname()
+        proxy = self._proxy_container()
+        if proxy is not None and network not in self._proxy_networks:
             connected = await self._docker('network', 'connect', network, proxy)
             if connected.exit_code and 'already exists' not in connected.stderr.lower():
                 raise RuntimeError(connected.render())
@@ -281,12 +287,12 @@ class ProjectEnvironments:
                       timeout_seconds: int = 90, max_projects: int | None = None) -> str:
         if not self.settings.enabled or not self.settings.projects_enabled:
             return 'Error: persistent projects are disabled. Set SBOT_SANDBOX__PROJECTS_ENABLED=true.'
-        if action not in {'start', 'status', 'stop', 'exec', 'compose_up', 'compose_ps', 'compose_logs', 'compose_down'}:
+        if action not in {'create', 'start', 'status', 'stop', 'delete', 'exec', 'compose_up', 'compose_ps', 'compose_logs', 'compose_down'}:
             raise ValueError('unknown project action')
         if isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 1800:
             raise ValueError('timeout_seconds must be between 1 and 1800')
         name, path = self.identity(workspace, project)
-        if action in {'start', 'stop'}:
+        if action in {'create', 'start', 'stop', 'delete'}:
             for key in tuple(self._proxy_targets):
                 if key[:2] == (str(workspace.resolve()), project):
                     self._proxy_targets.pop(key, None)
@@ -303,18 +309,75 @@ class ProjectEnvironments:
         # Serialize commands/lifecycle for one project. Different projects run
         # concurrently. Team members should use git worktrees for parallel edits.
         async with self._locks.get(name):
-            if action in {'status', 'stop'}:
+            if action in {'status', 'stop', 'delete'}:
                 state = await self._owned(name)
-                if state is None:
+                if state is None and action != 'delete':
                     return json.dumps({'project': project, 'state': 'not_created'})
                 if action == 'stop':
                     return (await self._docker('stop', '--time', '10', name)).render()
+                if action == 'delete':
+                    container_existed = state is not None
+                    if container_existed:
+                        removed = await self._docker('rm', '-f', name)
+                        if removed.exit_code:
+                            return removed.render()
+                    network = self._network_name(name)
+                    proxy = self._proxy_container()
+                    if proxy is not None:
+                        disconnected = await self._docker(
+                            'network', 'disconnect', '-f', network, proxy
+                        )
+                        disconnect_error = disconnected.stderr.lower()
+                        disconnect_ignored = any(message in disconnect_error for message in (
+                            'not connected', 'no such network', 'no such container',
+                        ))
+                        if not disconnected.exit_code or disconnect_ignored:
+                            self._proxy_networks.discard(network)
+                    network_removed = await self._docker('network', 'rm', network)
+                    network_missing = (
+                        network_removed.exit_code
+                        and 'no such network' in network_removed.stderr.lower()
+                    )
+                    network_deleted = not network_removed.exit_code or network_missing
+                    if network_deleted:
+                        self._proxy_networks.discard(network)
+                    cleanup_error = '' if network_deleted else network_removed.render()
+                    deleted_something = container_existed or not network_missing
+                    return json.dumps({
+                        'project': project,
+                        'state': (
+                            'deleted' if network_deleted and deleted_something
+                            else 'not_created' if network_deleted
+                            else 'container_deleted_network_cleanup_failed'
+                        ),
+                        'files': f'projects/{project}',
+                        'files_preserved': True,
+                        'named_volumes_preserved': True,
+                        'container_deleted': container_existed,
+                        'network_deleted': network_deleted,
+                        'network_cleanup_error': cleanup_error,
+                    })
             else:
-                if max_projects is not None and await self._owned(name) is None:
+                state = await self._owned(name)
+                if action == 'create' and state is not None:
+                    return (
+                        f"Error: project '{project}' already exists. Choose a new slug for a new application; "
+                        "use start only when continuing this application."
+                    )
+                if state is None and action != 'create':
+                    return (
+                        f"Error: project '{project}' has not been created. "
+                        "Use action=create with a new slug before running project commands."
+                    )
+                if max_projects is not None and state is None:
                     if len(await self.list(workspace)) >= max_projects:
-                        return f"Error: project container limit reached ({max_projects})."
+                        return (
+                            f"Error: project container limit reached ({max_projects}). "
+                            "Do not reuse an unrelated existing project; remove an unused project "
+                            "or ask an administrator to raise the limit."
+                        )
                 state = await self._ensure(name, path)
-            if action in {'start', 'status'}:
+            if action in {'create', 'start', 'status'}:
                 return json.dumps({'project': project, 'container': name,
                                    'state': state['State']['Status'],
                                    'files': f'projects/{project}', 'shell_cwd': '/workspace',

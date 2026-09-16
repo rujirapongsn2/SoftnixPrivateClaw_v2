@@ -154,8 +154,10 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
 
     "chat.confirm.exec.pending": "Run this command in the sandbox?",
     "chat.confirm.exec.approved": "Approved — command ran",
-    "chat.confirm.project.pending": "Create or start this project environment?",
-    "chat.confirm.project.approved": "Approved — project environment started",
+    "chat.confirm.project.pending": "Allow Project Container access for this task?",
+    "chat.confirm.project.approved": "Approved — Project Container access granted for this task",
+    "chat.confirm.projectDelete.pending": "Delete this project environment?",
+    "chat.confirm.projectDelete.approved": "Deleted project environment; project files were preserved",
     "chat.confirm.workflow.pending": "Start this multi-step workflow?",
     "chat.confirm.workflow.approved": "Approved — workflow started",
     "chat.confirm.spawn.pending": "Run this delegated task?",
@@ -165,6 +167,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.confirm.declined": "Declined",
     "chat.confirm.decline": "Decline",
     "chat.confirm.approve": "Approve & run",
+    "chat.confirm.approveTask": "Approve for this task",
 
     "chat.permission.ask.label": "Ask",
     "chat.permission.ask.desc": "Ask before sandbox commands and multi-step workflows",
@@ -404,7 +407,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.projects.policyAllowed": "You may run up to {count} project container(s).",
     "settings.projects.policyDenied": "Your account is not allowed to start project containers.",
     "settings.projects.emptyTitle": "No project containers",
-    "settings.projects.emptyDesc": "A software-development bot creates a project container when it starts its first project.",
+    "settings.projects.emptyDesc": "A software-development bot creates a container when it creates a new project.",
     "settings.projects.unavailableTitle": "Project containers are unavailable",
     "settings.projects.unavailableDesc": "This Sbot installation has not enabled persistent project environments.",
 
@@ -1398,8 +1401,10 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
 
     "chat.confirm.exec.pending": "รันคำสั่งนี้ใน sandbox หรือไม่?",
     "chat.confirm.exec.approved": "อนุมัติแล้ว — รันคำสั่งเสร็จสิ้น",
-    "chat.confirm.project.pending": "สร้างหรือเริ่มสภาพแวดล้อมโปรเจกต์นี้หรือไม่?",
-    "chat.confirm.project.approved": "อนุมัติแล้ว — เริ่มสภาพแวดล้อมโปรเจกต์แล้ว",
+    "chat.confirm.project.pending": "อนุญาตให้ใช้ Project Container สำหรับงานนี้หรือไม่?",
+    "chat.confirm.project.approved": "อนุมัติแล้ว — ใช้ Project Container สำหรับงานนี้ได้",
+    "chat.confirm.projectDelete.pending": "ลบสภาพแวดล้อมของโปรเจกต์นี้หรือไม่?",
+    "chat.confirm.projectDelete.approved": "ลบสภาพแวดล้อมแล้ว — เก็บไฟล์โปรเจกต์ไว้",
     "chat.confirm.workflow.pending": "เริ่ม workflow หลายขั้นตอนนี้หรือไม่?",
     "chat.confirm.workflow.approved": "อนุมัติแล้ว — เริ่ม workflow แล้ว",
     "chat.confirm.spawn.pending": "รันงานที่มอบหมายนี้หรือไม่?",
@@ -1409,6 +1414,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.confirm.declined": "ปฏิเสธแล้ว",
     "chat.confirm.decline": "ปฏิเสธ",
     "chat.confirm.approve": "อนุมัติและรัน",
+    "chat.confirm.approveTask": "อนุมัติสำหรับงานนี้",
 
     "chat.permission.ask.label": "ถามก่อน",
     "chat.permission.ask.desc": "ถามก่อนรันคำสั่งใน sandbox และ workflow หลายขั้นตอน",
@@ -1644,7 +1650,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.projects.policyAllowed": "บัญชีนี้ใช้คอนเทนเนอร์โปรเจกต์ได้สูงสุด {count} รายการ",
     "settings.projects.policyDenied": "บัญชีนี้ไม่ได้รับอนุญาตให้เริ่มคอนเทนเนอร์โปรเจกต์",
     "settings.projects.emptyTitle": "ยังไม่มีคอนเทนเนอร์โปรเจกต์",
-    "settings.projects.emptyDesc": "บอท software development จะสร้างคอนเทนเนอร์เมื่อเริ่มโปรเจกต์แรก",
+    "settings.projects.emptyDesc": "บอทพัฒนาซอฟต์แวร์จะสร้างคอนเทนเนอร์เมื่อสร้างโปรเจกต์ใหม่",
     "settings.projects.unavailableTitle": "คอนเทนเนอร์โปรเจกต์ไม่พร้อมใช้งาน",
     "settings.projects.unavailableDesc": "Sbot เครื่องนี้ยังไม่ได้เปิด persistent project environment",
 

@@ -41,3 +41,21 @@ async def test_project_tool_denies_creation_before_touching_docker(stores, tmp_p
 
     tool = ProjectTool(SimpleNamespace(projects=Projects()), tmp_path, user.id, policy)
     assert (await tool.execute("demo", "start")).startswith("Error: project containers are not allowed")
+
+
+@pytest.mark.asyncio
+async def test_project_tool_passes_the_fresh_user_limit_to_every_mutating_call(stores, tmp_path):
+    user = await stores["users"].create("limited@sbot.ai")
+    await stores["users"].set_project_policy(user.id, True, 1)
+    policy = ProjectAccessPolicy(stores["users"])
+    received: list[int | None] = []
+
+    class Projects:
+        async def execute(self, *_args, max_projects=None, **_kwargs):
+            received.append(max_projects)
+            return "ok"
+
+    tool = ProjectTool(SimpleNamespace(projects=Projects()), tmp_path, user.id, policy)
+    assert await tool.execute("first-app", "start") == "ok"
+    assert await tool.execute("second-app", "exec", "true") == "ok"
+    assert received == [1, 1]

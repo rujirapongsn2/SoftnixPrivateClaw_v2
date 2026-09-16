@@ -10,6 +10,7 @@ turns, whereas a ContextVar is isolated per async task and propagates across
 `await` within that task.
 """
 
+import asyncio
 import contextvars
 from collections.abc import Awaitable, Callable
 
@@ -49,3 +50,61 @@ current_turn_locale: contextvars.ContextVar[str | None] = contextvars.ContextVar
 current_turn_confirmation: contextvars.ContextVar[
     Callable[[str, str, str], Awaitable[bool]] | None
 ] = contextvars.ContextVar("sbot_current_turn_confirmation", default=None)
+
+# Project approvals for the active root turn. The scope is deliberately shared
+# with nested delegate/spawn tasks through ContextVar propagation, so one goal
+# does not prompt again merely because another team bot continues the same
+# project. AgentRuntime installs a fresh scope per turn.
+class ProjectApprovalScope:
+    """Coordinate one project approval across every loop in a root turn."""
+
+    def __init__(self) -> None:
+        self.approved: set[str] = set()
+        self._pending: dict[str, asyncio.Future[bool]] = {}
+        self._lock = asyncio.Lock()
+
+    def is_approved(self, slug: str) -> bool:
+        return slug in self.approved
+
+    async def request(
+        self,
+        slug: str,
+        confirm: Callable[[], Awaitable[bool]],
+    ) -> bool:
+        """Run at most one confirmation callback for a slug; concurrent callers share it."""
+        async with self._lock:
+            if slug in self.approved:
+                return True
+            pending = self._pending.get(slug)
+            owner = pending is None
+            if owner:
+                pending = asyncio.get_running_loop().create_future()
+                self._pending[slug] = pending
+
+        assert pending is not None
+        if not owner:
+            # One cancelled waiter must not cancel the decision awaited by the
+            # owner and the other specialists.
+            return await asyncio.shield(pending)
+
+        try:
+            approved = await confirm()
+        except BaseException:
+            async with self._lock:
+                self._pending.pop(slug, None)
+                if not pending.done():
+                    pending.set_result(False)
+            raise
+
+        async with self._lock:
+            if approved:
+                self.approved.add(slug)
+            self._pending.pop(slug, None)
+            if not pending.done():
+                pending.set_result(approved)
+        return approved
+
+
+current_project_approval_grants: contextvars.ContextVar[ProjectApprovalScope | None] = (
+    contextvars.ContextVar("sbot_current_project_approval_grants", default=None)
+)

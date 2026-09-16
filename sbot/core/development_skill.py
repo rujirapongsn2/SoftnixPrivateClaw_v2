@@ -3,8 +3,14 @@ DEVELOPMENT_SKILL = """# Software development
 Use project for development. The ordinary exec tool is ephemeral.
 
 Choose one project slug and include it in every delegation and mission node.
+One slug is one application. For a new application, always choose a new slug;
+create it first with project action=create, which rejects an existing slug. Never
+reuse an existing project to evade a user's container limit. If the new
+slug is rejected at capacity, report the limit and ask the user to remove an
+unused project or have an administrator raise the limit.
 Grant developers project, read_file, write_file, edit_file, list_dir and the exact
-GitHub connector tools they need. Start the project; its shell /workspace maps to
+GitHub connector tools they need. Create a new project or start an existing one;
+its shell /workspace maps to
 file-tool projects/<slug>/. If disabled, report the configuration error.
 
 Use a persisted mission for long work, with small implementation, test and
@@ -27,7 +33,10 @@ to 0.0.0.0 inside the environment. The project start/status result includes
 on that exact address and port (do not assume framework defaults such as 3000).
 The result also returns outer localhost port mappings for operator diagnostics.
 Use project exec for builds, tests, migrations and curl. stop preserves
-data; compose_down preserves named volumes. Do not remove data to fix an error.
+the container. To rebuild an environment with current host settings, use project
+delete and then create with the same slug; delete preserves workspace files and
+named volumes. compose_down preserves named volumes. Do not remove workspace data
+to fix an error.
 
 Commit and verify the working tree. GitHub publish_files sends up to 100 text
 files / 1 MB atomically to a feature branch with the connector credential.
