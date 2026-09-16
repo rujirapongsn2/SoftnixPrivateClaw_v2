@@ -4147,8 +4147,15 @@ function ProjectContainersAdminPanel() {
       try {
         const next = await api.adminSetProjectContainers(enabled);
         setStatus(next);
+        const toastKey = !enabled
+          ? "admin.projects.disabledToast"
+          : next.ready
+            ? "admin.projects.enabledToast"
+            : next.building
+              ? "admin.projects.preparingToast"
+              : "admin.projects.enabledNotReadyToast";
         toast({
-          body: t(enabled ? "admin.projects.enabledToast" : "admin.projects.disabledToast"),
+          body: t(toastKey),
           type: "info",
           autoHideDuration: 2500,
         });
@@ -4176,10 +4183,11 @@ function ProjectContainersAdminPanel() {
   };
 
   const build = () => void guard(async () => setStatus(await api.adminBuildProjectContainerImage()));
+  const preparing = status.enabled && status.docker_available && !status.image_available && !status.build_error;
   const readyLabel = status.ready
     ? t("admin.projects.ready")
-    : status.building
-      ? t("admin.projects.building")
+    : preparing
+      ? t("admin.projects.preparing")
       : t("admin.projects.notReady");
   const formatBytes = (bytes: number) => {
     if (bytes <= 0) return "0 B";
@@ -4196,7 +4204,10 @@ function ProjectContainersAdminPanel() {
         </div>
         <div className="claw-row">
           <Text size="sm" color="secondary">{t("admin.projects.overallReadiness")}</Text>
-          <Badge variant={status.ready ? "success" : status.building ? "warning" : "neutral"} label={readyLabel} />
+          <Badge
+            variant={status.ready ? "success" : preparing ? "warning" : status.build_error ? "error" : "neutral"}
+            label={readyLabel}
+          />
         </div>
       </div>
 
@@ -4309,7 +4320,11 @@ function ProjectContainersAdminPanel() {
           <div className="claw-row">
             {!status.image_available && (
               <Button
-                label={status.building ? t("admin.projects.building") : t("admin.projects.buildImage")}
+                label={status.building
+                  ? t("admin.projects.building")
+                  : status.build_error
+                    ? t("admin.projects.retryBuild")
+                    : t("admin.projects.buildImage")}
                 icon={<Icon icon={Server} size="sm" />}
                 variant="secondary"
                 isDisabled={!status.docker_available || status.building}

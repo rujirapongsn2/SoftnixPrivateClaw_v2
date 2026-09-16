@@ -84,6 +84,9 @@ class ProjectContainerManager:
         self._metrics_lock = asyncio.Lock()
         self._metrics_cache: dict | None = None
         self._metrics_cached_at = 0.0
+        self._readiness_lock = asyncio.Lock()
+        self._readiness_cache: tuple[bool, bool] | None = None
+        self._readiness_cached_at = 0.0
         self._disk_cache: tuple[int, bool] | None = None
         self._disk_cached_at = 0.0
 
@@ -158,22 +161,47 @@ class ProjectContainerManager:
         except (OSError, RuntimeError):
             return False
 
-    async def status(self) -> dict:
-        docker_available = await self._docker_ready()
-        if docker_available:
-            image_available, metrics = await asyncio.gather(self._image_ready(), self._runtime_metrics())
+    async def readiness(self, *, force: bool = False) -> dict:
+        """Return a cheap, cached runtime gate without collecting usage metrics."""
+        now = time.monotonic()
+        if not force and self._readiness_cache is not None and now - self._readiness_cached_at < 2:
+            docker_available, image_available = self._readiness_cache
         else:
-            image_available, metrics = False, dict(_EMPTY_METRICS)
+            async with self._readiness_lock:
+                now = time.monotonic()
+                if not force and self._readiness_cache is not None and now - self._readiness_cached_at < 2:
+                    docker_available, image_available = self._readiness_cache
+                else:
+                    docker_available = await self._docker_ready()
+                    image_available = await self._image_ready() if docker_available else False
+                    self._readiness_cache = (docker_available, image_available)
+                    self._readiness_cached_at = time.monotonic()
         building = self._build_task is not None and not self._build_task.done()
+        enabled = bool(self.settings.enabled and self.settings.projects_enabled)
+        ready = bool(enabled and docker_available and image_available)
+        runtime_state = (
+            "ready" if ready
+            else "building" if enabled and building
+            else "error" if enabled and self._build_error
+            else "unavailable"
+        )
         return {
-            "enabled": bool(self.settings.enabled and self.settings.projects_enabled),
+            "enabled": enabled,
             "docker_available": docker_available,
             "image_available": image_available,
-            "image": self.settings.project_image,
             "building": building,
             "build_error": self._build_error,
+            "ready": ready,
+            "runtime_state": runtime_state,
+        }
+
+    async def status(self) -> dict:
+        readiness = await self.readiness()
+        metrics = await self._runtime_metrics() if readiness["docker_available"] else dict(_EMPTY_METRICS)
+        return {
+            **readiness,
+            "image": self.settings.project_image,
             "build_started_at": self._build_started_at,
-            "ready": bool(self.settings.enabled and self.settings.projects_enabled and docker_available and image_available),
             "host_bind_ip": getattr(self.settings, "project_host_bind_ip", "127.0.0.1"),
             "access_scope": (
                 "host" if getattr(self.settings, "project_host_bind_ip", "127.0.0.1") == "127.0.0.1"
@@ -300,6 +328,7 @@ class ProjectContainerManager:
     async def set_enabled(self, enabled: bool) -> dict:
         await self.config_store.set_enabled(enabled)
         self.settings.projects_enabled = enabled
+        self._readiness_cache = None
         status = await self.status()
         if enabled and status["docker_available"] and not status["image_available"]:
             await self.start_build()
@@ -371,6 +400,7 @@ class ProjectContainerManager:
             self._build_error = f"Developer image build failed: {exc}"[:500]
         finally:
             self._build_task = None
+            self._readiness_cache = None
 
     async def close(self) -> None:
         task = self._build_task

@@ -184,6 +184,86 @@ async def test_create_provisions_a_new_project_within_the_limit(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
+async def test_missing_developer_image_blocks_create_before_side_effects(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(projects_enabled=True))
+    docker_calls: list[tuple[str, ...]] = []
+
+    async def owned(_name):
+        return None
+
+    async def docker(*args, timeout=120):
+        docker_calls.append(args)
+        if args[:2] == ("image", "inspect"):
+            return SandboxResult(1, "", "No such image", False)
+        raise AssertionError(f"unexpected Docker side effect: {args}")
+
+    monkeypatch.setattr(manager, "_owned", owned)
+    monkeypatch.setattr(manager, "_docker", docker)
+
+    result = await manager.execute(tmp_path, "new-app", "create")
+
+    assert result.startswith("Error: project containers are not ready")
+    assert "Control Plane" in result
+    assert not (tmp_path / "projects").exists()
+    assert docker_calls == [("image", "inspect", "sbot-developer:latest", "--format", "{{.Id}}")]
+
+
+@pytest.mark.asyncio
+async def test_missing_docker_cli_returns_a_controlled_preparing_error(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(projects_enabled=True))
+
+    async def owned(_name):
+        return None
+
+    async def docker(*_args, **_kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(manager, "_owned", owned)
+    monkeypatch.setattr(manager, "_docker", docker)
+
+    result = await manager.execute(tmp_path, "new-app", "create")
+
+    assert result.startswith("Error: project containers are not ready")
+    assert not (tmp_path / "projects").exists()
+
+
+@pytest.mark.asyncio
+async def test_missing_developer_image_blocks_restart_but_allows_status(monkeypatch, tmp_path):
+    manager = ProjectEnvironments(SandboxSettings(projects_enabled=True))
+    stopped = {
+        "Config": {"Labels": {"sbot.project": "unused"}},
+        "State": {"Running": False, "Status": "exited"},
+        "NetworkSettings": {"Networks": {}, "Ports": {}},
+    }
+    start_called = False
+
+    async def owned(_name):
+        return stopped
+
+    async def connect(_name, state):
+        return state
+
+    async def docker(*args, timeout=120):
+        nonlocal start_called
+        if args[:2] == ("image", "inspect"):
+            return SandboxResult(1, "", "No such image", False)
+        if args and args[0] == "start":
+            start_called = True
+        return SandboxResult(0, "", "", False)
+
+    monkeypatch.setattr(manager, "_owned", owned)
+    monkeypatch.setattr(manager, "_connect_network", connect)
+    monkeypatch.setattr(manager, "_docker", docker)
+
+    status = json.loads(await manager.execute(tmp_path, "existing-app", "status"))
+    started = await manager.execute(tmp_path, "existing-app", "start")
+
+    assert status["state"] == "exited"
+    assert started.startswith("Error: project containers are not ready")
+    assert start_called is False
+
+
+@pytest.mark.asyncio
 async def test_project_status_returns_clickable_urls_using_the_configured_host_ip(
     monkeypatch, tmp_path
 ):

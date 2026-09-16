@@ -534,6 +534,8 @@ export interface ProjectContainerInfo {
 
 export interface ProjectInventory {
   available: boolean;
+  ready?: boolean;
+  runtime_state?: "disabled" | "building" | "ready" | "error" | "unavailable";
   allowed: boolean;
   source: "user" | "group" | "none";
   max_containers: number;
