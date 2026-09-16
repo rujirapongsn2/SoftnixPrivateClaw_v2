@@ -38,6 +38,14 @@ delete and then create with the same slug; delete preserves workspace files and
 named volumes. compose_down preserves named volumes. Do not remove workspace data
 to fix an error.
 
+After the application passes its checks, call project status and use its
+`app_url` as the primary delivery. End with a concise result and a clickable
+Markdown link that opens the running application. Project source files under
+`projects/<slug>/` are working files and must not be enumerated, attached or
+published individually. Only call publish_artifact for a project file when the
+user explicitly asks for a downloadable/exported artifact (for example a ZIP,
+report or dataset).
+
 Commit and verify the working tree. GitHub publish_files sends up to 100 text
 files / 1 MB atomically to a feature branch with the connector credential.
 Provide expected_sha for existing branches; resolve conflicts instead of force

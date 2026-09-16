@@ -33,10 +33,11 @@ class ProjectTool(Tool):
         'that action rejects an existing slug. Use the SAME slug only when continuing that '
         'application across team members. File tools access projects/<slug>/; '
         'project exec runs there at /workspace. Write compose.yaml then compose_up for persistent services; '
-        'status returns localhost port mappings. Use exec for git, builds, tests and curl. '
+        'status returns app_url and access_urls using the configured host IP. Use exec for git, builds, tests and curl. '
         'Use separate git worktrees for parallel edits and report commit/test evidence. '
         'stop preserves the container. delete removes the project container and its network but preserves files '
         'and named volumes, so create can rebuild it with current settings. compose_down preserves named volumes. '
+        'After verification, give the user the clickable app_url instead of listing project files. '
         'Never claim deployment from a dispatch alone.'
     )
     parameters: ClassVar[dict] = {

@@ -1425,6 +1425,10 @@ function extensionOf(path: string): string {
 }
 
 export function isHiddenArtifact(path: string): boolean {
+  // Project working trees can contain hundreds of source/data files. New
+  // turns suppress them server-side; this also cleans up older transcripts.
+  // Explicitly published copies live under .deliveries/ and remain visible.
+  if (path.startsWith("projects/")) return true;
   if (HIDDEN_ARTIFACT_RE.test(path)) return true;
   return nameTokens(path).some((tok) => HIDDEN_ARTIFACT_TOKENS.has(tok));
 }
