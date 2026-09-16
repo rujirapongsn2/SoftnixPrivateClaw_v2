@@ -116,6 +116,7 @@ class MissionService:
         # holds its in-flight node tasks: asyncio keeps only a weak reference, so
         # a dropped handle lets a whole mission be garbage-collected mid-run.
         self._running: dict[str, asyncio.Task[str]] = {}
+        self._activity_tasks: set[asyncio.Task] = set()
         self._admission_lock = asyncio.Lock()
         self._start_locks = KeyedLocks()
         self._bot_slots = KeyedSlots(1)
@@ -627,6 +628,10 @@ class MissionService:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        observers = list(self._activity_tasks)
+        for task in observers:
+            task.cancel()
+        await asyncio.gather(*observers, return_exceptions=True)
 
     @staticmethod
     def _report_prompt(mission: Mission, status: str) -> str:
@@ -1051,24 +1056,36 @@ class MissionService:
         )
 
         async def execute(node: MissionNode, context: NodeContext) -> NodeResult:
-            background = await self.missions.blackboard_read(mission.id, 'scope:background')
-            if not background:
-                async with self._node_slots:
-                    return await self._execute_node(mission, runner, node, context)
-            await self.missions.blackboard_write(mission.id, f'scope:activity:{node.id}', {'phase': 'queued'})
-            # Waiting for a busy bot must not consume a global execution slot.
-            async with self._bot_slots.hold(f'{mission.owner_id}:{node.bot_id}'):
-                async with self._owner_slots.hold(mission.owner_id), self._node_slots:
-                    current = await self.missions.get_mission_unchecked(mission.id)
-                    if current is None or current.status != 'running':
-                        return NodeResult(status='error', output='Job stopped before this step began.')
-                    await self.missions.blackboard_write(mission.id, f'scope:activity:{node.id}', {'phase': 'running'})
-                    return await self._execute_node(mission, runner, node, context)
+            from sbot.core.mission_activity import MissionActivity
+            activity = MissionActivity(self, mission, node)
+            activity.start()
+            result = None
+            try:
+                background = await self.missions.blackboard_read(mission.id, 'scope:background')
+                if not background:
+                    async with self._node_slots:
+                        activity.running()
+                        result = await self._execute_node(mission, runner, node, context, activity)
+                        return result
+                await self.missions.blackboard_write(mission.id, f'scope:activity:{node.id}', {'phase': 'queued'})
+                # Waiting for a busy bot must not consume a global execution slot.
+                async with self._bot_slots.hold(f'{mission.owner_id}:{node.bot_id}'):
+                    async with self._owner_slots.hold(mission.owner_id), self._node_slots:
+                        current = await self.missions.get_mission_unchecked(mission.id)
+                        if current is None or current.status != 'running':
+                            result = NodeResult(status='error', output='Job stopped before this step began.')
+                            return result
+                        await self.missions.blackboard_write(mission.id, f'scope:activity:{node.id}', {'phase': 'running'})
+                        activity.running()
+                        result = await self._execute_node(mission, runner, node, context, activity)
+                        return result
+            finally:
+                activity.finish(result)
 
         return execute
 
     async def _execute_node(
-        self, mission: Mission, runner: SpecialistRunner, node: MissionNode, context: NodeContext
+        self, mission: Mission, runner: SpecialistRunner, node: MissionNode, context: NodeContext, activity=None
     ) -> NodeResult:
         from sbot.core.organization_policy import load_policy
         await load_policy(self.missions.factory, self.settings)
@@ -1154,12 +1171,16 @@ class MissionService:
                 return recovery_parent_guard(name, args) if recovery_parent_guard else (args, None)
             runner.arg_guard = recovery_guard
             runner.connectors = None
+        if activity:
+            activity.data['inputs'] = list(dict.fromkeys(
+                list((node.budget or {}).get('input_files') or []) + list(input_manifest)))
+            activity.changed.set()
         started = time.monotonic()
         outcome = await runner.run(
             bot,
             await self._system_prompt(mission, bot, runner),
             self._user_prompt(node, context) + ("\nInput snapshots (keep unchanged): " + str(input_manifest) if input_manifest else ""),
-            lambda _event: None,
+            activity.emit if activity else lambda _event: None,
             turn_id=f"mn_{mission.id[:8]}_{node.id}",
             max_seconds=_NODE_SECONDS,
             extra_tools=[BlackboardTool(self.missions, mission.id, node.id), completion],

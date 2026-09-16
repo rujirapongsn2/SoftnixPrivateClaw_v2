@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir .test-dist src/skill-access.ts && node --test test/skill-access.test.mjs",
-    "preview": "vite preview"
+    "test": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir .test-dist src/skill-access.ts && node --test test/skill-access.test.mjs && npm run test:mission-activity",
+    "preview": "vite preview",
+    "test:mission-activity": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir .test-dist src/sbot/mission-activity-merge.ts && node --test test/mission-activity.test.mjs"
   },
   "dependencies": {
     "@astryxdesign/core": "^0.1.2",

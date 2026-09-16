@@ -461,6 +461,13 @@ async def _owned_session(state: AppState, user: User, session_id: str, headers: 
     return session
 
 
+@router.get("/api/sessions/{session_id}/mission-activity")
+async def mission_activity(session_id: str, user: User = Depends(current_user),
+                           state: AppState = Depends(get_state)) -> list:
+    await _owned_session(state, user, session_id)
+    return await state.messages.mission_activity(session_id)
+
+
 @router.get("/api/sessions/{session_id}/messages")
 async def list_messages(
     session_id: str,
