@@ -165,6 +165,55 @@ class MessageStore:
             )
             await db.commit()
 
+    async def save_mission_activity(self, session_id: str, key: str, snapshot: dict) -> None:
+        meta = {'delivery_id': key, 'mission_activity': snapshot}
+        await self.append(session_id, [dict(role='observation', content=snapshot['title'], meta=meta)], delivery_key=key)
+        async with self.factory() as db:
+            await db.execute(update(Message).where(Message.id == key, Message.session_id == session_id)
+                             .values(meta=meta))
+            await db.commit()
+
+    async def mission_activity(self, session_id: str) -> list[dict]:
+        from sbot.core.mission_activity import result_preview
+
+        async with self.factory() as db:
+            rows = list(await db.scalars(select(Message).where(
+                Message.session_id == session_id, Message.role == 'observation'
+            ).order_by(Message.seq.desc()).limit(100)))
+            mission_ids = {r.meta['mission_activity']['mission_id'] for r in rows
+                           if (r.meta or {}).get('mission_activity')}
+            missions = {m.id: m for m in await db.scalars(select(Mission).where(Mission.id.in_(mission_ids)))} if mission_ids else {}
+            nodes = {(n.mission_id, n.id): n for n in await db.scalars(
+                select(MissionNode).where(MissionNode.mission_id.in_(mission_ids)))} if mission_ids else {}
+            result = []
+            for row in reversed(rows):
+                meta = dict(row.meta or {})
+                activity = dict(meta.get('mission_activity') or {})
+                if activity:
+                    node = nodes.get((activity['mission_id'], activity['node_id']))
+                    mission = missions.get(activity['mission_id'])
+                    active = activity['status'] in ('queued', 'running', 'finishing', 'recovering')
+                    if node is None or mission is None:
+                        if active:
+                            activity['status'] = 'unavailable'
+                    elif node.attempts != activity['attempt']:
+                        if active:
+                            activity['status'] = 'interrupted'
+                    elif node.status != 'running':
+                        preview, truncated = result_preview(node.output)
+                        activity['status'] = node.status
+                        activity['result'] = preview
+                        activity['result_truncated'] = truncated
+                        activity['artifacts'] = node.artifacts or []
+                    elif active:
+                        if mission.status not in ('running', 'queued'):
+                            activity['status'] = mission.status
+                        elif node.lease_expires_at and node.lease_expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+                            activity['status'] = 'recovering'
+                    meta['mission_activity'] = activity
+                result.append(dict(role='assistant', content=row.content, meta=meta, seq=row.seq))
+            return result
+
     async def recent(self, session_id: str, *, after_seq: int = 0, limit: int = 200) -> list[dict[str, Any]]:
         """Load recent messages in chronological order, in LLM message format.
 
@@ -182,6 +231,7 @@ class MessageStore:
                         Message.session_id == session_id,
                         Message.seq > after_seq,
                         Message.speaker_bot_id.is_(None),
+                        Message.role != 'observation',
                     )
                     .order_by(Message.seq.desc())
                     .limit(limit)
@@ -236,7 +286,7 @@ class MessageStore:
         """
         window = [
             Message.session_id == session_id,
-            Message.role.in_(("user", "assistant")),
+            Message.role.in_(("user", "assistant", "observation")),
         ]
         visible: list[Message] = []
         cursor = before_seq
@@ -268,7 +318,7 @@ class MessageStore:
         return [
             {
                 "seq": r.seq,
-                "role": r.role,
+                "role": 'assistant' if r.role == 'observation' else r.role,
                 "content": r.content,
                 "meta": r.meta,
                 "speaker_bot_id": r.speaker_bot_id,
@@ -299,12 +349,32 @@ class MessageStore:
                         Message.session_id == session_id,
                         Message.seq > after_seq,
                         Message.seq <= through_seq,
+                        Message.role != 'observation',
                     )
                     .order_by(Message.seq.asc())
                     .limit(limit)
                 )
             ).all()
         return [{"seq": row.seq, "role": row.role, "content": row.content} for row in rows]
+
+    async def consolidation_batch(
+        self, session_id: str, *, after_seq: int, keep: int, limit: int
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Count and slice only rows that can actually enter memory."""
+        eligible = (
+            Message.session_id == session_id,
+            Message.seq > after_seq,
+            Message.role != 'observation',
+        )
+        async with self.factory() as db:
+            total = int(await db.scalar(select(func.count()).select_from(Message).where(*eligible)) or 0)
+            take = min(limit, max(0, total - keep))
+            if not take:
+                return total, []
+            rows = list(await db.scalars(
+                select(Message).where(*eligible).order_by(Message.seq.asc()).limit(take)
+            ))
+        return total, [{"seq": row.seq, "role": row.role, "content": row.content} for row in rows]
 
     async def max_seq(self, session_id: str) -> int:
         async with self.factory() as db:

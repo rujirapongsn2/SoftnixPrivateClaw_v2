@@ -702,8 +702,12 @@ class MemoryService:
         session = await self.sessions.get(session_id)
         if session is None:
             return False
-        max_seq = await self.messages.max_seq(session_id)
-        unconsolidated = max_seq - session.last_consolidated_seq
+        unconsolidated, old = await self.messages.consolidation_batch(
+            session_id,
+            after_seq=session.last_consolidated_seq,
+            keep=self.keep,
+            limit=self.window * 2,
+        )
         if unconsolidated < self.window:
             return False
 
@@ -714,12 +718,6 @@ class MemoryService:
         # and the catch-up loop in maybe_consolidate re-enters to walk forward
         # through the rest, instead of jumping the cursor over messages that
         # were never sent to the model.
-        old = await self.messages.oldest_for_consolidation(
-            session_id,
-            after_seq=session.last_consolidated_seq,
-            through_seq=max_seq - self.keep,
-            limit=self.window * 2,
-        )
         if not old:
             return False
         # The cursor may only advance as far as this batch actually reached.

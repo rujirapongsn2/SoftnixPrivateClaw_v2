@@ -90,12 +90,25 @@ export interface ActiveMission {
   awaiting: { node_id: string; title: string }[];
 }
 
+export interface MissionHandoff {
+  title: string; bot_name: string; session_id: string; activity_id: string; attempt: number;
+}
+export interface MissionActivityData {
+  mission_id: string; node_id: string; attempt: number; title: string;
+  instruction: string; inputs: string[]; required_files: string[]; depends_on: string[];
+  leader_name: string; origin_session?: string; bot_name: string; status: string;
+  text: string; result: string; result_truncated: boolean; artifacts: string[]; updated_at: string; revision: number;
+  steps: { tool: string; status: string; at: string }[];
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   meta?: {
     artifacts?: string[];
     delivery_id?: string;
+    mission_activity?: MissionActivityData;
+    mission_handoff?: MissionHandoff;
     vision_model?: string;
     // Set alongside speaker_bot_id: what this bot was asked to do, shown as the
     // assignment it answered.
@@ -1081,6 +1094,7 @@ export const api = {
   renameSession: (id: string, title: string) =>
     request(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ title }) }),
   deleteSession: (id: string) => request(`/api/sessions/${id}`, { method: "DELETE" }),
+  missionActivity: (sessionId: string) => request<ChatMessage[]>(`/api/sessions/${sessionId}/mission-activity`),
   listMessages: (sessionId: string, opts?: { beforeSeq?: number; limit?: number }) => {
     const q = new URLSearchParams();
     if (opts?.beforeSeq != null) q.set("before_seq", String(opts.beforeSeq));
@@ -1662,6 +1676,10 @@ function extensionOf(path: string): string {
 
 export function isHiddenArtifact(path: string): boolean {
   if (path.startsWith('.deliveries/')) return false;
+  // Project working trees can contain hundreds of source/data files. New
+  // turns suppress them server-side; this also cleans up older transcripts.
+  // Explicitly published copies live under .deliveries/ and remain visible.
+  if (path.startsWith("projects/")) return true;
   if (HIDDEN_ARTIFACT_RE.test(path)) return true;
   return nameTokens(path).some((tok) => HIDDEN_ARTIFACT_TOKENS.has(tok));
 }

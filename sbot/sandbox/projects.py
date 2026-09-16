@@ -97,6 +97,26 @@ class ProjectEnvironments:
             return None
         return self.settings.project_proxy_container.strip() or socket.gethostname()
 
+    def _access_urls(self, state: dict) -> list[dict]:
+        """Return clickable host URLs for the configured application ports."""
+        urls = []
+        for container_port, bindings in (state['NetworkSettings'].get('Ports') or {}).items():
+            try:
+                port = int(str(container_port).split('/', 1)[0])
+            except ValueError:
+                continue
+            for binding in bindings or []:
+                host_port = binding.get('HostPort')
+                if not host_port:
+                    continue
+                host_ip = binding.get('HostIp') or self.settings.project_host_bind_ip
+                urls.append({
+                    'container_port': port,
+                    'host_port': int(host_port),
+                    'url': f'http://{host_ip}:{host_port}',
+                })
+        return sorted(urls, key=lambda item: item['container_port'])
+
     async def _ensure_network(self, network: str) -> bool:
         internal = self.settings.network == 'none'
         inspected = await self._docker('network', 'inspect', network)
@@ -378,12 +398,19 @@ class ProjectEnvironments:
                         )
                 state = await self._ensure(name, path)
             if action in {'create', 'start', 'status'}:
+                access_urls = self._access_urls(state)
+                app_url = next((
+                    item['url'] for item in access_urls
+                    if item['container_port'] == self.settings.project_ingress_port
+                ), access_urls[0]['url'] if access_urls else None)
                 return json.dumps({'project': project, 'container': name,
                                    'state': state['State']['Status'],
                                    'files': f'projects/{project}', 'shell_cwd': '/workspace',
                                    'host_bind_ip': self.settings.project_host_bind_ip,
                                    'public_ingress_port': self.settings.project_ingress_port,
                                    'public_bind': f'0.0.0.0:{self.settings.project_ingress_port}',
+                                   'app_url': app_url,
+                                   'access_urls': access_urls,
                                    'ports': state['NetworkSettings'].get('Ports', {})})
             if action.startswith('compose_'):
                 if not self.settings.project_docker_enabled:

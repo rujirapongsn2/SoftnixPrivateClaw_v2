@@ -1,3 +1,6 @@
+import { mergeMissionActivity } from './mission-activity-merge';
+import { MissionActivityCard } from "./MissionActivity";
+import type { MissionActivityData, MissionHandoff } from "./api";
 import type { TaskResult } from "./api";
 import { isSkillEnabledForCurrentUser } from "../skill-access";
 import {
@@ -268,6 +271,9 @@ type TranscriptItem =
       content: string;
       artifacts?: string[];
       deliveryId?: string;
+      seq?: number;
+      missionActivity?: MissionActivityData;
+      missionHandoff?: MissionHandoff;
       visionModel?: string;
       // A delegated reply: another bot on the team wrote this, not the one the
       // user is chatting with. Not a separate item kind on purpose — it is a
@@ -304,6 +310,9 @@ function toTranscriptItem(m: ChatMessageRow): TranscriptItem {
     content: m.content,
     artifacts: m.meta?.artifacts,
     deliveryId: m.meta?.delivery_id,
+    seq: m.seq,
+    missionActivity: m.meta?.mission_activity,
+    missionHandoff: m.meta?.mission_handoff,
     visionModel: m.meta?.vision_model,
     speakerBotId: m.speaker_bot_id ?? m.meta?.coordinator_bot_id ?? undefined,
     speakerName: m.meta?.speaker_name,
@@ -640,6 +649,35 @@ export function Chat({
     // this transcript stops being able to tell whether anyone is still working.
     return () => onWorkingBotsChange?.([]);
   }, [workingBotKey, onWorkingBotsChange]);
+  // Observer snapshots never affect busy/streaming or send a user message.
+  useEffect(() => {
+    if (!sessionId || loadedSessionId !== sessionId) return;
+    let disposed = false;
+    let anchored = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      let nextDelay = document.visibilityState === "visible" ? 10_000 : 30_000;
+      try {
+        const rows = await api.missionActivity(sessionId);
+        if (disposed) return;
+        setItems(prev => mergeMissionActivity(prev, rows.map(toTranscriptItem)));
+        const active = rows.some(row => {
+          const status = row.meta?.mission_activity?.status;
+          return status === "queued" || status === "running" || status === "finishing" || status === "recovering";
+        });
+        if (active && document.visibilityState === "visible") nextDelay = 3000;
+        const anchor = window.location.hash.slice(1);
+        if (!anchored && anchor.startsWith('activity-')) requestAnimationFrame(() => {
+          const element = document.getElementById(anchor);
+          if (!disposed && element) { element.scrollIntoView({ block: 'center' }); anchored = true; }
+        });
+      } catch { /* next poll recovers dropped connections without affecting the task */ }
+      if (!disposed) timer = setTimeout(refresh, nextDelay);
+    };
+    void refresh();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [sessionId, loadedSessionId]);
+
   const fileRef = useRef<HTMLInputElement | null>(null);
   // Imperative handle for the composer's contentEditable — lets us insert a
   // styled mention chip (skill/connector/knowledge) instead of raw "@name " text.
@@ -2915,6 +2953,11 @@ export function Chat({
                     </div>
                   )}
                 </div>
+              ) : item.kind === "message" && (item.missionActivity || item.missionHandoff) ? (
+                <MissionActivityCard key={item.deliveryId ?? i} id={item.deliveryId}
+                  activity={item.missionActivity} handoff={item.missionHandoff}
+                  artifacts={renderArtifacts(item.missionActivity?.artifacts)}
+                  result={<Markdown>{sanitizeModelMarkdown(item.missionActivity?.result ?? "")}</Markdown>} />
               ) : item.kind === "message" && item.speakerBotId ? (
                 // A teammate's reply, shown as that bot speaking rather than as
                 // the leader's tool output — the handoff is the product here.

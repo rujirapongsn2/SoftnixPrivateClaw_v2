@@ -4675,3 +4675,13 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-preview-action:disabled { opacity: .5; cursor: wait; }
 .claw-preview-action:focus-visible { outline: 2px solid #278bc2; outline-offset: 2px; }
+
+.sbot-mission-activity { border: 1px solid var(--claw-border, #e5e3dd); border-radius: 12px; padding: 14px 18px; margin: 12px 0; min-width: 0; overflow-wrap: anywhere; }
+.sbot-mission-activity header, .sbot-mission-activity footer { display: flex; gap: 12px; flex-wrap: wrap; justify-content: space-between; }
+.sbot-mission-activity > a { display: block; margin-top: 8px; }
+.sbot-mission-activity details { margin-top: 10px; }
+.sbot-mission-activity summary { cursor: pointer; }
+.sbot-mission-activity footer { font-size: 12px; margin-top: 12px; }
+.sbot-mission-prose { white-space: pre-wrap; max-height: 50vh; overflow: auto; line-height: 1.6; }
+
+.sbot-mission-result { overflow-x: auto; line-height: 1.6; }

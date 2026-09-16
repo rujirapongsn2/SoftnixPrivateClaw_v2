@@ -1240,6 +1240,14 @@ def test_hidden_artifact_rules_do_not_swallow_deliverables():
     assert visible_artifacts(["osm_map_base64.txt", "map.b64", "build.py"]) == []
 
 
+def test_project_working_files_are_hidden_but_published_exports_remain_visible():
+    assert visible_artifacts([
+        "projects/it-inventory/index.html",
+        "projects/it-inventory/data/inventory.db",
+        ".deliveries/release/it-inventory.zip",
+    ]) == [".deliveries/release/it-inventory.zip"]
+
+
 async def test_write_file_intermediate_types_are_not_artifacts(tmp_path):
     """write_file follows the same rule as exec diffing: .py/.json/.xml are
     helpers, not deliverables, and never become download chips."""

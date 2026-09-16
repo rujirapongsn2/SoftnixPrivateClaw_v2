@@ -184,6 +184,37 @@ async def test_create_provisions_a_new_project_within_the_limit(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
+async def test_project_status_returns_clickable_urls_using_the_configured_host_ip(
+    monkeypatch, tmp_path
+):
+    manager = ProjectEnvironments(SandboxSettings(
+        projects_enabled=True,
+        project_host_bind_ip="192.168.1.134",
+        project_ingress_port=8000,
+    ))
+    running = {
+        "State": {"Running": True, "Status": "running"},
+        "NetworkSettings": {"Networks": {}, "Ports": {
+            "3000/tcp": [{"HostIp": "192.168.1.134", "HostPort": "62001"}],
+            "8000/tcp": [{"HostIp": "192.168.1.134", "HostPort": "62002"}],
+        }},
+    }
+
+    async def owned(_name):
+        return running
+
+    monkeypatch.setattr(manager, "_owned", owned)
+
+    result = json.loads(await manager.execute(tmp_path, "inventory", "status"))
+
+    assert result["app_url"] == "http://192.168.1.134:62002"
+    assert result["access_urls"] == [
+        {"container_port": 3000, "host_port": 62001, "url": "http://192.168.1.134:62001"},
+        {"container_port": 8000, "host_port": 62002, "url": "http://192.168.1.134:62002"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_delete_removes_environment_and_network_but_preserves_project_data(monkeypatch, tmp_path):
     manager = ProjectEnvironments(SandboxSettings(projects_enabled=True))
     name, path = manager.identity(tmp_path, "existing-app")

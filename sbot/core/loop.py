@@ -279,6 +279,12 @@ def _name_tokens(path: str) -> set[str]:
 def _is_artifact_hidden(path: str) -> bool:
     if path.startswith('.deliveries/'):
         return False
+    # A software project is a working tree, not a bundle of chat attachments.
+    # Individual project files remain available to tools and can still be
+    # deliberately published into .deliveries/ when the user requests a
+    # download/export.
+    if path.startswith('projects/'):
+        return True
     if Path(path).suffix.lower() in _ARTIFACT_HIDDEN_SUFFIXES:
         return True
     return bool(_ARTIFACT_HIDDEN_TOKENS & _name_tokens(path))
@@ -1003,13 +1009,13 @@ class AgentLoop:
                     p = str(args["path"])
                     if p not in written:
                         written.append(p)
-                # Files created/modified by a shell command (e.g. matplotlib
-                # savefig) or a persistent project command aren't captured
-                # above, so diff the workspace vs the turn's baseline and
-                # surface anything new or freshly changed. A project command
-                # writes under projects/<slug>, which is still inside this
-                # workspace and therefore follows the same artifact path.
-                elif tc.name in {"exec", "project"} and self.workspace is not None and not tool_result.startswith("Error"):
+                # Files created/modified by an ordinary shell command (e.g.
+                # matplotlib savefig) aren't captured above, so diff the
+                # workspace vs the turn's baseline. Persistent project files
+                # intentionally do not become chat artifacts: an application
+                # is delivered through its access URL, with explicit
+                # publish_artifact reserved for requested downloads.
+                elif tc.name == "exec" and self.workspace is not None and not tool_result.startswith("Error"):
                     for rel, mtime in _snapshot_workspace(self.workspace).items():
                         if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
                             written.append(rel)
