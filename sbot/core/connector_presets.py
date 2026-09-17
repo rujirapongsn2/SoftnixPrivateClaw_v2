@@ -319,6 +319,25 @@ def get_preset(key: str) -> ConnectorPreset | None:
     return _BY_KEY.get(key)
 
 
+def oauth_preset_for_connector(connector) -> ConnectorPreset | None:
+    """Identify OAuth presets across legacy claw/sbot command variants."""
+    env = connector.env if isinstance(connector.env, dict) else {}
+    command = (connector.command or "").replace("sbot.integrations.", "claw.integrations.")
+    for preset in _PRESETS:
+        if preset.setup != "oauth" or connector.name != preset.name:
+            continue
+        preset_command = preset.command.replace("sbot.integrations.", "claw.integrations.")
+        prefix = f"{preset.env_prefix}_"
+        if (
+            connector.kind == "mcp"
+            and connector.transport == preset.transport
+            and command == preset_command
+            and any(str(key).startswith(prefix) for key in env)
+        ):
+            return preset
+    return None
+
+
 # The exact `command` string of every built-in stdio preset (always
 # `python -m sbot.integrations.<module>` — developer-authored code, never
 # user input). A non-admin's stdio connector must match one of these exactly;

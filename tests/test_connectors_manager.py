@@ -1127,7 +1127,33 @@ async def test_api_kind_signature_skip_still_works_when_unchanged(db_factory, mo
     # before even reaching the api/mcp partitioning logic.
     registry_2 = ToolRegistry()
     await mgr.sync_tools(user.id, registry_2)
-    assert registry_2.get("api_myapi_ping") is None  # never re-registered into a fresh registry — skipped
+    # The connector itself is not rebuilt, but the cached proxy is mirrored
+    # into this second bot's distinct registry.
+    assert registry_2.get("api_myapi_ping") is registry_1.get("api_myapi_ping")
+
+
+@pytest.mark.asyncio
+async def test_disconnect_user_removes_cached_tools_from_every_registry(db_factory):
+    users = UserStore(db_factory)
+    user = await users.create(email="disconnect-all-registries@x.io", password_hash="h")
+    store = ConnectorStore(db_factory)
+    await store.upsert(
+        user.id, "internal", kind="api", transport="http", url="https://api.example.com",
+        operations=[{"name": "ping", "method": "GET", "path": "/ping", "parameters": []}],
+        enabled=True,
+    )
+    manager = ConnectorManager(store)
+    first = ToolRegistry()
+    second = ToolRegistry()
+    await manager.sync_tools(user.id, first)
+    await manager.sync_tools(user.id, second)
+    assert first.get("api_internal_ping") is not None
+    assert second.get("api_internal_ping") is not None
+
+    await manager.disconnect_user(user.id)
+
+    assert first.get("api_internal_ping") is None
+    assert second.get("api_internal_ping") is None
 
 
 async def test_api_kind_global_connector_never_calls_mcp_connect(db_factory, monkeypatch):
@@ -1864,3 +1890,23 @@ def test_mcp_tool_schema_text_is_clipped():
     assert props["q"]["type"] == "string"
     assert props["q"]["enum"] == ["a", "b"]
     assert proxy.parameters["required"] == ["q"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_tool_error_marks_connector_for_reauthorization():
+    class ErrorContent:
+        text = "invalid_grant: Token has been expired or revoked"
+
+    class ErrorResult:
+        isError = True
+        content = [ErrorContent()]
+
+    class Session:
+        async def call_tool(self, *_args, **_kwargs):
+            return ErrorResult()
+
+    marked = []
+    proxy = McpToolProxy(Session(), "gmail", "search", "desc", {}, on_auth_error=lambda: marked.append(True))
+    result = await proxy.execute()
+    assert result.startswith("Error:")
+    assert marked == [True]

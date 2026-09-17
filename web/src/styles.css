@@ -1548,14 +1548,16 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-connector-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  gap: 12px;
 }
 .claw-connector-card {
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: start;
   gap: 12px;
-  padding: 10px 12px !important;
+  padding: 14px !important;
+  min-height: 132px;
 }
 /* Uniform tinted frame + equal inner padding so mismatched brand PNGs read as
    one consistent icon set instead of ad-hoc logos. */
@@ -1582,7 +1584,7 @@ html[data-chat-bg="grid"] .claw-chat {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 .claw-connector-name {
   line-height: 1.3;
@@ -1655,7 +1657,7 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-connector-desc {
   display: -webkit-box;
-  -webkit-line-clamp: 1;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   margin: 0;
@@ -1675,10 +1677,13 @@ html[data-chat-bg="grid"] .claw-chat {
   padding: 1px 7px;
 }
 .claw-connector-actions {
-  flex: 0 0 auto;
+  grid-column: 2;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
+  min-width: 0;
+  margin-top: auto;
 }
 
 /* ---- Admin console (in-panel) ---- */
@@ -3170,16 +3175,46 @@ html[data-chat-bg="grid"] .claw-chat {
 
 /* ---- guided connector setup (no MCP jargon) ---- */
 .claw-setup {
-  max-width: 560px;
+  max-width: 680px;
 }
 .claw-setup-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 14px;
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
-.claw-setup-header > div {
+.claw-setup-heading {
   min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+.claw-setup-title,
+.claw-setup-description,
+.claw-oauth-info p {
+  margin: 0;
+}
+.claw-oauth-status {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+}
+.claw-oauth-status > * {
+  width: fit-content;
+  flex: 0 0 auto;
+}
+.claw-oauth-info-card {
+  width: 100%;
+}
+.claw-oauth-info {
+  display: grid;
+  gap: 5px;
+}
+.claw-oauth-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 .claw-setup-field {
   display: flex;

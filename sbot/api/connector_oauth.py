@@ -15,11 +15,17 @@ from loguru import logger
 
 from sbot.api.deps import AppState, current_user, get_state
 from sbot.auth import connector_oauth as flow
-from sbot.core.connector_presets import get_preset
+from sbot.core.connector_presets import get_preset, oauth_preset_for_connector
 from sbot.db.models import User
 from sbot.db.stores import ConnectorKindMismatch
 
 router = APIRouter(prefix="/api/connectors/oauth")
+
+
+def _is_installed_preset(connector: Any, preset: Any) -> bool:
+    """Return whether a stored row is the OAuth preset we are allowed to remove."""
+    installed = oauth_preset_for_connector(connector)
+    return installed is not None and installed.key == preset.key
 
 
 @router.get("/{preset_key}/start")
@@ -35,6 +41,26 @@ async def start(
         raise HTTPException(status_code=400, detail=f"{preset.oauth_provider}_not_configured")
     token = flow.make_state(user.id, preset.key, preset.oauth_provider, app_state.settings.secret_key)
     return {"url": flow.authorize_url(preset, app, app_state.settings, token)}
+
+
+@router.delete("/{preset_key}/disconnect")
+async def disconnect(
+    preset_key: str, user: User = Depends(current_user), app_state: AppState = Depends(get_state)
+) -> dict:
+    """Forget local OAuth credentials and close the connector's live session."""
+    preset = get_preset(preset_key)
+    if preset is None or preset.setup != "oauth":
+        raise HTTPException(status_code=404, detail="unknown OAuth connector")
+    connector = await app_state.connectors.get_by_name(user.id, preset.name)
+    if connector is None:
+        return {"disconnected": True}
+    if not _is_installed_preset(connector, preset):
+        raise HTTPException(status_code=409, detail="connector name belongs to a custom connector")
+    deleted = await app_state.connectors.delete_if_unchanged(user.id, connector.id, connector.updated_at)
+    if not deleted:
+        raise HTTPException(status_code=409, detail="connector changed while disconnecting; retry")
+    await app_state.connectors_mgr.disconnect_user(user.id)
+    return {"disconnected": True}
 
 
 @router.get("/{provider}/callback")

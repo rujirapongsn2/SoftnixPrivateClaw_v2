@@ -442,6 +442,11 @@ def _extract_response_detail(response: httpx.Response) -> str:
         return response.text.strip()
     if isinstance(data, dict):
         error = data.get("error")
+        if isinstance(error, str):
+            description = str(data.get("error_description") or "").strip()
+            subtype = str(data.get("error_subtype") or "").strip()
+            details = [error.strip(), description, subtype]
+            return "; ".join(item for item in details if item)
         if isinstance(error, dict):
             messages: list[str] = []
             message = str(error.get("message") or "").strip()

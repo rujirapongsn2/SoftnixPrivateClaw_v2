@@ -20,6 +20,7 @@ from sqlalchemy import (
     literal_column,
     or_,
     select,
+    delete as sa_delete,
     update,
 )
 from sqlalchemy import text as sa_text
@@ -2107,6 +2108,21 @@ class ConnectorStore:
             await db.delete(row)
             await db.commit()
             return name
+
+    async def delete_if_unchanged(
+        self, owner_id: str | None, connector_id: str, expected_updated_at: datetime
+    ) -> bool:
+        """Atomically delete only the exact revision the caller inspected."""
+        async with self.factory() as db:
+            result = await db.execute(
+                sa_delete(McpConnector).where(
+                    McpConnector.id == connector_id,
+                    McpConnector.owner_id == owner_id,
+                    McpConnector.updated_at == expected_updated_at,
+                )
+            )
+            await db.commit()
+            return bool(result.rowcount)
 
 
 class ScheduleStore:
