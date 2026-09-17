@@ -20,6 +20,7 @@ import re
 import shlex
 import sys
 import time
+import weakref
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -99,6 +100,19 @@ _MAX_ERROR_BACKOFF_MULTIPLIER = 8
 # description needs — they only clip servers that pasted their README in.
 _MAX_TOOL_DESCRIPTION_CHARS = 600
 _MAX_PARAM_DESCRIPTION_CHARS = 250
+_OAUTH_REAUTH_MARKERS = (
+    "invalid_grant",
+    "invalid_client",
+    "unauthorized_client",
+    "invalid_rapt",
+    "expired or revoked",
+    "token has been expired",
+)
+
+
+def _requires_oauth_reauthorization(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _OAUTH_REAUTH_MARKERS)
 
 # Bounds for a connector's own `timeout_ms` override (Settings > Connectors'
 # "Timeout (ms)" field) — mirrors the range enforced by ConnectorBody in
@@ -412,7 +426,18 @@ def _register_scoped(registry: ToolRegistry, state, tool: Tool, connector_name: 
         return False
     registry.register(tool)
     state.tool_names.append(tool.name)
+    state.tools.append(tool)
     return True
+
+
+def _populate(registry: ToolRegistry, state) -> None:
+    """Register cached connector proxies in another bot's registry."""
+    if registry in state.registries:
+        return
+    for tool in state.tools:
+        if not registry.has(tool.name):
+            registry.register(tool)
+    state.registries.add(registry)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -453,6 +478,7 @@ class McpToolProxy(Tool):
         *,
         tool_call_timeout_seconds: float = _TOOL_CALL_TIMEOUT_SECONDS,
         session_ref: Callable[[], Any] | None = None,
+        on_auth_error: Callable[[], None] | None = None,
     ):
         # `session_ref`, when given, is looked up fresh on every call instead
         # of using the captured `session` — used only for global-connector
@@ -466,6 +492,7 @@ class McpToolProxy(Tool):
         # _GlobalConnections state, so it always reflects the current session.
         self._session = session
         self._session_ref = session_ref
+        self._on_auth_error = on_auth_error
         self._remote_name = tool_name
         self._tool_call_timeout_seconds = tool_call_timeout_seconds
         self.name = f"mcp_{connector}_{tool_name}"
@@ -488,6 +515,8 @@ class McpToolProxy(Tool):
                     f"Error: {self.name} timed out after {self._tool_call_timeout_seconds}s "
                     "waiting for a response"
                 )
+            if _requires_oauth_reauthorization(str(exc)) and self._on_auth_error is not None:
+                self._on_auth_error()
             raise
         parts: list[str] = []
         for item in getattr(result, "content", None) or []:
@@ -495,7 +524,10 @@ class McpToolProxy(Tool):
             if text:
                 parts.append(text)
         if getattr(result, "isError", False):
-            return "Error: " + ("\n".join(parts) or "MCP tool call failed")
+            message = "\n".join(parts) or "MCP tool call failed"
+            if _requires_oauth_reauthorization(message) and self._on_auth_error is not None:
+                self._on_auth_error()
+            return "Error: " + message
         return "\n".join(parts) or "(empty result)"
 
 
@@ -504,6 +536,8 @@ class _UserConnections:
     signature: tuple = ()
     stack: AsyncExitStack | None = None
     tool_names: list[str] = field(default_factory=list)
+    tools: list[Tool] = field(default_factory=list)
+    registries: "weakref.WeakSet[ToolRegistry]" = field(default_factory=weakref.WeakSet)
     statuses: dict[str, dict] = field(default_factory=dict)
     # time.monotonic() of the most recent sync that left at least one connector
     # in "error"; drives the retry cooldown in sync_tools. Monotonic (not
@@ -797,6 +831,7 @@ class ConnectorManager:
                 and state.signature == signature
                 and (not had_error or within_error_cooldown)
             ):
+                _populate(registry, state)
                 return
             # The state object below is replaced wholesale, so the streak has to
             # be carried by hand or the backoff resets to zero on every sync. A
@@ -828,6 +863,7 @@ class ConnectorManager:
             state = _UserConnections(
                 signature=signature, stack=AsyncExitStack(), error_streak=previous_streak
             )
+            state.registries.add(registry)
             self._users[user_id] = state
 
             for name in effective_global:
@@ -890,6 +926,14 @@ class ConnectorManager:
                 registered_names: list[str] = []
                 shadowed_names: list[str] = []
                 for tool in listed.tools:
+                    def mark_reauthorization_required(name: str = connector.name) -> None:
+                        previous = state.statuses.get(name, {})
+                        state.statuses[name] = {
+                            **previous,
+                            "status": "reauthorization_required",
+                            "error": "Authorization expired or was revoked. Reconnect this account.",
+                        }
+
                     proxy = McpToolProxy(
                         session,
                         connector.name,
@@ -899,6 +943,7 @@ class ConnectorManager:
                         tool_call_timeout_seconds=self._effective_timeout_seconds(
                             connector, self.tool_call_timeout_seconds
                         ),
+                        on_auth_error=mark_reauthorization_required,
                     )
                     if _register_scoped(registry, state, proxy, connector.name):
                         registered_names.append(proxy.name)
@@ -1066,12 +1111,16 @@ class ConnectorManager:
         await session.initialize()
         return session
 
-    async def _close_user(self, user_id: str, registry: ToolRegistry) -> None:
+    async def _close_user(self, user_id: str, registry: ToolRegistry | None = None) -> None:
         state = self._users.pop(user_id, None)
         if state is None:
             return
-        for name in state.tool_names:
-            registry.unregister(name)
+        targets = set(state.registries)
+        if registry is not None:
+            targets.add(registry)
+        for target in targets:
+            for name in state.tool_names:
+                target.unregister(name)
         if state.stack is not None:
             try:
                 await state.stack.aclose()
@@ -1097,6 +1146,11 @@ class ConnectorManager:
         state = self._users.get(user_id)
         if state is not None:
             state.signature = ()
+
+    async def disconnect_user(self, user_id: str) -> None:
+        """Immediately close live sessions and remove their tool proxies."""
+        async with self._lock(user_id):
+            await self._close_user(user_id)
 
     async def status_global(self) -> dict[str, dict]:
         return dict(self._global.statuses)

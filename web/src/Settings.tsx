@@ -1460,6 +1460,10 @@ export function presetAuthHint(p: ConnectorPreset, t: (key: string) => string): 
   return null;
 }
 
+export function isInstalledOAuthPreset(c: ConnectorInfo, p: ConnectorPreset): boolean {
+  return p.setup === "oauth" && c.oauth?.preset_key === p.key;
+}
+
 export function ConnectorBrandTile({ presetKey }: { presetKey: string }) {
   const logo = PRESET_LOGO[presetKey];
   return (
@@ -1483,26 +1487,25 @@ function GuidedSetup({
   installed,
   onCancel,
   onSaved,
-  onManage,
 }: {
   preset: ConnectorPreset;
   installed?: ConnectorInfo;
   onCancel: () => void;
   onSaved: () => Promise<void>;
-  onManage: (c: ConnectorInfo) => void;
 }) {
   const t = useT();
   const [values, setValues] = useState<Record<string, string>>({});
   const [url, setUrl] = useState(preset.url);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [oauthAction, setOauthAction] = useState<"connect" | "disconnect" | null>(null);
 
   const header = (
     <div className="claw-setup-header">
       <ConnectorBrandTile presetKey={preset.key} />
-      <div>
-        <Text type="display-3">{preset.label}</Text>
-        <Text color="secondary" as="p">
+      <div className="claw-setup-heading">
+        <Text type="display-3" className="claw-setup-title">{preset.label}</Text>
+        <Text color="secondary" as="p" className="claw-setup-description">
           {preset.description}
         </Text>
       </div>
@@ -1514,6 +1517,7 @@ function GuidedSetup({
     const provider = OAUTH_PROVIDER_LABEL[preset.oauth_provider] ?? preset.oauth_provider;
     const connect = async () => {
       setBusy(true);
+      setOauthAction("connect");
       setError("");
       try {
         const { url } = await api.connectorOAuthStart(preset.key);
@@ -1521,6 +1525,7 @@ function GuidedSetup({
       } catch (e) {
         const msg = String(e);
         setBusy(false);
+        setOauthAction(null);
         setError(
           /not_configured/.test(msg)
             ? t("settings.connectors.oauthNotConfigured", { provider })
@@ -1528,36 +1533,72 @@ function GuidedSetup({
         );
       }
     };
+    const disconnect = async () => {
+      if (!window.confirm(t("settings.connectors.disconnectConfirm", { name: preset.label }))) return;
+      setBusy(true);
+      setOauthAction("disconnect");
+      setError("");
+      try {
+        await api.connectorOAuthDisconnect(preset.key);
+        await onSaved();
+      } catch {
+        setBusy(false);
+        setOauthAction(null);
+        setError(t("settings.connectors.disconnectFailed"));
+      }
+    };
     return (
-      <div className="claw-panel claw-setup">
+      <div className="claw-panel claw-setup claw-oauth-setup">
         {header}
-        {installed?.runtime.status === "connected" && (
-          <Badge variant="success" icon={<Icon icon="check" size="xsm" />} label={t("settings.connectors.connected")} />
-        )}
-        <Card padding={3} variant="muted">
-          <Text weight="semibold">{t("settings.connectors.signInWith", { provider })}</Text>
-          <Text size="sm" color="secondary" as="p">
-            {t("settings.connectors.oauthDesc", { provider })}
-          </Text>
+        <div className="claw-oauth-status">
+          {installed?.runtime.status === "connected" && (
+            <Badge
+              variant="success"
+              icon={<Icon icon="check" size="xsm" />}
+              label={t("settings.connectors.connectedTools", { count: String(installed.runtime.tools ?? 0) })}
+            />
+          )}
+          {installed?.runtime.status === "reauthorization_required" && (
+            <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.reconnectRequired")} />
+          )}
+        </div>
+        <Card padding={3} variant="muted" className="claw-oauth-info-card">
+          <div className="claw-oauth-info">
+            <Text weight="semibold">{t("settings.connectors.signInWith", { provider })}</Text>
+            <Text size="sm" color="secondary" as="p">
+              {t("settings.connectors.oauthDesc", { provider })}
+            </Text>
+          </div>
         </Card>
         {error && <ErrorText>{error}</ErrorText>}
-        <div className="claw-row">
-          <Button
-            label={
-              busy
-                ? t("settings.connectors.redirecting")
-                : installed
-                  ? t("settings.connectors.reconnectWith", { provider })
-                  : t("settings.connectors.connectWith", { provider })
-            }
-            icon={<Icon icon={LinkIcon} size="sm" />}
-            isDisabled={busy}
-            clickAction={connect}
-          />
+        <div className="claw-oauth-actions">
+          <div className="claw-row">
+            <Button
+              label={
+                oauthAction === "connect"
+                  ? t("settings.connectors.redirecting")
+                  : installed
+                    ? t("settings.connectors.reconnectWith", { provider })
+                    : t("settings.connectors.connectWith", { provider })
+              }
+              icon={<Icon icon={LinkIcon} size="sm" />}
+              isDisabled={busy}
+              clickAction={connect}
+            />
+            <Button label={t("settings.connectors.backToConnectors")} variant="ghost" clickAction={onCancel} />
+          </div>
           {installed && (
-            <Button label={t("settings.connectors.manage")} variant="secondary" clickAction={() => onManage(installed)} />
+            <Button
+              label={
+                oauthAction === "disconnect"
+                  ? t("settings.connectors.disconnecting")
+                  : t("settings.connectors.disconnect")
+              }
+              variant="destructive"
+              isDisabled={busy}
+              clickAction={disconnect}
+            />
           )}
-          <Button label={t("settings.common.cancel")} variant="ghost" clickAction={onCancel} />
         </div>
       </div>
     );
@@ -2598,6 +2639,9 @@ function ConnectorsPanel() {
   }, [reload]);
 
   const installedByName = new Map(connectors.map((c) => [c.name.toLowerCase(), c]));
+  const oauthPresetByName = new Map(
+    presets.filter((p) => p.setup === "oauth").map((p) => [p.name.toLowerCase(), p]),
+  );
 
   // Group presets into ordered categories for the catalog grid.
   const categoryOrder = [
@@ -2818,10 +2862,6 @@ function ConnectorsPanel() {
           setSetupPreset(null);
           await reload();
         }}
-        onManage={(c) => {
-          setSetupPreset(null);
-          setEditing(c);
-        }}
       />
     );
   }
@@ -2855,20 +2895,37 @@ function ConnectorsPanel() {
           <div className="claw-connector-grid">
             {(grouped.get(cat) ?? []).map((p) => {
               const installed = installedByName.get(p.name.toLowerCase());
+              const installedOAuthPreset = installed != null && isInstalledOAuthPreset(installed, p);
               const menuItems = [
                 ...(p.docs
                   ? [{ label: t("settings.connectors.viewDocs"), icon: ExternalLink, onClick: () => window.open(p.docs, "_blank", "noopener") }]
                   : []),
                 ...(installed
                   ? [
-                      { label: t("settings.common.edit"), icon: Pencil, onClick: () => setEditing(installed) },
+                      {
+                        label: installedOAuthPreset
+                          ? t("settings.connectors.reconnectWith", {
+                              provider: OAUTH_PROVIDER_LABEL[p.oauth_provider] ?? p.oauth_provider,
+                            })
+                          : t("settings.common.edit"),
+                        icon: installedOAuthPreset ? LinkIcon : Pencil,
+                        onClick: () => (installedOAuthPreset ? setSetupPreset(p) : setEditing(installed)),
+                      },
                       { type: "divider" as const },
                       {
-                        label: t("settings.connectors.remove"),
+                        label:
+                          installedOAuthPreset
+                            ? t("settings.connectors.disconnect")
+                            : t("settings.connectors.remove"),
                         icon: Trash2,
                         onClick: () =>
                           guard(async () => {
-                            await api.deleteConnector(installed.id);
+                            if (installedOAuthPreset) {
+                              if (!window.confirm(t("settings.connectors.disconnectConfirm", { name: p.label }))) return;
+                              await api.connectorOAuthDisconnect(p.key);
+                            } else {
+                              await api.deleteConnector(installed.id);
+                            }
                             // If an edit form for this same connector was opened
                             // (from a stale pre-delete snapshot) while the delete
                             // was in flight, close it — otherwise Save would
@@ -2895,8 +2952,10 @@ function ConnectorsPanel() {
                         <Badge
                           variant="success"
                           icon={<Icon icon="check" size="xsm" />}
-                          label={t("settings.connectors.toolsCount", { count: String(installed.runtime.tools ?? 0) })}
+                          label={t("settings.connectors.connectedTools", { count: String(installed.runtime.tools ?? 0) })}
                         />
+                      ) : installed?.runtime.status === "reauthorization_required" ? (
+                        <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.reconnectRequired")} />
                       ) : installed?.runtime.status === "error" ? (
                         <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.error")} />
                       ) : (
@@ -2910,14 +2969,22 @@ function ConnectorsPanel() {
                   <div className="claw-connector-actions">
                     {installed ? (
                       <Button
-                        label={t("settings.connectors.manage")}
+                        label={
+                          installedOAuthPreset
+                            ? t("settings.connectors.reconnect")
+                            : t("settings.connectors.manage")
+                        }
                         size="sm"
                         variant="secondary"
-                        clickAction={() => setEditing(installed)}
+                        clickAction={() => (installedOAuthPreset ? setSetupPreset(p) : setEditing(installed))}
                       />
                     ) : (
                       <Button
-                        label={t("settings.connectors.add")}
+                        label={
+                          p.setup === "oauth"
+                            ? t("settings.connectors.connect")
+                            : t("settings.connectors.add")
+                        }
                         size="sm"
                         variant="primary"
                         clickAction={() => setSetupPreset(p)}
@@ -2951,8 +3018,11 @@ function ConnectorsPanel() {
               title={t("settings.connectors.yourEmptyTitle")}
               description={t("settings.connectors.yourEmptyDesc")}
             />
-          ) : connectors.map((c) => (
-            <Card key={c.id} padding={2}>
+          ) : connectors.map((c) => {
+            const candidate = oauthPresetByName.get(c.name.toLowerCase());
+            const oauthPreset = candidate && isInstalledOAuthPreset(c, candidate) ? candidate : undefined;
+            return (
+              <Card key={c.id} padding={2}>
               <div className="claw-row claw-row-between">
                 <div>
                   <div className="claw-row">
@@ -2967,6 +3037,9 @@ function ConnectorsPanel() {
                     )}
                     {c.runtime.status === "error" && (
                       <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.error")} />
+                    )}
+                    {c.runtime.status === "reauthorization_required" && (
+                      <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.reconnectRequired")} />
                     )}
                   </div>
                   <Text size="sm" color="secondary" as="p">
@@ -2985,36 +3058,49 @@ function ConnectorsPanel() {
                   )}
                 </div>
                 <div className="claw-row">
-                  <Switch
-                    value={c.enabled}
-                    label={t("settings.common.enable", { name: c.name })}
-                    isLabelHidden
-                    changeAction={(checked) =>
-                      guard(async () => {
-                        await api.saveConnector({ ...c, enabled: checked });
-                        // Keep an already-open edit form for this same connector
-                        // in sync, so a stale `editing.enabled` snapshot can't
-                        // later overwrite this toggle when the form is saved.
-                        setEditing((prev) => (prev?.id === c.id ? { ...prev, enabled: checked } : prev));
-                        await reload();
-                      })
-                    }
-                  />
+                  {!oauthPreset && (
+                    <Switch
+                      value={c.enabled}
+                      label={t("settings.common.enable", { name: c.name })}
+                      isLabelHidden
+                      changeAction={(checked) =>
+                        guard(async () => {
+                          await api.saveConnector({ ...c, enabled: checked });
+                          // Keep an already-open edit form for this same connector
+                          // in sync, so a stale `editing.enabled` snapshot can't
+                          // later overwrite this toggle when the form is saved.
+                          setEditing((prev) => (prev?.id === c.id ? { ...prev, enabled: checked } : prev));
+                          await reload();
+                        })
+                      }
+                    />
+                  )}
                   <Button
-                    label={t("settings.common.edit")}
-                    icon={<Icon icon={Pencil} size="sm" />}
+                    label={
+                      oauthPreset
+                        ? t("settings.connectors.reconnectWith", {
+                            provider: OAUTH_PROVIDER_LABEL[oauthPreset.oauth_provider] ?? oauthPreset.oauth_provider,
+                          })
+                        : t("settings.common.edit")
+                    }
+                    icon={<Icon icon={oauthPreset ? LinkIcon : Pencil} size="sm" />}
                     size="sm"
                     variant="ghost"
-                    clickAction={() => setEditing(c)}
+                    clickAction={() => (oauthPreset ? setSetupPreset(oauthPreset) : setEditing(c))}
                   />
                   <Button
-                    label={t("settings.common.delete")}
+                    label={oauthPreset ? t("settings.connectors.disconnect") : t("settings.common.delete")}
                     icon={<Icon icon={Trash2} size="sm" />}
                     size="sm"
                     variant="destructive"
                     clickAction={() =>
                       guard(async () => {
-                        await api.deleteConnector(c.id);
+                        if (oauthPreset) {
+                          if (!window.confirm(t("settings.connectors.disconnectConfirm", { name: oauthPreset.label }))) return;
+                          await api.connectorOAuthDisconnect(oauthPreset.key);
+                        } else {
+                          await api.deleteConnector(c.id);
+                        }
                         // See the "Remove" MoreMenu item above — closes a
                         // same-connector edit form opened mid-delete so Save
                         // can't resurrect the row that was just removed.
@@ -3025,8 +3111,9 @@ function ConnectorsPanel() {
                   />
                 </div>
               </div>
-            </Card>
-          ))}
+              </Card>
+            );
+          })}
         </div>
       )}
 

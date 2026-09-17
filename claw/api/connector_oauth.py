@@ -15,11 +15,21 @@ from loguru import logger
 
 from claw.api.deps import AppState, current_user, get_state
 from claw.auth import connector_oauth as flow
-from claw.core.connector_presets import get_preset
+from claw.core.connector_presets import get_preset, oauth_preset_for_connector
 from claw.db.models import User
 from claw.db.stores import ConnectorKindMismatch
 
 router = APIRouter(prefix="/api/connectors/oauth")
+
+
+def _is_installed_preset(connector: Any, preset: Any) -> bool:
+    """Return whether a stored row is the OAuth preset we are allowed to remove.
+
+    A user can create a custom connector whose name happens to match a preset.
+    Disconnect must never delete that row merely because the names collide.
+    """
+    installed = oauth_preset_for_connector(connector)
+    return installed is not None and installed.key == preset.key
 
 
 @router.get("/{preset_key}/start")
@@ -35,6 +45,37 @@ async def start(
         raise HTTPException(status_code=400, detail=f"{preset.oauth_provider}_not_configured")
     token = flow.make_state(user.id, preset.key, preset.oauth_provider, app_state.settings.secret_key)
     return {"url": flow.authorize_url(preset, app, app_state.settings, token)}
+
+
+@router.delete("/{preset_key}/disconnect")
+async def disconnect(
+    preset_key: str, user: User = Depends(current_user), app_state: AppState = Depends(get_state)
+) -> dict:
+    """Forget one user's OAuth credentials and close its live MCP session.
+
+    This is intentionally local-only. Revoking a grant at the provider can
+    invalidate other connectors authorized under the same Google/Microsoft
+    grant. A later Connect/Reconnect starts a fresh consent flow and replaces
+    the access and refresh tokens stored for this preset.
+    """
+    preset = get_preset(preset_key)
+    if preset is None or preset.setup != "oauth":
+        raise HTTPException(status_code=404, detail="unknown OAuth connector")
+
+    connector = await app_state.connectors.get_by_name(user.id, preset.name)
+    if connector is None:
+        # Idempotent so a double click or a retry after a lost response is safe.
+        return {"disconnected": True}
+    if not _is_installed_preset(connector, preset):
+        raise HTTPException(status_code=409, detail="connector name belongs to a custom connector")
+
+    deleted = await app_state.connectors.delete_if_unchanged(user.id, connector.id, connector.updated_at)
+    if not deleted:
+        # A callback may have written a fresh token after our read. Never let a
+        # stale Disconnect request erase that newer authorization.
+        raise HTTPException(status_code=409, detail="connector changed while disconnecting; retry")
+    await app_state.connectors_mgr.disconnect_user(user.id)
+    return {"disconnected": True}
 
 
 @router.get("/{provider}/callback")

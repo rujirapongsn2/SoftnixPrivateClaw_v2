@@ -103,6 +103,19 @@ _MAX_ERROR_BACKOFF_MULTIPLIER = 8
 # description needs — they only clip servers that pasted their README in.
 _MAX_TOOL_DESCRIPTION_CHARS = 600
 _MAX_PARAM_DESCRIPTION_CHARS = 250
+_OAUTH_REAUTH_MARKERS = (
+    "invalid_grant",
+    "invalid_client",
+    "unauthorized_client",
+    "invalid_rapt",
+    "expired or revoked",
+    "token has been expired",
+)
+
+
+def _requires_oauth_reauthorization(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _OAUTH_REAUTH_MARKERS)
 
 # Bounds for a connector's own `timeout_ms` override (Settings > Connectors'
 # "Timeout (ms)" field) — mirrors the range enforced by ConnectorBody in
@@ -482,6 +495,7 @@ class McpToolProxy(Tool):
         *,
         tool_call_timeout_seconds: float = _TOOL_CALL_TIMEOUT_SECONDS,
         session_ref: Callable[[], Any] | None = None,
+        on_auth_error: Callable[[], None] | None = None,
     ):
         # `session_ref`, when given, is looked up fresh on every call instead
         # of using the captured `session` — used only for global-connector
@@ -495,6 +509,7 @@ class McpToolProxy(Tool):
         # _GlobalConnections state, so it always reflects the current session.
         self._session = session
         self._session_ref = session_ref
+        self._on_auth_error = on_auth_error
         self._remote_name = tool_name
         self._tool_call_timeout_seconds = tool_call_timeout_seconds
         self.name = f"mcp_{connector}_{tool_name}"
@@ -517,6 +532,8 @@ class McpToolProxy(Tool):
                     f"Error: {self.name} timed out after {self._tool_call_timeout_seconds}s "
                     "waiting for a response"
                 )
+            if _requires_oauth_reauthorization(str(exc)) and self._on_auth_error is not None:
+                self._on_auth_error()
             raise
         parts: list[str] = []
         for item in getattr(result, "content", None) or []:
@@ -524,7 +541,10 @@ class McpToolProxy(Tool):
             if text:
                 parts.append(text)
         if getattr(result, "isError", False):
-            return "Error: " + ("\n".join(parts) or "MCP tool call failed")
+            message = "\n".join(parts) or "MCP tool call failed"
+            if _requires_oauth_reauthorization(message) and self._on_auth_error is not None:
+                self._on_auth_error()
+            return "Error: " + message
         return "\n".join(parts) or "(empty result)"
 
 
@@ -937,6 +957,14 @@ class ConnectorManager:
                 registered_names: list[str] = []
                 shadowed_names: list[str] = []
                 for tool in listed.tools:
+                    def mark_reauthorization_required(name: str = connector.name) -> None:
+                        previous = state.statuses.get(name, {})
+                        state.statuses[name] = {
+                            **previous,
+                            "status": "reauthorization_required",
+                            "error": "Authorization expired or was revoked. Reconnect this account.",
+                        }
+
                     proxy = McpToolProxy(
                         session,
                         connector.name,
@@ -946,6 +974,7 @@ class ConnectorManager:
                         tool_call_timeout_seconds=self._effective_timeout_seconds(
                             connector, self.tool_call_timeout_seconds
                         ),
+                        on_auth_error=mark_reauthorization_required,
                     )
                     if _register_scoped(registry, state, proxy, connector.name):
                         registered_names.append(proxy.name)
@@ -1113,7 +1142,7 @@ class ConnectorManager:
         await session.initialize()
         return session
 
-    async def _close_user(self, user_id: str, registry: ToolRegistry) -> None:
+    async def _close_user(self, user_id: str, registry: ToolRegistry | None = None) -> None:
         state = self._users.pop(user_id, None)
         if state is None:
             return
@@ -1121,7 +1150,10 @@ class ConnectorManager:
         # a torn-down MCP session leaves its proxies callable, so another bot of
         # the same user would keep calling into a dead session (or a deleted
         # connector's credentials) until its own next sync.
-        for target in {*state.registries, registry}:
+        targets = set(state.registries)
+        if registry is not None:
+            targets.add(registry)
+        for target in targets:
             for name in state.tool_names:
                 target.unregister(name)
         if state.stack is not None:
@@ -1149,6 +1181,11 @@ class ConnectorManager:
         state = self._users.get(user_id)
         if state is not None:
             state.signature = ()
+
+    async def disconnect_user(self, user_id: str) -> None:
+        """Immediately close live sessions and remove their tool proxies."""
+        async with self._lock(user_id):
+            await self._close_user(user_id)
 
     async def status_global(self) -> dict[str, dict]:
         return dict(self._global.statuses)

@@ -349,6 +349,11 @@ export interface ConnectorInfo {
   command: string;
   url: string;
   env: Record<string, string>;
+  oauth?: {
+    preset_key: string;
+    provider: string;
+    has_refresh_token: boolean;
+  } | null;
   // Only meaningful when kind === "api".
   operations: ApiOperation[];
   // Per-connector connect/tool-call timeout override, in milliseconds. null =
@@ -1227,6 +1232,10 @@ export const api = {
   // One-click OAuth: returns the provider authorize URL for the browser to visit.
   connectorOAuthStart: (presetKey: string) =>
     request<{ url: string }>(`/api/connectors/oauth/${encodeURIComponent(presetKey)}/start`),
+  connectorOAuthDisconnect: (presetKey: string) =>
+    request<{ disconnected: boolean }>(`/api/connectors/oauth/${encodeURIComponent(presetKey)}/disconnect`, {
+      method: "DELETE",
+    }),
   // Admin-global connectors ("Provided by your organization") — read-only,
   // redacted (no command/url/env), for Settings' transparency panel.
   listGlobalConnectors: () => request<ConnectorGlobalSummary[]>("/api/connectors/global"),

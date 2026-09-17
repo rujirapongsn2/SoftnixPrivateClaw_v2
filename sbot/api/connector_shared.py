@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from sbot.api.deps import AppState
-from sbot.core.connector_presets import is_allowed_stdio_command
+from sbot.core.connector_presets import is_allowed_stdio_command, oauth_preset_for_connector
 from sbot.db.stores import ConnectorKindMismatch
 from sbot.security.ssrf import assert_public_url
 
@@ -121,6 +121,7 @@ class ConnectorBody(BaseModel):
 
 
 def connector_row(c, status: dict | None = None) -> dict:
+    oauth_preset = oauth_preset_for_connector(c)
     return {
         "id": c.id,
         "name": c.name,
@@ -129,7 +130,16 @@ def connector_row(c, status: dict | None = None) -> dict:
         "transport": c.transport,
         "command": c.command,
         "url": c.url,
-        "env": c.env or {},
+        "env": {} if oauth_preset is not None else (c.env or {}),
+        "oauth": (
+            {
+                "preset_key": oauth_preset.key,
+                "provider": oauth_preset.oauth_provider,
+                "has_refresh_token": bool((c.env or {}).get(f"{oauth_preset.env_prefix}_REFRESH_TOKEN")),
+            }
+            if oauth_preset is not None
+            else None
+        ),
         "operations": c.operations or [],
         "timeout_ms": c.timeout_ms,
         "enabled": c.enabled,
