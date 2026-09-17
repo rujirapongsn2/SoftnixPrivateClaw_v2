@@ -4138,6 +4138,9 @@ function ProjectContainersAdminPanel() {
   // Keep this page usable during a rolling restart where a freshly-built web
   // bundle may briefly talk to an older API process without these fields.
   const configuredHostBindIp = status.host_bind_ip || "127.0.0.1";
+  const availableHostBindIps = status.available_host_bind_ips?.length
+    ? status.available_host_bind_ips
+    : ["127.0.0.1"];
   const accessScope = status.access_scope || "host";
   const projectPorts = status.project_ports || [3000, 8000, 8080];
 
@@ -4238,12 +4241,27 @@ function ProjectContainersAdminPanel() {
             </div>
             <div className="claw-row claw-row-between">
               <div className="claw-project-bind-input">
-                <TextInput
-                  label={t("admin.projects.hostBindIp")}
+                <label className="claw-project-bind-label" htmlFor="project-host-bind-ip">
+                  <Text size="sm" weight="semibold">{t("admin.projects.hostBindIp")}</Text>
+                </label>
+                <select
+                  id="project-host-bind-ip"
+                  className="claw-token-filter claw-project-bind-select"
                   value={hostBindIp}
-                  placeholder="192.168.1.10"
-                  onChange={setHostBindIp}
-                />
+                  onChange={(event) => setHostBindIp(event.target.value)}
+                  disabled={saving}
+                >
+                  {!availableHostBindIps.includes(hostBindIp) && hostBindIp && (
+                    <option value={hostBindIp} disabled>
+                      {hostBindIp} — {t("admin.projects.addressUnavailable")}
+                    </option>
+                  )}
+                  {availableHostBindIps.map((address) => (
+                    <option key={address} value={address}>
+                      {address}{address === "127.0.0.1" ? ` — ${t("admin.projects.thisHost")}` : ""}
+                    </option>
+                  ))}
+                </select>
               </div>
               <Button
                 label={t("admin.projects.save")}

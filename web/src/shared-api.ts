@@ -812,6 +812,7 @@ export interface ProjectContainerAdminStatus {
   build_started_at: string | null;
   ready: boolean;
   host_bind_ip: string;
+  available_host_bind_ips: string[];
   access_scope: "host" | "lan";
   project_ports: number[];
   public_ingress_enabled: boolean;
