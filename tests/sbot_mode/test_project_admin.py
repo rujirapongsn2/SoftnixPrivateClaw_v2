@@ -1,9 +1,10 @@
+import ipaddress
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from sbot.sandbox.project_admin import ProjectContainerManager, _size_bytes
+from sbot.sandbox.project_admin import ProjectContainerManager, _host_private_ipv4_addresses, _size_bytes
 
 
 EMPTY_METRICS = {
@@ -49,14 +50,32 @@ async def test_internal_access_accepts_private_ipv4_and_rejects_public_address(m
     store = ConfigStore()
     manager = ProjectContainerManager(settings, store, source_root=tmp_path)
     monkeypatch.setattr(manager, "_docker_ready", lambda: _async_value(False))
+    monkeypatch.setattr(
+        "sbot.sandbox.project_admin._host_private_ipv4_addresses",
+        lambda: ["127.0.0.1", "192.168.1.24"],
+    )
 
     status = await manager.set_host_bind_ip("192.168.1.24")
 
     assert store.host_bind_ip == "192.168.1.24"
     assert status["host_bind_ip"] == "192.168.1.24"
+    assert status["available_host_bind_ips"] == ["127.0.0.1", "192.168.1.24"]
     assert status["access_scope"] == "lan"
     with pytest.raises(ValueError, match="private or loopback"):
         await manager.set_host_bind_ip("8.8.8.8")
+    with pytest.raises(ValueError, match="assigned to this host"):
+        await manager.set_host_bind_ip("192.168.1.25")
+
+
+def test_host_private_ipv4_addresses_starts_with_loopback():
+    addresses = _host_private_ipv4_addresses()
+
+    assert addresses[0] == "127.0.0.1"
+    assert all(
+        (address := ipaddress.ip_address(value)).version == 4
+        and (address.is_private or address.is_loopback)
+        for value in addresses
+    )
 
 
 async def test_enabling_missing_image_starts_background_build(monkeypatch, tmp_path):

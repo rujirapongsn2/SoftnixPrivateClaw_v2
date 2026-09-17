@@ -1804,8 +1804,18 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 
 .claw-project-bind-input {
+  display: grid;
+  gap: 6px;
   flex: 1 1 280px;
   max-width: 420px;
+}
+.claw-project-bind-label {
+  display: block;
+}
+.claw-project-bind-select {
+  width: 100%;
+  max-width: none;
+  min-height: 40px;
 }
 .claw-project-status-grid > div {
   display: grid;

@@ -9,6 +9,9 @@ import os
 import re
 import shutil
 import signal
+import socket
+import struct
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -36,6 +39,55 @@ _EMPTY_METRICS = {
     "disk_usage_bytes": 0,
     "disk_usage_complete": True,
 }
+
+
+def _host_private_ipv4_addresses() -> list[str]:
+    """Return bindable private/loopback IPv4 addresses on this host.
+
+    ``getaddrinfo(hostname)`` is not reliable on machines whose local hostname
+    is not published in DNS (notably macOS), so inspect each interface through
+    the platform socket ioctl first and keep DNS/default-route discovery as a
+    portable fallback.
+    """
+    addresses = {"127.0.0.1"}
+
+    try:
+        import fcntl
+
+        request = 0xC0206921 if sys.platform == "darwin" else 0x8915
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            for _, interface_name in socket.if_nameindex():
+                try:
+                    packed_name = struct.pack("256s", interface_name.encode()[:15])
+                    response = fcntl.ioctl(probe.fileno(), request, packed_name)
+                    addresses.add(socket.inet_ntoa(response[20:24]))
+                except (OSError, ValueError):
+                    continue
+    except (ImportError, OSError):
+        pass
+
+    try:
+        for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addresses.add(item[4][0])
+    except OSError:
+        pass
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))
+            addresses.add(probe.getsockname()[0])
+    except OSError:
+        pass
+
+    allowed: list[ipaddress.IPv4Address] = []
+    for value in addresses:
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if address.version == 4 and not address.is_unspecified and (address.is_private or address.is_loopback):
+            allowed.append(address)
+    return [str(address) for address in sorted(set(allowed), key=lambda item: (not item.is_loopback, int(item)))]
 
 
 def _size_bytes(value: str) -> int:
@@ -198,11 +250,13 @@ class ProjectContainerManager:
     async def status(self) -> dict:
         readiness = await self.readiness()
         metrics = await self._runtime_metrics() if readiness["docker_available"] else dict(_EMPTY_METRICS)
+        available_host_bind_ips = _host_private_ipv4_addresses()
         return {
             **readiness,
             "image": self.settings.project_image,
             "build_started_at": self._build_started_at,
             "host_bind_ip": getattr(self.settings, "project_host_bind_ip", "127.0.0.1"),
+            "available_host_bind_ips": available_host_bind_ips,
             "access_scope": (
                 "host" if getattr(self.settings, "project_host_bind_ip", "127.0.0.1") == "127.0.0.1"
                 else "lan"
@@ -350,6 +404,8 @@ class ProjectContainerManager:
         if address.version != 4 or address.is_unspecified or not (address.is_private or address.is_loopback):
             raise ValueError("Enter a private or loopback IPv4 address")
         normalized = str(address)
+        if normalized not in _host_private_ipv4_addresses():
+            raise ValueError("Select an IPv4 address assigned to this host")
         await self.config_store.set_host_bind_ip(normalized)
         self.settings.project_host_bind_ip = normalized
         return await self.status()
