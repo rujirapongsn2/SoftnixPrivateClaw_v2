@@ -2,7 +2,18 @@
 distinguishes a permanent "this model can't do tool calling at all" failure
 (retrying is futile) from a transient one (error.llm's generic "try again")."""
 
-from claw.i18n import classify_error_reason, is_no_tool_support_error, is_no_vision_support_error, t
+from claw.i18n import (
+    classify_error_reason,
+    is_no_tool_support_error,
+    is_no_vision_support_error,
+    locale_for_text,
+    t,
+)
+
+
+def test_locale_for_text_prefers_thai_request_over_english_ui():
+    assert locale_for_text("en", "ช่วยสร้างไฟล์ Excel ให้หน่อย") == "th"
+    assert locale_for_text("th", "Create an Excel file") == "th"
 
 
 def test_no_tool_support_error_detected_from_openrouter_message():

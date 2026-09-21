@@ -71,6 +71,7 @@ export interface AgentEvent {
     | "tool_started"
     | "tool_finished"
     | "tool_progress"
+    | "artifact_job_progress"
     | "plan_updated"
     | "tool_confirm_request"
     | "tool_confirm_resolved"
@@ -96,6 +97,11 @@ export interface AgentEvent {
   index?: number;
   total?: number;
   status?: string;
+  job_id?: string;
+  segment?: number;
+  max_segments?: number;
+  elapsed_seconds?: number;
+  token_count?: number;
   // plan_updated: the agent's current working plan (goal + step checklist)
   goal?: string;
   steps?: { step: string; status: string }[];
@@ -274,11 +280,20 @@ export interface ScheduleInfo {
   cron: string;
   interval_seconds: number;
   session_id: string | null;
+  // Bot Mode only — which bot runs the task. Null = the Chief of Staff.
+  bot_id?: string | null;
   enabled: boolean;
   next_run_at: string | null;
   last_run_at: string | null;
   last_status: string;
 }
+
+/** What a save sends. `run_at` sets a one-shot's time and is write-only —
+ * reads report it as `next_run_at`. Omit it and the server keeps the deadline
+ * the task already had. */
+export type ScheduleInput = Omit<ScheduleInfo, "id" | "next_run_at" | "last_run_at" | "last_status"> & {
+  run_at?: string;
+};
 
 export interface KnowledgeBase {
   id: string;
@@ -832,7 +847,15 @@ export interface TeamPolicy {
   model_output_limits: Record<string, number>;
 }
 
+export interface DurableJob {
+  job_id: string; status: string; reason: string; locale: string; deliveries: number;
+  steps: {id: string; status: string; reason: string; actor: string; approval?: {key: string; tool: string; arguments: string} | null}[];
+}
+
 export const api = {
+  approveDurableStep: (job: string, step: string, key: string, approved: boolean) => request<DurableJob>(`/api/jobs/${encodeURIComponent(job)}/steps/${encodeURIComponent(step)}/approval`, {method: 'POST', body: JSON.stringify({key, approved})}),
+  listDurableJobs: (sessionId: string) => request<DurableJob[]>(`/api/jobs?session_id=${encodeURIComponent(sessionId)}`),
+  controlDurableJob: (id: string, action: 'cancel' | 'resume') => request<DurableJob>(`/api/jobs/${encodeURIComponent(id)}/${action}`, {method: 'POST'}),
   adminTeamPolicy: () => request<TeamPolicy>("/api/admin/team-policy"),
   adminSaveTeamPolicy: (policy: TeamPolicy) => request<TeamPolicy>("/api/admin/team-policy", {method: "PUT", body: JSON.stringify(policy)}),
   register: (email: string, password: string, display_name = "") =>
@@ -1061,9 +1084,9 @@ export const api = {
     ),
 
   listSchedules: () => request<ScheduleInfo[]>("/api/schedules"),
-  createSchedule: (s: Partial<ScheduleInfo>) =>
+  createSchedule: (s: Partial<ScheduleInput>) =>
     request<ScheduleInfo>("/api/schedules", { method: "POST", body: JSON.stringify(s) }),
-  updateSchedule: (id: string, s: Partial<ScheduleInfo>) =>
+  updateSchedule: (id: string, s: Partial<ScheduleInput>) =>
     request<ScheduleInfo>(`/api/schedules/${id}`, { method: "PUT", body: JSON.stringify(s) }),
   deleteSchedule: (id: string) => request(`/api/schedules/${id}`, { method: "DELETE" }),
   runScheduleNow: (id: string) =>

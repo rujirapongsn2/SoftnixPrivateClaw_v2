@@ -30,6 +30,7 @@ from sbot.core.turn_context import current_turn_locale, current_turn_deadline
 from sbot.db.stores import BotStore, MAX_BOTS_PER_OWNER
 from sbot.i18n import t
 from sbot.tools.base import Tool
+from sbot.tools.registry import ALWAYS_AVAILABLE_TOOLS
 
 __all__ = [
     "DELEGATABLE_TOOLS",
@@ -41,6 +42,30 @@ __all__ = [
     "DelegateTool",
     "ListBotsTool",
 ]
+
+# Spelled out rather than left to the model's memory of the tool set: an
+# invented name fails the whole call and no bot is created, and the default is
+# the permissive one, so a leader that simply says nothing about tools hands a
+# content writer a shell. Shared by both create tools — a batch member that got
+# less guidance than a single one is how the batch path drifted before.
+_TOOL_ALLOWLIST_DESCRIPTION = (
+    "The capabilities this bot may use. Choose from exactly these built-in names — "
+    f"{', '.join(sorted(DELEGATABLE_TOOLS))} — plus the exact name of any enabled mcp_* "
+    "connector tool. Any other name is rejected and the bot is not created. OMITTING THIS "
+    "GRANTS EVERY CAPABILITY, including `exec` (shell) and `project`: pass the shortest list "
+    f"the charter actually needs instead. Reading documents "
+    f"({', '.join(sorted(SPECIALIST_ALWAYS_TOOLS))}) and the bot's own memory and skills are "
+    "always available and must not be listed."
+)
+
+_SKILL_NAMES_IN_ERROR = 40
+
+_SKILL_IDS_DESCRIPTION = (
+    "Optional: exact names of the skills this bot should see, copied from your own skills "
+    "list. A name that matches no skill is rejected and the bot is not created. Omit to give "
+    "it every skill; use this to keep a narrow specialist's prompt focused. It can still open "
+    "any skill by name with read_skill."
+)
 
 # How much of a mistyped bot id still resolves. A dropped or swapped character
 # in 32 hex ones scores ~0.97, while two unrelated ids score ~0.2 — so this sits
@@ -67,10 +92,33 @@ class ListBotsTool(Tool):
         },
     }
 
-    def __init__(self, bot_store: BotStore, owner_id: str, member_ids: frozenset[str] | None = None):
+    def __init__(
+        self,
+        bot_store: BotStore,
+        owner_id: str,
+        member_ids: frozenset[str] | None = None,
+        skills=None,
+    ):
         self.bot_store = bot_store
         self.owner_id = owner_id
         self.member_ids = member_ids
+        self.skills = skills
+
+    async def _skill_names(self) -> dict[str, str]:
+        """id -> name, so the roster can say what a bot knows.
+
+        Bots store skill ids, which are uuid hex — a leader choosing who to
+        delegate to cannot match those against anything it has seen. Resolved
+        once per call, not once per bot.
+        """
+        if self.skills is None:
+            return {}
+        from sbot.core.builtin_skills import builtin_skills
+
+        own = await self.skills.enabled_for_user(self.owner_id)
+        own_names = {s.name for s in own}
+        catalog = [*(b for b in builtin_skills() if b.name not in own_names), *own]
+        return {str(s.id): s.name for s in catalog}
 
     async def execute(self, include_archived: bool = False, **_: Any) -> str:
         bots = await self.bot_store.list_for_user(self.owner_id, include_archived=include_archived)
@@ -78,6 +126,7 @@ class ListBotsTool(Tool):
             bots = [b for b in bots if b.id in self.member_ids]
         if not bots:
             return "No bots found."
+        names = await self._skill_names()
         items = []
         for b in bots:
             items.append({
@@ -90,7 +139,12 @@ class ListBotsTool(Tool):
                 "intrinsic_tools": sorted(SPECIALIST_ALWAYS_TOOLS),
                 # So a delegation can be aimed at the specialist that actually
                 # holds the relevant skill, instead of at whoever sounds right.
-                "skill_ids": b.skill_ids,
+                # By name where one is known: an id that resolves to nothing is
+                # a skill since deleted, and saying so beats hiding it.
+                "skills": (
+                    None if b.skill_ids is None
+                    else [names.get(str(sid), sid) for sid in b.skill_ids]
+                ),
             })
         return json.dumps(items, ensure_ascii=False, indent=2)
 
@@ -116,16 +170,12 @@ class CreateBotTool(Tool):
             "tool_allowlist": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Built-in tool names (including project) or exact enabled mcp_* connector tool names.",
+                "description": _TOOL_ALLOWLIST_DESCRIPTION,
             },
             "skill_ids": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": (
-                    "Optional: names of the skills this bot should see, from your own skills "
-                    "list. Omit to give it every skill; use this to keep a narrow specialist's "
-                    "prompt focused. It can still open any skill by name with read_skill."
-                ),
+                "description": _SKILL_IDS_DESCRIPTION,
             },
         },
         "required": ["name", "role_title", "charter"],
@@ -135,11 +185,146 @@ class CreateBotTool(Tool):
     # of Staff choose one would be a way to reach a pricier model than the
     # user's tier allows. Setting it stays with the user, in Settings.
 
-    def __init__(self, bot_store: BotStore, owner_id: str, creator_bot_id: str, connectors=None):
+    def __init__(
+        self,
+        bot_store: BotStore,
+        owner_id: str,
+        creator_bot_id: str,
+        connectors=None,
+        skills=None,
+    ):
         self.bot_store = bot_store
         self.owner_id = owner_id
         self.creator_bot_id = creator_bot_id
         self.connectors = connectors
+        self.skills = skills
+
+    async def _grantable_tools(self) -> set[str]:
+        available = set(DELEGATABLE_TOOLS)
+        if self.connectors is not None:
+            from sbot.tools.registry import ToolRegistry
+            connected = ToolRegistry()
+            await self.connectors.sync_tools(self.owner_id, connected)
+            available.update(connected.tool_names)
+        return available
+
+    @staticmethod
+    def _unknown_tools(requested: Any, available: set[str]) -> list[str]:
+        """Names in `requested` that name no tool at all.
+
+        An always-available name is redundant, not wrong — the allowlist is
+        unioned with them either way. Rejecting those was refusing the exact
+        names `_TOOL_ALLOWLIST_DESCRIPTION` spells out in the same field, so a
+        leader that read the description carefully got no bot.
+        """
+        return sorted(set(requested) - available - ALWAYS_AVAILABLE_TOOLS)
+
+    async def _skill_catalog(self) -> list[Any] | None:
+        """Every skill this owner can currently see, built-ins included.
+
+        Resolved once per call rather than once per bot: a roster of ten would
+        otherwise re-read the owner's whole skill list ten times to answer the
+        same question.
+        """
+        if self.skills is None:
+            return None
+        from sbot.core.builtin_skills import builtin_skills
+
+        own = await self.skills.enabled_for_user(self.owner_id)
+        own_names = {s.name for s in own}
+        # A user skill shadows the built-in of the same name, exactly as the
+        # turn that will later read these ids resolves it.
+        return [*(b for b in builtin_skills() if b.name not in own_names), *own]
+
+    async def _resolve_skills(
+        self, skill_ids: Any, catalog: list[Any] | None = None
+    ) -> tuple[list[str] | None, str | None]:
+        """Turn the names the model proposed into ids, or explain what is wrong.
+
+        `scope_skills` is a filter, so an unrecognised name does not narrow the
+        bot — it removes a skill that was never there and leaves the rest. Get
+        every name wrong and the filter yields nothing at all, which is not the
+        focused specialist that was asked for but one that sees no skills and
+        says so only once someone tries to use it. Rejecting here is the only
+        point at which the model can still be told what the real names are.
+
+        Ids are stored rather than the names given, so renaming a skill later
+        does not quietly detach it from the bots that were built around it.
+        """
+        if skill_ids is None:
+            return None, None
+        given = list(skill_ids)
+        wanted = [str(s).strip() for s in given if str(s).strip()]
+        if given and not wanted:
+            # `[]` means "no skills" and is a legitimate instruction; a list of
+            # blanks is a malformed one that used to strip down to it, so a
+            # model emitting `[""]` for an optional list silently produced a
+            # specialist with no skills at all.
+            return None, (
+                "Error: skill_ids held no skill names. Omit it to give every skill, "
+                "or name the skills this bot should see."
+            )
+        if catalog is None:
+            catalog = await self._skill_catalog()
+        if not wanted or catalog is None:
+            return wanted, None
+        by_id = {str(s.id).casefold(): s.id for s in catalog}
+        by_name: dict[str, str] = {}
+        # First match wins, over the same precedence `enabled_for_user` applies:
+        # the owner's own skill beats a share beats a built-in. Names collide on
+        # case (the unique index does not fold it, so `pdf` and `PDF` coexist),
+        # and last-wins quietly inverted that order.
+        for skill in sorted(catalog, key=self._skill_rank):
+            by_name.setdefault(skill.name.casefold(), skill.id)
+        resolved: list[str] = []
+        unknown: list[str] = []
+        for value in wanted:
+            key = value.casefold()
+            found = by_id.get(key) or by_name.get(key)
+            if found is None:
+                unknown.append(value)
+            elif found not in resolved:
+                resolved.append(found)
+        if unknown:
+            return None, await self._unknown_skill_error(unknown, catalog)
+        return resolved, None
+
+    def _skill_rank(self, skill: Any) -> int:
+        if str(skill.id).startswith("builtin:"):
+            return 2
+        return 0 if getattr(skill, "user_id", None) == self.owner_id else 1
+
+    async def _unknown_skill_error(self, unknown: list[str], catalog: list[Any]) -> str:
+        """Why these names matched nothing, in terms the leader can act on.
+
+        A skill the owner has switched off is missing from the catalog but
+        plainly visible in their Skills panel, so "no skill named X" reads as
+        the tool being wrong. Naming the real reason is what lets the leader
+        tell the user to enable it instead of guessing at synonyms.
+        """
+        off: list[str] = []
+        if self.skills is not None:
+            disabled = {
+                s.name.casefold()
+                for s in await self.skills.available_for_user(self.owner_id)
+                if not getattr(s, "subscription_enabled", s.enabled)
+            }
+            off = [v for v in unknown if v.casefold() in disabled]
+        if off:
+            return (
+                f"Error: {off} exists but is switched off, so the bot could not use it. "
+                "Ask the user to enable it in Settings → Skills, then create the bot."
+            )
+        # Capped: the whole message is fed straight back to the model, and a
+        # long-standing owner's skill list is not a size this error should be
+        # able to grow to.
+        names = sorted(s.name for s in catalog)
+        shown = names[:_SKILL_NAMES_IN_ERROR]
+        rest = f" (+{len(names) - len(shown)} more — read them with read_skill)" if len(names) > len(shown) else ""
+        return (
+            f"Error: no skill named {unknown}. Choose from {shown}{rest}, "
+            "or omit skill_ids to give every skill."
+        )
 
     async def execute(
         self,
@@ -154,23 +339,12 @@ class CreateBotTool(Tool):
         if not name:
             return "Error: name is required."
 
-        if skill_ids is not None:
-            # Kept as given rather than resolved to rows: `scope_skills` matches
-            # on id or name because built-in skills are code-defined and have no
-            # row to point at, so a name is a legitimate value here. A name that
-            # matches nothing narrows the bot to fewer skills, which is a worse
-            # bot but not a broken one — unlike an unknown tool, it cannot grant
-            # anything, so it is clamped rather than rejected.
-            skill_ids = [s.strip() for s in skill_ids if str(s).strip()]
+        skill_ids, skill_error = await self._resolve_skills(skill_ids)
+        if skill_error:
+            return skill_error
 
         if tool_allowlist is not None:
-            available = set(DELEGATABLE_TOOLS)
-            if self.connectors is not None:
-                from sbot.tools.registry import ToolRegistry
-                connected = ToolRegistry()
-                await self.connectors.sync_tools(self.owner_id, connected)
-                available.update(connected.tool_names)
-            unknown = sorted(set(tool_allowlist) - available)
+            unknown = self._unknown_tools(tool_allowlist, await self._grantable_tools())
             if unknown:
                 return (
                     f"Error: cannot grant {unknown} — a specialist may only be given "
@@ -237,8 +411,16 @@ class CreateBotsTool(CreateBotTool):
                         "name": {"type": "string"},
                         "role_title": {"type": "string"},
                         "charter": {"type": "string"},
-                        "tool_allowlist": {"type": "array", "items": {"type": "string"}},
-                        "skill_ids": {"type": "array", "items": {"type": "string"}},
+                        "tool_allowlist": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": _TOOL_ALLOWLIST_DESCRIPTION,
+                        },
+                        "skill_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": _SKILL_IDS_DESCRIPTION,
+                        },
                     },
                     "required": ["name", "role_title", "charter"],
                 },
@@ -273,21 +455,21 @@ class CreateBotsTool(CreateBotTool):
                 "skill_ids": item.get("skill_ids"),
             })
 
-        available = set(DELEGATABLE_TOOLS)
-        if self.connectors is not None:
-            from sbot.tools.registry import ToolRegistry
-            connected = ToolRegistry()
-            await self.connectors.sync_tools(self.owner_id, connected)
-            available.update(connected.tool_names)
+        available = await self._grantable_tools()
+        catalog = await self._skill_catalog()
         for item in normalized:
             allowed = item["tool_allowlist"]
             if allowed is not None:
-                unknown = sorted(set(allowed) - available)
+                unknown = self._unknown_tools(allowed, available)
                 if unknown:
-                    return f"Error: cannot grant {unknown} to '{item['name']}'."
-            skills = item["skill_ids"]
-            if skills is not None:
-                item["skill_ids"] = [str(skill).strip() for skill in skills if str(skill).strip()]
+                    return (
+                        f"Error: cannot grant {unknown} to '{item['name']}' — a specialist "
+                        f"may only be given {sorted(DELEGATABLE_TOOLS)}."
+                    )
+            resolved, skill_error = await self._resolve_skills(item["skill_ids"], catalog)
+            if skill_error:
+                return f"{skill_error} (for '{item['name']}')"
+            item["skill_ids"] = resolved
 
         for item in normalized:
             item["kind"] = "specialist"
@@ -355,6 +537,7 @@ class DelegateTool(Tool):
         llm_config: Any = None,
         skills: Any = None,
         memory: Any = None,
+        knowledge: Any = None,
         mirror: Any = None,
         leader_bot_id: str | None = None,
         member_ids: frozenset[str] | None = None,
@@ -385,6 +568,7 @@ class DelegateTool(Tool):
             owner_id=owner_id,
             skills=skills,
             memory=memory,
+            knowledge=knowledge,
             connectors=connectors,
             project_access=project_access,
             arg_guard=arg_guard,

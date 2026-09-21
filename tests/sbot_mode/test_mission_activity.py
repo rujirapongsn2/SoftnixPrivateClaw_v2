@@ -42,15 +42,26 @@ async def test_live_activity_is_durable_separate_and_excluded_from_context(store
         activity.running()
         activity.emit(TextDeltaEvent('turn', 'Checking sources'))
         activity.emit(ThinkingDeltaEvent('turn', 'private reasoning'))
-        activity.emit(ToolStarted('turn', 'web_search', 'SECRET'))
-        activity.emit(ToolFinished('turn', 'web_search', 'SECRET', False))
+        activity.emit(ToolStarted(
+            'turn', 'web_fetch',
+            '{"url":"https://example.com/report","api_key":"top-secret"}',
+        ))
+        activity.emit(ToolFinished(
+            'turn', 'web_fetch', 'Fetched report; Authorization: Bearer private-token', False,
+        ))
         await asyncio.sleep(.65)
         page = await stores['messages'].page_for_display(activity.session_id)
         snapshot = page[0][0]['meta']['mission_activity']
         assert snapshot['status'] == 'running'
         assert snapshot['text'] == 'Checking sources'
         assert snapshot['steps'][0]['status'] == 'done'
-        assert 'SECRET' not in str(snapshot) and 'private reasoning' not in str(snapshot)
+        tool = snapshot['steps'][0]
+        assert 'https://example.com/report' in tool['args_preview']
+        assert '[redacted]' in tool['args_preview']
+        assert 'top-secret' not in str(tool) and 'private-token' not in str(tool)
+        assert tool['result_preview'] == 'Fetched report; Authorization: [redacted]'
+        assert tool['finished_at'] and isinstance(tool['duration_ms'], int)
+        assert 'private reasoning' not in str(snapshot)
         assert await stores['messages'].recent(activity.session_id) == []
         assert await stores['messages'].oldest_for_consolidation(activity.session_id,
             after_seq=0, through_seq=100, limit=100) == []
@@ -182,6 +193,8 @@ async def test_activity_storage_is_bounded_and_cancelled_tools_close(stores, tmp
     assert len(snapshot['text']) == 12000
     assert len(snapshot['steps']) == 100
     assert all(step['status'] == 'interrupted' for step in snapshot['steps'])
+    assert all(step['finished_at'] for step in snapshot['steps'])
+    assert all(isinstance(step['duration_ms'], int) for step in snapshot['steps'])
     assert len(snapshot['result']) == 20000
     assert snapshot['result_truncated'] is True
 

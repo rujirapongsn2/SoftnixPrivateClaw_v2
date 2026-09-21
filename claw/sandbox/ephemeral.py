@@ -24,9 +24,14 @@ class SandboxResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    infrastructure_error: bool = False
 
     def render(self) -> str:
         parts = []
+        if self.infrastructure_error:
+            parts.append("Error: [sandbox_unavailable] Execution environment is unavailable; do not retry different commands.")
+        elif self.exit_code != 0 or self.timed_out:
+            parts.append("Error: command failed")
         if self.timed_out:
             parts.append("[command timed out]")
         if self.stdout:
@@ -47,12 +52,15 @@ class EphemeralSandbox:
         else:
             argv = ["/bin/sh", "-lc", command]
 
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=None if self.settings.enabled else str(workspace),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=None if self.settings.enabled else str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            return SandboxResult(-1, "", str(exc), infrastructure_error=True)
         timed_out = False
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
@@ -63,18 +71,24 @@ class EphemeralSandbox:
             proc.kill()
             stdout_b, stderr_b = await proc.communicate()
             logger.warning("Sandbox command timed out after {}s", self.settings.timeout_seconds)
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.communicate()
+            raise
 
         return SandboxResult(
             exit_code=proc.returncode if proc.returncode is not None else -1,
             stdout=stdout_b.decode("utf-8", "replace")[-_OUTPUT_CAP:],
             stderr=stderr_b.decode("utf-8", "replace")[-_OUTPUT_CAP:],
             timed_out=timed_out,
+            infrastructure_error=self.settings.enabled and proc.returncode == 125,
         )
 
     def _docker_argv(self, command: str, workspace: Path) -> list[str]:
         s = self.settings
         return [
-            "docker", "run", "--rm",
+            "docker", "run", "--rm", "--pull=never",
             "--network", s.network,
             "--cpus", str(s.cpu_limit),
             "--memory", s.memory_limit,

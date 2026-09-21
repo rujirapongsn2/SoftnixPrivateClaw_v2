@@ -98,7 +98,11 @@ export interface MissionActivityData {
   instruction: string; inputs: string[]; required_files: string[]; depends_on: string[];
   leader_name: string; origin_session?: string; bot_name: string; status: string;
   text: string; result: string; result_truncated: boolean; artifacts: string[]; updated_at: string; revision: number;
-  steps: { tool: string; status: string; at: string }[];
+  steps: {
+    tool: string; status: string; at: string; started_at?: string;
+    finished_at?: string | null; duration_ms?: number | null;
+    args_preview?: string; result_preview?: string;
+  }[];
 }
 
 export interface ChatMessage {
@@ -432,11 +436,21 @@ export interface ScheduleInfo {
   cron: string;
   interval_seconds: number;
   session_id: string | null;
+  // Which bot runs the task, and whose thread the result lands in. Null = the
+  // Chief of Staff, which is what tasks created from Settings get.
+  bot_id?: string | null;
   enabled: boolean;
   next_run_at: string | null;
   last_run_at: string | null;
   last_status: string;
 }
+
+/** What a save sends. `run_at` sets a one-shot's time and is write-only —
+ * reads report it as `next_run_at`. Omit it and the server keeps the deadline
+ * the task already had. */
+export type ScheduleInput = Omit<ScheduleInfo, "id" | "next_run_at" | "last_run_at" | "last_status"> & {
+  run_at?: string;
+};
 
 export interface KnowledgeBase {
   id: string;
@@ -1299,9 +1313,9 @@ export const api = {
     ),
 
   listSchedules: () => request<ScheduleInfo[]>("/api/schedules"),
-  createSchedule: (s: Partial<ScheduleInfo>) =>
+  createSchedule: (s: Partial<ScheduleInput>) =>
     request<ScheduleInfo>("/api/schedules", { method: "POST", body: JSON.stringify(s) }),
-  updateSchedule: (id: string, s: Partial<ScheduleInfo>) =>
+  updateSchedule: (id: string, s: Partial<ScheduleInput>) =>
     request<ScheduleInfo>(`/api/schedules/${id}`, { method: "PUT", body: JSON.stringify(s) }),
   deleteSchedule: (id: string) => request(`/api/schedules/${id}`, { method: "DELETE" }),
   runScheduleNow: (id: string) =>

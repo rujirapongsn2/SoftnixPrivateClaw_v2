@@ -73,6 +73,7 @@ class MissionService:
         llm_config: Any = None,
         skills: Any = None,
         memory: Any = None,
+        knowledge: Any = None,
         max_parallel_nodes: int = 4,
         notifier: Any = None,
         connectors: Any = None,
@@ -108,6 +109,7 @@ class MissionService:
         # `SpecialistRunner.context_block`.
         self.skills = skills
         self.memory = memory
+        self.knowledge = knowledge
         self.project_access = project_access
         self.arg_guard_for_owner = arg_guard_for_owner
         self.require_verified_results = require_verified_results
@@ -128,6 +130,13 @@ class MissionService:
         Recoverable model limits continue from retained messages.
         Recovery after an uncertain worker death needs inspection.
         """
+        from claw.jobs.provider import current_execution
+        context = current_execution.get()
+        if context is not None:
+            # A specialist must not create another root and thereby reset the
+            # organization's resource ledger. Root DAG expansion is not yet a
+            # supported operation; preserve the current job instead.
+            raise InvalidGraphError('Nested background jobs cannot create a new budget. Continue within the current root job.')
         from sbot.core.organization_policy import load_policy
         await load_policy(self.missions.factory, self.settings)
         limits = self.settings.team_work
@@ -191,10 +200,17 @@ class MissionService:
                                       budget={"max_tokens": min(DEFAULT_BUDGET["max_tokens"] * len(safe), limits.max_job_tokens),
                                               "max_wall_seconds": min(DEFAULT_BUDGET["max_wall_seconds"], limits.max_job_seconds)})
             await self.missions.blackboard_write(mission.id, 'scope:background', True)
+            # Keep the legacy projection planned until shared admission commits;
+            # otherwise legacy maintenance can claim it in the handoff window.
             await self.missions.update_mission(
-                mission.id, status='queued', plan_link=await self._plan_link(session_id)
+                mission.id, plan_link=await self._plan_link(session_id)
             )
-            self._spawn(mission.id)
+            if getattr(self, 'durable_enabled', False):
+                from claw.jobs.bot_bridge import enqueue
+                await enqueue(self, mission)
+            else:
+                await self.missions.update_mission(mission.id, status='queued')
+                self._spawn(mission.id)
             mission.status = 'queued'
             return mission
 
@@ -387,6 +403,10 @@ class MissionService:
             mission = await self.missions.get_mission(mission_id, owner_id)
             if mission is None:
                 return "not_found"
+            durable = getattr(self, 'durable_jobs', None)
+            if durable and await durable.snapshot(owner_id, mission_id):
+                await durable.control(mission_id, owner_id, 'resume')
+                return (await durable.snapshot(owner_id, mission_id))['status']
             task = self._running.get(mission_id)
             if task is not None and not task.done():
                 return mission.status
@@ -483,6 +503,9 @@ class MissionService:
             offset += len(page)
         resumed = 0
         for mission in missions:
+            durable = getattr(self, 'durable_jobs', None)
+            if durable and await durable.snapshot(mission.owner_id, mission.id):
+                continue  # also when the feature flag is rolled back
             task = self._running.get(mission.id)
             if task is not None and not task.done():
                 continue
@@ -609,6 +632,9 @@ class MissionService:
         while self.messages is not None:
             page = await self.missions.reportable_missions(offset)
             for mission in page:
+                durable = getattr(self, 'durable_jobs', None)
+                if durable and await durable.snapshot(mission.owner_id, mission.id):
+                    continue  # shared transactional outbox owns delivery
                 await self._report(mission, mission.status)
             if len(page) < 100:
                 return
@@ -972,6 +998,9 @@ class MissionService:
         mission = await self.missions.get_mission(mission_id, owner_id)
         if mission is None:
             return False
+        durable = getattr(self, 'durable_jobs', None)
+        if durable and await durable.snapshot(owner_id, mission_id):
+            await durable.control(mission_id, owner_id, 'cancel')
         await self.missions.update_mission(mission_id, status="cancelled")
         # A mission cancelled before a worker ever picked it up never reaches
         # `_run`, and `cancelled` is not reportable, so neither the run nor the
@@ -1050,6 +1079,7 @@ class MissionService:
             owner_id=mission.owner_id,
             skills=self.skills,
             memory=self.memory,
+            knowledge=self.knowledge,
             connectors=self.connectors,
             project_access=self.project_access,
             arg_guard=self.arg_guard_for_owner(mission.owner_id) if self.arg_guard_for_owner else None,
@@ -1081,6 +1111,9 @@ class MissionService:
                         return result
             finally:
                 activity.finish(result)
+                from claw.jobs.provider import current_execution
+                if current_execution.get() is not None:
+                    await activity.wait()
 
         return execute
 
@@ -1107,6 +1140,10 @@ class MissionService:
         from sbot.core.deep_verification import TaskVerifier
         policy = getattr(self.settings, 'reliability', ReliabilitySettings())
         mode = policy.verification_mode if policy.enabled_for(mission.owner_id) else 'off'
+        from claw.jobs.provider import current_execution
+        verification = (node.budget or {}).get('verification') or {}
+        if current_execution.get() is not None and verification.get('kind') in {'code', 'research'}:
+            mode = 'enforce'
         root_workspace = runner.workspace
         input_manifest = {}
         background = await self.missions.blackboard_read(mission.id, 'scope:background')

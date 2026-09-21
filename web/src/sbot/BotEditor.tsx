@@ -120,7 +120,11 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
     }
     setSaving(true);
     setError("");
-    const savedSkillIds = skillScope === "all" ? null : skillScope === "none" ? [] : skillIds;
+    // Stale entries are dropped rather than sent back: a skill deleted since
+    // this bot was configured is no longer a choice the user can see, and the
+    // API now rejects the whole save over one id nobody picked.
+    const savedSkillIds = skillScope === "all" ? null : skillScope === "none" ? []
+      : skillIds.filter(item => skills.some(skill => skill.id === item || skill.name === item));
     try {
       const updates: Partial<BotInfo> = {
         name: name.trim(),
@@ -206,9 +210,16 @@ export function BotEditor({ bot, onClose, onSaved, onDeleted }: {
         <legend>Tools</legend>
         <label className="sbot-bot-check sbot-bot-tools-toggle"><input type="checkbox" checked={restricted}
           onChange={e => setRestricted(e.target.checked)} /> Limit this bot to selected tools</label>
-        {restricted && <div className="sbot-bot-check-grid">{BOT_TOOLS.map(([id, label]) => <label key={id} className="sbot-bot-check">
-          <input type="checkbox" checked={tools.includes(id)} onChange={() => toggleTool(id)} /> {label}
-        </label>)}</div>}
+        {restricted && <>
+          <div className="sbot-bot-check-grid">{BOT_TOOLS.map(([id, label]) => <label key={id} className="sbot-bot-check">
+            <input type="checkbox" checked={tools.includes(id)} onChange={() => toggleTool(id)} /> {label}
+          </label>)}</div>
+          <small className="sbot-bot-tools-note">
+            Reading documents and publishing results stay available whatever you choose
+            here, as do the bot's own memory and skills. Knowledge-base search stays
+            available too, where a knowledge base has been set up.
+          </small>
+        </>}
       </fieldset>
 
       <fieldset className="sbot-bot-tools-field">

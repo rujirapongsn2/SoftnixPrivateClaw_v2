@@ -131,19 +131,82 @@ class ReadPdfTool(_WorkspaceDocTool):
 
 class ReadDocxTool(_WorkspaceDocTool):
     name = "read_docx"
-    description = "Extract text from a Word (.docx) file in the workspace."
-    parameters = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+    description = (
+        "Read Word paragraphs and tables in document order. Follow next_offset until null "
+        "to read the entire document; no shell extraction is needed."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 4000},
+        },
+        "required": ["path"],
+    }
 
-    async def execute(self, path: str, **_: Any) -> str:
+    def __init__(self, workspace: Path):
+        super().__init__(workspace)
+        self._parsed: dict[tuple, str] = {}
+
+    @staticmethod
+    def _extract(target: Path) -> str:
+        from docx import Document
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+        document = Document(str(target))
+        parts = []
+        def blocks(parent):
+            element = parent.element.body if hasattr(parent, "element") else parent._tc
+            for child in element.iterchildren():
+                if child.tag.endswith("}p"):
+                    parts.append(Paragraph(child, parent).text)
+                elif child.tag.endswith("}tbl"):
+                    table = Table(child, parent)
+                    for row in table.rows:
+                        parts.append("[table row]")
+                        seen = set()
+                        for cell in row.cells:
+                            if cell._tc not in seen:
+                                seen.add(cell._tc)
+                                blocks(cell)
+        blocks(document)
+        return "\n".join(parts).strip()
+
+    async def execute(self, path: str, offset: int = 0, limit: int = 4000, **_: Any) -> str:
+        import json
         target = self._resolve(path)
         if target is None:
             return f"Error: file not found: {path}"
+        import hashlib
+        from claw.jobs.provider import source_context
+        ctx = source_context()
+        fingerprint = hashlib.sha256(await asyncio.to_thread(target.read_bytes)).hexdigest()
+        key = (str(target), fingerprint)
+        if ctx:
+            path = str(target.relative_to(self.workspace))
+        sources = dict(ctx.state.get('sources', {})) if ctx else {}
+        cached = sources.get(path, {})
         try:
-            import docx
+            if cached.get('sha256') == fingerprint:
+                text = cached['text']
+            else:
+                if key not in self._parsed:
+                    self._parsed = {key: await asyncio.to_thread(self._extract, target)}
+                text = self._parsed[key]
         except ImportError:
             return "Error: Word support is not installed (pip install python-docx)."
-        document = docx.Document(str(target))
-        return self._cap("\n".join(p.text for p in document.paragraphs).strip() or "(empty document)")
+        offset = max(0, offset)
+        end = min(len(text), offset + max(1, min(limit, 4000)))
+        if ctx:
+            ranges = cached.get('ranges', []) if cached.get('sha256') == fingerprint else []
+            ranges = sorted({tuple(r) for r in [*ranges, [min(offset, len(text)), end]]})
+            sources[path] = {'sha256': fingerprint, 'text': text, 'length': len(text), 'ranges': ranges}
+            await ctx.checkpoint({**ctx.state, 'sources': sources})
+
+        return json.dumps({"path": path, "offset": offset, "total_chars": len(text),
+                           "next_offset": end if end < len(text) else None,
+                           "text": text[offset:end]}, ensure_ascii=False)
 
 
 def build_document_tools(workspace: Path) -> list[Tool]:

@@ -397,8 +397,9 @@ def _elapsed_ms(started: float, mark: float | None) -> int:
 
 
 def _args_preview(arguments: dict[str, Any]) -> str:
-    text = json.dumps(arguments, ensure_ascii=False)
-    return text[:_PREVIEW_CHARS] + ("…" if len(text) > _PREVIEW_CHARS else "")
+    from sbot.core.tool_preview import safe_args_preview
+
+    return safe_args_preview(arguments, _PREVIEW_CHARS)
 
 
 def _project_confirmation_preview(arguments: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -468,7 +469,15 @@ class AgentLoop:
         (per-chat model selection), falling back to the agent's configured model.
         `context_window` is the admin's per-model input-window override, if set.
         """
-        working = list(messages)
+        from claw.jobs.provider import current_execution, foreground_accounting
+        durable = current_execution.get() if self.tools.get('finish_step') else None
+        working = list(durable.state.get('bot_messages', messages)) if durable else list(messages)
+        if durable:
+            from claw.jobs.runtime_bridge import pair_checkpoint_messages
+            working = pair_checkpoint_messages(working)
+            completed_record = durable.state.get('completion_record')
+            if completed_record:
+                self.tools.get('finish_step').result = completed_record
         base_len = len(working)
         usage_total: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         effective_model = model or self.model
@@ -485,7 +494,7 @@ class AgentLoop:
         # template counts as an intermediate depends on what else the turn wrote.
         # `baseline` lets us also detect files an `exec` command created (e.g. a
         # saved chart) by diffing the workspace.
-        written: list[str] = []
+        written: list[str] = list(durable.state.get("written", [])) if durable else []
         baseline = _snapshot_workspace(self.workspace) if self.workspace is not None else {}
         started = time.monotonic()
         first_text_at: float | None = None
@@ -995,9 +1004,20 @@ class AgentLoop:
                     emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
                     tool_started = True
                     logger.info("Tool call: {}({})", tc.name, args_preview)
+                    foreground = foreground_accounting.get()
+                    if foreground is not None and not foreground.adopted_job_id:
+                        await foreground.checkpoint({**foreground.state,
+                            'pending_tool': {'name': tc.name, 'arguments': args}, 'bot_messages': working})
+                    if durable:
+                        await durable.checkpoint({**durable.state, 'pending_tool': {'name': tc.name},
+                                                  'bot_messages': working, 'written': written})
                     tool_result = await self.tools.execute(
                         tc.name, args, progress=_progress, deadline=turn_deadline
                     )
+                from claw.jobs.tool_results import observe
+                await observe(tool_result)
+                if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
+                    written.append(str(args['output']))
                 # Track files the agent created/edited (successful write_file /
                 # edit_file) so the UI can offer them as artifacts.
                 if (
@@ -1053,6 +1073,14 @@ class AgentLoop:
                         "content": tool_result,
                     }
                 )
+                foreground = foreground_accounting.get()
+                if foreground is not None and not foreground.adopted_job_id:
+                    await foreground.checkpoint({**foreground.state, 'pending_tool': None,
+                        'bot_messages': working, 'written': written})
+                if durable:
+                    await durable.checkpoint({**durable.state, 'pending_tool': None,
+                        'bot_messages': working, 'written': written,
+                        'completion_record': getattr(self.tools.get('finish_step'), 'result', None)})
                 tool = self.tools.get(tc.name)
                 if tool and tool.ends_turn_on_success and not tool_result.startswith('Error'):
                     terminal_results.append(tool_result)

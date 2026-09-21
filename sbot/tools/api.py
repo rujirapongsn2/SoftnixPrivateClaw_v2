@@ -125,6 +125,7 @@ class GenericApiTool(Tool):
         connector_ref: Callable[[], Any] | None = None,
     ):
         self._connector = connector
+        self._connector_name = connector.name
         # `connector_ref`, when given, is looked up fresh on every call instead
         # of using the captured `connector` — used only for admin-global
         # connectors (see claw/core/connectors.py's sync_global), and the exact
@@ -152,8 +153,11 @@ class GenericApiTool(Tool):
         # loaded (sbot.core.connectors is what constructs this tool).
         from sbot.core.connectors import _redact_secrets
 
+        from claw.jobs.connectors import authorize, unavailable, uncertain
+        await authorize(self._connector_name)
         connector = self._connector_ref() if self._connector_ref is not None else self._connector
         if connector is None:
+            await unavailable(self._connector_name)
             return f"Error: {self.name} is no longer available — the connector was changed or disabled"
         env = connector.env or {}
 
@@ -273,10 +277,13 @@ class GenericApiTool(Tool):
                         client, target, headers, body_content, env_query
                     )
         except (httpx.TimeoutException, TimeoutError):
+            await uncertain(self._connector_name)
             return f"Error: {self._method} {self._path_template} timed out after {self._timeout_seconds}s"
         except UnsafeUrlError as exc:
+            await uncertain(self._connector_name)
             return f"Error: {self._method} {self._path_template} blocked: {exc}"
         except Exception as exc:
+            await uncertain(self._connector_name)
             # Deliberately broader than httpx.HTTPError: httpx.InvalidURL (a bad
             # stored base url) does NOT subclass it, and anything not caught
             # here lands in ToolRegistry.execute's catch-all, which does no
@@ -286,6 +293,7 @@ class GenericApiTool(Tool):
             )
 
         if status_code >= 400:
+            await uncertain(self._connector_name)
             return _redact_secrets(
                 f"Error: {self._method} {self._path_template} failed with status {status_code}\n\n{text}",
                 connector,

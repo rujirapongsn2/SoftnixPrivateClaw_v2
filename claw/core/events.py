@@ -122,3 +122,19 @@ class TurnError(AgentEvent):
     turn_id: str
     message: str
     type: str = field(default="turn_error", init=False)
+
+
+@dataclass(slots=True)
+class ArtifactJobProgress(AgentEvent):
+    """Durable progress for a segmented artifact-producing chat turn."""
+
+    turn_id: str
+    job_id: str
+    status: str
+    segment: int
+    max_segments: int
+    elapsed_seconds: float = 0
+    token_count: int = 0
+    artifacts: list[str] = field(default_factory=list)
+    message: str = ""
+    type: str = field(default="artifact_job_progress", init=False)

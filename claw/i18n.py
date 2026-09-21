@@ -2,6 +2,13 @@
 
 from typing import Any
 
+
+def locale_for_text(configured: str, text: str) -> str:
+    """Prefer the language the user is writing for runtime-owned messages."""
+    if any("\u0e00" <= char <= "\u0e7f" for char in (text or "")):
+        return "th"
+    return configured if configured in {"en", "th"} else "en"
+
 _MESSAGES: dict[str, dict[str, str]] = {
     "error.llm": {
         "en": "The AI model could not be reached ({reason}). Please try again.",
@@ -78,6 +85,34 @@ _MESSAGES: dict[str, dict[str, str]] = {
     "error.turn_timeout_partial": {
         "en": "[This answer was cut off — the turn ran out of time. Ask me to continue.]",
         "th": "[คำตอบนี้ถูกตัดกลางคัน เพราะหมดเวลาที่กำหนดไว้ สั่งให้ทำต่อได้]",
+    },
+    "artifact.sandboxBlocked": {
+        "en": "File creation is paused because the execution environment is unavailable. Progress is saved. An administrator must restore the sandbox before this job can continue.",
+        "th": "พักงานสร้างไฟล์ไว้ เนื่องจากระบบรันคำสั่งไม่พร้อมใช้งาน บันทึกความคืบหน้าแล้ว ผู้ดูแลต้องกู้คืน sandbox ก่อนจึงจะทำงานต่อได้",
+    },
+    "artifact.started": {
+        "en": "Preparing a resumable artifact job.",
+        "th": "กำลังเตรียมงานสร้างไฟล์แบบทำต่ออัตโนมัติ",
+    },
+    "artifact.resuming": {
+        "en": "Continuing automatically from checkpoint (segment {segment}).",
+        "th": "กำลังทำต่ออัตโนมัติจากจุดบันทึก (ช่วงที่ {segment})",
+    },
+    "artifact.completed": {
+        "en": "Artifact job completed.",
+        "th": "งานสร้างไฟล์เสร็จแล้ว",
+    },
+    "artifact.cancelled": {
+        "en": "Artifact job cancelled.",
+        "th": "ยกเลิกงานสร้างไฟล์แล้ว",
+    },
+    "artifact.limitReached": {
+        "en": "The artifact job stopped at its cumulative safety limit. Completed checkpoints were preserved.",
+        "th": "งานสร้างไฟล์หยุดเมื่อถึงขีดจำกัดสะสม โดยเก็บขั้นตอนที่ทำเสร็จแล้วไว้ครบถ้วน",
+    },
+    "artifact.limitReachedPartial": {
+        "en": "[The artifact job reached its cumulative safety limit; completed checkpoints were preserved.]",
+        "th": "[งานสร้างไฟล์ถึงขีดจำกัดสะสมแล้ว โดยเก็บขั้นตอนที่ทำเสร็จไว้ครบถ้วน]",
     },
     "error.provider_stream_partial": {
         "en": "[This response was cut off because the upstream model provider became unavailable. Ask me to continue.]",

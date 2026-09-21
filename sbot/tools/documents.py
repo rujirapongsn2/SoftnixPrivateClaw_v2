@@ -139,6 +139,10 @@ class ReadDocxTool(_WorkspaceDocTool):
     }, "required": ["path"]}
 
     async def execute(self, path: str, offset: int = 0, limit: int = 10000, **_: Any) -> str:
+        from claw.jobs.provider import current_execution
+        if current_execution.get() is not None:
+            from claw.tools.documents import ReadDocxTool as SharedReader
+            return await SharedReader(self.workspace).execute(path, offset, min(limit, 4000))
         if not isinstance(offset, int) or offset < 0 or not isinstance(limit, int) or not 1 <= limit <= 10000:
             return "Error: offset must be nonnegative and limit must be 1–10000."
         target = self._resolve(path)

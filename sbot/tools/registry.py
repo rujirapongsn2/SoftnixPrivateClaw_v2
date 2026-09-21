@@ -9,20 +9,42 @@ from sbot.tools.base import Tool
 
 _RETRY_HINT = "\n\n[Analyze the error above and try a different approach.]"
 
-# Tools a bot's own `tool_allowlist` cannot take away. Two groups, one reason
+# Reading a file the user handed the bot, and turning a result into something
+# they can look at. Not capability grants: every one of them is confined to the
+# bot's own workspace, and a specialist has always had them on the delegate
+# path (`SpecialistRunner.build_tools`, which is defined in terms of this set).
+# Naming them in one place is what keeps the two paths from drifting — while
+# they were listed separately, a bot restricted to `read_file` could open a PDF
+# when its leader delegated to it and not when the user opened its own chat.
+INTRINSIC_TOOLS = frozenset({
+    "generate_workbook",
+    "read_docx",
+    "read_excel",
+    "read_csv",
+    "read_pdf",
+    "render_diagram",
+    "publish_artifact",
+})
+
+# Tools a bot's own `tool_allowlist` cannot take away. Three groups, one reason
 # each: the agent's own machinery (its memory, its plan, reading the skills it
 # was given) is not a capability grant — a bot restricted to `web_search` still
-# has to be able to remember things, or per-bot memory stops working. And the
-# Chief of Staff orchestration tools are granted by the bot's *kind*, which is
-# already checked before they are registered at all; a CoS that also carried an
-# allowlist would otherwise lose the ability to delegate.
-ALWAYS_AVAILABLE_TOOLS = frozenset({
+# has to be able to remember things, or per-bot memory stops working. The
+# `INTRINSIC_TOOLS` above. And the Chief of Staff orchestration tools, granted
+# by the bot's *kind*, which is already checked before they are registered at
+# all; a CoS that also carried an allowlist would otherwise lose the ability to
+# delegate.
+ALWAYS_AVAILABLE_TOOLS = INTRINSIC_TOOLS | frozenset({
     "remember",
     "recall_memory",
     "update_plan",
     "read_skill",
     "save_blueprint",
-    "publish_artifact",
+    # Read-only retrieval over the owner's own knowledge bases, in the same
+    # class as `recall_memory` rather than a capability: withholding it left a
+    # restricted bot unable to search the very corpus it was created to answer
+    # from, with no way for either its leader or Settings to grant it back.
+    "search_knowledge",
     "list_bots",
     "create_bot",
     "create_bots",

@@ -20,6 +20,8 @@ from typing import Any
 
 from loguru import logger
 
+from claw.jobs.graph import CycleDetectedError, InvalidGraphError, validate_dag  # noqa: F401
+
 from sbot.db.models import Mission, MissionNode
 from sbot.db.stores import MissionStore
 
@@ -53,14 +55,6 @@ def dependency_satisfied(node: MissionNode) -> bool:
     # Preserve legacy skips of non-delivery steps, but never waive a requested
     # deliverable merely because a replanner changed the step status.
     return node.status == 'skipped' and not (node.budget or {}).get('required_files')
-
-
-class InvalidGraphError(Exception):
-    """The graph is not executable as given (dangling edge, duplicate id, …)."""
-
-
-class CycleDetectedError(InvalidGraphError):
-    pass
 
 
 @dataclass(slots=True)
@@ -142,45 +136,7 @@ class MissionEngine:
         self._consecutive_failures: dict[str, int] = {}
 
     # ------------------------------------------------------------- validation
-    @staticmethod
-    def validate_dag(nodes: list[dict]) -> None:
-        """Reject a graph that cannot execute, before it is ever persisted.
-
-        A dangling `depends_on` is the dangerous case: it is not a cycle, so it
-        passes a naive check, and then the dependent node can never become
-        ready — the mission just sits there looking blocked with no reason given.
-        """
-        ids = [n["id"] for n in nodes]
-        dupes = sorted({i for i in ids if ids.count(i) > 1})
-        if dupes:
-            raise InvalidGraphError(f"duplicate node ids: {dupes}")
-
-        known = set(ids)
-        children: dict[str, list[str]] = {i: [] for i in ids}
-        indegree: dict[str, int] = {i: 0 for i in ids}
-        for node in nodes:
-            nid = node["id"]
-            for dep in node.get("depends_on") or []:
-                if dep == nid:
-                    raise CycleDetectedError(f"node {nid!r} depends on itself")
-                if dep not in known:
-                    raise InvalidGraphError(f"node {nid!r} depends on unknown node {dep!r}")
-                children[dep].append(nid)
-                indegree[nid] += 1
-
-        # Kahn's algorithm — iterative, so a long chain can't blow the stack.
-        queue = [i for i in ids if indegree[i] == 0]
-        settled = 0
-        while queue:
-            current = queue.pop()
-            settled += 1
-            for child in children[current]:
-                indegree[child] -= 1
-                if indegree[child] == 0:
-                    queue.append(child)
-        if settled != len(ids):
-            stuck = sorted(i for i in ids if indegree[i] > 0)
-            raise CycleDetectedError(f"cycle detected among nodes: {stuck}")
+    validate_dag = staticmethod(validate_dag)
 
     # ---------------------------------------------------------------- budget
     @staticmethod

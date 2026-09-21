@@ -65,6 +65,10 @@ class WebFetchTool(Tool):
     async def execute(self, url: str, **_: Any) -> str:
         if not re.match(r"^https?://", url):
             return "Error: only http(s) URLs are supported"
+        from claw.jobs.research import cached_source, record_source
+        cached = cached_source(url)
+        if cached:
+            return f"[{cached['status']}] {url}\n\n{cached['text']}"
         async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
             resp = await client.get(url, headers={"User-Agent": "ClawAgent/0.1"})
         content_type = resp.headers.get("content-type", "")
@@ -72,6 +76,7 @@ class WebFetchTool(Tool):
         text = _html_to_text(body) if "html" in content_type else body
         if len(text) > _MAX_FETCH_CHARS:
             text = text[:_MAX_FETCH_CHARS] + "\n... (truncated)"
+        await record_source(url, text, resp.status_code)
         return f"[{resp.status_code}] {url}\n\n{text}"
 
 

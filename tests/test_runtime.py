@@ -312,14 +312,14 @@ async def test_truncated_empty_answer_is_reported_not_silently_blank(stores, tmp
 
     final = await runtime.handle_message(user.id, session.id, "สร้างไฟล์ pdf")
 
-    assert final == t("error.truncated", "en")
+    assert final == t("error.truncated", "th")
     # The model's own blank turn must not reach storage as-is (it would render
     # as an empty bubble and come back as content-less history), but the
     # fallback explanation the user was actually shown must — otherwise a
     # reload shows the user's message with no reply at all.
     history = await stores["messages"].recent(session.id)
     assert [m["role"] for m in history] == ["user", "assistant"]
-    assert history[-1]["content"] == t("error.truncated", "en")
+    assert history[-1]["content"] == t("error.truncated", "th")
 
 
 async def test_empty_answer_without_truncation_gets_its_own_message(stores, tmp_path):

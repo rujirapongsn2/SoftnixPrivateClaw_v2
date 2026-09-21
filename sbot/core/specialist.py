@@ -26,7 +26,7 @@ from sbot.tools.documents import build_document_tools
 from sbot.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from sbot.tools.memory import MemoryTool, RecallMemoryTool
 from sbot.tools.project import ProjectTool
-from sbot.tools.registry import ToolRegistry
+from sbot.tools.registry import INTRINSIC_TOOLS, ToolRegistry
 from sbot.tools.shell import ExecTool
 from sbot.tools.skills import ReadSkillTool, build_skills_summary, scope_skills
 from sbot.tools.web import WebFetchTool, WebSearchTool
@@ -38,7 +38,10 @@ from sbot.tools.web import WebFetchTool, WebSearchTool
 DELEGATABLE_TOOLS = frozenset(
     {"read_file", "write_file", "edit_file", "list_dir", "exec", "project", "web_fetch", "web_search"}
 )
-SPECIALIST_ALWAYS_TOOLS = frozenset({'publish_artifact', 'read_docx', 'read_excel', 'read_csv', 'read_pdf', 'render_diagram'})
+# The same set direct chat protects, aliased rather than restated: a specialist
+# and its own chat thread are the same bot, and two hand-maintained lists of
+# what a bot keeps regardless of its allowlist is exactly how they came apart.
+SPECIALIST_ALWAYS_TOOLS = INTRINSIC_TOOLS
 
 _DEFAULT_BUDGET_SECONDS = 300.0
 
@@ -382,6 +385,7 @@ class SpecialistRunner:
         owner_id: str | None = None,
         skills: Any = None,
         memory: Any = None,
+        knowledge: Any = None,
         connectors: Any = None,
         project_access: Any = None,
         arg_guard: Any = None,
@@ -397,6 +401,7 @@ class SpecialistRunner:
         self.owner_id = owner_id
         self.skills = skills
         self.memory = memory
+        self.knowledge = knowledge
         self.connectors = connectors
         self.project_access = project_access
         self.arg_guard = arg_guard
@@ -418,6 +423,8 @@ class SpecialistRunner:
         registry = ToolRegistry()
         from sbot.tools.artifacts import PublishArtifactTool
         registry.register(PublishArtifactTool(self.workspace))
+        from claw.jobs.workbook import GenerateWorkbookTool
+        registry.register(GenerateWorkbookTool(self.workspace))
         for tool in build_document_tools(self.workspace):
             registry.register(tool)
         for name, tool in all_tools.items():
@@ -441,6 +448,20 @@ class SpecialistRunner:
             registry.register(RecallMemoryTool(self.memory, self.owner_id))
         if self.skills is not None and self.owner_id:
             registry.register(ReadSkillTool(self.skills, self.owner_id, workspace=self.workspace))
+        if self.knowledge is not None and self.owner_id:
+            # `search_knowledge` is in `ALWAYS_AVAILABLE_TOOLS`, so the allowlist
+            # says every bot has it. It was never built here, which made that a
+            # promise about direct chat only: the same bot answered from the
+            # user's documents in its own thread and reported the tool missing
+            # the moment its leader delegated the identical question.
+            from sbot.tools.knowledge import SearchKnowledgeTool
+            registry.register(SearchKnowledgeTool(self.knowledge, self.owner_id))
+        if self.owner_id:
+            # Keyed on `owner_id` alone, not on the skill store: `render_diagram`
+            # is declared intrinsic and advertised to the leader through
+            # `list_bots`, so gating it on an unrelated dependency is how a
+            # caller that omits skills silently loses a tool the registry claims
+            # it has.
             from claw.tools.diagram import RenderDiagramTool
             registry.register(RenderDiagramTool(self.workspace, self.owner_id))
         # Not allowlist-gated either: these are granted by the caller (the
@@ -596,6 +617,13 @@ class SpecialistRunner:
         if budget_notice:
             structured = getattr(tools.get("finish_step"), "require_record", False)
             system_prompt = f"{system_prompt}\n\n{_budget_notice(budget, max_iterations, structured)}"
+        from claw.jobs.provider import current_execution
+        durable = current_execution.get()
+        recorded = durable.state.get('completion_record') if durable and tools.get('finish_step') else None
+        if recorded:
+            tools.get('finish_step').result = recorded
+            return SpecialistOutcome(text=recorded.get('summary', ''),
+                                     artifacts=recorded.get('artifacts', []))
         outcome = await loop.run_turn(
             turn_id,
             [

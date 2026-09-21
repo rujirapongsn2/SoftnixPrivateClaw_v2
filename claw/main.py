@@ -37,6 +37,7 @@ from claw.security.policy import (
 from claw.db.engine import create_engine_and_factory, init_db
 from claw.db.stores import (
     AuditStore,
+    ArtifactJobStore,
     BrandingStore,
     ConnectorStore,
     FeedbackStore,
@@ -70,11 +71,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(settings.log)
     engine, factory = create_engine_and_factory(settings.database_url)
 
-    provider = LiteLLMProvider(
+    from claw.jobs.provider import AccountedProvider
+    provider = AccountedProvider(LiteLLMProvider(
         api_key=settings.llm.api_key,
         api_base=settings.llm.api_base,
         default_model=settings.llm.model,
-    )
+    ))
     bus = EventBus()
     is_postgres = "postgresql" in settings.database_url
     from claw.modes import SharedUserStore as ModeUserStore
@@ -109,6 +111,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     plans = PolicyPlanStore(factory)
     branding = BrandingStore(factory)
     project_container_config = ProjectContainerConfigStore(factory)
+    artifact_jobs = ArtifactJobStore(factory)
+    from claw.jobs.store import JobStore
+    jobs = JobStore(factory, secret_box)
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
 
     browser_mgr = None
@@ -151,7 +156,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         plans=plans,
         browser_broker=browser_broker,
         knowledge=knowledge,
+        artifact_jobs=artifact_jobs,
     )
+
+    runtime.durable_jobs = jobs
 
     async def _scheduled_turn(user_id: str, session_id: str, prompt: str) -> str | None:
         return await runtime.handle_message(user_id, session_id, prompt, channel="schedule")
@@ -186,6 +194,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise
         else:
             await init_db(engine)
+        await jobs.initialize()
         # Ensure the branding asset dir exists (admin-uploaded logos land here).
         try:
             settings.branding_root.mkdir(parents=True, exist_ok=True)
@@ -215,6 +224,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.exception("Policy-plan seed failed; continuing without default plans")
         scheduler.start()
         heartbeat.start()
+        await runtime.recover_artifact_jobs()
         await knowledge_service.start()
         # Telegram: an admin-saved config in the DB is authoritative once it
         # exists; otherwise fall back to CLAW_TELEGRAM_BOT_TOKEN (env) so
@@ -319,6 +329,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         shares=shares,
         project_container_config=project_container_config,
         project_containers=None,
+        jobs=jobs,
     )
     app.state.claw.blueprints = blueprints
     from sbot.api.blueprints import router as blueprint_router
@@ -378,6 +389,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(knowledge_router)
     app.include_router(project_containers_router)
     app.include_router(router)
+    from claw.jobs.api import router as jobs_router
+    app.include_router(jobs_router)
     app.include_router(manage_router)
     app.include_router(telegram_router)
 

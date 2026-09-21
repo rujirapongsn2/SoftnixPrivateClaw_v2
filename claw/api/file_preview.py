@@ -271,7 +271,10 @@ def _cell(value: object) -> str:
     return text[:MAX_CELL_CHARS]
 
 
-def _shape(rows: list[list[str]], *, truncated: bool, truncated_columns: bool) -> dict:
+def _shape(
+    rows: list[list[str]], *, truncated: bool, truncated_columns: bool,
+    positional_blank_headers: bool = True,
+) -> dict:
     """Split parsed rows into a header + body, padded to a rectangle so the UI
     can render a table without per-row length checks. Rows arrive already
     clipped to MAX_COLS by the parsers."""
@@ -279,7 +282,10 @@ def _shape(rows: list[list[str]], *, truncated: bool, truncated_columns: bool) -
     padded = [r + [""] * (width - len(r)) for r in rows]
     header = padded[0] if padded else []
     return {
-        "columns": [c or f"#{i + 1}" for i, c in enumerate(header)],
+        "columns": [
+            c or (f"#{i + 1}" if positional_blank_headers else "")
+            for i, c in enumerate(header)
+        ],
         "rows": padded[1:],
         "truncated": truncated,
         "truncated_columns": truncated_columns,
@@ -472,7 +478,15 @@ def _preview_xlsx(path: Path) -> dict:
             for i, row in enumerate(raw_rows)
         ]
         return {
-            **_shape(rows, truncated=truncated, truncated_columns=truncated_columns),
+            **_shape(
+                rows,
+                truncated=truncated,
+                truncated_columns=truncated_columns,
+                # Formatted workbooks often start with a merged title row.
+                # Synthetic #2/#3 labels make those intentionally blank cells
+                # look like corrupt spreadsheet columns in the preview.
+                positional_blank_headers=False,
+            ),
             "sheet": sheet.title,
             "sheets": [ws.title for ws in workbook.worksheets],
         }

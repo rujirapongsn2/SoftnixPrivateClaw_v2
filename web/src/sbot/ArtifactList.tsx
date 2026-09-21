@@ -1,12 +1,35 @@
+import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { fileFingerprint, visibleArtifacts } from './api';
+import { useT } from '../branding';
+import { isArtifactListExpanded, toggleArtifactList } from './artifact-list-state';
+
+const INITIAL_ARTIFACTS = 3;
+
+function artifactPriority(path: string): number {
+  if (path.startsWith('.deliveries/')) return 0;
+  const name = path.split('/').pop()?.toLowerCase() ?? path.toLowerCase();
+  // Keep probable scratch/recovery files accessible, but move them behind
+  // human-named results. This is deliberately ordering, not filtering: names
+  // are not a reliable enough contract to make a user's file disappear.
+  if (/^_|(?:^|[._-])(?:tmp|temp|test|backup|orig|draft)(?:[._-]|$)/.test(name)) return 2;
+  return 1;
+}
 
 /** Compare only potential duplicates, never collapse different content by name. */
 export function ArtifactList({ sessionId, paths, render }: {
   sessionId: string; paths?: string[]; render: (path: string) => ReactNode;
 }) {
-  const candidates = visibleArtifacts(paths);
+  const t = useT();
+  const [expansion, setExpansion] = useState({ key: '', expanded: false });
+  const candidates = visibleArtifacts(paths)
+    .map((path, index) => ({ path, index }))
+    .sort((a, b) => artifactPriority(a.path) - artifactPriority(b.path) || a.index - b.index)
+    .map(({ path }) => path);
   const key = JSON.stringify([sessionId, candidates]);
+  // Derive this during render so an expanded list never leaks into a new
+  // session/list for the frame before an effect can reset local state.
+  const expanded = isArtifactListExpanded(expansion, key);
   const [result, setResult] = useState<{ key: string; hidden: Set<string> } | null>(null);
   useEffect(() => {
     const controller = new AbortController();
@@ -36,5 +59,21 @@ export function ArtifactList({ sessionId, paths, render }: {
     })();
     return () => controller.abort();
   }, [key, sessionId]);
-  return <div className="claw-artifacts">{candidates.filter(path => result?.key !== key || !result.hidden.has(path)).map(render)}</div>;
+  const files = candidates.filter(path => result?.key !== key || !result.hidden.has(path));
+  const shown = expanded ? files : files.slice(0, INITIAL_ARTIFACTS);
+  const remaining = Math.max(0, files.length - INITIAL_ARTIFACTS);
+  return <div className="claw-artifacts">
+    {shown.map(render)}
+    {remaining > 0 && <button
+      type="button"
+      className="sbot-artifacts-more"
+      aria-expanded={expanded}
+      onClick={() => setExpansion(value => toggleArtifactList(value, key))}
+    >
+      {expanded ? <ChevronUp size={16} aria-hidden="true" /> : <ChevronDown size={16} aria-hidden="true" />}
+      {expanded
+        ? t('chat.artifact.showLess')
+        : t('chat.artifact.showMore', { count: String(remaining) })}
+    </button>}
+  </div>;
 }

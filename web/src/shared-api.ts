@@ -195,6 +195,7 @@ export interface AgentEvent {
     | "tool_started"
     | "tool_finished"
     | "tool_progress"
+    | "artifact_job_progress"
     | "delegation_started"
     | "delegation_step"
     | "delegation_delta"
@@ -228,6 +229,11 @@ export interface AgentEvent {
   index?: number;
   total?: number;
   status?: string;
+  job_id?: string;
+  segment?: number;
+  max_segments?: number;
+  elapsed_seconds?: number;
+  token_count?: number;
   // delegation_started/finished: which bot was handed the work, and what it was
   // asked. `text` carries its full reply on delegation_finished — not a preview,
   // unlike tool_finished's result_preview.
@@ -424,11 +430,20 @@ export interface ScheduleInfo {
   cron: string;
   interval_seconds: number;
   session_id: string | null;
+  bot_id?: string | null;
   enabled: boolean;
   next_run_at: string | null;
   last_run_at: string | null;
   last_status: string;
 }
+
+/** What a save sends. `run_at` sets a one-shot's time and is write-only —
+ * reads report it as `next_run_at`. Omit it and the server keeps the deadline
+ * the task already had. */
+export type ScheduleInput = Omit<
+  ScheduleInfo,
+  "id" | "next_run_at" | "last_run_at" | "last_status"
+> & { run_at?: string };
 
 export interface KnowledgeBase {
   id: string;
@@ -1368,9 +1383,9 @@ export const api = {
     ),
 
   listSchedules: () => request<ScheduleInfo[]>("/api/schedules"),
-  createSchedule: (s: Partial<ScheduleInfo>) =>
+  createSchedule: (s: Partial<ScheduleInput>) =>
     request<ScheduleInfo>("/api/schedules", { method: "POST", body: JSON.stringify(s) }),
-  updateSchedule: (id: string, s: Partial<ScheduleInfo>) =>
+  updateSchedule: (id: string, s: Partial<ScheduleInput>) =>
     request<ScheduleInfo>(`/api/schedules/${id}`, { method: "PUT", body: JSON.stringify(s) }),
   deleteSchedule: (id: string) => request(`/api/schedules/${id}`, { method: "DELETE" }),
   runScheduleNow: (id: string) =>

@@ -16,7 +16,7 @@ services:
       timeout: 3s
       retries: 10
 
-  app:
+  app: &claw_app
     build: .
     # Keep the app running across crashes and host reboots.
     restart: unless-stopped
@@ -42,6 +42,8 @@ services:
       # sandbox bind-mounts workspace.resolve() into a sibling container via the
       # host daemon, so the path has to resolve identically on host and in-app.
       CLAW_SBOT_ENABLED: ${CLAW_SBOT_ENABLED:-true}
+      CLAW_DURABLE_JOBS_PRIVATECLAW: ${CLAW_DURABLE_JOBS_PRIVATECLAW:-false}
+      CLAW_DURABLE_JOBS_SBOT: ${CLAW_DURABLE_JOBS_SBOT:-false}
       CLAW_SBOT_WORKSPACES_ROOT: ${CLAW_DATA_DIR}/workspaces-sbot
       CLAW_BLUEPRINTS_ROOT: ${CLAW_DATA_DIR}/blueprints
       CLAW_SANDBOX__PROJECTS_ENABLED: ${CLAW_SANDBOX__PROJECTS_ENABLED:-false}
@@ -107,6 +109,19 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+
+  # Opt-in only, after acceptance and additive migration. Same image, secret key,
+  # policy and workspace mounts as API; no HTTP ports or API lifecycle processes.
+  job-worker:
+    <<: *claw_app
+    profiles: [durable-jobs]
+    command: ["python", "-m", "claw.jobs.worker"]
+    ports: []
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      disable: true
 
 volumes:
   pgdata:

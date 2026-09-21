@@ -131,10 +131,36 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     if shared is not None:
         runtime._rate_limiter = shared.runtime._rate_limiter
 
-    async def _scheduled_turn(user_id: str, session_id: str, prompt: str) -> str | None:
-        return await runtime.handle_message(user_id, session_id, prompt, channel="schedule")
+    async def _reply_locale(user_id: str) -> str:
+        """Reply language for a turn nobody is sitting in front of.
 
-    scheduler = SchedulerService(schedules, sessions, _scheduled_turn, timezone=settings.scheduler.timezone)
+        Web turns resolve this from the live user row (Settings > Preferences)
+        falling back to the admin-set global default; background turns used to
+        take the "en" default instead, so a Thai user's scheduled report, mission
+        summary and heartbeat all came back in English. Same order as the
+        WebSocket path, and only the locale value is decided here — nothing
+        about how the turn runs.
+        """
+        user = None
+        try:
+            user = await users.get(user_id)
+            return (user.ui_language if user else None) or (await branding.get())["language"]
+        except Exception:
+            return (user.ui_language or user.locale) if user else "en"
+
+    async def _scheduled_turn(user_id: str, session_id: str, prompt: str) -> str | None:
+        return await runtime.handle_message(
+            user_id, session_id, prompt, channel="schedule", locale=await _reply_locale(user_id)
+        )
+
+    scheduler = SchedulerService(
+        schedules,
+        sessions,
+        _scheduled_turn,
+        timezone=settings.scheduler.timezone,
+        bots=bots,
+        busy=runtime.active_sessions,
+    )
     # The schedule tool needs the scheduler to wake it on changes; wire it back now
     # that both exist (scheduler depends on the runtime's turn handler).
     runtime.scheduler = scheduler
@@ -143,7 +169,9 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     # service is built after the runtime and wired back before any turn can
     # construct an agent.
     async def _mission_report(user_id: str, session_id: str, prompt: str) -> str | None:
-        return await runtime.handle_message(user_id, session_id, prompt, channel="mission")
+        return await runtime.handle_message(
+            user_id, session_id, prompt, channel="mission", locale=await _reply_locale(user_id)
+        )
 
     mission_service = MissionService(
         missions,
@@ -155,6 +183,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         llm_config=llm_config,
         skills=skills,
         memory=memory_service,
+        knowledge=knowledge,
         notifier=_mission_report,
         max_parallel_nodes=settings.team_work.max_parallel_total,
         messages=messages,
@@ -165,9 +194,13 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         project_access=project_access,
     )
     runtime.missions = mission_service
+    mission_service.durable_jobs = shared.jobs
+    mission_service.durable_enabled = shared.settings.durable_jobs_sbot
 
     async def _heartbeat_turn(user_id: str, session_id: str, prompt: str) -> str | None:
-        return await runtime.handle_message(user_id, session_id, prompt, channel="heartbeat")
+        return await runtime.handle_message(
+            user_id, session_id, prompt, channel="heartbeat", locale=await _reply_locale(user_id)
+        )
 
     from claw.modes import SbotHeartbeatUsers
 

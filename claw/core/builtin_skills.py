@@ -254,6 +254,20 @@ Use `pandas` for anything beyond simple rows: `pd.read_excel`/`read_csv` to load
 `df.to_excel(path, sheet_name=...)` for a quick dump, or `df.values.tolist()` fed
 into `build_table` above when you need the openpyxl styling/formulas on top.
 
+## Source-derived BOMs and inventories
+When the workbook is derived from a TOR, contract, specification, or similar source:
+- Preserve quantities and units exactly when stated. If either is absent, write `TBD`
+  and add an `Assumption / confirmation status` column; never silently invent `1`.
+- Separate required items from optional or alternative supply forms. Do not combine an
+  appliance and an optional service into one priced line.
+- Avoid double counting: a broad scope/delivery clause is a source note, not a second
+  billable line when its detailed deliverables already appear below it.
+- Put a precise source reference on every row. Record inconsistent numbering, wording,
+  and numeric/text amounts in a `Source issues` sheet rather than choosing silently.
+- Validate semantic coverage as well as workbook structure: compare source headings and
+  explicit quantities to the normalized rows, check duplicate scope, reopen the workbook,
+  and report unresolved/TBD counts.
+
 ## Financial Models
 For DCF / LBO / three-statement models, the point is that every number the reader
 might question should be a **formula referencing another cell**, not a hardcoded

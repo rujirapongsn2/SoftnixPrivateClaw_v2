@@ -60,7 +60,14 @@ async def test_turn_failed_records_error_status_not_ok(db_factory):
 
     user = await users.get_or_create_by_email("scheduled@x.y")
     job = await schedules.create(
-        user.id, name="daily report", cron="", interval_seconds=3600, prompt="hi"
+        user.id,
+        name="daily report",
+        cron="",
+        interval_seconds=3600,
+        prompt="hi",
+        # The run re-reads the row and only proceeds if it is still due, so the
+        # deadline has to be set here — `due()` would never hand back a NULL one.
+        next_run_at=datetime.now(timezone.utc),
     )
 
     await service._fire(job)

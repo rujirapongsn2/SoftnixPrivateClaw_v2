@@ -1,6 +1,16 @@
+# Pinned so the volume name does not follow the directory this is run from.
+# Compose defaults the project name to the working tree's folder, so a second
+# checkout (a worktree, a branch clone) silently gets its own empty pgdata and
+# serves it on the same port — which looks exactly like the database being
+# wiped. Every checkout points at the one dev database instead.
+name: softnixprivate_claw_v2
+
 services:
   postgres:
     image: postgres:16-alpine
+    # Matches install.sh and docker-compose.prod.yml: a Docker or host restart
+    # should not leave the dev database down until someone notices.
+    restart: unless-stopped
     environment:
       POSTGRES_USER: claw
       POSTGRES_PASSWORD: claw

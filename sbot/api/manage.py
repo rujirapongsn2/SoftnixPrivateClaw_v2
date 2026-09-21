@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from sbot.api import connector_shared as connectors
 from sbot.api import llm_shared as llm
@@ -12,7 +12,9 @@ from sbot.api.deps import AppState, current_user, get_state, require_admin
 from sbot.core.memory import MAX_CORE_MEMORY_CHARS, sanitize_core_document
 from sbot.core.mission_engine import InvalidGraphError
 from sbot.core.scheduler import compute_next_run
+from sbot.core.specialist import DELEGATABLE_TOOLS
 from sbot.db.models import User
+from sbot.tools.registry import ALWAYS_AVAILABLE_TOOLS
 
 router = APIRouter(prefix="/api")
 
@@ -47,6 +49,53 @@ class UpdateBotBody(BaseModel):
 # is a real value ("clear this") rather than an absent field. Must stay in step
 # with the Bot model's nullable=True columns.
 _NULLABLE_BOT_FIELDS = frozenset({"model", "tool_allowlist", "skill_ids", "avatar"})
+
+
+# A connector's tools are named by their owner's live MCP/API session, which is
+# too expensive to open just to check a checkbox. The namespace prefix is the
+# part that is stable, so the API enforces shape rather than existence: enough
+# to reject a hallucinated or mistyped built-in without pretending to know which
+# connectors happen to be connected right now.
+_CONNECTOR_TOOL_PREFIXES = ("mcp_", "api_")
+
+
+def _validate_bot_tools(tool_allowlist: list[str] | None) -> None:
+    """Reject tool names this deployment has no tool for.
+
+    Same question `CreateBotTool` asks its caller. Leaving it unasked here meant
+    one column with two rulesets: a name the leader could not save, the UI saved
+    silently, and the bot then lost the capability with no error anywhere.
+    """
+    if tool_allowlist is None:
+        return
+    unknown = sorted(
+        name for name in set(tool_allowlist)
+        if name not in DELEGATABLE_TOOLS
+        and name not in ALWAYS_AVAILABLE_TOOLS
+        and not name.startswith(_CONNECTOR_TOOL_PREFIXES)
+    )
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown tools: {', '.join(unknown)}")
+
+
+async def _validate_bot_skills(skill_ids: list[str] | None, user: User, state: AppState) -> None:
+    """Reject skill references the owner cannot see, so a stale one fails loudly.
+
+    Ids *or* names, because `scope_skills` matches either and bots created
+    before the leader resolved names hold names. Narrowing to ids here would
+    reject the rows already in the database.
+    """
+    if not skill_ids:
+        return
+    from sbot.core.builtin_skills import builtin_skills
+
+    known: set[str] = set()
+    for skill in [*builtin_skills(), *await state.skills.available_for_user(user.id)]:
+        known.add(str(skill.id))
+        known.add(skill.name)
+    unknown = sorted(set(map(str, skill_ids)) - known)
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown skills: {', '.join(unknown)}")
 
 
 async def _validated_bot_model(model: str | None, user: User, state: AppState) -> str | None:
@@ -96,6 +145,8 @@ async def create_bot(
 ) -> dict:
     await state.bots.get_or_create_cos(user.id)
     model = await _validated_bot_model(body.model, user, state)
+    _validate_bot_tools(body.tool_allowlist)
+    await _validate_bot_skills(body.skill_ids, user, state)
     try:
         bot = await state.bots.create(
             owner_id=user.id,
@@ -162,6 +213,10 @@ async def update_bot(
     }
     if "model" in updates:
         updates["model"] = await _validated_bot_model(updates["model"], user, state)
+    if "tool_allowlist" in updates:
+        _validate_bot_tools(updates["tool_allowlist"])
+    if "skill_ids" in updates:
+        await _validate_bot_skills(updates["skill_ids"], user, state)
     updated = await state.bots.update(bot_id, user.id, **updates)
     if updated is None:
         raise HTTPException(status_code=404, detail="Bot not found")
@@ -776,7 +831,16 @@ class ScheduleBody(BaseModel):
     interval_seconds: int = Field(default=0, ge=0)
     run_at: datetime | None = None  # one-shot
     session_id: str | None = None
+    bot_id: str | None = None  # which bot runs it; omit to leave unchanged
     enabled: bool = True
+
+    @field_validator("cron")
+    @classmethod
+    def _trim_cron(cls, value: str) -> str:
+        # A whitespace-only cron is not a cron. Left untrimmed it reads as
+        # truthy everywhere downstream, so the row is treated as recurring while
+        # croniter can't parse it.
+        return (value or "").strip()
 
 
 def _schedule_json(s) -> dict:
@@ -787,6 +851,7 @@ def _schedule_json(s) -> dict:
         "cron": s.cron,
         "interval_seconds": s.interval_seconds,
         "session_id": s.session_id,
+        "bot_id": s.bot_id,
         "enabled": s.enabled,
         "next_run_at": s.next_run_at.isoformat() if s.next_run_at else None,
         "last_run_at": s.last_run_at.isoformat() if s.last_run_at else None,
@@ -794,7 +859,25 @@ def _schedule_json(s) -> dict:
     }
 
 
+def _check_cron(cron: str) -> None:
+    """Reject a malformed cron up front.
+
+    ``compute_next_run`` is the only validator there is, and ``run_at``
+    short-circuits it — so an unparseable expression used to be stored with a
+    200 and then left the row permanently stuck: every run raised, the scheduler
+    turned that into ``next_run_at = NULL``, and ``mark_ran`` only reads NULL as
+    "completed" for a genuine one-shot, so the task stayed enabled but dormant.
+    """
+    if not cron:
+        return
+    try:
+        compute_next_run(cron, 0)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _initial_next_run(body: ScheduleBody, tz: str = "UTC") -> datetime:
+    _check_cron(body.cron)
     if body.run_at is not None:
         return body.run_at
     try:
@@ -808,19 +891,75 @@ def _initial_next_run(body: ScheduleBody, tz: str = "UTC") -> datetime:
     return next_run
 
 
+def _effective_timing(body: ScheduleBody, current) -> tuple[str, int]:
+    """The timing an edit leaves behind.
+
+    A field the client never sent is not a request to clear it. `cron` and
+    `interval_seconds` both have defaults, so a PUT that only flips `enabled`
+    used to blank them — turning a daily task into a one-shot, which the very
+    next run then disabled for good (ScheduleStore.mark_ran).
+    """
+    cron = body.cron if "cron" in body.model_fields_set else current.cron
+    interval = (
+        body.interval_seconds
+        if "interval_seconds" in body.model_fields_set
+        else current.interval_seconds
+    )
+    return cron, interval
+
+
+def _updated_next_run(
+    body: ScheduleBody, current, tz: str, cron: str, interval: int
+) -> datetime | None:
+    """When the next run should be after an edit, or None to leave it alone.
+
+    Only a timing change moves the deadline. Recomputing from "now" on every
+    save skipped the occurrence a daily task was seconds away from, and — since
+    the UI echoes every field back when you flip the on/off switch — pushed an
+    hourly task a fresh hour out on each toggle, so it could be starved for good.
+    """
+    if body.run_at is not None:
+        return body.run_at
+    timing_changed = cron != current.cron or interval != current.interval_seconds
+    if (cron or interval) and (timing_changed or current.next_run_at is None):
+        try:
+            next_run = compute_next_run(cron, interval, tz=tz)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if next_run is not None:
+            return next_run
+    return None
+
+
 @router.get("/schedules")
 async def list_schedules(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> list:
     return [_schedule_json(s) for s in await state.schedules.list_for_user(user.id)]
+
+
+async def _check_targets(body: ScheduleBody, user: User, state: AppState, current=None) -> None:
+    """Both pointers are caller-supplied ids, so they are owner-checked here —
+    otherwise a schedule could be aimed at another tenant's chat or bot.
+
+    Only values the edit actually changes are checked. A target can stop
+    resolving after the fact — a bot gets archived, a chat gets deleted — and
+    the UI echoes both ids back on every save, including a plain on/off toggle.
+    Re-validating an unchanged pointer made those schedules permanently
+    uneditable; the scheduler already degrades gracefully when one is stale.
+    """
+    if body.session_id and (current is None or body.session_id != current.session_id):
+        owned = await state.sessions.get(body.session_id)
+        if owned is None or owned.user_id != user.id:
+            raise HTTPException(status_code=404, detail="target session not found")
+    if body.bot_id and (current is None or body.bot_id != current.bot_id):
+        if await state.bots.get(body.bot_id, user.id) is None:
+            raise HTTPException(status_code=404, detail="bot not found")
 
 
 @router.post("/schedules")
 async def create_schedule(
     body: ScheduleBody, user: User = Depends(require_operator), state: AppState = Depends(get_state)
 ) -> dict:
-    if body.session_id and (
-        (owned := await state.sessions.get(body.session_id)) is None or owned.user_id != user.id
-    ):
-        raise HTTPException(status_code=404, detail="target session not found")
+    await _check_targets(body, user, state)
     row = await state.schedules.create(
         user.id,
         name=body.name,
@@ -828,6 +967,7 @@ async def create_schedule(
         cron=body.cron,
         interval_seconds=body.interval_seconds,
         session_id=body.session_id,
+        bot_id=body.bot_id,
         enabled=body.enabled,
         next_run_at=_initial_next_run(body, state.settings.scheduler.timezone),
     )
@@ -842,17 +982,37 @@ async def update_schedule(
     user: User = Depends(require_operator),
     state: AppState = Depends(get_state),
 ) -> dict:
-    row = await state.schedules.update(
-        user.id,
-        schedule_id,
+    current = await state.schedules.get(schedule_id)
+    if current is None or current.user_id != user.id:
+        raise HTTPException(status_code=404, detail="schedule not found")
+    await _check_targets(body, user, state, current=current)
+    tz = state.settings.scheduler.timezone
+    cron, interval_seconds = _effective_timing(body, current)
+    _check_cron(cron)
+    fields = dict(
         name=body.name,
         prompt=body.prompt,
-        cron=body.cron,
-        interval_seconds=body.interval_seconds,
-        session_id=body.session_id,
-        enabled=body.enabled,
-        next_run_at=_initial_next_run(body, state.settings.scheduler.timezone) if body.enabled else None,
+        cron=cron,
+        interval_seconds=interval_seconds,
     )
+    # `enabled` defaults to True, so passing it through unconditionally meant a
+    # PUT that never mentioned it silently resumed a task the owner had paused.
+    if "enabled" in body.model_fields_set:
+        fields["enabled"] = body.enabled
+    next_run = _updated_next_run(body, current, tz, cron, interval_seconds)
+    if next_run is None and current.next_run_at is None and fields.get("enabled"):
+        # A one-shot that already ran is being switched back on. There is no
+        # rule to recompute from, so "on" means now.
+        next_run = datetime.now(timezone.utc)
+    fields["next_run_at"] = next_run  # None leaves the stored deadline as it is
+    # Only repoint a task when the client actually said so. Both are nullable in
+    # the store, so passing the fields' defaults through would hand every task
+    # edited by a client that doesn't know about bots back to the Chief of
+    # Staff, and there would be no way to clear a chat that no longer exists.
+    for key in ("bot_id", "session_id"):
+        if key in body.model_fields_set:
+            fields[key] = getattr(body, key)
+    row = await state.schedules.update(user.id, schedule_id, **fields)
     if row is None:
         raise HTTPException(status_code=404, detail="schedule not found")
     state.scheduler.notify_changed()

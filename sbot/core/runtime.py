@@ -209,6 +209,7 @@ class ClawAgent:
         missions: "MissionService | None" = None,
         mirror: "DelegationMirror | None" = None,
         group_members: frozenset[str] | None = None,
+        group_session_id: str | None = None,
         connectors: Any = None,
         project_access: Any = None,
         blueprints: "BlueprintStore | None" = None,
@@ -276,14 +277,31 @@ class ClawAgent:
         if schedules is not None:
             from sbot.tools.schedule import ScheduleTool
 
-            self.tools.register(ScheduleTool(schedules, scheduler, user_id))
+            self.tools.register(
+                ScheduleTool(
+                    schedules,
+                    scheduler,
+                    user_id,
+                    bot_id=bot_id,
+                    is_cos=is_cos,
+                    session_id=group_session_id,
+                )
+            )
         if (is_cos or group_members is not None) and bot_store is not None:
             from sbot.tools.cos import CreateBotTool, CreateBotsTool, DelegateManyTool, DelegateTool, ListBotsTool
 
-            self.tools.register(ListBotsTool(bot_store, user_id, member_ids=group_members))
+            self.tools.register(ListBotsTool(bot_store, user_id, member_ids=group_members, skills=skills))
             if group_members is None:
-                self.tools.register(CreateBotTool(bot_store, user_id, creator_bot_id=bot_id or "cos", connectors=connectors))
-                self.tools.register(CreateBotsTool(bot_store, user_id, creator_bot_id=bot_id or "cos", connectors=connectors))
+                for create_cls in (CreateBotTool, CreateBotsTool):
+                    self.tools.register(
+                        create_cls(
+                            bot_store,
+                            user_id,
+                            creator_bot_id=bot_id or "cos",
+                            connectors=connectors,
+                            skills=skills,
+                        )
+                    )
             delegate = DelegateTool(
                 bot_store=bot_store,
                 owner_id=user_id,
@@ -294,6 +312,7 @@ class ClawAgent:
                 llm_config=llm_config,
                 skills=skills,
                 memory=memory,
+                knowledge=knowledge,
                 mirror=mirror,
                 leader_bot_id=bot_id,
                 member_ids=group_members,
@@ -737,7 +756,7 @@ class AgentRuntime:
 
     def get_agent(
         self, user_id: str, bot_id: str | None = None, is_cos: bool = False,
-        group_members: frozenset[str] | None = None,
+        group_members: frozenset[str] | None = None, session_id: str | None = None,
     ) -> ClawAgent:
         cache_key = f"{user_id}:{bot_id or 'default'}"
         agent = self._agents.get(cache_key) if group_members is None else None
@@ -765,6 +784,9 @@ class AgentRuntime:
             bot_id=bot_id,
             is_cos=is_cos,
             group_members=group_members,
+            # Only for a group turn, which is never cached (see below) — a
+            # cached agent must not carry one session's id into another's turn.
+            group_session_id=session_id if group_members is not None else None,
             llm_config=self.llm_config,
             missions=self.missions,
             connectors=self.connectors,
@@ -901,6 +923,10 @@ class AgentRuntime:
         blueprints: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Process one user message; tracks in-flight count for graceful shutdown."""
+        from claw.jobs.provider import ForegroundAccounting, foreground_accounting
+        tape_token = foreground_accounting.set(ForegroundAccounting(
+            getattr(self.missions, "durable_jobs", None), user_id, session_id, "sbot")
+            if channel == 'web' and getattr(self.missions, 'durable_enabled', False) else None)
         self._inflight += 1
         self._active_turns[session_id] = self._active_turns.get(session_id, 0) + 1
         try:
@@ -908,6 +934,13 @@ class AgentRuntime:
                 user_id, session_id, content, channel, locale, media, model, permission_mode, blueprints
             )
         finally:
+            foreground = foreground_accounting.get()
+            foreground_accounting.reset(tape_token)
+            if foreground is not None:
+                try:
+                    await foreground.close()
+                except Exception:
+                    logger.warning("Foreground journal retained for reconciliation after close failure")
             self._inflight -= 1
             remaining = self._active_turns.get(session_id, 1) - 1
             if remaining <= 0:
@@ -974,7 +1007,9 @@ class AgentRuntime:
                 bot = await self.bots.get_or_create_cos(user_id)
         bot_id = bot.id if bot else None
         is_cos = bot.kind == "chief_of_staff" if bot else False
-        agent = self.get_agent(user_id, bot_id=bot_id, is_cos=is_cos, group_members=group_members)
+        agent = self.get_agent(
+            user_id, bot_id=bot_id, is_cos=is_cos, group_members=group_members, session_id=session_id
+        )
         # The bot's capability boundary, re-applied every turn so an allowlist
         # edited in Settings takes effect on the next message instead of
         # whenever the agent cache happens to evict. Without this the boundary
@@ -1153,6 +1188,13 @@ class AgentRuntime:
                 # message and RPM quotas do not apply to those turns. Keep the
                 # global RPM backstop for shared application capacity.
                 uses_private_model = model_scope == "private"
+                from claw.jobs.provider import foreground_accounting
+                foreground = foreground_accounting.get()
+                if foreground is not None:
+                    foreground.count_plan_turn = not uses_private_model
+                    foreground.state['request'] = dict(content=content, locale=locale,
+                        media=list(media or []), model=model, permission_mode=permission_mode,
+                        session_id=session_id, actor=bot_id)
                 if (
                     not uses_private_model
                     and plan
@@ -1762,7 +1804,11 @@ class AgentRuntime:
                         len(to_store),
                     )
                     to_store[at:at] = answered
-                if to_store:
+                if foreground is not None and not foreground.adopted_job_id:
+                    await foreground.deliver(to_store, metrics={
+                        'iterations': outcome.iterations, 'tool_calls': outcome.tool_calls,
+                        'ttft_ms': outcome.ttft_ms, 'duration_ms': outcome.duration_ms})
+                elif to_store:
                     try:
                         await self.messages.append(session_id, to_store)
                     except SQLAlchemyError as exc:
@@ -1812,7 +1858,11 @@ class AgentRuntime:
             outcome.tool_defs_chars,
             outcome.prompt_chars,
         )
-        if self.usage is not None:
+        # team_submit ends the turn; admission already persisted all prior call
+        # receipts in the root ledger. Do not bill the same foreground turn twice.
+        from claw.jobs.provider import foreground_accounting
+        tape = foreground_accounting.get()
+        if self.usage is not None and not (tape and (tape.adopted_job_id or tape.delivered)):
             self._spawn_background(
                 self.usage.record(
                     user_id,
@@ -1932,7 +1982,11 @@ class AgentRuntime:
         )
 
     def _spawn_background(self, coro) -> None:
-        task = asyncio.create_task(self._guard(coro))
+        from contextvars import copy_context
+        from claw.jobs.provider import foreground_accounting
+        background_context = copy_context()
+        background_context.run(foreground_accounting.set, None)
+        task = asyncio.create_task(self._guard(coro), context=background_context)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 

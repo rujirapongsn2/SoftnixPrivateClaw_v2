@@ -33,8 +33,18 @@ class ToolRegistry:
     def tool_names(self) -> list[str]:
         return list(self._tools)
 
-    def get_definitions(self) -> list[dict[str, Any]]:
-        return [tool.to_schema() for tool in self._tools.values()]
+    def get_definitions(self, names: set[str] | None = None) -> list[dict[str, Any]]:
+        """Return schemas for all tools, or a task-scoped subset.
+
+        Long artifact jobs use the subset form so each resumed segment does not
+        repay the token cost of unrelated browser, scheduling, memory, and
+        connector definitions.
+        """
+        return [
+            tool.to_schema()
+            for name, tool in self._tools.items()
+            if names is None or name in names
+        ]
 
     async def execute(
         self,
