@@ -231,6 +231,29 @@ async def test_scheduler_disables_completed_one_shot(db_factory, stores):
     assert job.next_run_at is None
 
 
+async def test_scheduler_preserves_one_shot_rescheduled_while_running(db_factory, stores):
+    schedules = ScheduleStore(db_factory)
+    user = await stores["users"].get_or_create_by_email("once-retimed@x.y")
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    job = await schedules.create(
+        user.id,
+        name="once",
+        prompt="one time thing",
+        next_run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+
+    async def handler(user_id: str, session_id: str, prompt: str) -> str:
+        await schedules.update(user.id, job.id, next_run_at=future, enabled=True)
+        return "done"
+
+    await SchedulerService(schedules, stores["sessions"], handler)._fire(job)
+
+    saved = await schedules.get(job.id)
+    assert saved.last_status == "ok"
+    assert saved.enabled is True
+    assert as_utc(saved.next_run_at) == future
+
+
 async def test_scheduler_creates_session_when_none_given(db_factory, stores):
     schedules = ScheduleStore(db_factory)
     user = await stores["users"].get_or_create_by_email("nosess@x.y")
@@ -263,7 +286,10 @@ async def test_scheduler_creates_session_when_none_given(db_factory, stores):
     assert sess.title == "autosess"
 
 
-async def test_scheduler_creates_a_fresh_session_each_run(db_factory, stores):
+async def test_scheduler_reuses_the_chat_it_opened(db_factory, stores):
+    """A task with no chat of its own opens one on its first run and writes the
+    id back. Opening a new one every run left ~144 orphan sessions a day on a
+    ten-minute job, and nothing collects them."""
     schedules = ScheduleStore(db_factory)
     user = await stores["users"].get_or_create_by_email("recur@x.y")
     seen: list[str] = []
@@ -277,15 +303,16 @@ async def test_scheduler_creates_a_fresh_session_each_run(db_factory, stores):
         next_run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
     service = SchedulerService(schedules, stores["sessions"], handler)
-    # Fire the same job twice directly — each run must open its own session,
-    # never reuse one (job.session_id stays None across runs).
     await service._fire(job)
-    job = (await schedules.list_for_user(user.id))[0]
-    await service._fire(job)
+    await schedules.update(
+        user.id, job.id, next_run_at=datetime.now(timezone.utc) - timedelta(seconds=1)
+    )
+    await service._fire((await schedules.list_for_user(user.id))[0])
 
-    assert len(seen) == 2 and seen[0] != seen[1]
+    assert len(seen) == 2 and seen[0] == seen[1]
     created = await stores["sessions"].list_for_user(user.id)
-    assert len([s for s in created if s.channel == "schedule"]) == 2
+    assert len([s for s in created if s.channel == "schedule"]) == 1
+    assert (await schedules.get(job.id)).session_id == seen[0]
 
 
 # ---------------------------------------------------------------- connectors store

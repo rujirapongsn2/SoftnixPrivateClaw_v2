@@ -76,6 +76,11 @@ class MessageStore:
         if not entries:
             return 0
         async with self.factory() as db:
+            # Serialize sequence allocation across API and durable worker processes.
+            await db.execute(
+                update(ChatSession).where(ChatSession.id == session_id)
+                .values(updated_at=datetime.now(timezone.utc))
+            )
             next_seq = (
                 await db.scalar(
                     select(func.coalesce(func.max(Message.seq), 0)).where(Message.session_id == session_id)
@@ -899,14 +904,20 @@ class ScheduleStore:
             await db.commit()
             return True
 
-    async def due(self, now: datetime) -> list[Schedule]:
+    async def due(self, now: datetime, limit: int = 200) -> list[Schedule]:
+        """Jobs ready to run, earliest deadline first. Bounded because this runs
+        once a minute across every tenant: anything past the limit is still due
+        next pass, so a backlog drains instead of arriving as one burst."""
         async with self.factory() as db:
             rows = await db.scalars(
-                select(Schedule).where(
+                select(Schedule)
+                .where(
                     Schedule.enabled.is_(True),
                     Schedule.next_run_at.is_not(None),
                     Schedule.next_run_at <= now,
                 )
+                .order_by(Schedule.next_run_at.asc())
+                .limit(max(1, limit))
             )
             return list(rows)
 
@@ -920,6 +931,45 @@ class ScheduleStore:
             row.next_run_at = next_run_at
             if next_run_at is None and row.interval_seconds == 0 and not row.cron:
                 row.enabled = False  # one-shot completed
+            await db.commit()
+
+    async def settle_run(
+        self,
+        schedule_id: str,
+        *,
+        expected_next_run_at: datetime,
+        next_run_at: datetime | None,
+        status: str,
+    ) -> None:
+        """Record a run without overwriting a schedule edited while it ran.
+
+        The deadline is the run's revision token.  Keeping the comparison and
+        both writes in one UPDATE closes the read/write race between the
+        scheduler and the edit endpoint.
+        """
+        same_run = Schedule.next_run_at == expected_next_run_at
+        completed_one_shot = (
+            same_run & (Schedule.interval_seconds == 0) & (Schedule.cron == "")
+            if next_run_at is None
+            else sa_false()
+        )
+        async with self.factory() as db:
+            await db.execute(
+                update(Schedule)
+                .where(Schedule.id == schedule_id)
+                .values(
+                    last_run_at=datetime.now(timezone.utc),
+                    last_status=status[:300],
+                    next_run_at=case(
+                        (same_run, next_run_at),
+                        else_=Schedule.next_run_at,
+                    ),
+                    enabled=case(
+                        (completed_one_shot, False),
+                        else_=Schedule.enabled,
+                    ),
+                )
+            )
             await db.commit()
 
 
@@ -3062,6 +3112,149 @@ class SmtpConfigStore:
             else:
                 row.value = value
             await db.commit()
+
+
+class ArtifactJobStore:
+    """Durable checkpoints for normal-chat artifact jobs.
+
+    Stored in ``app_settings`` to keep this recovery feature migration-free.
+    Each job owns one row and updates it by replacement, which works on both
+    SQLite and Postgres JSON columns without mutable-value tracking surprises.
+    """
+
+    _PREFIX = "artifact_job:"
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+        self.factory = factory
+
+    def _key(self, job_id: str) -> str:
+        return f"{self._PREFIX}{job_id}"
+
+    async def resource_policy(self) -> dict[str, Any]:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, "team_resource_policy")
+            return dict((row.value or {}).get("policy") or {}) if row else {}
+
+    async def resumable(self, user_id: str, session_id: str) -> dict[str, Any] | None:
+        jobs = await self.list_for_session(user_id, session_id, active_only=False)
+        return next((job for job in reversed(jobs)
+                     if job.get("status") in {"blocked", "limit_reached"}), None)
+
+    async def create(self, value: dict[str, Any]) -> dict[str, Any]:
+        async with self.factory() as db:
+            db.add(AppSetting(key=self._key(str(value["id"])), value=dict(value)))
+            await db.commit()
+        return dict(value)
+
+    async def get(self, job_id: str) -> dict[str, Any] | None:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._key(job_id))
+        return dict(row.value) if row is not None else None
+
+    async def update(self, job_id: str, **changes: Any) -> dict[str, Any] | None:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._key(job_id))
+            if row is None:
+                return None
+            value = {**(row.value or {}), **changes, "updated_at": datetime.now(timezone.utc).isoformat()}
+            row.value = value
+            await db.commit()
+        return dict(value)
+
+    async def finish(self, job_id: str, status: str, **changes: Any) -> dict[str, Any] | None:
+        """Set a terminal state and discard sensitive recovery payloads."""
+        if status == "limit_reached":
+            return await self.update(job_id, status=status, **changes)
+        return await self.update(
+            job_id,
+            status=status,
+            content="",
+            media=[],
+            checkpoint_messages=[],
+            tool_results={},
+            pending_call=None,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            **changes,
+        )
+
+    async def claim_recovery(self, job_id: str) -> dict[str, Any] | None:
+        """Atomically claim one recoverable job across concurrent app workers."""
+        async with self.factory() as db:
+            row = await db.scalar(
+                select(AppSetting)
+                .where(AppSetting.key == self._key(job_id))
+                .with_for_update()
+            )
+            if row is None or (row.value or {}).get("status") not in {"queued", "running", "waiting_dependency", "blocked"}:
+                return None
+            value = {
+                **(row.value or {}),
+                "status": "recovering",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            row.value = value
+            await db.commit()
+        return dict(value)
+
+    async def prune_finished(self, max_age: timedelta = timedelta(days=1)) -> int:
+        """Delete old terminal metadata so app_settings does not grow forever."""
+        cutoff = datetime.now(timezone.utc) - max_age
+        async with self.factory() as db:
+            rows = (
+                await db.scalars(
+                    select(AppSetting).where(
+                        AppSetting.key.like(f"{self._PREFIX}%"),
+                        AppSetting.updated_at < cutoff,
+                    )
+                )
+            ).all()
+            terminal = {"completed", "cancelled", "failed", "limit_reached"}
+            doomed = [row for row in rows if (row.value or {}).get("status") in terminal]
+            for row in doomed:
+                await db.delete(row)
+            if doomed:
+                await db.commit()
+        return len(doomed)
+
+    async def list_recoverable(self) -> list[dict[str, Any]]:
+        async with self.factory() as db:
+            rows = (
+                await db.scalars(
+                    select(AppSetting).where(
+                        AppSetting.key.like(f"{self._PREFIX}%")
+                    )
+                )
+            ).all()
+        return [
+            dict(row.value)
+            for row in rows
+            if (row.value or {}).get("status") in {"queued", "running", "waiting_dependency", "blocked"}
+        ]
+
+    async def list_for_session(
+        self, user_id: str, session_id: str, *, active_only: bool = True
+    ) -> list[dict[str, Any]]:
+        async with self.factory() as db:
+            rows = (
+                await db.scalars(
+                    select(AppSetting).where(
+                        AppSetting.key.like(f"{self._PREFIX}%")
+                    )
+                )
+            ).all()
+        jobs = [
+            dict(row.value)
+            for row in rows
+            if (row.value or {}).get("user_id") == user_id
+            and (row.value or {}).get("session_id") == session_id
+            and (
+                not active_only
+                or (row.value or {}).get("status") in {
+                    "queued", "running", "recovering", "cancelling", "waiting_dependency", "blocked"
+                }
+            )
+        ]
+        return sorted(jobs, key=lambda item: str(item.get("created_at") or ""))
 
 
 class BrandingStore:

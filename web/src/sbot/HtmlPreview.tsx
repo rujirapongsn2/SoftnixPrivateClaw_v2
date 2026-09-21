@@ -1,7 +1,7 @@
 import { Icon } from "@astryxdesign/core/Icon";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { Text } from "@astryxdesign/core/Text";
-import { ExternalLink, FileCode, Maximize2, Minimize2 } from "lucide-react";
+import { Eye, ExternalLink, FileCode, Maximize2, Minimize2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fileHtmlPreview, filePngExport, fileUrl, type HtmlPreview as HtmlPreviewData, previewRetryDelay } from "./api";
 import { useT } from "../branding";
@@ -35,6 +35,7 @@ type Props = {
  * allow-same-origin, which is exactly what must not be granted. */
 export function HtmlPreview({ sessionId, path, href }: Props) {
   const t = useT();
+  const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -54,6 +55,7 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
   const loadedKey = useRef(key);
   if (loadedKey.current !== key) {
     loadedKey.current = key;
+    if (open) setOpen(false);
     if (data) setData(null);
     setPng(null);
     setExportError(null);
@@ -79,7 +81,7 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
   const hostRef = useCallback((node: HTMLDivElement | null) => {
     observerRef.current?.disconnect();
     observerRef.current = null;
-    if (!node) return;
+    if (!node || !open) return;
     if (typeof IntersectionObserver === "undefined") {
       setVisible(true);
       return;
@@ -90,10 +92,10 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
     );
     observer.observe(node);
     observerRef.current = observer;
-  }, []);
+  }, [open]);
 
   useEffect(() => {
-    if (!visible || data || error) return;
+    if (!open || !visible || data || error) return;
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
     // Aborting on unmount is about the download, not the server: an HTML preview
@@ -127,7 +129,7 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
       if (retry) clearTimeout(retry);
       control.abort();
     };
-  }, [visible, sessionId, path, data, error, attempt]);
+  }, [open, visible, sessionId, path, data, error, attempt]);
 
   // Grace period rather than an immediate drop: without it, jitter across the
   // observer's own margin would refetch the document repeatedly while the user
@@ -172,8 +174,9 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
         >
           <Icon icon={ExternalLink} size="xsm" color="secondary" />
         </a>
-        <button className="claw-preview-action" type="button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded} aria-label={t("chat.preview.resize")} title={t("chat.preview.resize")}><Icon icon={expanded ? Minimize2 : Maximize2} size="sm" /></button>
-        {data && /<svg\b/i.test(data.html) && <button className="claw-preview-action" title={t("chat.preview.exportPng")} aria-label={t("chat.preview.exportPng")} type="button" disabled={exportBusy} onClick={async () => {
+        <button className="claw-preview-action" type="button" onClick={() => setOpen(value => !value)} aria-expanded={open} aria-label={open ? t("chat.artifact.hidePreview") : t("chat.artifact.preview")} title={open ? t("chat.artifact.hidePreview") : t("chat.artifact.preview")}><Icon icon={open ? X : Eye} size="sm" /></button>
+        {open && <button className="claw-preview-action" type="button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded} aria-label={t("chat.preview.resize")} title={t("chat.preview.resize")}><Icon icon={expanded ? Minimize2 : Maximize2} size="sm" /></button>}
+        {open && data && /<svg\b/i.test(data.html) && <button className="claw-preview-action" title={t("chat.preview.exportPng")} aria-label={t("chat.preview.exportPng")} type="button" disabled={exportBusy} onClick={async () => {
           const exportKey = key;
           setExportBusy(true); setExportError(null);
           try {
@@ -184,9 +187,9 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
         }}>PNG{exportBusy ? "…" : ""}</button>}
         {png && <a href={fileUrl(sessionId, png)} target="_blank" rel="noopener noreferrer" download>{t("chat.preview.downloadPng")}</a>}
       </div>
-      {exportError && <div className="claw-html-preview-foot" role="status">{exportError}</div>}
+      {open && exportError && <div className="claw-html-preview-foot" role="status">{exportError}</div>}
 
-      {!data ? (
+      {open && (!data ? (
         <div className="claw-html-preview-loading">
           <Spinner size="sm" />
         </div>
@@ -216,7 +219,7 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
             </Text>
           </div>
         </>
-      )}
+      ))}
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { DurableJobs } from "../DurableJobs";
 import { mergeMissionActivity } from './mission-activity-merge';
 import { MissionActivityCard } from "./MissionActivity";
 import type { MissionActivityData, MissionHandoff } from "./api";
@@ -605,6 +606,12 @@ export function Chat({
   // `plan` — used to detect a genuinely new/changed plan vs. a reconnect
   // replaying the same event, so closing the panel doesn't get undone by a resend.
   const planRef = useRef<WorkingPlan | null>(null);
+  // Which live turn owns the plan currently shown. The persisted session plan
+  // intentionally survives across turns for agent recovery, but the execution
+  // panel must not present that recovery state as the plan for a NEW request.
+  // Keeping the turn id separately also makes reconnect replay safe: replaying
+  // turn_started for the same turn leaves its already-received plan in place.
+  const planTurnIdRef = useRef<string | null>(null);
   useEffect(() => {
     planRef.current = plan;
   }, [plan]);
@@ -774,6 +781,8 @@ export function Chat({
     setFeedback({});
     setCopied({});
     setPlan(null); // plan is per-session; don't leak one chat's plan into another
+    planRef.current = null;
+    planTurnIdRef.current = null;
     setSuggestionCategory(null);
     // "Create image" mode is per-session UI state too — without this, opening
     // it in one chat and switching to another leaves the composer stuck in
@@ -861,6 +870,16 @@ export function Chat({
       const event: AgentEvent = JSON.parse(raw.data);
       switch (event.type) {
         case "turn_started":
+          // A session-level plan may still contain the completed checklist from
+          // the previous request. Hide it as soon as a different turn begins;
+          // plan_updated below will attach the new turn's plan if it needs one.
+          // On reconnect, the bus replays turn_started before plan_updated. If
+          // we already saw this turn, keep the plan to avoid a visible flicker.
+          if (planTurnIdRef.current !== event.turn_id) {
+            planRef.current = null;
+            planTurnIdRef.current = event.turn_id;
+            setPlan(null);
+          }
           setBusy(true);
           setStreaming("");
           sawCompletionRef.current = false;
@@ -1120,6 +1139,8 @@ export function Chat({
             prev.goal !== nextPlan.goal ||
             JSON.stringify(prev.steps) !== JSON.stringify(nextPlan.steps);
           if (changed) setExecOpen(true);
+          planRef.current = nextPlan;
+          planTurnIdRef.current = event.turn_id;
           setPlan(nextPlan);
           break;
         }
@@ -1737,6 +1758,13 @@ export function Chat({
   const rawSend = useCallback(
     (content: string, atts: AttachmentRef[], modelOverride?: string) => {
       if (socketRef.current?.readyState !== WebSocket.OPEN) return;
+      // Clear the prior request's plan at submit time, before the server has
+      // time to emit turn_started/tool events and auto-open Execution. Without
+      // this, a completed 9/9 checklist from the previous task is shown beside
+      // the new task's live activity for the first few seconds.
+      planRef.current = null;
+      planTurnIdRef.current = null;
+      setPlan(null);
       if (sentCountRef.current === 0 && content) onFirstMessage?.(content);
       sentCountRef.current += 1;
       socketRef.current.send(
@@ -2286,6 +2314,15 @@ export function Chat({
         emptyState={isEmpty ? greeting : undefined}
         composer={
           <div className="claw-composer">
+            <DurableJobs sessionId={sessionId} onDelivery={async () => {
+              if (!sessionId || busy) return false;
+              const current = sessionId;
+              const page = await api.listMessages(current);
+              if (sessionIdRef.current !== current) return false;
+              setItems(page.messages.map(toTranscriptItem));
+              setHasOlder(page.has_more); setOlderCursor(page.next_before_seq);
+              return true;
+            }} />
             {error && <ErrorText>{error}</ErrorText>}
             {attachments.length > 0 && (
               <div className="claw-attach-row">

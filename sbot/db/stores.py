@@ -119,6 +119,11 @@ class MessageStore:
         async with self._seq_locks.get(session_id), self.factory() as db:
             if delivery_key and await db.get(Message, delivery_key) is not None:
                 return 0
+            # Serialize sequence allocation across API and durable worker processes.
+            await db.execute(
+                update(ChatSession).where(ChatSession.id == session_id)
+                .values(updated_at=datetime.now(timezone.utc))
+            )
             next_seq = (
                 await db.scalar(
                     select(func.coalesce(func.max(Message.seq), 0)).where(Message.session_id == session_id)
@@ -2147,13 +2152,19 @@ class ScheduleStore:
             await db.commit()
             return row
 
+    # None means "leave this field alone" for every column but the two pointers,
+    # where it is a value in its own right — handing a task back to the Chief of
+    # Staff, or detaching it from a chat that has since been deleted, both have
+    # to be expressible. Callers that don't mean it simply omit the key.
+    _NULLABLE = frozenset({"bot_id", "session_id"})
+
     async def update(self, user_id: str, schedule_id: str, **fields: Any) -> Schedule | None:
         async with self.factory() as db:
             row = await db.get(Schedule, schedule_id)
             if row is None or row.user_id != user_id:
                 return None
             for key, value in fields.items():
-                if value is not None and hasattr(row, key):
+                if (value is not None or key in self._NULLABLE) and hasattr(row, key):
                     setattr(row, key, value)
             await db.commit()
             return row
@@ -2167,14 +2178,20 @@ class ScheduleStore:
             await db.commit()
             return True
 
-    async def due(self, now: datetime) -> list[Schedule]:
+    async def due(self, now: datetime, limit: int = 200) -> list[Schedule]:
+        """Jobs ready to run, earliest deadline first. Bounded because this runs
+        once a minute across every tenant: anything past the limit is still due
+        next pass, so a backlog drains instead of arriving as one burst."""
         async with self.factory() as db:
             rows = await db.scalars(
-                select(Schedule).where(
+                select(Schedule)
+                .where(
                     Schedule.enabled.is_(True),
                     Schedule.next_run_at.is_not(None),
                     Schedule.next_run_at <= now,
                 )
+                .order_by(Schedule.next_run_at.asc())
+                .limit(max(1, limit))
             )
             return list(rows)
 
@@ -2188,6 +2205,45 @@ class ScheduleStore:
             row.next_run_at = next_run_at
             if next_run_at is None and row.interval_seconds == 0 and not row.cron:
                 row.enabled = False  # one-shot completed
+            await db.commit()
+
+    async def settle_run(
+        self,
+        schedule_id: str,
+        *,
+        expected_next_run_at: datetime,
+        next_run_at: datetime | None,
+        status: str,
+    ) -> None:
+        """Record a run without overwriting a schedule edited while it ran.
+
+        The deadline is the run's revision token.  Keeping the comparison and
+        both writes in one UPDATE closes the read/write race between the
+        scheduler and the edit endpoint.
+        """
+        same_run = Schedule.next_run_at == expected_next_run_at
+        completed_one_shot = (
+            same_run & (Schedule.interval_seconds == 0) & (Schedule.cron == "")
+            if next_run_at is None
+            else sa_false()
+        )
+        async with self.factory() as db:
+            await db.execute(
+                update(Schedule)
+                .where(Schedule.id == schedule_id)
+                .values(
+                    last_run_at=datetime.now(timezone.utc),
+                    last_status=status[:300],
+                    next_run_at=case(
+                        (same_run, next_run_at),
+                        else_=Schedule.next_run_at,
+                    ),
+                    enabled=case(
+                        (completed_one_shot, False),
+                        else_=Schedule.enabled,
+                    ),
+                )
+            )
             await db.commit()
 
 

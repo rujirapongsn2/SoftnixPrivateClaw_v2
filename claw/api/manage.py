@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from claw.api import connector_shared as connectors
 from claw.api import llm_shared as llm
@@ -452,6 +452,14 @@ class ScheduleBody(BaseModel):
     session_id: str | None = None
     enabled: bool = True
 
+    @field_validator("cron")
+    @classmethod
+    def _trim_cron(cls, value: str) -> str:
+        # A whitespace-only cron is not a cron. Left untrimmed it reads as
+        # truthy everywhere downstream, so the row is treated as recurring while
+        # croniter can't parse it.
+        return (value or "").strip()
+
 
 def _schedule_json(s) -> dict:
     return {
@@ -468,7 +476,25 @@ def _schedule_json(s) -> dict:
     }
 
 
+def _check_cron(cron: str) -> None:
+    """Reject a malformed cron up front.
+
+    ``compute_next_run`` is the only validator there is, and ``run_at``
+    short-circuits it — so an unparseable expression used to be stored with a
+    200 and then left the row permanently stuck: every run raised, the scheduler
+    turned that into ``next_run_at = NULL``, and ``mark_ran`` only reads NULL as
+    "completed" for a genuine one-shot, so the task stayed enabled but dormant.
+    """
+    if not cron:
+        return
+    try:
+        compute_next_run(cron, 0)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _initial_next_run(body: ScheduleBody, tz: str = "UTC") -> datetime:
+    _check_cron(body.cron)
     if body.run_at is not None:
         return body.run_at
     try:
@@ -480,6 +506,46 @@ def _initial_next_run(body: ScheduleBody, tz: str = "UTC") -> datetime:
             status_code=422, detail="provide cron, interval_seconds, or run_at"
         )
     return next_run
+
+
+def _effective_timing(body: ScheduleBody, current) -> tuple[str, int]:
+    """The timing an edit leaves behind.
+
+    A field the client never sent is not a request to clear it. `cron` and
+    `interval_seconds` both have defaults, so a PUT that only flips `enabled`
+    used to blank them — turning a daily task into a one-shot, which the very
+    next run then disabled for good (ScheduleStore.mark_ran).
+    """
+    cron = body.cron if "cron" in body.model_fields_set else current.cron
+    interval = (
+        body.interval_seconds
+        if "interval_seconds" in body.model_fields_set
+        else current.interval_seconds
+    )
+    return cron, interval
+
+
+def _updated_next_run(
+    body: ScheduleBody, current, tz: str, cron: str, interval: int
+) -> datetime | None:
+    """When the next run should be after an edit, or None to leave it alone.
+
+    Only a timing change moves the deadline. Recomputing from "now" on every
+    save skipped the occurrence a daily task was seconds away from, and — since
+    clients echo every field back when they flip the on/off switch — pushed an
+    hourly task a fresh hour out on each toggle, so it could be starved for good.
+    """
+    if body.run_at is not None:
+        return body.run_at
+    timing_changed = cron != current.cron or interval != current.interval_seconds
+    if (cron or interval) and (timing_changed or current.next_run_at is None):
+        try:
+            next_run = compute_next_run(cron, interval, tz=tz)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if next_run is not None:
+            return next_run
+    return None
 
 
 @router.get("/schedules")
@@ -516,17 +582,39 @@ async def update_schedule(
     user: User = Depends(require_operator),
     state: AppState = Depends(get_state),
 ) -> dict:
-    row = await state.schedules.update(
-        user.id,
-        schedule_id,
+    current = await state.schedules.get(schedule_id)
+    if current is None or current.user_id != user.id:
+        raise HTTPException(status_code=404, detail="schedule not found")
+    # The target is a caller-supplied id and the scheduler fires into it as-is,
+    # so it is owner-checked here exactly as on create — otherwise an edit could
+    # aim a schedule's output at another tenant's chat. Only a changed value is
+    # checked: a chat deleted after the fact must not make the task uneditable.
+    if body.session_id and body.session_id != current.session_id:
+        owned = await state.sessions.get(body.session_id)
+        if owned is None or owned.user_id != user.id:
+            raise HTTPException(status_code=404, detail="target session not found")
+    cron, interval_seconds = _effective_timing(body, current)
+    _check_cron(cron)
+    fields = dict(
         name=body.name,
         prompt=body.prompt,
-        cron=body.cron,
-        interval_seconds=body.interval_seconds,
+        cron=cron,
+        interval_seconds=interval_seconds,
         session_id=body.session_id,
-        enabled=body.enabled,
-        next_run_at=_initial_next_run(body, state.settings.scheduler.timezone) if body.enabled else None,
     )
+    # `enabled` defaults to True, so passing it through unconditionally meant a
+    # PUT that never mentioned it silently resumed a task the owner had paused.
+    if "enabled" in body.model_fields_set:
+        fields["enabled"] = body.enabled
+    next_run = _updated_next_run(
+        body, current, state.settings.scheduler.timezone, cron, interval_seconds
+    )
+    if next_run is None and current.next_run_at is None and fields.get("enabled"):
+        # A one-shot that already ran is being switched back on. There is no
+        # rule to recompute from, so "on" means now.
+        next_run = datetime.now(timezone.utc)
+    fields["next_run_at"] = next_run  # None leaves the stored deadline as it is
+    row = await state.schedules.update(user.id, schedule_id, **fields)
     if row is None:
         raise HTTPException(status_code=404, detail="schedule not found")
     state.scheduler.notify_changed()

@@ -38,6 +38,8 @@ ArgGuard = Callable[[str, dict[str, Any]], tuple[dict[str, Any], str | None]]
 
 # Ask-mode confirmation gate: (turn_id, tool_name, args_preview) -> approved.
 ConfirmFn = Callable[[str, str, str], Awaitable[bool]]
+CheckpointFn = Callable[[dict[str, Any]], Awaitable[None]]
+BeforeToolFn = Callable[[dict[str, Any]], Awaitable[None]]
 
 # Tools gated behind a user confirmation when the session's permission mode is
 # "ask": ones that touch the sandbox / run arbitrary code (`exec`), and ones
@@ -67,6 +69,11 @@ _RETRY_BASE_SECONDS = 0.25
 # failure mode as write_file (a model whose old_text guess keeps missing
 # retries with a different fragment each time), so it needs the same keying.
 _PATH_KEYED_TOOLS = {"write_file", "edit_file"}
+
+# Reading the same immutable job input again only inflates context and latency.
+# Cache these exact calls for the whole resumable job, not just the first call
+# after recovery. Mutation-sensitive tools retain the narrower one-replay rule.
+_JOB_READ_ONCE_TOOLS = {"read_skill", "read_file", "read_excel", "read_csv", "read_pdf", "read_docx"}
 
 
 # Hard cap on one tool result *as fed back to the model*. A tool result isn't
@@ -241,6 +248,29 @@ def _exact_call_signature(name: str, arguments: dict[str, Any]) -> str:
     return f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
+def _invalidate_read_cache(results: dict[str, str], path: str | None = None) -> None:
+    """Drop cached workspace reads after a mutation; read_skill stays immutable."""
+    for signature in list(results):
+        name, separator, raw_args = signature.partition(":")
+        if not separator or name not in _JOB_READ_ONCE_TOOLS or name == "read_skill":
+            continue
+        if path is None:
+            results.pop(signature, None)
+            continue
+        try:
+            cached_args = json.loads(raw_args)
+            cached_path = str(
+                cached_args.get("path")
+                or cached_args.get("file_path")
+                or cached_args.get("filename")
+                or ""
+            )
+        except (json.JSONDecodeError, AttributeError):
+            cached_path = ""
+        if cached_path == path:
+            results.pop(signature, None)
+
+
 def _gateway_for_model(model: str | None) -> str | None:
     if not model or "/" not in model:
         return None
@@ -378,6 +408,9 @@ class TurnOutcome:
     # limit — a few slow tool calls are enough — and the user needs to be told
     # which limit actually stopped the work.
     timed_out: bool = False
+    # The caller supplied a cumulative token allowance and the next provider
+    # request would exceed it. No provider call is made in this state.
+    usage_limit_reached: bool = False
     # The provider stream failed after visible text had already reached the UI.
     # The partial answer is returned and persisted; the runtime appends a
     # localized marker so it cannot be mistaken for a complete response.
@@ -387,6 +420,7 @@ class TurnOutcome:
     # which need different messages. The runtime does that mapping (it owns the
     # locale); the loop just reports what the provider said.
     finish_reason: str = "stop"
+    blocked_reason: str = ""
     # Workspace-relative paths of files the agent created/edited this turn, so
     # the UI can offer them as downloadable/openable artifacts.
     artifacts: list[str] = field(default_factory=list)
@@ -462,6 +496,14 @@ class AgentLoop:
         on_fallback: Callable[[str], None] | None = None,
         permission_mode: str = "auto",
         confirm: ConfirmFn | None = None,
+        tool_names: set[str] | None = None,
+        resume_messages: list[dict[str, Any]] | None = None,
+        resume_tool_results: dict[str, str] | None = None,
+        resume_written: list[str] | None = None,
+        checkpoint: CheckpointFn | None = None,
+        before_tool: BeforeToolFn | None = None,
+        resume_pending_call: dict[str, Any] | None = None,
+        max_usage_tokens: int | None = None,
     ) -> TurnOutcome:
         """Run one user turn. Mutates a copy of `messages`; returns appended messages.
 
@@ -472,7 +514,7 @@ class AgentLoop:
         upstream call fails before emitting user-visible text. Transport-only
         events (usage metadata or hidden thinking) do not block recovery.
         """
-        working = list(messages)
+        working = [*messages, *(resume_messages or [])]
         base_len = len(working)
         usage_total: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         effective_model = model or self.model
@@ -490,7 +532,7 @@ class AgentLoop:
         # template counts as an intermediate depends on what else the turn wrote.
         # `baseline` lets us also detect files an `exec` command created (e.g. a
         # saved chart) by diffing the workspace.
-        written: list[str] = []
+        written: list[str] = list(dict.fromkeys(resume_written or []))
         baseline = _snapshot_workspace(self.workspace) if self.workspace is not None else {}
         started = time.monotonic()
         first_text_at: float | None = None
@@ -501,6 +543,7 @@ class AgentLoop:
         last_signature: str | None = None
         repeats = 0
         timed_out = False
+        usage_limit_reached = False
         tool_defs_chars = 0
         prompt_chars = 0
         # The exact text each of this turn's tool results is sent to the model as,
@@ -512,8 +555,12 @@ class AgentLoop:
         # Successful tool results survive provider recovery. If a retried or
         # fallback model repeats the exact call it just received in the prompt,
         # reuse the result instead of executing the side effect a second time.
-        successful_tool_results: dict[str, str] = {}
-        recovery_generation = False
+        successful_tool_results: dict[str, str] = dict(resume_tool_results or {})
+        # A recovered segment may have died after a side effect committed but
+        # before the next provider response. Reuse an immediately repeated exact
+        # call once; normal later iterations are free to run it again after the
+        # model has made progress (for example edit script → rerun generator).
+        recovery_generation = bool(resume_tool_results)
         fallback_selected = False
         ceiling = _compaction_ceiling_chars(effective_model, self.max_tokens, context_window)
         if fallback_available:
@@ -531,7 +578,7 @@ class AgentLoop:
                     break
             iterations += 1
             result: ChatResult | None = None
-            definitions = self.tools.get_definitions()
+            definitions = self.tools.get_definitions(tool_names)
             prompt = _prompt_messages(working, base_len, sent_results)
             size = _prompt_size(prompt)
             if size > ceiling and _compact_sent_tool_results(sent_order, sent_results):
@@ -543,6 +590,34 @@ class AgentLoop:
             if not tool_defs_chars:
                 tool_defs_chars = len(json.dumps(definitions, ensure_ascii=False, default=str))
             prompt_chars = max(prompt_chars, size)
+            message_tokens = self.provider.count_tokens(prompt, effective_model)
+            definition_tokens = self.provider.count_tokens(
+                [{"role": "system", "content": json.dumps(definitions, ensure_ascii=False)}],
+                effective_model,
+            )
+            # Provider accounting may add wrapper tokens around messages and
+            # tool schemas. Keep a small reserve so the hard cumulative cap is
+            # not crossed merely because the local tokenizer omitted wrappers.
+            request_tokens = max(1, int((message_tokens + definition_tokens) * 1.05) + 8)
+            remaining_tokens = (
+                None
+                if max_usage_tokens is None
+                else max_usage_tokens - sum(usage_total.values())
+            )
+            if remaining_tokens is not None and remaining_tokens <= request_tokens:
+                usage_limit_reached = True
+                iterations -= 1  # no provider request was made
+                logger.warning(
+                    "Turn {} stopped before provider call: estimated request {} tokens exceeds "
+                    "remaining cumulative allowance {}",
+                    turn_id,
+                    request_tokens,
+                    max(0, remaining_tokens),
+                )
+                break
+            request_max_tokens = self.max_tokens
+            if remaining_tokens is not None:
+                request_max_tokens = max(1, min(self.max_tokens, remaining_tokens - request_tokens))
             # Text streamed so far this iteration. The user has already seen it,
             # so if the deadline cuts the stream off mid-answer it is kept as
             # the turn's answer rather than thrown away for a bare error.
@@ -568,7 +643,7 @@ class AgentLoop:
                                 prompt,
                                 tools=definitions,
                                 model=effective_model,
-                                max_tokens=self.max_tokens,
+                                max_tokens=request_max_tokens,
                                 temperature=self.temperature,
                                 api_key=api_key,
                                 api_base=api_base,
@@ -768,6 +843,8 @@ class AgentLoop:
             )
             for tc in result.tool_calls:
                 tool_call_count += 1
+                tool_executed = False
+                exec_snapshot: dict[str, float] | None = None
                 args_preview = _args_preview(tc.arguments)
                 emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
                 logger.info("Tool call: {}({})", tc.name, args_preview)
@@ -779,12 +856,23 @@ class AgentLoop:
                 # legitimate.
                 signature = _call_signature(tc.name, tc.arguments)
                 replay_signature = _exact_call_signature(tc.name, tc.arguments)
+                uncertain_replay = bool(
+                    resume_pending_call
+                    and resume_pending_call.get("signature") == replay_signature
+                )
                 replayed_result = (
                     successful_tool_results.get(replay_signature)
-                    if recovery_generation
+                    if recovery_generation or tc.name in _JOB_READ_ONCE_TOOLS
                     else None
                 )
-                if replayed_result is not None:
+                if uncertain_replay:
+                    tool_result = (
+                        "Recovery notice: this exact tool call may already have completed before the "
+                        "previous process stopped. It was not run again. Inspect the workspace/output "
+                        "and continue from the observed state."
+                    )
+                    resume_pending_call = None
+                elif replayed_result is not None:
                     tool_result = replayed_result
                     logger.bind(
                         turn_id=turn_id,
@@ -806,7 +894,12 @@ class AgentLoop:
                         and confirm is not None
                     )
                     if gated_by_confirm:
-                        approved = await confirm(turn_id, tc.name, args_preview)
+                        from claw.jobs.provider import current_execution
+                        if current_execution.get() is not None:
+                            from claw.jobs.approval import confirm as durable_confirm
+                            approved = await durable_confirm(tc.name, tc.arguments)
+                        else:
+                            approved = await confirm(turn_id, tc.name, args_preview)
                         if not approved:
                             block_message = "The user declined to run this action."
                     # Loop breaker: only counts as a runaway loop for calls nothing
@@ -863,11 +956,41 @@ class AgentLoop:
                             if self.max_turn_seconds > 0
                             else None
                         )
+                        if before_tool is not None:
+                            await before_tool(
+                                {
+                                    "signature": replay_signature,
+                                    "name": tc.name,
+                                    "arguments": args,
+                                }
+                            )
+                        if tc.name == "exec" and self.workspace is not None:
+                            exec_snapshot = _snapshot_workspace(self.workspace)
+                        tool_executed = True
                         tool_result = await self.tools.execute(
                             tc.name, args, progress=_progress, deadline=turn_deadline
                         )
                         if not tool_result.startswith("Error"):
                             successful_tool_results[replay_signature] = tool_result
+                if tool_executed and not tool_result.startswith("Error"):
+                    if tc.name in {"write_file", "edit_file"}:
+                        _invalidate_read_cache(
+                            successful_tool_results,
+                            str(args.get("path") or "") if isinstance(args, dict) else "",
+                        )
+                    elif tc.name == "exec":
+                        after_exec = _snapshot_workspace(self.workspace) if self.workspace else {}
+                        changed = {
+                            path
+                            for path in set(exec_snapshot or {}) | set(after_exec)
+                            if (exec_snapshot or {}).get(path) != after_exec.get(path)
+                        }
+                        for path in changed:
+                            _invalidate_read_cache(successful_tool_results, path)
+                from claw.jobs.tool_results import observe
+                await observe(tool_result)
+                if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
+                    written.append(str(args['output']))
                 # Track files the agent created/edited (successful write_file /
                 # edit_file) so the UI can offer them as artifacts.
                 if (
@@ -917,9 +1040,43 @@ class AgentLoop:
                         "content": tool_result,
                     }
                 )
+                if checkpoint is not None:
+                    await checkpoint(
+                        {
+                            "messages": working[base_len:],
+                            "tool_results": successful_tool_results,
+                            "written": written,
+                            "iterations": iterations,
+                            "tool_calls": tool_call_count,
+                        }
+                    )
+                if tool_result.startswith("Error: [sandbox_unavailable]"):
+                    # Infrastructure recovery belongs to the runtime, not to a
+                    # model repeatedly inventing equivalent shell commands.
+                    answered = {m.get("tool_call_id") for m in working if m.get("role") == "tool"}
+                    for pending in result.tool_calls:
+                        if pending.id not in answered:
+                            working.append({"role": "tool", "tool_call_id": pending.id,
+                                            "name": pending.name,
+                                            "content": "Error: deferred until sandbox recovery"})
+                    if checkpoint is not None:
+                        await checkpoint({"messages": working[base_len:],
+                                          "tool_results": successful_tool_results,
+                                          "written": written, "iterations": iterations,
+                                          "tool_calls": tool_call_count})
+                    shown, suppressed = _split_artifacts(written)
+                    return TurnOutcome(
+                        final_content=None, new_messages=working[base_len:], usage=usage_total,
+                        blocked_reason="sandbox_unavailable", artifacts=shown,
+                        hidden_artifacts=suppressed, iterations=iterations,
+                        tool_calls=tool_call_count, duration_ms=_elapsed_ms(started, time.monotonic()),
+                        tool_defs_chars=tool_defs_chars, prompt_chars=prompt_chars,
+                    )
             recovery_generation = False
 
-        if timed_out:
+        if usage_limit_reached:
+            logger.warning("Turn {} reached its cumulative token allowance", turn_id)
+        elif timed_out:
             logger.warning(
                 "Turn {} exceeded its time budget ({}s) after {} iterations",
                 turn_id,
@@ -933,8 +1090,9 @@ class AgentLoop:
             final_content=None,
             new_messages=working[base_len:],
             usage=usage_total,
-            reached_max_iterations=not timed_out,
+            reached_max_iterations=not timed_out and not usage_limit_reached,
             timed_out=timed_out,
+            usage_limit_reached=usage_limit_reached,
             artifacts=shown,
             hidden_artifacts=suppressed,
             iterations=iterations,

@@ -6,7 +6,9 @@ def test_catalog_has_expected_connectors():
     keys = {p["key"] for p in list_presets()}
     assert {"github", "gmail", "outlook", "notion", "tavily"}.issubset(keys)
     gh = get_preset("github")
-    assert gh.transport == "stdio" and "GITHUB_PERSONAL_ACCESS_TOKEN" in gh.env_fields
+    assert gh.transport == "stdio"
+    token = next(f for f in gh.fields if f.key == "GITHUB_TOKEN")
+    assert token.secret and not token.optional
 
 
 def test_unknown_preset_is_none():
@@ -56,7 +58,8 @@ async def test_presets_endpoint(db_factory):
         assert "GitHub" in labels and "Tavily Search" in labels
         # Each preset lists the env fields the user must supply.
         gh = next(p for p in r.json() if p["key"] == "github")
-        assert gh["env_fields"] == ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+        token_field = next(f for f in gh["fields"] if f["key"] == "GITHUB_TOKEN")
+        assert token_field["secret"] and not token_field["optional"]
 
 
 async def test_create_connector_from_preset_fields(db_factory):
@@ -73,11 +76,12 @@ async def test_create_connector_from_preset_fields(db_factory):
                 "transport": preset.transport,
                 "command": preset.command,
                 "url": "",
-                "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_secret"},
+                "env": {"GITHUB_TOKEN": "ghp_secret"},
                 "enabled": False,
             },
         )
         assert r.status_code == 200
         listed = await c.get("/api/connectors", headers=_bearer(token))
         gh = next(cn for cn in listed.json() if cn["name"] == "github")
-        assert gh["transport"] == "stdio" and "server-github" in gh["command"]
+        assert gh["transport"] == "stdio"
+        assert gh["command"] == "python -m claw.integrations.github_mcp_server"

@@ -25,3 +25,6 @@ blueprints/
 
 /web/node_modules
 /dist/local-agent/
+
+# Local agent permissions; each developer controls these on their own machine.
+.claude/

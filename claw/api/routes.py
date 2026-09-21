@@ -1081,6 +1081,8 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
     # reconnect while a turn is paused on an Ask-mode gate).
     for pending in state.runtime.pending_confirmations(session_id):
         await websocket.send_text(json.dumps(pending.to_dict(), ensure_ascii=False))
+    for progress in await state.runtime.active_artifact_events(user.id, session_id):
+        await websocket.send_text(json.dumps(progress.to_dict(), ensure_ascii=False))
     turns: set[asyncio.Task] = set()
 
     def _turn_done(task: asyncio.Task) -> None:
@@ -1103,6 +1105,11 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
                 request_id = str(payload.get("request_id") or "")
                 if request_id:
                     state.runtime.resolve_confirmation(request_id, bool(payload.get("approved")))
+                continue
+            if payload.get("type") == "cancel_artifact_job":
+                job_id = str(payload.get("job_id") or "")
+                if job_id:
+                    await state.runtime.cancel_artifact_job(user.id, job_id)
                 continue
             content = str(payload.get("content") or "").strip()
             raw_attachments = payload.get("attachments") or []

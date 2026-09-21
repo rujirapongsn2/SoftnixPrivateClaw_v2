@@ -1,7 +1,7 @@
 import { Icon } from "@astryxdesign/core/Icon";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { Text } from "@astryxdesign/core/Text";
-import { Download, FileSpreadsheet } from "lucide-react";
+import { Download, Eye, FileSpreadsheet, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { fileTablePreview, previewRetryDelay, type TablePreview as TablePreviewData } from "./api";
 import { useT } from "../branding";
@@ -23,6 +23,7 @@ type Props = {
  * rows/columns, so each response is small once it does happen. */
 export function TablePreview({ sessionId, path, href }: Props) {
   const t = useT();
+  const [open, setOpen] = useState(false);
   const [data, setData] = useState<TablePreviewData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visible, setVisible] = useState(false);
@@ -37,6 +38,7 @@ export function TablePreview({ sessionId, path, href }: Props) {
   const loadedKey = useRef(key);
   if (loadedKey.current !== key) {
     loadedKey.current = key;
+    if (open) setOpen(false);
     if (data) setData(null);
     if (error) setError(null);
     if (attempt) setAttempt(0);
@@ -52,7 +54,7 @@ export function TablePreview({ sessionId, path, href }: Props) {
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host || visible) return;
+    if (!open || !host || visible) return;
     if (typeof IntersectionObserver === "undefined") {
       setVisible(true);
       return;
@@ -65,14 +67,14 @@ export function TablePreview({ sessionId, path, href }: Props) {
     );
     observer.observe(host);
     return () => observer.disconnect();
-  }, [visible]);
+  }, [open, visible]);
 
   // The `data`/`error` guard is load-bearing, not just an optimization. This
   // component latches `visible` permanently true, so without it a card that had
   // been shed once went on polling every few seconds for the life of the
   // transcript — including long after it scrolled out of view.
   useEffect(() => {
-    if (!visible || data || error) return;
+    if (!open || !visible || data || error) return;
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const control = new AbortController();
@@ -99,7 +101,7 @@ export function TablePreview({ sessionId, path, href }: Props) {
       if (retry) clearTimeout(retry);
       control.abort();
     };
-  }, [visible, sessionId, path, data, error, attempt]);
+  }, [open, visible, sessionId, path, data, error, attempt]);
 
   // A failed preview must not hide the file: fall through to the plain chip so
   // the user can still download it.
@@ -137,9 +139,10 @@ export function TablePreview({ sessionId, path, href }: Props) {
           <Icon icon={Download} size="xsm" color="secondary" />
         </a>
         <SaveToBlueprintButton sessionId={sessionId} path={path} />
+        <button className="claw-preview-action" type="button" onClick={() => setOpen(value => !value)} aria-expanded={open} aria-label={open ? t("chat.artifact.hidePreview") : t("chat.artifact.preview")} title={open ? t("chat.artifact.hidePreview") : t("chat.artifact.preview")}><Icon icon={open ? X : Eye} size="sm" /></button>
       </div>
 
-      {!data ? (
+      {open && (!data ? (
         <div className="claw-table-preview-loading">
           <Spinner size="sm" />
         </div>
@@ -193,7 +196,7 @@ export function TablePreview({ sessionId, path, href }: Props) {
             </div>
           )}
         </>
-      )}
+      ))}
     </div>
   );
 }

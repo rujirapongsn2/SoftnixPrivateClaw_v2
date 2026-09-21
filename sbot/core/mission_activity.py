@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 from loguru import logger
 
+from sbot.core.tool_preview import safe_text_preview
+
 MAX_ACTIVITY_TEXT_CHARS = 12_000
 MAX_ACTIVITY_RESULT_CHARS = 20_000
 MAX_ACTIVITY_TOOL_STEPS = 100
@@ -49,7 +51,15 @@ class MissionActivity:
             self.data['artifacts'] = result.artifacts or []
         for step in self.data.get('steps', []):
             if step['status'] == 'running':
+                finished_at = self.now()
                 step['status'] = 'interrupted'
+                step['finished_at'] = finished_at
+                try:
+                    started = datetime.fromisoformat(step.get('started_at') or step['at'])
+                    finished = datetime.fromisoformat(finished_at)
+                    step['duration_ms'] = max(0, int((finished - started).total_seconds() * 1000))
+                except (TypeError, ValueError):
+                    step['duration_ms'] = None
         self.changed.set()
 
     async def wait(self):
@@ -117,15 +127,35 @@ class MissionActivity:
             self.data['text'] = (self.data.get('text', '') + event.text)[-MAX_ACTIVITY_TEXT_CHARS:]
         elif kind == 'tool_started':
             steps = self.data.setdefault('steps', [])
-            # Tool names/status only: arguments and results can contain credentials.
             if steps and steps[-1]['tool'] == event.tool and steps[-1]['status'] == 'running':
                 return
-            steps.append(dict(tool=event.tool, status='running', at=self.now()))
+            # The loop has already redacted structured credentials from
+            # args_preview. Apply the plain-text guard as a second boundary
+            # before persisting it in the specialist's room.
+            started_at = self.now()
+            steps.append(dict(
+                tool=event.tool,
+                status='running',
+                at=started_at,
+                started_at=started_at,
+                args_preview=safe_text_preview(event.args_preview),
+                result_preview='',
+                finished_at=None,
+                duration_ms=None,
+            ))
             self.data['steps'] = steps[-MAX_ACTIVITY_TOOL_STEPS:]
         elif kind == 'tool_finished':
             for step in reversed(self.data.get('steps', [])):
                 if step['tool'] == event.tool and step['status'] == 'running':
                     step['status'] = 'error' if event.is_error else 'done'
+                    step['result_preview'] = safe_text_preview(event.result_preview)
+                    step['finished_at'] = self.now()
+                    try:
+                        started = datetime.fromisoformat(step.get('started_at') or step['at'])
+                        finished = datetime.fromisoformat(step['finished_at'])
+                        step['duration_ms'] = max(0, int((finished - started).total_seconds() * 1000))
+                    except (TypeError, ValueError):
+                        step['duration_ms'] = None
                     break
         else:
             return
@@ -140,6 +170,11 @@ class MissionActivity:
         self.changed.set()
 
     async def save(self):
+        from claw.jobs.provider import current_execution
+        ctx = current_execution.get()
+        if ctx is not None:
+            async with ctx.store.transaction() as db:
+                await ctx.store._guard(db, ctx.lease)
         self.revision += 1
         self.data['updated_at'] = self.now()
         self.data['revision'] = self.revision

@@ -1,3 +1,4 @@
+import { DurableJobs } from "./DurableJobs";
 import {
   ChatComposer,
   ChatComposerInput,
@@ -220,6 +221,15 @@ interface ConfirmRow {
   tool: string;
   argsPreview?: string;
   status: "pending" | "approved" | "denied";
+}
+
+interface ArtifactJobProgressState {
+  jobId: string;
+  status: string;
+  segment: number;
+  maxSegments: number;
+  elapsedSeconds: number;
+  message: string;
 }
 
 // Confirmation-card copy keys per gated tool (Ask mode). The default covers
@@ -475,6 +485,7 @@ export function Chat({
   // The agent's live working plan (from plan_updated events), shown pinned atop
   // the Execution panel. Null until the agent sets one this session.
   const [plan, setPlan] = useState<WorkingPlan | null>(null);
+  const [artifactJob, setArtifactJob] = useState<ArtifactJobProgressState | null>(null);
   // Mirrors `plan` for the "plan_updated" handler below, which runs inside a
   // WebSocket effect keyed only on [sessionId] and so closes over a stale
   // `plan` — used to detect a genuinely new/changed plan vs. a reconnect
@@ -590,6 +601,7 @@ export function Chat({
     setAttachments([]);
     setFeedback({});
     setPlan(null); // plan is per-session; don't leak one chat's plan into another
+    setArtifactJob(null);
     setSuggestionCategory(null);
     // "Create image" mode is per-session UI state too — without this, opening
     // it in one chat and switching to another leaves the composer stuck in
@@ -781,6 +793,22 @@ export function Chat({
             return prev;
           });
           break;
+        case "artifact_job_progress": {
+          const terminal = ["completed", "cancelled", "failed", "limit_reached", "blocked"].includes(event.status ?? "");
+          setArtifactJob({
+            jobId: event.job_id ?? "",
+            status: event.status ?? "running",
+            segment: event.segment ?? 1,
+            maxSegments: event.max_segments ?? 1,
+            elapsedSeconds: event.elapsed_seconds ?? 0,
+            message: event.message ?? "",
+          });
+          setStreaming("");
+          if (terminal) setBusy(false);
+          else setBusy(true);
+          onActivity?.();
+          break;
+        }
         case "plan_updated": {
           // The agent revised its working plan — show it pinned in the panel.
           // Unlike other auto-opens, this bypasses the execution_panel_enabled
@@ -1357,6 +1385,12 @@ export function Chat({
     );
   }, []);
 
+  const cancelArtifactJob = useCallback(() => {
+    if (!artifactJob?.jobId || socketRef.current?.readyState !== WebSocket.OPEN) return;
+    socketRef.current.send(JSON.stringify({ type: "cancel_artifact_job", job_id: artifactJob.jobId }));
+    setArtifactJob((current) => current ? { ...current, status: "cancelling" } : current);
+  }, [artifactJob?.jobId]);
+
   const changePermission = useCallback((mode: PermissionMode) => {
     setPermission(mode);
     localStorage.setItem("claw_permission_mode", mode);
@@ -1766,7 +1800,38 @@ export function Chat({
         emptyState={isEmpty ? greeting : undefined}
         composer={
           <div className="claw-composer">
+            <DurableJobs sessionId={sessionId} onDelivery={async () => {
+              if (!sessionId || busy) return false;
+              const current = sessionId;
+              const rows = await api.listMessages(current);
+              if (sessionIdRef.current !== current) return false;
+              setItems(rows.map(m => ({kind: 'message', role: m.role, content: m.content,
+                artifacts: m.meta?.artifacts, visionModel: m.meta?.vision_model})));
+              return true;
+            }} />
             {error && <ErrorText>{error}</ErrorText>}
+            {artifactJob && !["completed", "cancelled", "failed", "limit_reached"].includes(artifactJob.status) && (
+              <div className="claw-artifact-job" role="status" aria-live="polite">
+                <div className="claw-artifact-job-copy">
+                  <Text weight="semibold">{t("chat.artifactJob.title")}</Text>
+                  <Text size="sm" color="secondary">
+                    {artifactJob.message || t("chat.artifactJob.progress", {
+                      segment: String(artifactJob.segment),
+                      total: String(artifactJob.maxSegments),
+                    })}
+                  </Text>
+                </div>
+                <div className="claw-artifact-job-actions">
+                  <span>{t("chat.artifactJob.segment", { segment: String(artifactJob.segment), total: String(artifactJob.maxSegments) })}</span>
+                  <Button
+                    label={artifactJob.status === "cancelling" ? t("chat.artifactJob.cancelling") : t("chat.artifactJob.cancel")}
+                    variant="secondary"
+                    isDisabled={artifactJob.status === "cancelling"}
+                    clickAction={cancelArtifactJob}
+                  />
+                </div>
+              </div>
+            )}
             {attachments.length > 0 && (
               <div className="claw-attach-row">
                 {attachments.map((a, i) => (

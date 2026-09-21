@@ -72,6 +72,7 @@ import {
   KnowledgeDoc,
   MemoryInfo,
   ScheduleInfo,
+  ScheduleInput,
   ProjectInventory,
   SimpleGroup,
   SkillInfo,
@@ -3162,10 +3163,36 @@ function ConnectorsPanel() {
 
 // ---------------------------------------------------------------- Schedules
 
+/** ISO instant -> the "YYYY-MM-DDTHH:mm" a datetime-local input wants, in the
+ * browser's own zone (which is what the user is reading the next-run time in). */
+function toLocalInput(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** The writable half of a schedule. `run_at` is deliberately absent: leaving it
+ * out tells the server to keep the deadline the task already has, so toggling
+ * or renaming a one-shot neither fails nor reschedules it. */
+function toBody(s: ScheduleInfo): Partial<ScheduleInput> {
+  return {
+    name: s.name,
+    prompt: s.prompt,
+    cron: s.cron,
+    interval_seconds: s.interval_seconds,
+    session_id: s.session_id,
+    bot_id: s.bot_id,
+    enabled: s.enabled,
+  };
+}
+
 function SchedulesPanel() {
   const t = useT();
   const [schedules, setSchedules] = useState<ScheduleInfo[]>([]);
   const [editing, setEditing] = useState<Partial<ScheduleInfo> | null>(null);
+  const [runAt, setRunAt] = useState("");
   const { error, guard } = useAsyncError();
 
   const reload = useCallback(() => api.listSchedules().then(setSchedules), []);
@@ -3173,7 +3200,13 @@ function SchedulesPanel() {
     void reload();
   }, [reload]);
 
+  const edit = useCallback((s: Partial<ScheduleInfo>) => {
+    setRunAt(s.cron || s.interval_seconds ? "" : toLocalInput(s.next_run_at));
+    setEditing(s);
+  }, []);
+
   if (editing) {
+    const isOneShot = !(editing.cron ?? "").trim() && !(editing.interval_seconds ?? 0);
     return (
       <div className="claw-panel">
         <TextInput
@@ -3199,6 +3232,13 @@ function SchedulesPanel() {
             setEditing({ ...editing, interval_seconds: Math.max(0, parseInt(v) || 0) * 60 })
           }
         />
+        {isOneShot && (
+          <label className="claw-datetime-field">
+            <span>{t("settings.schedules.runAt")}</span>
+            <input type="datetime-local" value={runAt} onChange={(e) => setRunAt(e.target.value)} />
+            <Text size="sm" color="secondary">{t("settings.schedules.runAtNow")}</Text>
+          </label>
+        )}
         {error && <ErrorText>{error}</ErrorText>}
         <div className="claw-row">
           <Button
@@ -3206,15 +3246,26 @@ function SchedulesPanel() {
             icon={<Icon icon="check" size="sm" />}
             clickAction={() =>
               guard(async () => {
-                const body = {
+                const picked = isOneShot && runAt ? new Date(runAt) : null;
+                const body: Partial<ScheduleInput> = {
                   name: (editing.name ?? "").trim(),
                   prompt: editing.prompt ?? "",
-                  cron: editing.cron ?? "",
+                  cron: (editing.cron ?? "").trim(),
                   interval_seconds: editing.interval_seconds ?? 0,
+                  session_id: editing.session_id ?? null,
+                  bot_id: editing.bot_id,
                   enabled: editing.enabled ?? true,
-                  ...(editing.cron || editing.interval_seconds
-                    ? {}
-                    : { run_at: new Date().toISOString() }),
+                  // A one-shot gets a time: the picked one, or now when the
+                  // field is left empty on a new task, as the caption promises.
+                  // Editing pre-fills the picker from the task's own deadline,
+                  // so an empty field there means it has none left — it already
+                  // ran — and sending "now" would quietly re-arm a finished task
+                  // on a purely cosmetic edit.
+                  ...(picked
+                    ? { run_at: picked.toISOString() }
+                    : isOneShot && !editing.id
+                      ? { run_at: new Date().toISOString() }
+                      : {}),
                 };
                 if (editing.id) await api.updateSchedule(editing.id, body);
                 else await api.createSchedule(body);
@@ -3237,7 +3288,7 @@ function SchedulesPanel() {
           label={t("settings.schedules.new")}
           icon={<Icon icon={Plus} size="sm" />}
           size="sm"
-          clickAction={() => setEditing({ enabled: true, interval_seconds: 0 })}
+          clickAction={() => edit({ enabled: true, interval_seconds: 0 })}
         />
       </div>
       {error && <ErrorText>{error}</ErrorText>}
@@ -3284,7 +3335,7 @@ function SchedulesPanel() {
                   isLabelHidden
                   changeAction={(checked) =>
                     guard(async () => {
-                      await api.updateSchedule(s.id, { ...s, enabled: checked });
+                      await api.updateSchedule(s.id, { ...toBody(s), enabled: checked });
                       await reload();
                     })
                   }
@@ -3306,7 +3357,7 @@ function SchedulesPanel() {
                   icon={<Icon icon={Pencil} size="sm" />}
                   size="sm"
                   variant="ghost"
-                  clickAction={() => setEditing(s)}
+                  clickAction={() => edit(s)}
                 />
                 <Button
                   label={t("settings.common.delete")}

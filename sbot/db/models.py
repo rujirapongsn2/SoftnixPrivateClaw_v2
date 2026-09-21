@@ -249,9 +249,16 @@ class Schedule(Base):
     """Recurring or one-shot prompt delivered to the agent on schedule."""
 
     __tablename__ = "sbot_schedules"
+    # The scheduler's only read is "enabled and due", once a minute across every
+    # tenant — the user_id index below does nothing for it.
+    __table_args__ = (Index("ix_sbot_schedules_due", "enabled", "next_run_at"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    # Which bot runs this task. Null = the owner's Chief of Staff, which is also
+    # what an archived bot degrades to (bot lookups exclude archived rows), so a
+    # deleted specialist leaves its schedules working rather than erroring.
+    bot_id: Mapped[str | None] = mapped_column(ForeignKey("sbot_bots.id"), nullable=True, index=True)
     session_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # target chat
     name: Mapped[str] = mapped_column(String(128))
     cron: Mapped[str] = mapped_column(String(64), default="")  # cron expression, or

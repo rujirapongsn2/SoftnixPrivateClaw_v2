@@ -303,6 +303,22 @@ def test_xlsx_preview_reads_first_sheet_and_lists_sheets(tmp_path):
     assert result["rows"] == [["north", "12"]]
 
 
+def test_xlsx_merged_title_does_not_show_synthetic_column_names(tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet["A1"] = "BOM Summary"
+    sheet.merge_cells("A1:D1")
+    sheet.append([])
+    sheet.append(["Category", "Items", "Total Qty"])
+    path = tmp_path / "bom.xlsx"
+    wb.save(path)
+
+    result = preview_table(path)
+    assert result["columns"] == ["BOM Summary", "", "", ""]
+    assert "#2" not in result["columns"]
+
+
 def test_xlsx_row_limit_is_enforced(tmp_path):
     openpyxl = pytest.importorskip("openpyxl")
     wb = openpyxl.Workbook()

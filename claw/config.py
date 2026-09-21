@@ -25,6 +25,12 @@ class LLMSettings(BaseModel):
     # retrying the same slow tool can run for many minutes well inside its
     # iteration budget.
     max_turn_seconds: float = 600
+    # Long artifact work is split into ordinary bounded turns. These are
+    # cumulative job caps, not larger per-turn timeouts.
+    artifact_job_max_segments: int = 3
+    artifact_job_max_seconds: float = 1800
+    artifact_job_max_tokens: int = 300_000
+    artifact_job_max_cost_usd: float = 10.0
     # Token budget for the assembled prompt (input side).
     max_context_tokens: int = 60_000
 
@@ -234,6 +240,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CLAW_", env_nested_delimiter="__", env_file=".env", extra="ignore"
     )
+
+    durable_jobs_privateclaw: bool = False
+    durable_jobs_sbot: bool = False
 
     database_url: str = "postgresql+asyncpg://claw:claw@localhost:5432/claw"
     # Run Alembic migrations on startup (production). Tests/dev may create_all directly.

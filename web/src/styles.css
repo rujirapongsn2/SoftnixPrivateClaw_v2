@@ -601,6 +601,7 @@ html[data-font-size="large"] {
 .sbot-bot-check input { margin-top: 2px; accent-color: var(--color-accent, #4b6bfb); }
 .sbot-bot-tools-toggle { margin-bottom: 10px; }
 .sbot-bot-check-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 18px; }
+.sbot-bot-tools-note { display: block; margin-top: 9px; color: var(--color-text-secondary, #687080); font-size: 12px; line-height: 1.45; }
 .sbot-bot-check span { display: flex; flex-direction: column; gap: 2px; }
 .sbot-bot-check small { color: var(--color-text-secondary, #687080); font-size: 12px; }
 .sbot-bot-skill-scopes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
@@ -912,6 +913,38 @@ html[data-chat-bg="grid"] .claw-chat {
   max-width: 768px;
   margin: 0 auto;
   padding: 0 16px;
+}
+.claw-artifact-job {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 10px;
+  background: var(--color-background-subtle, #f6f5f2);
+}
+.claw-artifact-job-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.claw-artifact-job-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+@media (max-width: 640px) {
+  .claw-artifact-job {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .claw-artifact-job-actions {
+    justify-content: space-between;
+  }
 }
 .claw-composer {
   padding-bottom: 12px;
@@ -1405,6 +1438,33 @@ html[data-chat-bg="grid"] .claw-chat {
   outline-offset: 1px;
   border-color: transparent;
 }
+/* Native date/time picker — the design system's TextInput only types text,
+   password and email, so a one-shot schedule's time uses a raw input dressed
+   to match the fields around it. */
+.claw-datetime-field { display: grid; gap: 6px; min-width: 0; }
+.claw-datetime-field > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6b6760);
+}
+.claw-datetime-field input {
+  width: 100%;
+  min-height: 36px;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-emphasized, #d8d6d1);
+  border-radius: 8px;
+  background: var(--color-background-surface, #fff);
+  color: var(--color-text-primary, #1c1a18);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.claw-datetime-field input:focus-visible {
+  outline: 2px solid var(--color-accent, #2786c2);
+  outline-offset: 1px;
+  border-color: transparent;
+}
+
 .claw-team-policy-actions {
   display: flex;
   align-items: center;
@@ -3696,6 +3756,30 @@ html[data-chat-bg="grid"] .claw-chat {
      is what made an earlier version of this jump and then drift. */
   transition: max-width 0.2s ease, margin 0.2s ease;
 }
+.sbot-artifacts-more {
+  flex: 1 1 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid var(--color-border-subtle, #e8e7e4);
+  border-radius: 8px;
+  background: var(--color-surface-2, #faf9f7);
+  color: var(--color-text-secondary, #6b6862);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.sbot-artifacts-more:hover {
+  background: var(--color-surface-3, #f0eeea);
+  color: var(--color-text-primary, #1c1a18);
+}
+.sbot-artifacts-more:focus-visible {
+  outline: 2px solid var(--color-accent, #2786c2);
+  outline-offset: 2px;
+}
 /* Table/HTML previews are the one artifact kind whose whole point is to show
    more of a wide report/sheet at once (see the "does NOT shrink-wrap"
    comments below) — so let just THAT row escape .claw-column's 768px prose
@@ -4728,5 +4812,32 @@ html[data-chat-bg="grid"] .claw-chat {
 .sbot-mission-activity summary { cursor: pointer; }
 .sbot-mission-activity footer { font-size: 12px; margin-top: 12px; }
 .sbot-mission-prose { white-space: pre-wrap; max-height: 50vh; overflow: auto; line-height: 1.6; }
+.sbot-mission-tools { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.sbot-mission-tool { min-width: 0; border: 1px solid var(--color-border-subtle, #e8e7e4); border-radius: 8px; background: var(--color-surface-2, #f8f7f4); }
+.sbot-mission-tool > details { margin: 0; }
+.sbot-mission-tool summary { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 9px 11px; }
+.sbot-mission-tool summary::marker { color: var(--color-text-secondary, #706f6b); }
+.sbot-mission-tool-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
+.sbot-mission-tool-status, .sbot-mission-tool-duration { font-size: 12px; color: var(--color-text-secondary, #706f6b); white-space: nowrap; }
+.sbot-mission-tool--running .sbot-mission-tool-status { color: #137c4b; }
+.sbot-mission-tool--error .sbot-mission-tool-status { color: #b42318; }
+.sbot-mission-tool-body { display: grid; gap: 8px; padding: 0 11px 11px; }
+.sbot-mission-tool-body > div { display: grid; gap: 3px; min-width: 0; }
+.sbot-mission-tool-body span, .sbot-mission-tool-body time { font-size: 11px; color: var(--color-text-secondary, #706f6b); }
+.sbot-mission-tool-body code { display: block; max-height: 7.5em; padding: 7px 9px; overflow: auto; border-radius: 6px; background: var(--color-surface-1, #fff); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.45; }
+@media (max-width: 640px) {
+  .sbot-mission-tool summary { grid-template-columns: minmax(0, 1fr) auto; }
+  .sbot-mission-tool-duration { grid-column: 2; }
+}
 
 .sbot-mission-result { overflow-x: auto; line-height: 1.6; }
+
+/* Shared durable job status: compact, details stay collapsed. */
+.claw-durable-jobs { display: grid; gap: .4rem; max-height: 12rem; overflow: auto; }
+.claw-durable-job { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .4rem .8rem; padding: .65rem; border: 1px solid var(--border-color, #d9d9d9); border-radius: .6rem; }
+.claw-durable-job details { grid-column: 1 / -1; overflow-wrap: anywhere; font-size: .85rem; }
+.claw-durable-job button, .claw-durable-job summary { cursor: pointer; }
+.claw-durable-job p { margin: .4rem 0; }
+
+.claw-durable-approval { grid-column: 1 / -1; min-width: 0; }
+.claw-durable-approval pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12rem; overflow: auto; }

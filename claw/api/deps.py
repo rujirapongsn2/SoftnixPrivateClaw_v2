@@ -80,6 +80,7 @@ class AppState:
     blueprints: "BlueprintStore | None" = None
     project_container_config: "ProjectContainerConfigStore | None" = None
     project_containers: "ProjectContainerManager | None" = None
+    jobs: object | None = None
 
 
 def get_state(request: Request) -> AppState:

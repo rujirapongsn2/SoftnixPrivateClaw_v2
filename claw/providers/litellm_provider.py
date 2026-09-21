@@ -433,6 +433,9 @@ class LiteLLMProvider(LLMProvider):
         stream = None
         transport_stream_started = False
         try:
+            from claw.jobs.provider import current_execution, foreground_accounting
+            if current_execution.get() is not None or foreground_accounting.get() is not None:
+                kwargs['num_retries'] = 0  # outer runtime retries each reserve their own usage
             stream = await acompletion(**kwargs)
             async for chunk in stream:
                 transport_stream_started = True

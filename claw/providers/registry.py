@@ -125,6 +125,40 @@ def context_window(model: str | None) -> int | None:
     return None
 
 
+@lru_cache(maxsize=256)
+def _model_pricing(model: str | None) -> tuple[float, float] | None:
+    """Return LiteLLM's local input/output USD-per-token rates when known."""
+    name = (model or "").strip()
+    if not name:
+        return None
+    try:
+        from litellm import model_cost
+    except ImportError:  # pragma: no cover - litellm is a hard dependency
+        return None
+    parts = name.split("/")
+    for start in range(len(parts)):
+        info = model_cost.get("/".join(parts[start:]))
+        if not info:
+            continue
+        input_rate = info.get("input_cost_per_token")
+        output_rate = info.get("output_cost_per_token")
+        if isinstance(input_rate, (int, float)) and isinstance(output_rate, (int, float)):
+            return float(input_rate), float(output_rate)
+    return None
+
+
+def estimated_cost_usd(model: str | None, usage: dict[str, int]) -> float | None:
+    """Estimate one provider call's USD cost; unknown/private models return None."""
+    pricing = _model_pricing(model)
+    if pricing is None:
+        return None
+    input_rate, output_rate = pricing
+    return (
+        int(usage.get("prompt_tokens", 0) or 0) * input_rate
+        + int(usage.get("completion_tokens", 0) or 0) * output_rate
+    )
+
+
 def apply_model_overrides(model: str, kwargs: dict) -> None:
     spec = find_spec(model)
     if not spec:

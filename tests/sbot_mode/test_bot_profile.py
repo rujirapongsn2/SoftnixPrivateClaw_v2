@@ -352,10 +352,31 @@ class _FakeKnowledge:
 
 
 @pytest.mark.asyncio
-async def test_the_prompt_does_not_advertise_a_tool_the_allowlist_removed(stores, tmp_path):
+async def test_the_prompt_does_not_advertise_a_tool_that_is_not_there(stores, tmp_path):
     """A prompt that names an unavailable tool is worse than one that stays
     quiet: the model follows the instruction, the registry refuses the call,
     and the user gets an apology instead of an answer."""
+    user, _, session = await _bot_session(
+        stores, "kb-none@sbot.ai", tool_allowlist=["web_search"]
+    )
+    provider = FakeProvider([text_turn("ok")])
+    runtime = make_runtime(stores, provider, tmp_path)  # no knowledge service
+
+    await runtime.handle_message(user.id, session.id, "อ่านคู่มือให้หน่อย")
+
+    prompt = system_text(provider.calls[0])
+    assert "search_knowledge" not in prompt
+    assert "search_knowledge" not in provider.offered_tools[0]
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_allowlist_does_not_cut_the_bot_off_from_the_knowledge_base(
+    stores, tmp_path
+):
+    """Searching the owner's own knowledge bases is retrieval over their own
+    data, in the same class as `recall_memory` — not a capability. Withholding
+    it left a bot created to answer from a corpus unable to read that corpus,
+    and neither Settings nor its leader had any way to grant it back."""
     user, _, session = await _bot_session(
         stores, "kb@sbot.ai", tool_allowlist=["web_search"]
     )
@@ -365,9 +386,10 @@ async def test_the_prompt_does_not_advertise_a_tool_the_allowlist_removed(stores
     await runtime.handle_message(user.id, session.id, "อ่านคู่มือให้หน่อย")
 
     prompt = system_text(provider.calls[0])
-    assert "search_knowledge" not in prompt
-    assert "handbook" not in prompt
-    assert "search_knowledge" not in provider.offered_tools[0]
+    assert "search_knowledge" in prompt and "handbook" in prompt
+    assert "search_knowledge" in provider.offered_tools[0]
+    # Still a boundary: what it was not given stays gone.
+    assert "exec" not in provider.offered_tools[0]
 
 
 @pytest.mark.asyncio

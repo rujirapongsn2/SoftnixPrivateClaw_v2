@@ -7,7 +7,7 @@ JSON columns use the portable JSON type (JSONB on Postgres via dialect).
 import uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, func, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, func, text, true
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Aliased so every column below is NUL-stripping by construction — see
@@ -348,6 +348,9 @@ class Schedule(Base):
     """Recurring or one-shot prompt delivered to the agent on schedule."""
 
     __tablename__ = "schedules"
+    # The scheduler's only read is "enabled and due", once a minute across every
+    # tenant — the user_id index below does nothing for it.
+    __table_args__ = (Index("ix_schedules_due", "enabled", "next_run_at"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
@@ -378,7 +381,7 @@ class UsageRecord(Base):
     # False for background work (memory consolidation): the tokens are real and
     # belong in the bill, but the row is not a chat turn the user took, so every
     # turn count has to exclude it or it contradicts the user's own quota.
-    counts_as_turn: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
+    counts_as_turn: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     # Cost *shape* of the turn, not just its price: LLM round-trips, tools run,
     # and the wait before the first visible character. Tokens alone can't tell a
     # one-shot answer apart from a multi-tool detour that produced the same reply.

@@ -3,7 +3,8 @@
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from claw.db.models import Base
-import sbot.db.models  # register isolated mode tables
+import sbot.db.models  # noqa: F401 — register isolated mode tables
+import claw.jobs.models  # noqa: F401 — register shared durable-job tables
 
 
 def create_engine_and_factory(database_url: str):
