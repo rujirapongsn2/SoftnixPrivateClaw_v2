@@ -8,6 +8,7 @@ everyone. Only the owner may modify or delete a base.
 """
 
 import os
+import shutil
 import tempfile
 from typing import Literal
 
@@ -23,12 +24,16 @@ router = APIRouter(prefix="/api/knowledge")
 _UPLOAD_CHUNK = 1024 * 1024  # 1 MB stream chunks
 
 Visibility = Literal["private", "group", "public"]
+KnowledgeKind = Literal["general", "queryable"]
+_GENERAL_SUFFIXES = {".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm", ".csv"}
+_QUERYABLE_SUFFIXES = {".csv", ".xlsx"}
 
 
 class CreateKBBody(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
     visibility: Visibility = "private"
+    kind: KnowledgeKind = "general"
     # Only meaningful when visibility == "group" — additional groups beyond
     # the owner's own (which is always included by default, see
     # KnowledgeBase.visibility).
@@ -39,6 +44,7 @@ class UpdateKBBody(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     description: str | None = None
     visibility: Visibility | None = None
+    kind: KnowledgeKind | None = None
     shared_group_ids: list[str] | None = None
 
 
@@ -53,6 +59,8 @@ def _doc_row(d) -> dict:
         "chunks": d.chunks,
         "status": getattr(d, "status", "ready"),
         "error": getattr(d, "error", ""),
+        "dataset_rows": getattr(d, "dataset_rows", 0),
+        "dataset_schema": getattr(d, "dataset_schema", None),
         "created_at": d.created_at.isoformat(),
     }
 
@@ -91,7 +99,8 @@ async def create_base(
     body: CreateKBBody, user: User = Depends(current_user), state: AppState = Depends(get_state)
 ) -> dict:
     kb = await state.knowledge.create_base(
-        owner_id=user.id, name=body.name, description=body.description, visibility=body.visibility
+        owner_id=user.id, name=body.name, description=body.description,
+        visibility=body.visibility, kind=body.kind,
     )
     shared_group_ids: list[str] = []
     if kb.visibility == "group" and body.shared_group_ids:
@@ -102,6 +111,7 @@ async def create_base(
         "name": kb.name,
         "description": kb.description,
         "visibility": kb.visibility,
+        "kind": kb.kind,
         "shared_group_ids": shared_group_ids,
         "is_owner": True,
         "docs": 0,
@@ -113,9 +123,16 @@ async def update_base(
     kb_id: str, body: UpdateKBBody, user: User = Depends(current_user), state: AppState = Depends(get_state)
 ) -> dict:
     await _owned_base(state, user, kb_id)
-    kb = await state.knowledge.update_base(
-        kb_id, name=body.name, description=body.description, visibility=body.visibility
-    )
+    try:
+        kb = await state.knowledge.update_base(
+            kb_id,
+            name=body.name,
+            description=body.description,
+            visibility=body.visibility,
+            kind=body.kind,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     shared_group_ids: list[str] = []
     if kb.visibility == "group" and body.shared_group_ids is not None:
         await state.knowledge.set_shared_groups(kb_id, body.shared_group_ids)
@@ -126,6 +143,7 @@ async def update_base(
         "name": kb.name,
         "description": kb.description,
         "visibility": kb.visibility,
+        "kind": kb.kind,
         "shared_group_ids": shared_group_ids,
     }
 
@@ -136,6 +154,7 @@ async def delete_base(
 ) -> dict:
     await _owned_base(state, user, kb_id)
     await state.knowledge.delete_base(kb_id)
+    shutil.rmtree(state.knowledge_service.root / kb_id, ignore_errors=True)
     return {"deleted": True}
 
 
@@ -201,7 +220,7 @@ async def upload_documents(
     """Accept one or more documents, stage them to disk, and queue them for
     background parsing. Returns 202 with each doc in `pending` status — poll the
     documents list to watch them turn `ready` (or `failed`)."""
-    await _owned_base(state, user, kb_id)
+    kb = await _owned_base(state, user, kb_id)
     svc = state.knowledge_service
     kcfg = state.settings.knowledge
     if len(files) > kcfg.max_docs_per_upload:
@@ -209,6 +228,17 @@ async def upload_documents(
             status_code=413, detail=f"at most {kcfg.max_docs_per_upload} files per upload"
         )
     queued, errors = [], []
+    allowed = _QUERYABLE_SUFFIXES if kb.kind == "queryable" else _GENERAL_SUFFIXES
+    for upload in files:
+        suffix = os.path.splitext(upload.filename or "")[1].lower()
+        if suffix not in allowed:
+            if suffix == ".xlsx" and kb.kind == "general":
+                raise HTTPException(
+                    status_code=415,
+                    detail="Excel files are supported only in Queryable Knowledge",
+                )
+            detail = "CSV and XLSX" if kb.kind == "queryable" else "PDF, DOCX, text, HTML, Markdown, and CSV"
+            raise HTTPException(status_code=415, detail=f"{kb.kind} Knowledge supports {detail} files")
     for upload in files:
         name = upload.filename or "document"
         tmp_path, err = await _stage_upload(upload, svc.staging_dir, svc.max_doc_bytes)
@@ -230,5 +260,8 @@ async def delete_document(
     kb_id: str, doc_id: str, user: User = Depends(current_user), state: AppState = Depends(get_state)
 ) -> dict:
     await _owned_base(state, user, kb_id)
+    doc = await state.knowledge.get_doc(doc_id)
+    if doc is None or doc.kb_id != kb_id:
+        raise HTTPException(status_code=404, detail="document not found")
     await state.knowledge_service.delete_doc(doc_id)
     return {"deleted": True}

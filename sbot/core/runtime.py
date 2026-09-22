@@ -79,6 +79,7 @@ from sbot.tools.browser import BrowserTool
 from sbot.tools.documents import build_document_tools
 from sbot.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from sbot.tools.knowledge import SearchKnowledgeTool
+from sbot.tools.dataset import QueryKnowledgeDatasetTool
 from sbot.tools.memory import MemoryTool, RecallMemoryTool
 from sbot.tools.plan import PlanTool
 from sbot.tools.project import ProjectTool
@@ -274,6 +275,7 @@ class ClawAgent:
             self.tools.register(ManageSkillTool(skills, user_id, workspace=workspace))
         if knowledge is not None:
             self.tools.register(SearchKnowledgeTool(knowledge, user_id))
+            self.tools.register(QueryKnowledgeDatasetTool(knowledge, user_id, settings.knowledge_root))
         if schedules is not None:
             from sbot.tools.schedule import ScheduleTool
 
@@ -1309,18 +1311,26 @@ class AgentRuntime:
                 # tool the model cannot call buys a refused call and an apology,
                 # not an answer.
                 knowledge_summary = ""
-                usable = [b for b in bases if b["docs"] > 0] if agent.tools.has("search_knowledge") else []
+                usable = [
+                    b
+                    for b in bases
+                    if b["docs"] > 0
+                    and (
+                        (b.get("kind", "general") == "general" and agent.tools.has("search_knowledge"))
+                        or (b.get("kind") == "queryable" and agent.tools.has("query_knowledge_dataset"))
+                    )
+                ]
                 if usable:
                     lines = "\n".join(
-                        f"- {b['name']}" + (f": {b['description']}" if b["description"] else "")
+                        f"- {b['name']} [{b.get('kind', 'general')}]"
+                        + (f": {b['description']}" if b["description"] else "")
                         for b in usable
                     )
                     knowledge_summary = (
                         "# Knowledge bases\n\n"
-                        "The user has uploaded documents into these knowledge bases. When a "
-                        "question may be answered by them, call the `search_knowledge` tool "
-                        "(optionally with `knowledge_base` to target one) and answer from the "
-                        "returned passages, citing the source.\n\n" + lines
+                        "For general knowledge, use `search_knowledge` and cite the returned passages. "
+                        "For queryable knowledge, use `query_knowledge_dataset`: inspect its schema first, "
+                        "then run exact filters, grouping or calculations.\n\n" + lines
                     )
                 # Tell the agent which integrations exist but aren't connected yet,
                 # so it points the user at Settings -> Connectors instead of

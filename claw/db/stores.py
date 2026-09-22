@@ -3393,7 +3393,8 @@ class KnowledgeStore:
     _VISIBILITIES = ("private", "group", "public")
 
     async def create_base(
-        self, owner_id: str, name: str, description: str = "", visibility: str = "private"
+        self, owner_id: str, name: str, description: str = "", visibility: str = "private",
+        kind: str = "general",
     ) -> KnowledgeBase:
         async with self.factory() as db:
             kb = KnowledgeBase(
@@ -3401,6 +3402,7 @@ class KnowledgeStore:
                 name=name[:120],
                 description=description,
                 visibility=visibility if visibility in self._VISIBILITIES else "private",
+                kind=kind if kind in {"general", "queryable"} else "general",
             )
             db.add(kb)
             await db.commit()
@@ -3420,6 +3422,14 @@ class KnowledgeStore:
                 kb.name = str(fields["name"])[:120]
             if fields.get("description") is not None:
                 kb.description = str(fields["description"])
+            requested_kind = fields.get("kind")
+            if requested_kind in {"general", "queryable"} and requested_kind != kb.kind:
+                doc_count = await db.scalar(
+                    select(func.count(KnowledgeDoc.id)).where(KnowledgeDoc.kb_id == kb_id)
+                )
+                if doc_count:
+                    raise ValueError("knowledge type cannot be changed after files are uploaded")
+                kb.kind = requested_kind
             if fields.get("visibility") in self._VISIBILITIES:
                 kb.visibility = fields["visibility"]
                 if kb.visibility != "group":
@@ -3517,6 +3527,7 @@ class KnowledgeStore:
                 "name": kb.name,
                 "description": kb.description,
                 "visibility": kb.visibility,
+                "kind": kb.kind,
                 "owner_id": kb.owner_id,
                 "is_owner": kb.owner_id == user_id,
                 "owner_group_name": group_names.get(owner_group_id),
@@ -3674,6 +3685,30 @@ class KnowledgeStore:
             doc.concept_id = concept_id
             doc.chars = chars
             doc.chunks = len(chunk_records)
+            doc.status = "ready"
+            doc.error = ""
+            kb = await db.get(KnowledgeBase, doc.kb_id)
+            if kb is not None:
+                kb.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(doc)
+            return doc
+
+    async def finalize_dataset_doc(
+        self,
+        *,
+        doc_id: str,
+        dataset_path: str,
+        dataset_schema: dict[str, Any],
+        dataset_rows: int,
+    ) -> KnowledgeDoc | None:
+        async with self.factory() as db:
+            doc = await db.get(KnowledgeDoc, doc_id)
+            if doc is None:
+                return None
+            doc.dataset_path = dataset_path[:512]
+            doc.dataset_schema = dataset_schema
+            doc.dataset_rows = dataset_rows
             doc.status = "ready"
             doc.error = ""
             kb = await db.get(KnowledgeBase, doc.kb_id)

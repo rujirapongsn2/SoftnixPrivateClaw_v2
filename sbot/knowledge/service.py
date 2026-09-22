@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -25,6 +26,7 @@ from loguru import logger
 from sbot.config import KnowledgeSettings
 from sbot.db.stores import KnowledgeStore
 from sbot.knowledge.okf import OkfBundle, render_concept, slugify
+from claw.knowledge.dataset import ingest_dataset
 from sbot.knowledge.parse import parse_document_path
 
 
@@ -136,6 +138,42 @@ class KnowledgeService:
     async def _process(self, job: _IngestJob) -> None:
         await self.store.set_doc_status(job.doc_id, "processing")
         try:
+            base = await self.store.get_base(job.kb_id)
+            if base is None:
+                await self.store.set_doc_status(job.doc_id, "failed", "knowledge base was deleted")
+                return
+            suffix = Path(job.filename).suffix.lower()
+            if base.kind == "queryable":
+                if suffix not in {".csv", ".xlsx"}:
+                    await self.store.set_doc_status(
+                        job.doc_id, "failed", "Queryable Knowledge supports CSV and XLSX files only"
+                    )
+                    return
+                destination = self.root / job.kb_id / "datasets" / job.doc_id
+                try:
+                    schema, rows = await asyncio.to_thread(
+                        ingest_dataset, Path(job.staging_path), job.filename, destination
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Queryable ingest failed for {}: {}", job.doc_id, exc)
+                    await self.store.set_doc_status(job.doc_id, "failed", str(exc)[:500])
+                    return
+                relative = str((destination / "dataset.duckdb").relative_to(self.root))
+                finalized = await self.store.finalize_dataset_doc(
+                    doc_id=job.doc_id,
+                    dataset_path=relative,
+                    dataset_schema=schema,
+                    dataset_rows=rows,
+                )
+                if finalized is None:
+                    shutil.rmtree(destination, ignore_errors=True)
+                    return
+                return
+            if suffix == ".xlsx":
+                await self.store.set_doc_status(
+                    job.doc_id, "failed", "Excel files are supported only in Queryable Knowledge"
+                )
+                return
             # CPU-bound (pypdf/OCR/chunking) — off the event loop.
             text, chunks, err = await asyncio.to_thread(
                 parse_document_path,
@@ -200,6 +238,8 @@ class KnowledgeService:
         if doc.concept_id:
             bundle.remove_concept(doc.concept_id)
             self._read_concept_body.cache_clear()
+        if doc.dataset_path:
+            shutil.rmtree((self.root / doc.dataset_path).parent, ignore_errors=True)
         await self.store.delete_doc(doc_id)
         await self._refresh_bundle(kb_id, bundle, action="Deletion", title=doc.title, concept_id=doc.concept_id)
 
@@ -215,6 +255,15 @@ class KnowledgeService:
         if doc is None:
             return {"available": False, "status": "missing"}
         if doc.status != "ready" or not doc.concept_id:
+            if doc.status == "ready" and doc.dataset_schema:
+                return {
+                    "available": True,
+                    "kind": "queryable",
+                    "title": doc.title,
+                    "filename": doc.filename,
+                    "rows": doc.dataset_rows,
+                    "schema": doc.dataset_schema,
+                }
             return {"available": False, "status": doc.status}
 
         offset = max(0, offset)

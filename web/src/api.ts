@@ -299,6 +299,7 @@ export interface KnowledgeBase {
   id: string;
   name: string;
   description: string;
+  kind: "general" | "queryable";
   visibility: "private" | "group" | "public";
   // Only meaningful when visibility === "group": the owner's own group is
   // always included by default (not listed here); these are additional
@@ -326,6 +327,8 @@ export interface KnowledgeDoc {
   size: number;
   chars: number;
   chunks: number;
+  dataset_rows?: number;
+  dataset_schema?: Record<string, unknown> | null;
   // Background ingestion lifecycle: pending → processing → ready | failed.
   status: "pending" | "processing" | "ready" | "failed";
   error: string;
@@ -1032,14 +1035,15 @@ export const api = {
     description: string,
     visibility: "private" | "group" | "public",
     sharedGroupIds?: string[],
+    kind: "general" | "queryable" = "general",
   ) =>
     request<KnowledgeBase>("/api/knowledge", {
       method: "POST",
-      body: JSON.stringify({ name, description, visibility, shared_group_ids: sharedGroupIds ?? null }),
+      body: JSON.stringify({ name, description, visibility, shared_group_ids: sharedGroupIds ?? null, kind }),
     }),
   updateKnowledge: (
     id: string,
-    patch: Partial<Pick<KnowledgeBase, "name" | "description" | "visibility" | "shared_group_ids">>,
+    patch: Partial<Pick<KnowledgeBase, "name" | "description" | "visibility" | "kind" | "shared_group_ids">>,
   ) =>
     request<KnowledgeBase>(`/api/knowledge/${id}`, {
       method: "PATCH",
