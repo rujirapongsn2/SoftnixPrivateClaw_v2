@@ -583,6 +583,8 @@ class KnowledgeBase(Base):
     name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str] = mapped_column(Text, default="")
     visibility: Mapped[str] = mapped_column(String(16), default="private")  # private | group | public
+    # general = chunked text retrieval; queryable = typed, read-only tabular queries.
+    kind: Mapped[str] = mapped_column(String(16), default="general", server_default="general")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -622,6 +624,10 @@ class KnowledgeDoc(Base):
     # (already fully ingested) valid after the migration.
     status: Mapped[str] = mapped_column(String(16), default="ready", server_default="ready")
     error: Mapped[str] = mapped_column(Text, default="", server_default="")
+    # Queryable datasets retain their immutable source and a DuckDB index.
+    dataset_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    dataset_schema: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    dataset_rows: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

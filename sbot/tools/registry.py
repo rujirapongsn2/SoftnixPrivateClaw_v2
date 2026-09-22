@@ -45,6 +45,7 @@ ALWAYS_AVAILABLE_TOOLS = INTRINSIC_TOOLS | frozenset({
     # restricted bot unable to search the very corpus it was created to answer
     # from, with no way for either its leader or Settings to grant it back.
     "search_knowledge",
+    "query_knowledge_dataset",
     "list_bots",
     "create_bot",
     "create_bots",

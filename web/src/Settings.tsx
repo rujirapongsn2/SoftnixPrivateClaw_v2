@@ -3711,6 +3711,10 @@ function BrowserExtensionPanel() {
 // ---------------------------------------------------------------- Knowledge
 
 const KB_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,.html,.htm,.csv";
+// Include MIME types as well as extensions: Safari/macOS can filter the file
+// picker by the document's UTI-derived MIME type instead of its suffix.
+const QUERYABLE_KB_ACCEPT =
+  ".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 // Shared by the create form and the per-card editor: a 3-way Private/Group/
 // Public picker, plus (when Group is selected) the owner's default group and
@@ -3807,6 +3811,7 @@ function KnowledgePanel() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [kind, setKind] = useState<"general" | "queryable">("general");
   const [visibility, setVisibility] = useState<"private" | "group" | "public">("private");
   const [sharedGroupIds, setSharedGroupIds] = useState<string[]>([]);
   const [groups, setGroups] = useState<SimpleGroup[]>([]);
@@ -3847,10 +3852,12 @@ function KnowledgePanel() {
         description.trim(),
         visibility,
         visibility === "group" ? sharedGroupIds : undefined,
+        kind,
       );
       setName("");
       setDescription("");
       setVisibility("private");
+      setKind("general");
       setSharedGroupIds([]);
       setCreating(false);
       load();
@@ -3894,6 +3901,19 @@ function KnowledgePanel() {
               onChange={setDescription}
               placeholder={t("settings.knowledge.descPlaceholder")}
             />
+            <SegmentedControl
+              value={kind}
+              onChange={(value) => setKind(value as "general" | "queryable")}
+              label={t("settings.knowledge.type")}
+            >
+              <SegmentedControlItem value="general" label={t("settings.knowledge.general")} />
+              <SegmentedControlItem value="queryable" label={t("settings.knowledge.queryable")} />
+            </SegmentedControl>
+            <Text size="sm" color="secondary">
+              {kind === "queryable"
+                ? t("settings.knowledge.queryableHelp")
+                : t("settings.knowledge.generalHelp")}
+            </Text>
             <VisibilitySelector
               visibility={visibility}
               onChange={setVisibility}
@@ -3971,6 +3991,7 @@ function KnowledgeCard({
   const [expanded, setExpanded] = useState(false);
   const [docs, setDocs] = useState<KnowledgeDoc[] | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [kindBusy, setKindBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   // Separate from `busy` (which gates delete actions) so flipping visibility
   // never disables unrelated Delete buttons for the duration of the request.
@@ -4062,6 +4083,9 @@ function KnowledgeCard({
 
   const onPick = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    if (kb.kind === "general" && Array.from(files).some((file) => file.name.toLowerCase().endsWith(".csv"))) {
+      toast({ body: t("settings.knowledge.csvSearchOnly"), type: "info", autoHideDuration: 5000 });
+    }
     setUploading(true);
     try {
       const res = await api.uploadKnowledgeDocs(kb.id, Array.from(files));
@@ -4138,6 +4162,27 @@ function KnowledgeCard({
     }
   };
 
+  const changeKind = async () => {
+    const nextKind = kb.kind === "queryable" ? "general" : "queryable";
+    setKindBusy(true);
+    try {
+      const r = await api.updateKnowledge(kb.id, { kind: nextKind });
+      onPatch(kb.id, { kind: r.kind });
+      toast({
+        body:
+          r.kind === "queryable"
+            ? t("settings.knowledge.queryableEnabled")
+            : t("settings.knowledge.generalEnabled"),
+        type: "info",
+        autoHideDuration: 3000,
+      });
+    } catch (e) {
+      toast({ body: t("settings.knowledge.updateTypeFailed", { error: String(e) }), type: "error" });
+    } finally {
+      setKindBusy(false);
+    }
+  };
+
   return (
     <Card padding={3}>
       <div className="claw-kb-card">
@@ -4145,6 +4190,14 @@ function KnowledgeCard({
           <Icon icon={Library} size="md" color="secondary" />
           <div className="claw-kb-card-title">
             <Text weight="semibold">{kb.name}</Text>
+            <Badge
+              variant={kb.kind === "queryable" ? "info" : "neutral"}
+              label={
+                kb.kind === "queryable"
+                  ? t("settings.knowledge.queryable")
+                  : t("settings.knowledge.general")
+              }
+            />
             {kb.is_owner ? (
               <button
                 type="button"
@@ -4215,17 +4268,36 @@ function KnowledgeCard({
           ref={fileRef}
           type="file"
           multiple
-          accept={KB_ACCEPT}
+          accept={kb.kind === "queryable" ? QUERYABLE_KB_ACCEPT : KB_ACCEPT}
           style={{ display: "none" }}
           onChange={(e) => void onPick(e.target.files)}
         />
         <div className="claw-kb-actions">
+          {kb.is_owner && kb.docs === 0 && (
+            <Button
+              label={
+                kb.kind === "queryable"
+                  ? t("settings.knowledge.useGeneral")
+                  : t("settings.knowledge.enableExcel")
+              }
+              variant="ghost"
+              size="sm"
+              isDisabled={kindBusy || uploading}
+              clickAction={changeKind}
+            />
+          )}
           {kb.is_owner && (
             <Button
-              label={uploading ? t("settings.knowledge.uploading") : t("settings.knowledge.upload")}
+              label={
+                uploading
+                  ? t("settings.knowledge.uploading")
+                  : kb.kind === "queryable"
+                    ? t("settings.knowledge.uploadDataset")
+                    : t("settings.knowledge.uploadDocuments")
+              }
               variant="secondary"
               size="sm"
-              isDisabled={uploading}
+              isDisabled={uploading || kindBusy}
               icon={<Icon icon={Upload} size="sm" />}
               onClick={() => fileRef.current?.click()}
             />
@@ -4277,12 +4349,16 @@ function KnowledgeCard({
                       <span className="claw-kb-doc-meta claw-kb-doc-processing">
                         {t("settings.knowledge.processing")}
                       </span>
+                    ) : kb.kind === "queryable" ? (
+                      <span className="claw-kb-doc-meta">
+                        {t("settings.knowledge.rowsCount", { count: (d.dataset_rows ?? 0).toLocaleString() })}
+                      </span>
                     ) : (
                       <span className="claw-kb-doc-meta">
                         {t("settings.knowledge.chunksCount", { count: String(d.chunks), plural: d.chunks === 1 ? "" : "s" })}
                       </span>
                     )}
-                    {d.status === "ready" && (
+                    {d.status === "ready" && kb.kind === "general" && (
                       <button
                         type="button"
                         className="claw-kb-doc-del"

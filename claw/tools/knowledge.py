@@ -48,7 +48,11 @@ class SearchKnowledgeTool(Tool):
     async def execute(
         self, query: str, queries: list[str] | None = None, knowledge_base: str = "", **_: Any
     ) -> str:
-        bases = await self.store.list_accessible(self.user_id)
+        bases = [
+            base
+            for base in await self.store.list_accessible(self.user_id)
+            if base.get("kind", "general") == "general"
+        ]
         if not bases:
             return "No knowledge bases are available. Ask the user to upload documents in Settings → Knowledge."
         if knowledge_base:

@@ -78,6 +78,7 @@ from claw.tools.plan import PlanTool
 from claw.tools.shell import ExecTool
 from claw.core.builtin_skills import builtin_skills
 from claw.tools.knowledge import SearchKnowledgeTool
+from claw.tools.dataset import QueryKnowledgeDatasetTool
 from claw.tools.skills import ManageSkillTool, ReadSkillTool, build_skills_summary
 from claw.tools.spawn import SpawnTool
 from claw.tools.web import WebFetchTool, WebSearchTool
@@ -112,7 +113,7 @@ _ARTIFACT_CORE_TOOLS = {
     "read_skill", "read_file", "read_excel", "read_csv", "read_pdf", "read_docx",
     "list_dir", "write_file", "edit_file", "exec", "update_plan",
 }
-_ARTIFACT_DISCOVERY_TOOLS = {"web_search", "web_fetch", "search_knowledge"}
+_ARTIFACT_DISCOVERY_TOOLS = {"web_search", "web_fetch", "search_knowledge", "query_knowledge_dataset"}
 _ARTIFACT_SKILL_HINTS = {
     "xlsx": ("xlsx", "xls", "csv", "excel", "spreadsheet", "workbook", "เอ็กซ์เซล", "สเปรดชีต"),
     "docx": ("docx", "word"),
@@ -325,6 +326,7 @@ class ClawAgent:
             self.tools.register(ManageSkillTool(skills, user_id, workspace=workspace))
         if knowledge is not None:
             self.tools.register(SearchKnowledgeTool(knowledge, user_id))
+            self.tools.register(QueryKnowledgeDatasetTool(knowledge, user_id, settings.knowledge_root))
         if schedules is not None:
             from claw.tools.schedule import ScheduleTool
 
@@ -1252,15 +1254,15 @@ class AgentRuntime:
                 usable = [b for b in bases if b["docs"] > 0]
                 if usable:
                     lines = "\n".join(
-                        f"- {b['name']}" + (f": {b['description']}" if b["description"] else "")
+                        f"- {b['name']} [{b.get('kind', 'general')}]"
+                        + (f": {b['description']}" if b["description"] else "")
                         for b in usable
                     )
                     knowledge_summary = (
                         "# Knowledge bases\n\n"
-                        "The user has uploaded documents into these knowledge bases. When a "
-                        "question may be answered by them, call the `search_knowledge` tool "
-                        "(optionally with `knowledge_base` to target one) and answer from the "
-                        "returned passages, citing the source.\n\n" + lines
+                        "For general knowledge, use `search_knowledge` and cite the returned passages. "
+                        "For queryable knowledge, use `query_knowledge_dataset`: inspect its schema first, "
+                        "then run exact filters, grouping or calculations.\n\n" + lines
                     )
                 # Tell the agent which integrations exist but aren't connected yet,
                 # so it points the user at Settings -> Connectors instead of
