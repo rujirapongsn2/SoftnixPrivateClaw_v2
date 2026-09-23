@@ -28,6 +28,7 @@ from claw.core.limits import RateLimiter
 from claw.core.plans import builtin_plan_seeds
 from claw.core.runtime import AgentRuntime
 from claw.core.scheduler import SchedulerService
+from claw.core.model_health import ModelHealthService
 from claw.security.policy import (
     DEFAULT_TOOL_ARGS_EXEMPT,
     PolicyEngine,
@@ -102,6 +103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     guardrails = GuardrailStore(factory)
     llm_config = LLMConfigStore(factory, secret_box=secret_box)
+    model_health = ModelHealthService(llm_config, provider.provider)
     oauth_apps = OAuthAppStore(factory, secret_box=secret_box)
     smtp_config = SmtpConfigStore(factory, secret_box=secret_box)
     browser_broker = BrowserBrokerStore(settings.workspaces_root / "_browser_broker")
@@ -223,6 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.exception("Policy-plan seed failed; continuing without default plans")
         scheduler.start()
+        model_health.start()
         heartbeat.start()
         await runtime.recover_artifact_jobs()
         await knowledge_service.start()
@@ -278,6 +281,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         # Stop intake, then let in-flight turns finish before tearing down.
         await scheduler.stop()
+        await model_health.stop()
         await heartbeat.stop()
         await knowledge_service.stop()
         await telegram_mgr.stop()
@@ -321,6 +325,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tts_rate_limiter=RateLimiter(settings.tts.per_minute),
         guardrails=guardrails,
         llm_config=llm_config,
+        model_health=model_health,
         audit=audit,
         oauth_apps=oauth_apps,
         browser_broker=browser_broker,

@@ -1052,6 +1052,21 @@ async def update_model(
     return await llm.update_model(state, model_pk, body, owner_id=None)
 
 
+@router.post("/models/{model_pk}/health/check")
+async def run_model_health_check(
+    model_pk: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    model = next((m for m in await state.llm_config.list_models(None) if m.id == model_pk), None)
+    if model is None:
+        raise HTTPException(status_code=404, detail="model not found")
+    provider = next((p for p in await state.llm_config.list_providers(None) if p.id == model.provider_id), None)
+    if model.kind != "chat" or not provider or not provider.enabled or not (model.enabled or model.health_auto_disabled):
+        raise HTTPException(status_code=409, detail="model is not eligible for a health check")
+    if state.model_health is None:
+        raise HTTPException(status_code=503, detail="model health checker unavailable")
+    return {"checked": await state.model_health.check_model(model_pk, force=True)}
+
+
 @router.delete("/models/{model_pk}")
 async def delete_model(
     model_pk: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)

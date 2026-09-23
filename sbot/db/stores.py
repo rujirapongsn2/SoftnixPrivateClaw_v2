@@ -3576,6 +3576,7 @@ class LLMConfigStore:
         enabled: bool = True,
         model_prefix: str = "",
         owner_id: str | None = None,
+        auto_disable_models: bool = False,
     ) -> LLMProvider:
         async with self.factory() as db:
             row = LLMProvider(
@@ -3585,6 +3586,7 @@ class LLMConfigStore:
                 enabled=enabled,
                 model_prefix=model_prefix,
                 owner_id=owner_id,
+                auto_disable_models=auto_disable_models if owner_id is None else False,
             )
             db.add(row)
             await db.commit()
@@ -3599,23 +3601,36 @@ class LLMConfigStore:
             # user can never edit another user's (or a global) provider.
             if row is None or row.owner_id != owner_id:
                 return None
+            route_changed = bool(fields.get("api_key"))
+            route_changed = route_changed or (
+                "api_base" in fields and fields["api_base"] is not None and fields["api_base"] != row.api_base
+            )
+            route_changed = route_changed or (fields.get("enabled") is True and not row.enabled)
+            route_changed = route_changed or (
+                owner_id is None and fields.get("auto_disable_models") is True and not row.auto_disable_models
+            )
             if "name" in fields and fields["name"]:
                 row.name = fields["name"]
             if "api_base" in fields and fields["api_base"] is not None:
                 row.api_base = fields["api_base"]
             if "enabled" in fields and fields["enabled"] is not None:
                 row.enabled = fields["enabled"]
-                if not row.enabled:
-                    await db.execute(
-                        LLMModel.__table__.update()
-                        .where(LLMModel.provider_id == provider_id)
-                        .values(is_fallback=False)
-                    )
             if "model_prefix" in fields and fields["model_prefix"] is not None:
                 row.model_prefix = fields["model_prefix"]
+            if owner_id is None and fields.get("auto_disable_models") is not None:
+                row.auto_disable_models = fields["auto_disable_models"]
             # Only overwrite the key when a non-empty value is supplied.
             if fields.get("api_key"):
                 row.api_key = self._enc(self._clean_key(fields["api_key"]))
+            if route_changed:
+                await db.execute(
+                    LLMModel.__table__.update()
+                    .where(LLMModel.provider_id == provider_id)
+                    .values(
+                        health_status="unchecked", health_reason="",
+                        health_checked_at=None, health_claim_until=None,
+                    )
+                )
             await db.commit()
             return row
 
@@ -3700,6 +3715,12 @@ class LLMConfigStore:
             for key in ("model_id", "label", "enabled", "cost", "description", "kind"):
                 if key in fields and fields[key] is not None:
                     setattr(row, key, fields[key])
+            if fields.get("enabled") is True or "model_id" in fields:
+                row.health_auto_disabled = False
+                row.health_status = "unchecked"
+                row.health_reason = ""
+                row.health_checked_at = None
+                row.health_claim_until = None
             # 0 (or any falsy value) clears the override back to "look it up",
             # since there is no such thing as a zero-token window.
             if "context_window" in fields:
@@ -3711,8 +3732,8 @@ class LLMConfigStore:
             if row.kind != "chat":
                 row.is_default = False
                 row.is_fallback = False
-            elif not row.enabled:
-                row.is_fallback = False
+            # Preserve the assignment for the Control Plane warning; runtime
+            # fallback_model_for() excludes disabled models/providers.
             # The auto-selected default is an admin-global concept only; private
             # models are never the global default (owner_id=None gates it).
             elif owner_id is None and fields.get("is_default"):
@@ -3780,6 +3801,7 @@ class LLMConfigStore:
                         LLMModel.enabled.is_(True),
                         LLMProvider.enabled.is_(True),
                         LLMModel.kind == kind,
+                        or_(LLMProvider.auto_disable_models.is_(False), LLMModel.health_status.notin_(("quarantined", "unavailable"))),
                         or_(
                             LLMProvider.owner_id.is_(None),
                             LLMProvider.owner_id == user_id,
@@ -3838,36 +3860,47 @@ class LLMConfigStore:
                         LLMProvider.enabled.is_(True),
                         LLMModel.is_default.is_(True),
                         LLMModel.kind == "chat",
+                        or_(LLMProvider.auto_disable_models.is_(False), LLMModel.health_status.notin_(("quarantined", "unavailable"))),
                     )
                     .limit(1)
                 )
             ).scalar_one_or_none()
             return row.model_id if row else None
 
+    async def has_configured_global_chat_models(self) -> bool:
+        """Distinguish a fresh env-only install from a disabled DB model lineup."""
+        async with self.factory() as db:
+            row = await db.scalar(
+                select(LLMModel.id)
+                .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+                .where(LLMProvider.owner_id.is_(None), LLMModel.kind == "chat")
+                .limit(1)
+            )
+            return row is not None
+
     async def default_model_for(self, max_cost: str | None = None) -> str | None:
-        """The chat model to fall back to for a user on a plan with ceiling
-        ``max_cost``. Prefers the admin default when the plan allows it, else
-        the most capable (highest-cost) allowed enabled global chat model, so a
-        restricted user never lands on a model their plan forbids. None when the
-        plan allows nothing (or nothing is configured)."""
+        """Return an allowed global default, or None when its configured row is
+        disabled. A plan that excludes an enabled default may use another
+        allowed model; an unavailable default requires manual selection."""
         async with self.factory() as db:
             rows = (
-                (
-                    await db.execute(
-                        select(LLMModel)
-                        .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
-                        .where(
-                            LLMModel.enabled.is_(True),
-                            LLMProvider.enabled.is_(True),
-                            LLMModel.kind == "chat",
-                            LLMProvider.owner_id.is_(None),  # global models only
-                        )
-                    )
+                await db.execute(
+                    select(LLMModel, LLMProvider)
+                    .join(LLMProvider, LLMModel.provider_id == LLMProvider.id)
+                    .where(LLMModel.kind == "chat", LLMProvider.owner_id.is_(None))
                 )
-                .scalars()
-                .all()
-            )
-        allowed = [m for m in rows if cost_allowed(max_cost, m.cost)]
+            ).all()
+        configured_default = next(((m, p) for m, p in rows if m.is_default), None)
+        if configured_default and (
+            not configured_default[0].enabled or not configured_default[1].enabled
+            or (configured_default[1].auto_disable_models and configured_default[0].health_status in {"quarantined", "unavailable"})
+        ):
+            return None
+        allowed = [
+            m for m, p in rows
+            if m.enabled and p.enabled and (not p.auto_disable_models or m.health_status not in {"quarantined", "unavailable"})
+            and cost_allowed(max_cost, m.cost)
+        ]
         if not allowed:
             return None
         default = next((m for m in allowed if m.is_default), None)
@@ -3888,6 +3921,7 @@ class LLMConfigStore:
                         LLMProvider.owner_id.is_(None),
                         LLMModel.kind == "chat",
                         LLMModel.is_fallback.is_(True),
+                        or_(LLMProvider.auto_disable_models.is_(False), LLMModel.health_status.notin_(("quarantined", "unavailable"))),
                     )
                     .limit(1)
                 )
@@ -3922,6 +3956,7 @@ class LLMConfigStore:
                         LLMModel.kind == "chat",
                         LLMModel.enabled.is_(True),
                         LLMProvider.enabled.is_(True),
+                        or_(LLMProvider.auto_disable_models.is_(False), LLMModel.health_status.notin_(("quarantined", "unavailable"))),
                         or_(
                             LLMProvider.owner_id.is_(None),
                             LLMProvider.owner_id == user_id,

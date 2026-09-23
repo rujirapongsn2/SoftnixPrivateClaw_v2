@@ -137,6 +137,14 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "en": "No chat model is configured yet. An administrator needs to set SBOT_LLM__API_KEY or SBOT_LLM__API_BASE in .env, or add an LLM provider in the Control Plane.",
         "th": "ยังไม่ได้ตั้งค่าโมเดลแชท ผู้ดูแลระบบต้องตั้งค่า SBOT_LLM__API_KEY หรือ SBOT_LLM__API_BASE ใน .env หรือเพิ่ม LLM provider ใน Control Plane ก่อน",
     },
+    "error.no_available_model": {
+        "en": "No configured chat model is available. Ask an administrator to check the provider status in the Control Plane.",
+        "th": "ไม่มีโมเดลแชทที่ตั้งค่าไว้พร้อมใช้งาน กรุณาให้ผู้ดูแลตรวจสถานะผู้ให้บริการใน Control Plane",
+    },
+    "error.model_selection_required": {
+        "en": "The selected or default model is unavailable. Choose an available model to continue.",
+        "th": "โมเดลที่เลือกหรือโมเดลเริ่มต้นไม่พร้อมใช้งาน กรุณาเลือกโมเดลที่พร้อมใช้งานเพื่อดำเนินการต่อ",
+    },
     "reason.timeout": {"en": "connection timed out", "th": "การเชื่อมต่อหมดเวลา"},
     "reason.auth": {"en": "authentication failed", "th": "การยืนยันตัวตนล้มเหลว"},
     "reason.rate_limit": {"en": "rate limit exceeded", "th": "เกินขีดจำกัดการเรียกใช้งาน"},

@@ -420,6 +420,10 @@ export function Chat({
   const [models, setModels] = useState<ModelOption[]>([]);
   const [defaultModel, setDefaultModel] = useState<string>("");
   const [model, setModel] = useState<string>(initialModel ?? "");
+  const availableModelIdsRef = useRef<Set<string> | null>(null);
+  const selectedModelRef = useRef(model);
+  selectedModelRef.current = model;
+  const refreshModelsRef = useRef<(openIfUnavailable?: boolean) => void>(() => {});
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeBase[]>([]);
@@ -888,6 +892,7 @@ export function Chat({
           sawCompletionRef.current = true;
           setItems((prev) => settleRunningCalls(prev, "error"));
           setError(event.message ?? "unknown error");
+          refreshModelsRef.current(event.code === "model_selection_required");
           onActivity?.();
           break;
       }
@@ -1030,15 +1035,27 @@ export function Chat({
     };
   }, [sessionId]);
 
-  // Load the model picker options + the admin-configured default once.
+  // Keep the picker in sync with auto-disabled models while the chat stays open.
   useEffect(() => {
-    api
-      .listModels()
-      .then((r) => {
+    let mounted = true;
+    const refresh = (openIfUnavailable = false) => {
+      void api.listModels().then((r) => {
+        if (!mounted) return;
+        const available = new Set(r.models.map((item) => item.model_id));
+        const selectedUnavailable = Boolean(selectedModelRef.current && !available.has(selectedModelRef.current));
+        availableModelIdsRef.current = available;
         setModels(r.models);
         setDefaultModel(r.default || "");
-      })
-      .catch(() => setModels([]));
+        setModel((current) => current && !available.has(current) ? "" : current);
+        if (openIfUnavailable && r.models.length > 0 && (selectedUnavailable || !r.default)) setModelOpen(true);
+      }).catch(() => { /* Keep the last known options during a network error. */ });
+    };
+    refreshModelsRef.current = refresh;
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    return () => { mounted = false; refreshModelsRef.current = () => {}; window.clearInterval(timer); window.removeEventListener("focus", onFocus); };
   }, []);
 
   // The picker must always reflect the ACTIVE session's model — its sticky
@@ -1059,7 +1076,8 @@ export function Chat({
     // and since the queued first message is flushed reading `model`, the turn
     // would even RUN on the wrong model). Keep the current selection.
     if (prev === null && sessionId !== null) return;
-    setModel(initialModel || defaultModel || "");
+    const next = initialModel || defaultModel || "";
+    setModel(next && availableModelIdsRef.current && !availableModelIdsRef.current.has(next) ? "" : next);
   }, [sessionId, initialModel, defaultModel]);
 
   // Show the composer mic only when the backend has speech-to-text configured.
@@ -2314,7 +2332,7 @@ export function Chat({
                     <button type="button" className="claw-model-trigger">
                       <Icon icon={Box} size="sm" color="secondary" />
                       <span className="claw-model-trigger-label">
-                        {models.find((m) => m.model_id === model)?.label ?? t("chat.model.fallback")}
+                        {models.find((m) => m.model_id === model)?.label ?? t("chat.model.select")}
                       </span>
                       <Icon icon={ChevronDown} size="xsm" color="secondary" />
                     </button>

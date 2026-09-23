@@ -705,7 +705,12 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
     chat_cost = plan["max_chat_cost"] if plan else None
     models = await state.llm_config.enabled_models(user.id, max_cost=chat_cost)
     default = await state.llm_config.default_model_for(chat_cost)
+    configured_global = await state.llm_config.has_configured_global_chat_models()
     if not models:
+        # A configured but unavailable lineup must not reappear as the env
+        # default in the picker: runtime rejects that route as well.
+        if configured_global:
+            return {"models": [], "default": None}
         llm = state.settings.llm
         if not (llm.api_key or llm.api_base):
             return {"models": [], "default": None}
@@ -723,7 +728,7 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
             ],
             "default": env_model,
         }
-    if not default:
+    if not default and not configured_global:
         default = models[0]["model_id"]
     return {"models": models, "default": default}
 

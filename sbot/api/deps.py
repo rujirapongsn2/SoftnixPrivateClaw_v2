@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, WebSocket
 
+from claw.core.model_health import ModelHealthService
+
 from sbot.browser.broker import BrowserBrokerStore
 from sbot.config import Settings
 from sbot.core.bus import EventBus
@@ -85,6 +87,7 @@ class AppState:
     # Per-user throttle for the /tts endpoint, same rationale as image_rate_limiter.
     tts_rate_limiter: RateLimiter = None  # type: ignore[assignment]
     telegram: "TelegramChannel | None" = None
+    model_health: ModelHealthService | None = None
 
 
 def get_state(request: Request) -> AppState:

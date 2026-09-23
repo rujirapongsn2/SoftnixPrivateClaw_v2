@@ -26,6 +26,7 @@ class ProviderBody(BaseModel):
     api_key: str = ""
     api_base: str = ""
     enabled: bool = True
+    auto_disable_models: bool = False
     # LiteLLM routing prefix (e.g. "openai", "openrouter") applied automatically
     # to every model id added under this provider — see LLMProvider.model_prefix.
     model_prefix: str = Field(default="", max_length=32, pattern=_PREFIX_RE)
@@ -36,6 +37,7 @@ class ProviderPatch(BaseModel):
     api_key: str | None = None  # empty/None keeps the existing key
     api_base: str | None = None
     enabled: bool | None = None
+    auto_disable_models: bool | None = None
     model_prefix: str | None = Field(default=None, max_length=32, pattern=_PREFIX_RE)
 
 
@@ -73,6 +75,7 @@ def provider_row(p, models: list) -> dict:
         "api_base": p.api_base,
         "has_key": bool(p.api_key),
         "enabled": p.enabled,
+        "auto_disable_models": p.auto_disable_models if p.owner_id is None else False,
         "model_prefix": p.model_prefix,
         "models": [model_row(m) for m in models if m.provider_id == p.id],
     }
@@ -84,6 +87,13 @@ def model_row(m) -> dict:
         "model_id": m.model_id,
         "label": m.label or m.model_id,
         "enabled": m.enabled,
+        "health_status": m.health_status,
+        "health_reason": m.health_reason,
+        "health_checked_at": (
+            m.health_checked_at.isoformat() + ("Z" if m.health_checked_at.tzinfo is None else "")
+            if m.health_checked_at else None
+        ),
+        "health_auto_disabled": m.health_auto_disabled,
         "is_default": m.is_default,
         "is_fallback": m.is_fallback,
         "cost": m.cost or "medium",
@@ -106,7 +116,8 @@ async def create_provider(state: AppState, body: ProviderBody, owner_id: str | N
     if await state.llm_config.get_by_name(body.name, owner_id) is not None:
         raise HTTPException(status_code=409, detail="a provider with this name already exists")
     p = await state.llm_config.create_provider(
-        body.name, body.api_key, body.api_base, body.enabled, body.model_prefix, owner_id=owner_id
+        body.name, body.api_key, body.api_base, body.enabled, body.model_prefix,
+        owner_id=owner_id, auto_disable_models=body.auto_disable_models if owner_id is None else False,
     )
     return provider_row(p, [])
 

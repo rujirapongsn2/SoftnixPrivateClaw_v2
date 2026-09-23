@@ -2248,26 +2248,63 @@ html[data-chat-bg="grid"] .claw-chat {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Table-like column layout for the model list (LLM Providers / My Models).
-   One grid spans the header AND every model row (cells are flat siblings,
-   not nested per-row divs) so column widths are computed once from the
-   widest cell in each column across the whole table — real table sizing,
-   without a <table> element (which would fight the inline Edit-expands-to-
-   a-form pattern used below). Only the model id column is flexible/truncating;
-   every other column sizes to its content (`max-content`) and stays put. */
-.claw-models-grid {
-  display: grid;
-  grid-template-columns: minmax(150px, 1.2fr) max-content minmax(90px, 1.4fr) max-content max-content max-content max-content;
+/* Provider identity and controls have separate rows so toggles do not crowd
+   the title or push the model table sideways at intermediate widths. */
+.claw-provider-heading,
+.claw-provider-models-heading {
+  display: flex;
+  justify-content: space-between;
   align-items: center;
-  column-gap: 12px;
+  gap: 12px;
+  flex-wrap: wrap;
 }
-.claw-models-grid-user {
-  /* No "Set default" column — that control is admin-only. */
-  grid-template-columns: minmax(150px, 1.2fr) max-content minmax(90px, 1.4fr) max-content max-content max-content;
+.claw-provider-ident,
+.claw-provider-actions,
+.claw-provider-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
-.claw-models-grid > * {
-  padding-block: 6px;
+.claw-provider-ident { flex: 1 1 220px; }
+.claw-provider-ident > div:last-child { min-width: 0; }
+.claw-provider-ident p { overflow-wrap: anywhere; }
+.claw-provider-actions { margin-left: auto; }
+.claw-provider-tools {
+  border-top: 1px solid var(--color-border-subtle, #e8e7e4);
+  margin-top: 10px;
+  padding-top: 10px;
 }
+.claw-provider-models-heading {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border-subtle, #e8e7e4);
+}
+.claw-models-list { min-width: 0; }
+.claw-model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(90px, max-content) 88px 112px;
+  grid-template-areas: "name cost status actions";
+  align-items: center;
+  gap: 12px;
+  min-height: 58px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-border-subtle, #e8e7e4);
+}
+.claw-model-row-head {
+  min-height: 0;
+  padding: 0 0 6px;
+  color: var(--color-text-secondary, #706b64);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.claw-model-row-head > :nth-child(1) { grid-area: name; }
+.claw-model-row-head > :nth-child(2) { grid-area: cost; }
+.claw-model-row-head > :nth-child(3) { grid-area: status; }
+.claw-model-row-head > :nth-child(4) { grid-area: actions; }
+.claw-model-row-edit { margin: 8px 0; }
 .claw-models-grid-head {
   padding-block: 0 6px;
   border-bottom: 1px solid var(--color-border-subtle, #e8e7e4);
@@ -2275,37 +2312,60 @@ html[data-chat-bg="grid"] .claw-chat {
   text-transform: uppercase;
   letter-spacing: 0.02em;
 }
-/* The edit-mode form isn't table cells — let it span every column. */
-.claw-models-grid-span {
-  grid-column: 1 / -1;
-}
 .claw-model-name-cell {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  grid-area: name;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
   min-width: 0;
 }
+.claw-model-name-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; width: 100%; }
+.claw-model-health {
+  line-height: 1.25;
+  color: var(--color-text-secondary, #706b64);
+}
+.claw-model-name-cell .claw-model-health { font-size: 11px; }
+.claw-model-name-cell .claw-model-health-warning { color: var(--color-warning, #a45b00); }
 .claw-model-cost-cell {
   display: flex;
+  grid-area: cost;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 }
-/* The label is the primary identifier — give it first claim on the cell's
-   width and only the "default" badge (fixed, less essential) yields; on truly
-   long labels the text itself ellipsizes rather than wrapping to a second
-   line, which broke row height consistency. */
 .claw-model-label {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .claw-model-id {
+  display: block;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.claw-model-status-cell { grid-area: status; }
+.claw-model-actions-cell {
+  grid-area: actions;
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+@media (max-width: 760px) {
+  .claw-model-row {
+    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-areas: "name actions" "cost status";
+    gap: 5px 10px;
+  }
+  .claw-model-row-head { display: none; }
+  .claw-model-cost-cell { align-self: start; }
+  .claw-model-status-cell { justify-self: end; }
 }
 .claw-rule-pattern {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -3090,12 +3150,6 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 .claw-model-fallback-picker select {
   width: 100%;
-}
-.claw-model-fallback-route {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
 }
 @media (max-width: 640px) {
   .claw-model-fallback-heading {
