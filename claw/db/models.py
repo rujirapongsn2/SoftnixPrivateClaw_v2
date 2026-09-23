@@ -495,6 +495,7 @@ class LLMProvider(Base):
     # existed — those fall back to typing the full id manually.
     model_prefix: Mapped[str] = mapped_column(String(32), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    auto_disable_models: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -526,6 +527,11 @@ class LLMModel(Base):
     cost: Mapped[str] = mapped_column(String(16), default="medium")  # low|medium|high|very_high
     description: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    health_status: Mapped[str] = mapped_column(String(24), default="unchecked")
+    health_reason: Mapped[str] = mapped_column(String(40), default="")
+    health_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    health_claim_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    health_auto_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     # One admin-global chat model may be the automatic runtime fallback. It is
     # deliberately separate from is_default: the default is the normal route,

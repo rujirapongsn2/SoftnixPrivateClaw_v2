@@ -741,6 +741,10 @@ export interface LLMModelCfg {
   model_id: string;
   label: string;
   enabled: boolean;
+  health_status: "unchecked" | "healthy" | "warning" | "quarantined" | "unavailable";
+  health_reason: string;
+  health_checked_at: string | null;
+  health_auto_disabled: boolean;
   is_default: boolean;
   is_fallback: boolean;
   cost: ModelCost;
@@ -757,6 +761,7 @@ export interface LLMProviderCfg {
   api_base: string;
   has_key: boolean;
   enabled: boolean;
+  auto_disable_models: boolean;
   // LiteLLM routing prefix auto-applied to model ids added under this provider
   // (e.g. "openai", "openrouter"). Empty on providers created before this
   // existed — those still type the full model id manually.
@@ -945,6 +950,7 @@ export interface LlmProviderCreate {
   api_key: string;
   api_base: string;
   enabled?: boolean;
+  auto_disable_models?: boolean;
   model_prefix?: string;
 }
 export interface LlmProviderPatch {
@@ -952,6 +958,7 @@ export interface LlmProviderPatch {
   api_key?: string;
   api_base?: string;
   enabled?: boolean;
+  auto_disable_models?: boolean;
   model_prefix?: string;
 }
 export interface LlmModelCreate {
@@ -982,6 +989,7 @@ export interface LlmApi {
   deleteProvider: (id: string) => Promise<unknown>;
   createModel: (providerId: string, m: LlmModelCreate) => Promise<LLMModelCfg>;
   updateModel: (id: string, m: LlmModelPatch) => Promise<LLMModelCfg>;
+  runModelHealth: (id: string) => Promise<{ checked: boolean }>;
   deleteModel: (id: string) => Promise<unknown>;
 }
 
@@ -1690,6 +1698,8 @@ function makeLlmApi(base: string): LlmApi {
       }),
     updateModel: (id, m) =>
       request<LLMModelCfg>(`${base}/models/${id}`, { method: "PATCH", body: JSON.stringify(m) }),
+    runModelHealth: (id) =>
+      request<{ checked: boolean }>(`${base}/models/${id}/health/check`, { method: "POST" }),
     deleteModel: (id) => request(`${base}/models/${id}`, { method: "DELETE" }),
   };
 }

@@ -9,6 +9,7 @@ from claw.config import Settings
 from claw.core.bus import EventBus
 from claw.core.connectors import ConnectorManager
 from claw.core.limits import RateLimiter
+from claw.core.model_health import ModelHealthService
 from claw.core.runtime import AgentRuntime
 from claw.core.scheduler import SchedulerService
 from claw.db.models import User
@@ -81,6 +82,7 @@ class AppState:
     project_container_config: "ProjectContainerConfigStore | None" = None
     project_containers: "ProjectContainerManager | None" = None
     jobs: object | None = None
+    model_health: ModelHealthService | None = None
 
 
 def get_state(request: Request) -> AppState:

@@ -126,11 +126,11 @@ async def test_configured_fallback_is_unique_and_respects_plan_ceiling(db_factor
     await store.update_model(cheap.id, owner_id=None, is_fallback=True)
     assert await store.fallback_model_for("low") == "vendor/cheap"
 
-    # Disabling its provider removes the route rather than leaving the Control
-    # Plane showing a fallback the runtime cannot use.
+    # Disabling its provider suspends the route but retains the configured
+    # fallback so Control Plane can warn and let the admin replace it.
     await store.update_provider(cheap.provider_id, owner_id=None, enabled=False)
     assert await store.fallback_model_for(None) is None
-    assert not any(m.is_fallback for m in await store.list_models())
+    assert any(m.is_fallback for m in await store.list_models())
     await store.update_provider(cheap.provider_id, owner_id=None, enabled=True)
 
     # Selecting another fallback atomically replaces the previous one.
@@ -563,6 +563,31 @@ async def test_no_allowed_model_rejects_turn_instead_of_bypassing_ceiling(db_fac
     out = await runtime.handle_message(user.id, session.id, "hi")
     assert "plan" in out.lower() or "แพ็กเกจ" in out
     assert provider.calls == []  # provider never invoked — turn rejected before any model call
+
+
+async def test_disabled_default_does_not_silently_route_to_another_model(db_factory, stores, tmp_path):
+    plans = await _seed_plans(db_factory)
+    llm_config = LLMConfigStore(db_factory)
+    p = await llm_config.create_provider("prov", "sk", "", True, "openrouter", owner_id=None)
+    primary = await llm_config.create_model(p.id, "vendor/primary", "primary", True, "low", "", kind="chat", owner_id=None)
+    await llm_config.create_model(p.id, "vendor/other", "other", True, "low", "", kind="chat", owner_id=None)
+    await llm_config.update_model(primary.id, owner_id=None, is_default=True)
+    await llm_config.update_model(primary.id, owner_id=None, enabled=False)
+
+    provider = FakeProvider([text_turn("chosen")])
+    runtime = make_runtime(stores, provider, tmp_path)
+    runtime.plans = plans
+    runtime.llm_config = llm_config
+    user = await stores["users"].get_or_create_by_email("u@x.io")
+    session = await stores["sessions"].create(user.id)
+
+    out = await runtime.handle_message(user.id, session.id, "hi")
+    assert "choose" in out.lower() or "เลือก" in out
+    assert provider.calls == []
+
+    out = await runtime.handle_message(user.id, session.id, "hi", model="vendor/other")
+    assert out == "chosen"
+    assert provider.calls
 
 
 async def test_env_default_model_usable_on_default_plan_when_no_control_plane_model(

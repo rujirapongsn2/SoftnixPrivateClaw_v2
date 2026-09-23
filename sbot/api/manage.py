@@ -1103,7 +1103,10 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
     chat_cost = plan["max_chat_cost"] if plan else None
     models = await state.llm_config.enabled_models(user.id, max_cost=chat_cost)
     default = await state.llm_config.default_model_for(chat_cost)
+    configured_global = await state.llm_config.has_configured_global_chat_models()
     if not models:
+        if configured_global:
+            return {"models": [], "default": None}
         llm = state.settings.llm
         if not (llm.api_key or llm.api_base):
             return {"models": [], "default": None}
@@ -1121,7 +1124,7 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
             ],
             "default": env_model,
         }
-    if not default and (state.settings.llm.api_key or state.settings.llm.api_base):
+    if not default and not configured_global and (state.settings.llm.api_key or state.settings.llm.api_base):
         # A private BYOK model is selectable, but it is never the server
         # default. Returning it here would label the default option incorrectly
         # even though a null override routes through this configured model.

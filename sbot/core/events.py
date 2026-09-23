@@ -238,4 +238,5 @@ class TurnCompleted(AgentEvent):
 class TurnError(AgentEvent):
     turn_id: str
     message: str
+    code: str = ""
     type: str = field(default="turn_error", init=False)

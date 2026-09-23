@@ -1091,6 +1091,10 @@ class AgentRuntime:
                             model_scope = resolved.get("scope", "global")
                         else:
                             requested_unavailable = True
+                    if requested_unavailable:
+                        msg = t("error.model_selection_required", locale)
+                        self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg, code="model_selection_required"))
+                        return msg
                     if effective_model is None:
                         effective_model = await self.llm_config.default_model_for(plan_chat_cost)
                         if effective_model is not None:
@@ -1157,13 +1161,16 @@ class AgentRuntime:
                             fallback_key = fallback_resolved["api_key"] or None
                             fallback_base = fallback_resolved["api_base"] or None
                             fallback_window = fallback_resolved["context_window"]
-                            if requested_unavailable:
-                                effective_model = fallback_model
-                                model_key = fallback_key
-                                model_base = fallback_base
-                                model_window = fallback_window
-                                model_scope = "global"
-                                fallback_model = None
+                    # A configured-but-disabled lineup must not silently route
+                    # through the env default, which may be the same failed model.
+                    if effective_model is None and await self.llm_config.has_configured_global_chat_models():
+                        available = await self.llm_config.enabled_models(user_id, max_cost=plan_chat_cost)
+                        msg = t("error.model_selection_required" if available else "error.no_available_model", locale)
+                        self.bus.publish(session_id, TurnError(
+                            turn_id=turn_id, message=msg,
+                            code="model_selection_required" if available else "no_available_model",
+                        ))
+                        return msg
                     # About to fall through to the operator's env-configured default
                     # (effective_model is None, no DB model available). If that env
                     # default has no usable credentials either (no api_key and no

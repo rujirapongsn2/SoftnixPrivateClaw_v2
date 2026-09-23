@@ -1318,11 +1318,14 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
   const chatModels = providers.flatMap((provider) =>
     provider.models.map((model) => ({ provider, model })).filter(({ model }) => model.kind === "chat"),
   );
-  const defaultModel = chatModels.find(({ model }) => model.is_default);
   const fallbackModel = chatModels.find(({ model }) => model.is_fallback);
+  const fallbackUnavailable = Boolean(fallbackModel && (
+    !fallbackModel.model.enabled || !fallbackModel.provider.enabled
+    || (fallbackModel.provider.auto_disable_models && ["quarantined", "unavailable"].includes(fallbackModel.model.health_status))
+  ));
   const fallbackCandidates = chatModels.filter(
     ({ provider, model }) =>
-      model.is_fallback || (provider.enabled && model.enabled && !model.is_default),
+      model.is_fallback || (provider.enabled && model.enabled && (!provider.auto_disable_models || !["quarantined", "unavailable"].includes(model.health_status)) && !model.is_default),
   );
 
   const reload = useCallback(() => llmApi.list().then((r) => setProviders(r.providers)), [llmApi]);
@@ -1350,14 +1353,9 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
       {scope === "admin" && providers.length > 0 && (
         <Card padding={2} variant="muted" className="claw-model-fallback-card">
           <div className="claw-model-fallback-heading">
-            <div className="claw-row">
+            <div className="claw-row" title={t("admin.providers.fallbackDescription")}>
               <Icon icon={Router} size="md" color="secondary" />
-              <div>
-                <Text weight="semibold">{t("admin.providers.fallbackTitle")}</Text>
-                <Text size="sm" color="secondary" as="p">
-                  {t("admin.providers.fallbackDescription")}
-                </Text>
-              </div>
+              <Text weight="semibold">{t("admin.providers.fallbackTitle")}</Text>
             </div>
             <label className="claw-model-fallback-picker">
               <Text size="sm" weight="semibold">{t("admin.providers.fallbackModel")}</Text>
@@ -1382,19 +1380,20 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
                 {fallbackCandidates.map(({ provider, model }) => (
                   <option key={model.id} value={model.id}>
                     {model.label || model.model_id} · {provider.name} · {t(COST_LABEL[model.cost])}
+                    {(!model.enabled || !provider.enabled || (provider.auto_disable_models && ["quarantined", "unavailable"].includes(model.health_status))) ? ` · ${t("admin.providers.fallbackUnavailableLabel")}` : ""}
                   </option>
                 ))}
               </select>
-              <Text size="sm" color="secondary">
-                {t("admin.providers.fallbackPlanHint")}
-              </Text>
             </label>
           </div>
-          {defaultModel && fallbackModel && (
-            <div className="claw-model-fallback-route" aria-label={t("admin.providers.fallbackRoute")}>
-              <Badge variant="purple" label={`${t("admin.providers.defaultBadge")}: ${defaultModel.model.label}`} />
-              <span aria-hidden="true">→</span>
-              <Badge variant="neutral" label={`${t("admin.providers.fallbackBadge")}: ${fallbackModel.model.label}`} />
+          {fallbackUnavailable && fallbackModel && (
+            <div className="claw-info-box is-warning" role="status">
+              <Text size="sm">
+                {t("admin.providers.fallbackUnavailable")}
+                {fallbackModel.model.health_reason && ["quarantined", "unavailable"].includes(fallbackModel.model.health_status)
+                  ? ` ${t(`admin.providers.health_${fallbackModel.model.health_reason}`)}`
+                  : ""}
+              </Text>
             </div>
           )}
           {fallbackCandidates.length === 0 && !fallbackModel && (
@@ -1603,7 +1602,11 @@ function ProviderCard({
   const [apiBase, setApiBase] = useState(provider.api_base);
   const [apiKey, setApiKey] = useState("");
   const [modelPrefix, setModelPrefix] = useState(provider.model_prefix);
+  const [checkingModels, setCheckingModels] = useState(false);
   const toast = useToast();
+  const checkableModels = provider.models.filter(
+    (model) => model.kind === "chat" && (model.enabled || model.health_auto_disabled),
+  );
 
   const logo = provider.models.length > 0 ? logoForModelId(provider.models[0].model_id) : null;
   // model_prefix is a free-text field, not a stored link back to the preset that
@@ -1617,8 +1620,8 @@ function ProviderCard({
 
   return (
     <Card padding={2} variant={provider.enabled ? "default" : "muted"}>
-      <div className="claw-row claw-row-between">
-        <div className="claw-row">
+      <div className="claw-provider-heading">
+        <div className="claw-provider-ident">
           <ProviderBrandTile logo={logo} fallback={Cpu} />
           <div>
             <div className="claw-row">
@@ -1632,11 +1635,9 @@ function ProviderCard({
             </Text>
           </div>
         </div>
-        <div className="claw-row">
-          <label className="claw-toggle">
-            <Text size="sm" color="secondary">
-              {t("admin.providers.enabled")}
-            </Text>
+        <div className="claw-provider-actions">
+          <label className="claw-toggle-inline">
+            <Text size="sm" color="secondary">{t("admin.providers.enabled")}</Text>
             <Switch
               value={provider.enabled}
               label={t("admin.providers.enableName", { name: provider.name })}
@@ -1649,8 +1650,8 @@ function ProviderCard({
               }
             />
           </label>
-          <Button
-            label={t("admin.common.edit")}
+          <IconButton
+            label={t("admin.providers.editProviderName", { name: provider.name })}
             icon={<Icon icon={Pencil} size="sm" />}
             size="sm"
             variant="ghost"
@@ -1662,13 +1663,14 @@ function ProviderCard({
               setEditing((e) => !e);
             }}
           />
-          <Button
-            label={t("admin.common.delete")}
+          <IconButton
+            label={t("admin.providers.deleteProviderName", { name: provider.name })}
             icon={<Icon icon={Trash2} size="sm" />}
             size="sm"
             variant="destructive"
             clickAction={() =>
               guard(async () => {
+                if (!window.confirm(t("admin.providers.deleteProviderConfirm", { name: provider.name }))) return;
                 await llmApi.deleteProvider(provider.id);
                 toast({ body: t("admin.providers.deletedToast", { name: provider.name }), type: "info", autoHideDuration: 2500 });
                 await reload();
@@ -1677,6 +1679,51 @@ function ProviderCard({
           />
         </div>
       </div>
+      {scope === "admin" && (
+        <div className="claw-provider-tools">
+          <label className="claw-toggle-inline" title={t("admin.providers.autoDisableHint")}>
+            <Text size="sm" color="secondary">{t("admin.providers.autoDisable")}</Text>
+            <Switch
+              value={provider.auto_disable_models}
+              label={`${t("admin.providers.autoDisable")}: ${provider.name}`}
+              isLabelHidden
+              changeAction={(checked) => guard(async () => {
+                await llmApi.updateProvider(provider.id, { auto_disable_models: checked });
+                await reload();
+              })}
+            />
+          </label>
+          <Button
+            label={t(checkingModels ? "admin.providers.runNowRunning" : "admin.providers.runNow")}
+            size="sm"
+            variant="ghost"
+            isDisabled={checkingModels || !provider.enabled || checkableModels.length === 0}
+            clickAction={() => {
+              setCheckingModels(true);
+              void guard(async () => {
+                let checked = 0;
+                let skipped = 0;
+                try {
+                  for (const [index, model] of checkableModels.entries()) {
+                    if (index > 0) await new Promise((resolve) => window.setTimeout(resolve, 1000));
+                    const result = await llmApi.runModelHealth(model.id);
+                    if (result.checked) checked += 1;
+                    else skipped += 1;
+                    await reload();
+                  }
+                  toast({
+                    body: t("admin.providers.runNowDone", { checked: String(checked), skipped: String(skipped) }),
+                    type: "info",
+                    autoHideDuration: 3500,
+                  });
+                } finally {
+                  setCheckingModels(false);
+                }
+              });
+            }}
+          />
+        </div>
+      )}
 
       {editing && (
         <Card padding={2} variant="muted">
@@ -1740,40 +1787,33 @@ function ProviderCard({
         </Card>
       )}
 
-      <Divider />
-      <Text size="sm" weight="semibold" color="secondary">
-        {t("admin.providers.modelsHeading")}
-      </Text>
+      <div className="claw-provider-models-heading">
+        <Text size="sm" weight="semibold" color="secondary">
+          {t("admin.providers.modelsHeading")} · {provider.models.length}
+        </Text>
+        {!addingModel && (
+          <Button
+            label={t("admin.providers.addModel")}
+            icon={<Icon icon={Plus} size="sm" />}
+            size="sm"
+            variant="ghost"
+            clickAction={() => setAddingModel(true)}
+          />
+        )}
+      </div>
       {provider.models.length === 0 && !addingModel && (
         <Text size="sm" color="secondary">
           {t("admin.providers.noModelsYet")}
         </Text>
       )}
       {provider.models.length > 0 && (
-        // One grid spanning the header AND every model row (not one grid per
-        // row) so columns size and align from the widest cell across the
-        // whole table — real table column behavior, without a <table> element
-        // (which would fight the inline Edit-expands-to-a-form pattern below).
-        <div className={`claw-models-grid claw-models-grid-${scope}`}>
-          <Text size="2xs" color="secondary" className="claw-models-grid-head">
-            {t("admin.providers.colModel")}
-          </Text>
-          <Text size="2xs" color="secondary" className="claw-models-grid-head">
-            {t("admin.providers.colCost")}
-          </Text>
-          <Text size="2xs" color="secondary" className="claw-models-grid-head">
-            {t("admin.providers.colModelId")}
-          </Text>
-          <Text size="2xs" color="secondary" className="claw-models-grid-head">
-            {t("admin.providers.colStatus")}
-          </Text>
-          {scope === "admin" && (
-            <Text size="2xs" color="secondary" className="claw-models-grid-head">
-              {t("admin.providers.colDefault")}
-            </Text>
-          )}
-          <span className="claw-models-grid-head" />
-          <span className="claw-models-grid-head" />
+        <div className="claw-models-list">
+          <div className="claw-model-row claw-model-row-head">
+            <span>{t("admin.providers.colModel")}</span>
+            <span>{t("admin.providers.colCost")}</span>
+            <span>{t("admin.providers.colStatus")}</span>
+            <span>{t("admin.providers.colActions")}</span>
+          </div>
           {/* Chat models first, then the vision reader, then image models —
               keeps the kinds visually grouped within the provider. */}
           {[...provider.models]
@@ -1782,6 +1822,7 @@ function ProviderCard({
               <ModelRow
                 key={m.id}
                 model={m}
+                autoDisable={provider.auto_disable_models}
                 modelPrefix={provider.model_prefix}
                 reload={reload}
                 guard={guard}
@@ -1792,7 +1833,7 @@ function ProviderCard({
         </div>
       )}
 
-      {addingModel ? (
+      {addingModel && (
         <AddModelForm
           providerId={provider.id}
           modelPrefix={provider.model_prefix}
@@ -1800,14 +1841,6 @@ function ProviderCard({
           reload={reload}
           llmApi={llmApi}
           onClose={() => setAddingModel(false)}
-        />
-      ) : (
-        <Button
-          label={t("admin.providers.addModel")}
-          icon={<Icon icon={Plus} size="sm" />}
-          size="sm"
-          variant="secondary"
-          clickAction={() => setAddingModel(true)}
         />
       )}
     </Card>
@@ -1818,6 +1851,7 @@ function ProviderCard({
 // demand (so the model id / label / cost can actually be corrected in place).
 function ModelRow({
   model,
+  autoDisable,
   modelPrefix,
   reload,
   guard,
@@ -1825,6 +1859,7 @@ function ModelRow({
   scope,
 }: {
   model: LLMModelCfg;
+  autoDisable: boolean;
   modelPrefix: string;
   reload: () => Promise<void>;
   guard: (fn: () => Promise<void>) => Promise<void>;
@@ -1850,9 +1885,7 @@ function ModelRow({
 
   if (editing) {
     return (
-      // Spans every column of the shared models grid — the edit form is a
-      // free-form multi-field layout, not another row of table cells.
-      <Card padding={2} variant="muted" className="claw-models-grid-span">
+      <Card padding={2} variant="muted" className="claw-model-row-edit">
         <div className="claw-panel">
           <div className="claw-info-box">
             <Icon icon={Pencil} size="sm" color="secondary" />
@@ -1958,27 +1991,44 @@ function ModelRow({
   }
 
   return (
-    <>
+    <div className="claw-model-row">
       <div className="claw-model-name-cell">
-        <Text className="claw-model-label">{model.label || stripKnownPrefix(modelPrefix, model.model_id)}</Text>
-        {model.is_default && (
-          <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label={t("admin.providers.defaultBadge")} />
+        <div className="claw-model-name-line">
+          <span className="claw-model-label" title={model.label || model.model_id}>
+            {model.label || stripKnownPrefix(modelPrefix, model.model_id)}
+          </span>
+          {model.is_default && (
+            <Badge variant="purple" icon={<Icon icon={Star} size="xsm" />} label={t("admin.providers.defaultBadge")} />
+          )}
+          {model.is_fallback && (
+            <Badge variant="neutral" icon={<Icon icon={Router} size="xsm" />} label={t("admin.providers.fallbackBadge")} />
+          )}
+        </div>
+        {model.label && model.label !== model.model_id && (
+          <span className="claw-model-id" title={model.model_id}>
+            {model.model_id}
+          </span>
         )}
-        {model.is_fallback && (
-          <Badge variant="neutral" icon={<Icon icon={Router} size="xsm" />} label={t("admin.providers.fallbackBadge")} />
+        {scope === "admin" && (
+          <span className={`claw-model-health${["warning", "quarantined", "unavailable"].includes(model.health_status) ? " claw-model-health-warning" : ""}`}
+            title={model.health_checked_at ? new Date(model.health_checked_at).toLocaleString() : undefined}
+            role={["warning", "quarantined", "unavailable"].includes(model.health_status) ? "status" : undefined}>
+            {model.kind !== "chat"
+              ? t("admin.providers.healthNotMonitored")
+              : model.health_status === "unchecked"
+              ? `${t("admin.providers.healthPending")}${model.health_auto_disabled ? ` · ${t("admin.providers.autoDisabled")}` : ""}`
+              : model.health_status === "healthy"
+              ? `${t("admin.providers.healthHealthy")}${model.health_auto_disabled ? ` · ${t("admin.providers.enableManually")}` : ""}`
+              : `${autoDisable && ["quarantined", "unavailable"].includes(model.health_status) ? `${t("admin.providers.healthPaused")} · ` : ""}${t(`admin.providers.health_${model.health_reason || "probe_failed"}`)}${model.health_auto_disabled ? ` · ${t("admin.providers.autoDisabled")}` : ""}`}
+          </span>
         )}
       </div>
       <div className="claw-model-cost-cell">
         {model.kind !== "chat" && <Badge variant="neutral" label={t(KIND_LABEL[model.kind])} />}
         <span className={`claw-cost claw-cost-${model.cost}`}>{t(COST_LABEL[model.cost])}</span>
       </div>
-      <Text size="sm" color="secondary" className="claw-model-id">
-        {stripKnownPrefix(modelPrefix, model.model_id)}
-      </Text>
-      <label className="claw-toggle-inline">
-        <Text size="sm" color="secondary">
-          {model.enabled ? t("admin.providers.on") : t("admin.providers.off")}
-        </Text>
+      <label className="claw-toggle-inline claw-model-status-cell">
+        <Text size="sm" color="secondary">{model.enabled ? t("admin.providers.on") : t("admin.providers.off")}</Text>
         <Switch
           value={model.enabled}
           label={t("admin.providers.enableName", { name: model.label })}
@@ -1991,43 +2041,40 @@ function ModelRow({
           }
         />
       </label>
-      {/* The auto-selected default is an admin-global concept; a user's private
-          model is never the global default, so this control is admin-only. */}
-      {scope === "admin" && (
-        <Button
-          label={model.is_default ? t("admin.providers.defaultLabel") : t("admin.providers.setDefault")}
-          size="sm"
-          variant={model.is_default ? "secondary" : "ghost"}
-          // Only a chat model can be the chat default.
-          isDisabled={model.is_default || !model.enabled || model.kind !== "chat"}
-          clickAction={() =>
-            guard(async () => {
+      <div className="claw-model-actions-cell">
+        {scope === "admin" && !model.is_default && model.kind === "chat" && (
+          <IconButton
+            label={t("admin.providers.setDefaultName", { name: model.label || model.model_id })}
+            icon={<Icon icon={Star} size="sm" />}
+            size="sm"
+            variant="ghost"
+            isDisabled={!model.enabled}
+            clickAction={() => guard(async () => {
               await llmApi.updateModel(model.id, { is_default: true });
               await reload();
-            })
-          }
+            })}
+          />
+        )}
+        <IconButton
+          label={t("admin.providers.editModelName", { name: model.label || model.model_id })}
+          icon={<Icon icon={Pencil} size="sm" />}
+          size="sm"
+          variant="ghost"
+          clickAction={() => setEditing(true)}
         />
-      )}
-      <Button
-        label={t("admin.common.edit")}
-        icon={<Icon icon={Pencil} size="sm" />}
-        size="sm"
-        variant="ghost"
-        clickAction={() => setEditing(true)}
-      />
-      <Button
-        label={t("admin.providers.remove")}
-        icon={<Icon icon={Trash2} size="sm" />}
-        size="sm"
-        variant="ghost"
-        clickAction={() =>
-          guard(async () => {
+        <IconButton
+          label={t("admin.providers.removeModelName", { name: model.label || model.model_id })}
+          icon={<Icon icon={Trash2} size="sm" />}
+          size="sm"
+          variant="ghost"
+          clickAction={() => guard(async () => {
+            if (!window.confirm(t("admin.providers.removeModelConfirm", { name: model.label || model.model_id }))) return;
             await llmApi.deleteModel(model.id);
             await reload();
-          })
-        }
-      />
-    </>
+          })}
+        />
+      </div>
+    </div>
   );
 }
 

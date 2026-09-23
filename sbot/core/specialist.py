@@ -22,6 +22,7 @@ from sbot.core.keyed_locks import KeyedLocks
 from sbot.core.loop import AgentLoop
 from sbot.core.memory import memory_scope
 from sbot.core.turn_context import current_turn_confirmation, current_turn_deadline
+from sbot.providers.base import ProviderError
 from sbot.tools.documents import build_document_tools
 from sbot.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from sbot.tools.memory import MemoryTool, RecallMemoryTool
@@ -520,6 +521,8 @@ class SpecialistRunner:
                 "api_base": found["api_base"] or None,
                 "context_window": found["context_window"],
             }
+        elif await self.llm_config.has_configured_global_chat_models():
+            raise ProviderError("No enabled chat model is available")
         return resolved
 
     async def _resolve_fallback(self) -> dict[str, Any] | None:

@@ -64,6 +64,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     connectors_mgr = shared.connectors_mgr
     guardrails = shared.guardrails
     llm_config = shared.llm_config
+    model_health = shared.model_health
     oauth_apps = shared.oauth_apps
     smtp_config = shared.smtp_config
     knowledge = shared.knowledge
@@ -275,6 +276,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         tts_rate_limiter=shared.tts_rate_limiter if shared else RateLimiter(settings.tts.per_minute),
         guardrails=guardrails,
         llm_config=llm_config,
+        model_health=model_health,
         audit=audit,
         oauth_apps=oauth_apps,
         browser_broker=browser_broker,

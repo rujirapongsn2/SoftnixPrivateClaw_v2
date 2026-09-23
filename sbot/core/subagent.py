@@ -112,6 +112,8 @@ class SubagentManager:
                 "api_base": found["api_base"] or None,
                 "context_window": found["context_window"],
             }
+        elif await self.llm_config.has_configured_global_chat_models():
+            raise ProviderError("No enabled chat model is available")
         return primary, fallback
 
     def _build_tools(self) -> ToolRegistry:
@@ -160,7 +162,10 @@ class SubagentManager:
                 if left <= 0:
                     return SubagentRun(_OUT_OF_TIME, ok=False)
                 budget = max(min(budget, left), _MIN_RUN_SECONDS)
-            primary, fallback = await self._model_route()
+            try:
+                primary, fallback = await self._model_route()
+            except ProviderError as exc:
+                return SubagentRun(f"Subagent error: {exc}", ok=False)
             loop = AgentLoop(
                 arg_guard=self.arg_guard,
                 provider=self.provider,
