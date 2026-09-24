@@ -196,6 +196,7 @@ export interface AgentEvent {
     | "tool_finished"
     | "tool_progress"
     | "artifact_job_progress"
+    | "session_state_snapshot"
     | "delegation_started"
     | "delegation_step"
     | "delegation_delta"
@@ -234,6 +235,16 @@ export interface AgentEvent {
   max_segments?: number;
   elapsed_seconds?: number;
   token_count?: number;
+  session_id?: string;
+  running?: boolean;
+  artifact_jobs?: Array<{
+    job_id?: string;
+    status?: string;
+    segment?: number;
+    max_segments?: number;
+    elapsed_seconds?: number;
+    message?: string;
+  }>;
   // delegation_started/finished: which bot was handed the work, and what it was
   // asked. `text` carries its full reply on delegation_finished — not a preview,
   // unlike tool_finished's result_preview.

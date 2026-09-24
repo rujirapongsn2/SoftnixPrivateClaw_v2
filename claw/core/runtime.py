@@ -99,13 +99,26 @@ _FALLBACK_ARTIFACTS_SHOWN = 8
 # auto-declined, so a turn can never hang forever on an unanswered card.
 _CONFIRM_TIMEOUT_SECONDS = 600
 
-_ARTIFACT_TASK_RE = re.compile(
-    r"(?:\b(?:xlsx|xls|csv|docx|pptx|pdf|zip|html)\b|excel|spreadsheet|workbook|artifact|"
-    r"ไฟล์|เอ็กซ์เซล|สเปรดชีต|เวิร์กบุ๊ก)",
+_ARTIFACT_ACTION_RE = re.compile(
+    r"(?:\b(?:create|build|generate|export|write|make|produce|save|convert|deliver|send)\b|"
+    r"สร้าง|จัดทำ|ทำไฟล์|ส่งออก|เขียนไฟล์|บันทึกเป็น|แปลงเป็น|ส่งเป็น)",
     re.IGNORECASE,
 )
-_ARTIFACT_ACTION_RE = re.compile(
-    r"(?:create|build|generate|export|write|make|produce|สร้าง|จัดทำ|ทำไฟล์|ส่งออก)",
+_ARTIFACT_TARGET_RE = re.compile(
+    r"(?:\b(?:xlsx|xls|csv|docx|pptx|pdf|zip|html|excel|spreadsheet|workbook|"
+    r"file|document|presentation|slides)\b|ไฟล์|เอกสาร|สเปรดชีต|เวิร์กบุ๊ก|สไลด์|งานนำเสนอ)",
+    re.IGNORECASE,
+)
+_ARTIFACT_CLAUSE_SPLIT_RE = re.compile(
+    # A dot is a sentence boundary only when followed by whitespace (or end of
+    # input); the dot inside names such as report.pdf must stay with its target.
+    r"[!?;]+|\.(?=\s|$)|\n+|\s+(?:and then|and|but|then|also|while|as well as|และ|แต่|แล้ว|จากนั้น|โดย|พร้อมกับ)\s+",
+    re.IGNORECASE,
+)
+_INFORMATION_REQUEST_RE = re.compile(
+    r"^\s*(?:(?:(?:please|can you|could you|would you)\s+)?(?:help me\s+)?(?:find|search|look for|research|investigate|"
+    r"explain|summari[sz]e|review|analy[sz]e|check)\b|"
+    r"(?:ช่วย)?(?:หา|ค้นหา|ค้นคว้า|ศึกษา|อธิบาย|สรุป|ตรวจสอบ|วิเคราะห์|รีวิว))",
     re.IGNORECASE,
 )
 _ARTIFACT_CORE_TOOLS = {
@@ -128,13 +141,29 @@ _GENERIC_ARTIFACT_TERMS = {
 
 
 def _is_artifact_task(content: str, media: list[str] | None = None) -> bool:
-    # A source URL ending in .html/.pdf and a prohibition such as "do not
-    # create files" are not requests for an output artifact.
+    # File types in links, attachments, or unrelated clauses are source context,
+    # not proof that the user wants a generated file. Require an explicit output
+    # action close to a file target within the same clause.
     text = re.sub(r'https?://\S+', '', content or '', flags=re.IGNORECASE)
     text = re.sub(r"\b(?:do not|don't|never)\s+(?:create|generate|write|make|build)\s+(?:any\s+)?files?\b"
                   r"|(?:ไม่ต้อง|ห้าม)(?:สร้าง|ทำ|จัดทำ)(?:ไฟล์|เอกสาร)", '', text, flags=re.IGNORECASE)
-    attached_source = any(Path(item).suffix.lower() in {".xlsx", ".xls", ".csv", ".pdf", ".docx"} for item in (media or []))
-    return bool(_ARTIFACT_TASK_RE.search(text) and (_ARTIFACT_ACTION_RE.search(text) or attached_source))
+    for clause in _ARTIFACT_CLAUSE_SPLIT_RE.split(text):
+        clause = clause.strip()
+        if not clause or _INFORMATION_REQUEST_RE.search(clause):
+            continue
+        # Output markers also cover natural wording such as “ส่งออกเป็น Excel”.
+        output_format = re.search(
+            r"(?:\b(?:as|into|to|in)\s+(?:a\s+)?|(?:ออก)?เป็น\s*(?:ไฟล์)?|ในรูปแบบ\s*)"
+            r"(?:\b(?:xlsx|xls|csv|docx|pptx|pdf|zip|html|excel|spreadsheet|workbook|"
+            r"file|document|presentation|slides)\b|ไฟล์|เอกสาร|เอ็กซ์เซล|สเปรดชีต|เวิร์กบุ๊ก|สไลด์)",
+            clause,
+            re.IGNORECASE,
+        )
+        action = _ARTIFACT_ACTION_RE.search(clause)
+        target = _ARTIFACT_TARGET_RE.search(clause)
+        if action and (output_format or (target and abs(action.start() - target.start()) <= 100)):
+            return True
+    return False
 
 
 def _checkpoint_tool_names(messages: list[dict]) -> set[str]:

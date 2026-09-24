@@ -579,6 +579,12 @@ def test_plain_text_report_is_not_promoted_to_artifact_job():
     assert _is_artifact_task("Create an Excel report")
 
 
+def test_artifact_classifier_keeps_filename_extensions_together():
+    assert _is_artifact_task("Create report.pdf")
+    assert _is_artifact_task("Save invoice.xlsx")
+    assert _is_artifact_task("Create report.pdf. Then email it to me.")
+
+
 def test_artifact_connector_scope_requires_connector_name():
     available = ["mcp_gmail_search", "mcp_gmail_read", "write_file", "read_file"]
     assert "mcp_gmail_search" not in _artifact_tool_scope(

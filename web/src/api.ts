@@ -72,6 +72,7 @@ export interface AgentEvent {
     | "tool_finished"
     | "tool_progress"
     | "artifact_job_progress"
+    | "session_state_snapshot"
     | "plan_updated"
     | "tool_confirm_request"
     | "tool_confirm_resolved"
@@ -103,6 +104,16 @@ export interface AgentEvent {
   max_segments?: number;
   elapsed_seconds?: number;
   token_count?: number;
+  session_id?: string;
+  running?: boolean;
+  artifact_jobs?: Array<{
+    job_id?: string;
+    status?: string;
+    segment?: number;
+    max_segments?: number;
+    elapsed_seconds?: number;
+    message?: string;
+  }>;
   // plan_updated: the agent's current working plan (goal + step checklist)
   goal?: string;
   steps?: { step: string; status: string }[];
