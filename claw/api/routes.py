@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from claw.api.deps import AppState, current_user, current_user_ws, get_state
 from claw.api.file_preview import PreviewError, preview_html, preview_table
+from claw.core.events import SessionStateSnapshot
 from claw.core.loop import visible_artifacts
 from claw.db.models import User
 
@@ -1070,95 +1071,95 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
         return
     await websocket.accept()
 
-    async def forward_events() -> None:
-        async with state.bus.subscribe(session_id) as queue:
-            while True:
-                event = await queue.get()
-                await websocket.send_text(json.dumps(event.to_dict(), ensure_ascii=False))
-
-    forwarder = asyncio.create_task(forward_events())
-    # Re-render any confirmations still awaiting an answer (e.g. this is a
-    # reconnect while a turn is paused on an Ask-mode gate).
-    for pending in state.runtime.pending_confirmations(session_id):
-        await websocket.send_text(json.dumps(pending.to_dict(), ensure_ascii=False))
-    for progress in await state.runtime.active_artifact_events(user.id, session_id):
-        await websocket.send_text(json.dumps(progress.to_dict(), ensure_ascii=False))
-    turns: set[asyncio.Task] = set()
-
-    def _turn_done(task: asyncio.Task) -> None:
-        turns.discard(task)
-        if not task.cancelled() and task.exception() is not None:
-            # A TurnError was already published to the bus and logged with a
-            # full traceback inside handle_message; retrieving it here only
-            # prevents asyncio's "exception was never retrieved" warning.
-            pass
-
-    try:
+    async def forward_events(queue: asyncio.Queue) -> None:
         while True:
-            raw = await websocket.receive_text()
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            # Ask-mode: the client answering a pending tool confirmation.
-            if payload.get("type") == "tool_decision":
-                request_id = str(payload.get("request_id") or "")
-                if request_id:
-                    state.runtime.resolve_confirmation(request_id, bool(payload.get("approved")))
-                continue
-            if payload.get("type") == "cancel_artifact_job":
-                job_id = str(payload.get("job_id") or "")
-                if job_id:
-                    await state.runtime.cancel_artifact_job(user.id, job_id)
-                continue
-            content = str(payload.get("content") or "").strip()
-            raw_attachments = payload.get("attachments") or []
-            model = str(payload.get("model") or "").strip() or None
-            permission_mode = "ask" if str(payload.get("permission_mode") or "") == "ask" else "auto"
-            workspace = _user_workspace(state, user.id)
-            media = [
-                p
-                for p in (_resolve_attachment(workspace, str(a)) for a in raw_attachments[:_MAX_ATTACHMENTS])
-                if p
-            ]
-            if not content and not media:
-                continue
-            # The user's own Settings > Profile > Preferences language (if
-            # saved) drives the AI's response language for web turns; else
-            # the admin-set global default (Control Plane > Preferences).
-            # Re-read the user row fresh each turn (cheap indexed-PK lookup,
-            # dwarfed by the LLM call that follows) rather than trusting the
-            # `user` object captured once at connect time, so a preference
-            # saved from another tab mid-session takes effect on the very
-            # next message instead of only after a reconnect. BrandingStore.
-            # get() always returns a language (defaults merged in), so this
-            # can only fall back to the connect-time locale if either read
-            # fails outright. Only the locale VALUE changes here — the turn
-            # orchestration is untouched.
-            try:
-                current = await state.users.get(user.id)
-                turn_locale = (current.ui_language if current else user.ui_language) or (
-                    await state.branding.get()
-                )["language"]
-            except Exception:
-                turn_locale = user.ui_language or user.locale
-            turn = asyncio.create_task(
-                state.runtime.handle_message(
-                    user_id=user.id,
-                    session_id=session_id,
-                    content=content,
-                    channel="web",
-                    locale=turn_locale,
-                    media=media,
-                    model=model,
-                    permission_mode=permission_mode,
+            event = await queue.get()
+            await websocket.send_text(json.dumps(event.to_dict(), ensure_ascii=False))
+
+    async with state.bus.subscribe(session_id) as queue:
+        # Deliver any replay for a turn already in progress before sending the
+        # authoritative snapshot. Events published after subscription stay in
+        # the queue and are forwarded after the snapshot, so newer state wins.
+        replay_count = queue.qsize()
+        for _ in range(replay_count):
+            event = queue.get_nowait()
+            await websocket.send_text(json.dumps(event.to_dict(), ensure_ascii=False))
+        # Re-render confirmations still awaiting an answer (e.g. reconnect on
+        # an Ask-mode gate).
+        for pending in state.runtime.pending_confirmations(session_id):
+            await websocket.send_text(json.dumps(pending.to_dict(), ensure_ascii=False))
+        artifact_jobs = await state.runtime.active_artifact_events(user.id, session_id)
+        snapshot = SessionStateSnapshot(
+            session_id=session_id,
+            running=session_id in state.runtime.active_sessions(),
+            artifact_jobs=[progress.to_dict() for progress in artifact_jobs],
+        )
+        await websocket.send_text(json.dumps(snapshot.to_dict(), ensure_ascii=False))
+        forwarder = asyncio.create_task(forward_events(queue))
+        turns: set[asyncio.Task] = set()
+
+        def _turn_done(task: asyncio.Task) -> None:
+            turns.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                # A TurnError was already published and logged by the runtime.
+                pass
+
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                # Ask-mode: the client answering a pending tool confirmation.
+                if payload.get("type") == "tool_decision":
+                    request_id = str(payload.get("request_id") or "")
+                    if request_id:
+                        state.runtime.resolve_confirmation(request_id, bool(payload.get("approved")))
+                    continue
+                if payload.get("type") == "cancel_artifact_job":
+                    job_id = str(payload.get("job_id") or "")
+                    if job_id:
+                        await state.runtime.cancel_artifact_job(user.id, job_id)
+                    continue
+                content = str(payload.get("content") or "").strip()
+                raw_attachments = payload.get("attachments") or []
+                model = str(payload.get("model") or "").strip() or None
+                permission_mode = "ask" if str(payload.get("permission_mode") or "") == "ask" else "auto"
+                workspace = _user_workspace(state, user.id)
+                media = [
+                    p
+                    for p in (_resolve_attachment(workspace, str(a)) for a in raw_attachments[:_MAX_ATTACHMENTS])
+                    if p
+                ]
+                if not content and not media:
+                    continue
+                # Re-read the language preference for every turn so changes
+                # from another tab take effect without reconnecting.
+                try:
+                    current = await state.users.get(user.id)
+                    turn_locale = (current.ui_language if current else user.ui_language) or (
+                        await state.branding.get()
+                    )["language"]
+                except Exception:
+                    turn_locale = user.ui_language or user.locale
+                turn = asyncio.create_task(
+                    state.runtime.handle_message(
+                        user_id=user.id,
+                        session_id=session_id,
+                        content=content,
+                        channel="web",
+                        locale=turn_locale,
+                        media=media,
+                        model=model,
+                        permission_mode=permission_mode,
+                    )
                 )
-            )
-            turns.add(turn)
-            turn.add_done_callback(_turn_done)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        forwarder.cancel()
-        # Turns keep running to completion — reconnecting clients refetch
-        # missed messages from the REST API.
+                turns.add(turn)
+                turn.add_done_callback(_turn_done)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            forwarder.cancel()
+            # Turns keep running to completion — reconnecting clients refetch
+            # missed messages from the REST API.

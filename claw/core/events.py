@@ -139,3 +139,14 @@ class ArtifactJobProgress(AgentEvent):
     artifacts: list[str] = field(default_factory=list)
     message: str = ""
     type: str = field(default="artifact_job_progress", init=False)
+
+
+@dataclass(slots=True)
+class SessionStateSnapshot(AgentEvent):
+    """Authoritative reconnect state for foreground and artifact-job progress."""
+
+    session_id: str
+    running: bool
+    artifact_jobs: list[dict[str, Any]]
+    turn_id: str = ""
+    type: str = field(default="session_state_snapshot", init=False)

@@ -813,6 +813,26 @@ export function Chat({
           onActivity?.();
           break;
         }
+        case "session_state_snapshot": {
+          const activeJobs = event.artifact_jobs ?? [];
+          const latest = activeJobs[activeJobs.length - 1];
+          setArtifactJob(latest ? {
+            jobId: latest.job_id ?? "",
+            status: latest.status ?? "running",
+            segment: latest.segment ?? 1,
+            maxSegments: latest.max_segments ?? 1,
+            elapsedSeconds: latest.elapsed_seconds ?? 0,
+            message: latest.message ?? "",
+          } : null);
+          const pending = pendingRef.current;
+          const queuedForSession = Boolean(
+            pending && (pending.sessionId === null || pending.sessionId === sessionId),
+          );
+          setBusy(Boolean(event.running) || activeJobs.length > 0 || queuedForSession);
+          if (!event.running) setStreaming("");
+          onActivity?.();
+          break;
+        }
         case "plan_updated": {
           // The agent revised its working plan — show it pinned in the panel.
           // Unlike other auto-opens, this bypasses the execution_panel_enabled
