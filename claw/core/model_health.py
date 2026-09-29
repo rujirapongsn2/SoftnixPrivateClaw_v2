@@ -158,7 +158,12 @@ class ModelHealthService:
         # A bad prompt, unsupported input, or content-policy rejection is not
         # evidence that the route is down. Only explicit model/auth errors can
         # make a 4xx response affect global model health.
-        if not permanent and exc.status_code is not None and 400 <= exc.status_code < 500 and exc.status_code != 429:
+        if not permanent and exc.status_code is not None and 400 <= exc.status_code < 500:
+            return
+        # 429 is capacity/rate limiting, not an outage: a busy burst must never
+        # switch a shared model off for everyone. Scheduled probes still catch
+        # a route that is genuinely down.
+        if not permanent and exc.status_code == 429:
             return
         now = datetime.now(timezone.utc)
         async with self.store.factory() as db:
@@ -175,9 +180,13 @@ class ModelHealthService:
             model, provider = pair
             if route_snapshot is not None and (model.model_id, provider.api_key, provider.api_base) != route_snapshot:
                 return
-            # A previous failed probe or real turn confirms an uncertain error.
-            confirmed = permanent or model.health_status == "warning"
-            model.health_status = "unavailable" if permanent else ("quarantined" if confirmed else "warning")
+            # An uncertain failure is only ever a warning here. Concurrent
+            # failed turns must not confirm each other; a dedicated probe
+            # (check_model) is the only path that quarantines.
+            if not permanent and model.health_status in {"warning", "quarantined", "recovering"}:
+                return
+            confirmed = permanent
+            model.health_status = "unavailable" if permanent else "warning"
             model.health_reason = reason
             model.health_checked_at = now
             if confirmed:

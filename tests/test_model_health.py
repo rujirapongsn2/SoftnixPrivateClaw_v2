@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import asyncio
 import pytest
 
 from sqlalchemy import update
@@ -477,3 +478,27 @@ async def test_run_now_api_forces_check_and_is_admin_only(db_factory):
         assert len(fake.calls) == 2
         await store.update_provider(provider.id, enabled=False)
         assert (await http.post(url, headers={"Authorization": f"Bearer {admin}"})).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_concurrent_or_rate_limited_turn_failures_do_not_disable_a_healthy_model(tmp_path):
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/health.db")
+    await init_db(engine)
+    store = LLMConfigStore(factory)
+    provider = await store.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
+    model = await store.create_model(provider.id, "openai/demo", "Demo")
+    fake = FakeProvider()  # the confirmation probe succeeds: the blip is over
+    service = ModelHealthService(store, fake)
+
+    # A 429 burst is capacity, not an outage: no state change, no probe.
+    await service.report_failure(model.id, ProviderError("busy", status_code=429))
+    assert (await store.list_models())[0].health_status != "warning"
+    assert fake.calls == []
+
+    # Several failed turns racing through a brief 503 blip: only a probe may
+    # quarantine, and it succeeded, so the model stays enabled and healthy.
+    await asyncio.gather(*(service.report_failure(model.id, ProviderError("blip", status_code=503)) for _ in range(3)))
+    current = (await store.list_models())[0]
+    assert current.enabled is True
+    assert current.health_status == "healthy"
+    assert len(fake.calls) == 1

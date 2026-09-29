@@ -1194,7 +1194,6 @@ export function Chat({
           setBusy(false);
           setStreaming("");
           sawCompletionRef.current = true;
-          refreshModelsRef.current();
           setItems((prev) => {
             const settled = settleRunningCalls(prev, "complete");
             if (!event.content) return settled;
