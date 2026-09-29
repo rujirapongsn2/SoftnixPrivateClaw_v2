@@ -2939,11 +2939,6 @@ class OAuthAppStore:
             await db.commit()
 
 
-class ProjectContainerConfigStore:
-    """Database-backed global switch; the environment is the initial fallback."""
-
-    _KEY = "project_containers"
-    _INGRESS_KEY = "project_public_ingress"
 class SettingsAclStore:
     """Admin policy for which user-Settings menus are visible.
 
@@ -3003,6 +2998,11 @@ class SettingsAclStore:
         return sorted(k for k, visible in merged.items() if visible is False)
 
 
+class ProjectContainerConfigStore:
+    """Database-backed global switch; the environment is the initial fallback."""
+
+    _KEY = "project_containers"
+    _INGRESS_KEY = "project_public_ingress"
     _ACCESS_KEY = "project_internal_access"
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]):

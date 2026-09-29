@@ -2694,19 +2694,6 @@ function PrebuiltConnectorsPanel() {
 // daily / per-minute quotas, and can be assigned to groups or individual
 // users. Structurally mirrors the LLM Providers panel — a list of Cards, each
 // with an inline Edit form, plus an Add form toggled from the header.
-function PlansPanel() {
-  const t = useT();
-  const [plans, setPlans] = useState<PlanInfo[]>([]);
-  const [adding, setAdding] = useState(false);
-  const { error, guard } = useAsyncError();
-
-  const reload = useCallback(() => api.adminListPlans().then(setPlans), []);
-  useEffect(() => {
-    void guard(async () => await reload());
-  }, [guard, reload]);
-
-  // Ranked low→high so the list reads as a ladder (Free → Plus → Pro → …).
-  const sorted = [...plans].sort((a, b) => a.rank - b.rank);
 type AclChoice = "inherit" | "show" | "hide";
 
 function SettingsAclPanel() {
@@ -2873,6 +2860,19 @@ function SettingsAclPanel() {
   );
 }
 
+function PlansPanel() {
+  const t = useT();
+  const [plans, setPlans] = useState<PlanInfo[]>([]);
+  const [adding, setAdding] = useState(false);
+  const { error, guard } = useAsyncError();
+
+  const reload = useCallback(() => api.adminListPlans().then(setPlans), []);
+  useEffect(() => {
+    void guard(async () => await reload());
+  }, [guard, reload]);
+
+  // Ranked low→high so the list reads as a ladder (Free → Plus → Pro → …).
+  const sorted = [...plans].sort((a, b) => a.rank - b.rank);
 
   return (
     <div className="claw-panel">
