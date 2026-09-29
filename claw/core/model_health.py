@@ -194,10 +194,10 @@ class ModelHealthService:
                 model.health_auto_disabled = True
             await db.commit()
         logger.info("Real turn health failure: model_id={} reason={} confirmed={}", model_id, reason, confirmed)
-        if not confirmed:
-            # A tiny probe checks an uncertain live error without delaying the
-            # user's fallback turn. The claim prevents duplicate checks.
-            await self.check_model(model_id, force=True)
+        # No immediate probe: it would land inside the same short blip and
+        # quarantine the model for everyone. The scheduler re-probes a
+        # "warning" model after _CONFIRM_INTERVAL, so only an outage that
+        # outlasts that gap can disable it.
 
     async def check_model(self, model_id: str, *, force: bool = False) -> bool:
         """Claim a model once across workers, probe, and apply only if config is unchanged."""

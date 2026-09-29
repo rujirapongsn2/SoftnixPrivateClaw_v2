@@ -282,11 +282,19 @@ async def test_real_turn_failure_disables_after_confirmation_and_recovers(tmp_pa
 
     await service.report_failure(model.id, ProviderError("busy", status_code=503))
     current = (await store.list_models())[0]
+    assert current.health_status == "warning" and current.enabled is True
+    assert fake.calls == []  # no probe inside the blip; the scheduler confirms later
+    async with factory() as db:
+        await db.execute(update(LLMModel).where(LLMModel.id == model.id).values(
+            health_checked_at=datetime.now(timezone.utc) - timedelta(minutes=2)
+        ))
+        await db.commit()
+    assert await service.check_due() == 1
+    current = (await store.list_models())[0]
     assert current.health_status == "quarantined"
     assert current.enabled is False
     assert current.health_auto_disabled is True
     assert await store.enabled_models() == []
-    assert len(fake.calls) == 1  # one small confirmation probe
 
     fake.error = None
     assert await service.check_model(model.id, force=True)
@@ -500,5 +508,14 @@ async def test_concurrent_or_rate_limited_turn_failures_do_not_disable_a_healthy
     await asyncio.gather(*(service.report_failure(model.id, ProviderError("blip", status_code=503)) for _ in range(3)))
     current = (await store.list_models())[0]
     assert current.enabled is True
-    assert current.health_status == "healthy"
-    assert len(fake.calls) == 1
+    assert current.health_status == "warning"
+    assert fake.calls == []
+    # The delayed scheduled probe succeeds once the blip is over.
+    async with factory() as db:
+        await db.execute(update(LLMModel).where(LLMModel.id == model.id).values(
+            health_checked_at=datetime.now(timezone.utc) - timedelta(minutes=2)
+        ))
+        await db.commit()
+    assert await service.check_due() == 1
+    current = (await store.list_models())[0]
+    assert current.enabled is True and current.health_status == "healthy"
