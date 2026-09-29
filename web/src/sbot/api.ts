@@ -1427,7 +1427,6 @@ export const api = {
     request<GroupInfo>(`/api/admin/groups/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
 
   // -- admin: usage-tier plans --
-  adminListPlans: () => request<PlanInfo[]>("/api/admin/plans"),
   // -- admin: settings-menu ACL --
   adminSettingsAcl: () => request<SettingsAclOverview>("/api/admin/settings-acl"),
   adminSaveSettingsAcl: (body: { scope: "global" | "group" | "user"; target_id?: string | null; rules: Record<string, boolean> }) =>
@@ -1436,6 +1435,7 @@ export const api = {
     request<{ id: string; label: string; email: string }[]>(`/api/admin/settings-acl/users?q=${encodeURIComponent(q)}`),
   mySettingsAcl: () => request<{ hidden: string[] }>("/api/auth/settings-acl"),
 
+  adminListPlans: () => request<PlanInfo[]>("/api/admin/plans"),
   adminCreatePlan: (plan: PlanCreate) =>
     request<PlanInfo>("/api/admin/plans", { method: "POST", body: JSON.stringify(plan) }),
   adminUpdatePlan: (id: string, patch: PlanPatch) =>
