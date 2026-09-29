@@ -460,6 +460,7 @@ class AgentLoop:
         fallback_api_base: str | None = None,
         fallback_context_window: int | None = None,
         on_fallback: Callable[[str], None] | None = None,
+        on_provider_failure: Callable[[str, ProviderError, bool], None] | None = None,
         permission_mode: str = "auto",
         confirm: ConfirmFn | None = None,
     ) -> TurnOutcome:
@@ -489,6 +490,7 @@ class AgentLoop:
                 or fallback_api_base != api_base
             )
         )
+        fallback_selected = False
         # Files the agent wrote/edited this turn (deduped, in order). Split into
         # surfaced/suppressed by _split_artifacts at each exit, since whether a
         # template counts as an intermediate depends on what else the turn wrote.
@@ -613,6 +615,8 @@ class AgentLoop:
                                     result = event
                         break
                     except ProviderError as exc:
+                        if on_provider_failure is not None:
+                            on_provider_failure(effective_model, exc, fallback_selected)
                         if fallback_available and not stream_started:
                             logger.warning(
                                 "Turn {} switching from model {} to fallback {} after upstream failure: {}",
@@ -626,6 +630,7 @@ class AgentLoop:
                             api_base = fallback_api_base
                             context_window = fallback_context_window
                             fallback_available = False
+                            fallback_selected = True
                             if on_fallback is not None:
                                 on_fallback(effective_model)
                             remaining = (

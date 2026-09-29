@@ -157,6 +157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         usage=usage,
         schedules=schedules,
         llm_config=llm_config,
+        model_health=model_health,
         plans=plans,
         browser_broker=browser_broker,
         knowledge=knowledge,

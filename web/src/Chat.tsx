@@ -689,6 +689,9 @@ export function Chat({
     const onMessage = (raw: MessageEvent) => {
       const event: AgentEvent = JSON.parse(raw.data);
       switch (event.type) {
+        case "model_availability_changed":
+          refreshModelsRef.current(true);
+          break;
         case "turn_started":
           setBusy(true);
           setStreaming("");

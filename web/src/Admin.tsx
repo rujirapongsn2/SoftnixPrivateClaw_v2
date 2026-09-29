@@ -1338,6 +1338,20 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
   useEffect(() => {
     void guard(async () => await reload());
   }, [guard, reload]);
+  useEffect(() => {
+    if (scope !== "admin") return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") void reload().catch(() => {});
+    };
+    const timer = window.setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [reload, scope]);
 
   return (
     <div className="claw-panel">
@@ -1828,7 +1842,6 @@ function ProviderCard({
               <ModelRow
                 key={m.id}
                 model={m}
-                autoDisable={provider.auto_disable_models}
                 modelPrefix={provider.model_prefix}
                 reload={reload}
                 guard={guard}
@@ -1857,7 +1870,6 @@ function ProviderCard({
 // demand (so the model id / label / cost can actually be corrected in place).
 function ModelRow({
   model,
-  autoDisable,
   modelPrefix,
   reload,
   guard,
@@ -1865,7 +1877,6 @@ function ModelRow({
   scope,
 }: {
   model: LLMModelCfg;
-  autoDisable: boolean;
   modelPrefix: string;
   reload: () => Promise<void>;
   guard: (fn: () => Promise<void>) => Promise<void>;
@@ -2016,16 +2027,18 @@ function ModelRow({
           </span>
         )}
         {scope === "admin" && (
-          <span className={`claw-model-health${["warning", "quarantined", "unavailable"].includes(model.health_status) ? " claw-model-health-warning" : ""}`}
+          <span className={`claw-model-health${["warning", "quarantined", "unavailable", "recovering"].includes(model.health_status) ? " claw-model-health-warning" : ""}`}
             title={model.health_checked_at ? new Date(model.health_checked_at).toLocaleString() : undefined}
-            role={["warning", "quarantined", "unavailable"].includes(model.health_status) ? "status" : undefined}>
+            role={["warning", "quarantined", "unavailable", "recovering"].includes(model.health_status) ? "status" : undefined}>
             {model.kind !== "chat"
               ? t("admin.providers.healthNotMonitored")
               : model.health_status === "unchecked"
               ? `${t("admin.providers.healthPending")}${model.health_auto_disabled ? ` · ${t("admin.providers.autoDisabled")}` : ""}`
               : model.health_status === "healthy"
-              ? `${t("admin.providers.healthHealthy")}${model.health_auto_disabled ? ` · ${t("admin.providers.enableManually")}` : ""}`
-              : `${autoDisable && ["quarantined", "unavailable"].includes(model.health_status) ? `${t("admin.providers.healthPaused")} · ` : ""}${t(`admin.providers.health_${model.health_reason || "probe_failed"}`)}${model.health_auto_disabled ? ` · ${t("admin.providers.autoDisabled")}` : ""}`}
+              ? model.health_auto_disabled ? `${t("admin.providers.autoDisabled")} · ${t("admin.providers.enableManually")}` : t("admin.providers.healthHealthy")
+              : model.health_status === "recovering"
+              ? `${t("admin.providers.autoDisabled")} · ${t("admin.providers.healthRecovering")}`
+              : `${model.health_auto_disabled ? `${t("admin.providers.autoDisabled")} · ` : ""}${t(`admin.providers.health_${model.health_reason || "probe_failed"}`)}`}
           </span>
         )}
       </div>

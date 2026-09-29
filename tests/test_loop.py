@@ -69,6 +69,7 @@ async def test_provider_failure_before_stream_switches_to_configured_fallback():
 
     provider = FailingPrimary()
     switched = []
+    failed = []
     loop = AgentLoop(provider, ToolRegistry())
     outcome = await loop.run_turn(
         "t1",
@@ -81,6 +82,7 @@ async def test_provider_failure_before_stream_switches_to_configured_fallback():
         fallback_api_key="backup-key",
         fallback_api_base="https://backup.example/v1",
         on_fallback=switched.append,
+        on_provider_failure=lambda model, error, is_fallback: failed.append((model, is_fallback)),
     )
 
     assert outcome.final_content == "fallback answer"
@@ -89,6 +91,7 @@ async def test_provider_failure_before_stream_switches_to_configured_fallback():
         ("backup/model", "backup-key", "https://backup.example/v1"),
     ]
     assert switched == ["backup/model"]
+    assert failed == [("primary/model", False)]
 
 
 async def test_provider_failure_after_visible_output_keeps_partial_without_fallback():

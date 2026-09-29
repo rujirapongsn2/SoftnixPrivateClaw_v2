@@ -224,6 +224,7 @@ export interface CreatedShare {
 export interface AgentEvent {
   type:
     | "turn_started"
+    | "model_availability_changed"
     | "text_delta"
     | "thinking_delta"
     | "tool_started"
@@ -764,7 +765,7 @@ export interface LLMModelCfg {
   model_id: string;
   label: string;
   enabled: boolean;
-  health_status: "unchecked" | "healthy" | "warning" | "quarantined" | "unavailable";
+  health_status: "unchecked" | "healthy" | "warning" | "quarantined" | "unavailable" | "recovering";
   health_reason: string;
   health_checked_at: string | null;
   health_auto_disabled: boolean;

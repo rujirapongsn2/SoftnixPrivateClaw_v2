@@ -41,6 +41,7 @@ from sbot.core.events import (
     TurnCompleted,
     TurnError,
     TurnStarted,
+    ModelAvailabilityChanged,
 )
 from sbot.core.limits import RateLimiter
 from sbot.core.loop import AgentLoop
@@ -94,6 +95,7 @@ from sbot.workflows.service import WorkflowService
 if TYPE_CHECKING:
     from sbot.core.missions import MissionService
     from sbot.db.stores import BotStore, LLMConfigStore
+    from claw.core.model_health import ModelHealthService
 
 _STORED_TOOL_RESULT_CAP = 4000
 
@@ -652,10 +654,12 @@ class AgentRuntime:
         missions: "MissionService | None" = None,
         project_access: Any = None,
         blueprints: "BlueprintStore | None" = None,
+        model_health: "ModelHealthService | None" = None,
     ):
         self.settings = settings
         self.provider = provider
         self.llm_config = llm_config
+        self.model_health = model_health
         self.plans = plans
         self.knowledge = knowledge
         self.bus = bus
@@ -1063,7 +1067,11 @@ class AgentRuntime:
                 model_base: str | None = None
                 model_window: int | None = None
                 model_scope = "global"
+                model_pk: str | None = None
+                model_route: tuple[str, str, str] | None = None
                 fallback_model: str | None = None
+                fallback_pk: str | None = None
+                fallback_route: tuple[str, str, str] | None = None
                 fallback_key: str | None = None
                 fallback_base: str | None = None
                 fallback_window: int | None = None
@@ -1085,6 +1093,8 @@ class AgentRuntime:
                         resolved = await self.llm_config.resolve(requested, user_id, max_cost=plan_chat_cost)
                         if resolved is not None:
                             effective_model = resolved["model_id"]
+                            model_pk = resolved.get("id")
+                            model_route = resolved.get("health_route")
                             model_key = resolved["api_key"] or None
                             model_base = resolved["api_base"] or None
                             model_window = resolved["context_window"]
@@ -1108,6 +1118,8 @@ class AgentRuntime:
                                 effective_model, None, max_cost=plan_chat_cost
                             )
                             if default_resolved:
+                                model_pk = default_resolved.get("id")
+                                model_route = default_resolved.get("health_route")
                                 model_key = default_resolved["api_key"] or None
                                 model_base = default_resolved["api_base"] or None
                                 model_window = default_resolved["context_window"]
@@ -1158,6 +1170,8 @@ class AgentRuntime:
                             fallback_model, None, max_cost=plan_chat_cost
                         )
                         if fallback_resolved is not None:
+                            fallback_pk = fallback_resolved.get("id")
+                            fallback_route = fallback_resolved.get("health_route")
                             fallback_key = fallback_resolved["api_key"] or None
                             fallback_base = fallback_resolved["api_base"] or None
                             fallback_window = fallback_resolved["context_window"]
@@ -1609,6 +1623,16 @@ class AgentRuntime:
                         nonlocal model_used
                         model_used = model_id
 
+                    def _on_provider_failure(_model_id: str, exc: ProviderError, is_fallback: bool) -> None:
+                        failed_pk = fallback_pk if is_fallback else model_pk
+                        route_snapshot = fallback_route if is_fallback else model_route
+                        if self.model_health is not None and failed_pk is not None and model_scope != "private":
+                            async def report_and_refresh() -> None:
+                                await self.model_health.report_failure(failed_pk, exc, route_snapshot)
+                                self.bus.publish(session_id, ModelAvailabilityChanged(turn_id=turn_id))
+
+                            self._spawn_background(report_and_refresh())
+
                     outcome = await agent.loop.run_turn(
                         turn_id,
                         prompt_messages,
@@ -1622,6 +1646,7 @@ class AgentRuntime:
                         fallback_api_base=fallback_base,
                         fallback_context_window=fallback_window,
                         on_fallback=_on_fallback,
+                        on_provider_failure=_on_provider_failure,
                         permission_mode=permission_mode,
                         confirm=_confirm,
                     )
