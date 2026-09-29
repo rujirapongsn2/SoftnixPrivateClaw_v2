@@ -64,16 +64,19 @@ async def test_provider_failure_before_stream_switches_to_configured_fallback():
             yield ChatResult(content="fallback answer")
 
     provider = FailingPrimary([])
+    failures = []
     outcome = await AgentLoop(provider, ToolRegistry()).run_turn(
         "fallback",
         [{"role": "user", "content": "hi"}],
         lambda _event: None,
         model="primary/model",
         fallback_model="backup/model",
+        on_provider_failure=lambda model, error, is_fallback: failures.append((model, is_fallback)),
     )
 
     assert outcome.final_content == "fallback answer"
     assert provider.models == ["primary/model", "backup/model"]
+    assert failures == [("primary/model", False)]
 
 
 async def test_provider_failure_after_stream_started_does_not_retry_fallback():

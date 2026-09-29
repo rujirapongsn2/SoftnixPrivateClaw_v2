@@ -1,16 +1,18 @@
 """Tests for multi-bot message handling and session routing."""
 
-import asyncio
 import pytest
 
 from sbot.config import LLMSettings, SandboxSettings, Settings
 from sbot.core.bus import EventBus
 from sbot.core.memory import MemoryService
 from sbot.core.runtime import AgentRuntime
+from claw.core.model_health import ModelHealthService
+from sbot.db.stores import LLMConfigStore
+from sbot.providers.base import ChatResult, ProviderError, TextDelta
 from tests.sbot_mode.conftest import FakeProvider, text_turn
 
 
-def make_runtime(stores, provider, tmp_path) -> AgentRuntime:
+def make_runtime(stores, provider, tmp_path, *, llm_config=None, model_health=None) -> AgentRuntime:
     settings = Settings(
         _env_file=None,
         database_url="sqlite+aiosqlite:///:memory:",
@@ -29,7 +31,46 @@ def make_runtime(stores, provider, tmp_path) -> AgentRuntime:
         messages=stores["messages"],
         memory=memory,
         audit=stores["audit"],
+        llm_config=llm_config,
+        model_health=model_health,
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_sbot_chat_model_is_disabled_after_fallback(stores, db_factory, tmp_path):
+    class RoutedProvider(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            self.models.append(kwargs["model"])
+            if kwargs["model"] == "openai/primary":
+                raise ProviderError("bad key", status_code=401)
+            yield TextDelta(text="backup answer")
+            yield ChatResult(content="backup answer")
+
+    provider = RoutedProvider([])
+    config = LLMConfigStore(db_factory)
+    upstream = await config.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
+    primary = await config.create_model(upstream.id, "openai/primary", "Primary")
+    backup = await config.create_model(upstream.id, "openai/backup", "Backup")
+    await config.update_model(primary.id, is_default=True)
+    await config.update_model(backup.id, is_fallback=True)
+    runtime = make_runtime(stores, provider, tmp_path, llm_config=config,
+                           model_health=ModelHealthService(config, provider))
+    user = await stores["users"].get_or_create_by_email("health@sbot.ai")
+    session = await stores["sessions"].create(user.id)
+
+    async with runtime.bus.subscribe(session.id) as queue:
+        assert await runtime.handle_message(user.id, session.id, "hello") == "backup answer"
+        await runtime.drain()
+        event_types = []
+        while not queue.empty():
+            event_types.append(queue.get_nowait().type)
+    current = {m.id: m for m in await config.list_models()}
+    assert provider.models == ["openai/primary", "openai/backup"]
+    assert current[primary.id].enabled is False
+    assert current[primary.id].health_auto_disabled is True
+    assert current[backup.id].enabled is True
+    assert [m["model_id"] for m in await config.enabled_models()] == ["openai/backup"]
+    assert "model_availability_changed" in event_types
 
 
 @pytest.mark.asyncio

@@ -494,6 +494,7 @@ class AgentLoop:
         fallback_api_base: str | None = None,
         fallback_context_window: int | None = None,
         on_fallback: Callable[[str], None] | None = None,
+        on_provider_failure: Callable[[str, ProviderError, bool], None] | None = None,
         permission_mode: str = "auto",
         confirm: ConfirmFn | None = None,
         tool_names: set[str] | None = None,
@@ -707,6 +708,9 @@ class AgentLoop:
                                 "completed" if committed_output_started else "none"
                             ),
                         ).warning("LLM provider attempt failed")
+
+                        if not will_retry and on_provider_failure is not None:
+                            on_provider_failure(effective_model, exc, fallback_selected)
 
                         # Usage normally arrives only with ChatResult. Account
                         # for an interrupted transport attempt, but do not bill

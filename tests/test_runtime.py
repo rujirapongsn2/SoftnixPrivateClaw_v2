@@ -11,6 +11,7 @@ from claw.config import LLMSettings, SandboxSettings, Settings
 from claw.core.bus import EventBus
 from claw.core.memory import MemoryService
 from claw.core.runtime import AgentRuntime, TurnFailed
+from claw.core.model_health import ModelHealthService
 from claw.db.stores import LLMConfigStore, UsageStore
 from claw.i18n import t
 from claw.providers.base import ChatResult, ProviderError, TextDelta, ToolCall
@@ -18,7 +19,8 @@ from tests.conftest import FakeProvider, text_turn
 
 
 def make_runtime(
-    stores, provider, tmp_path, policy=None, llm_config=None, llm=None, usage=None
+    stores, provider, tmp_path, policy=None, llm_config=None, llm=None, usage=None,
+    model_health=None,
 ) -> AgentRuntime:
     settings = Settings(
         _env_file=None,
@@ -39,8 +41,44 @@ def make_runtime(
         audit=stores["audit"],
         policy=policy,
         llm_config=llm_config,
+        model_health=model_health,
         usage=usage,
     )
+
+
+async def test_failed_chat_model_is_disabled_even_when_fallback_answers(stores, db_factory, tmp_path):
+    class RoutedProvider(FakeProvider):
+        async def stream_chat(self, *args, **kwargs):
+            if kwargs["model"] == "openai/primary":
+                raise ProviderError("bad key", status_code=401)
+            yield TextDelta(text="backup answer")
+            yield ChatResult(content="backup answer")
+
+    provider = RoutedProvider([])
+    config = LLMConfigStore(db_factory)
+    upstream = await config.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
+    primary = await config.create_model(upstream.id, "openai/primary", "Primary")
+    backup = await config.create_model(upstream.id, "openai/backup", "Backup")
+    await config.update_model(primary.id, is_default=True)
+    await config.update_model(backup.id, is_fallback=True)
+    runtime = make_runtime(stores, provider, tmp_path, llm_config=config,
+                           model_health=ModelHealthService(config, provider))
+    user = await stores["users"].get_or_create_by_email("u@x.y")
+    session = await stores["sessions"].create(user.id)
+
+    async with runtime.bus.subscribe(session.id) as queue:
+        assert await runtime.handle_message(user.id, session.id, "hello") == "backup answer"
+        await runtime.drain()
+        event_types = []
+        while not queue.empty():
+            event_types.append(queue.get_nowait().type)
+    assert "model_availability_changed" in event_types
+    current = {m.id: m for m in await config.list_models()}
+    assert current[primary.id].enabled is False
+    assert current[primary.id].health_auto_disabled is True
+    assert current[primary.id].health_reason == "auth_failed"
+    assert current[backup.id].enabled is True
+    assert [m["model_id"] for m in await config.enabled_models()] == ["openai/backup"]
 
 
 async def test_handle_message_streams_and_persists(stores, tmp_path):

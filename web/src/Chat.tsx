@@ -689,6 +689,9 @@ export function Chat({
     const onMessage = (raw: MessageEvent) => {
       const event: AgentEvent = JSON.parse(raw.data);
       switch (event.type) {
+        case "model_availability_changed":
+          refreshModelsRef.current(true);
+          break;
         case "turn_started":
           setBusy(true);
           setStreaming("");
@@ -890,6 +893,7 @@ export function Chat({
           setBusy(false);
           setStreaming("");
           sawCompletionRef.current = true;
+          refreshModelsRef.current();
           setItems((prev) => {
             const settled = settleRunningCalls(prev, "complete");
             if (!event.content) return settled;

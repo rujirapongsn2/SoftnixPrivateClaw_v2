@@ -1,8 +1,7 @@
 """Low-cost daily checks for admin-global chat models.
 
-Only a confirmed permanent routing/billing/auth failure can turn off the
-administrator's switch. Uncertain failures require a second check before a
-model is temporarily removed from chat; success restores it.
+Confirmed failures turn off the administrator's model switch. Models disabled
+by health checks keep being probed and are restored when the route recovers.
 """
 
 import asyncio
@@ -15,11 +14,12 @@ from sqlalchemy import or_, select, update
 
 from claw.db.models import LLMModel, LLMProvider
 from claw.db.stores import LLMConfigStore
-from claw.providers.base import LLMProvider as ProviderProtocol, ProviderError
+from claw.providers.base import ChatResult, LLMProvider as ProviderProtocol, ProviderError
 
 _CHECK_INTERVAL = timedelta(hours=23)
 _CONFIRM_INTERVAL = timedelta(minutes=1)
 _RETRY_INTERVAL = timedelta(minutes=5)
+_UNAVAILABLE_RETRY_INTERVAL = timedelta(minutes=30)
 _LEASE = timedelta(minutes=3)
 _POLL_SECONDS = 60
 _PROBE_TIMEOUT = 30
@@ -41,8 +41,12 @@ def _due_at(now: datetime):
         LLMModel.health_checked_at <= now - _CHECK_INTERVAL,
         (LLMModel.health_status == "warning") &
         (LLMModel.health_checked_at <= now - _CONFIRM_INTERVAL),
+        (LLMModel.health_status == "recovering") &
+        (LLMModel.health_checked_at <= now - _CONFIRM_INTERVAL),
         (LLMModel.health_status == "quarantined") &
         (LLMModel.health_checked_at <= now - _RETRY_INTERVAL),
+        (LLMModel.health_status == "unavailable") &
+        (LLMModel.health_checked_at <= now - _UNAVAILABLE_RETRY_INTERVAL),
     )
 
 
@@ -79,6 +83,10 @@ def classify_error(exc: Exception) -> tuple[str, bool]:
     if exc.status_code is not None and exc.status_code >= 500:
         return "service_unavailable", False
     return "probe_failed", False
+
+
+def _usable_probe_result(result: ChatResult) -> bool:
+    return bool((result.content or "").strip() or result.tool_calls)
 
 
 class ModelHealthService:
@@ -136,6 +144,52 @@ class ModelHealthService:
             await asyncio.sleep(1)
         return checked
 
+    async def report_failure(
+        self, model_id: str, exc: ProviderError,
+        route_snapshot: tuple[str, str, str] | None = None,
+    ) -> None:
+        """Use a failed real turn as evidence, then confirm uncertain failures.
+
+        model_id is the database primary key, avoiding collisions between
+        providers exposing the same upstream model name. Private models and
+        models with auto-disable off are deliberately excluded.
+        """
+        reason, permanent = classify_error(exc)
+        # A bad prompt, unsupported input, or content-policy rejection is not
+        # evidence that the route is down. Only explicit model/auth errors can
+        # make a 4xx response affect global model health.
+        if not permanent and exc.status_code is not None and 400 <= exc.status_code < 500 and exc.status_code != 429:
+            return
+        now = datetime.now(timezone.utc)
+        async with self.store.factory() as db:
+            row = await db.execute(
+                select(LLMModel, LLMProvider)
+                .join(LLMProvider, LLMProvider.id == LLMModel.provider_id)
+                .where(LLMModel.id == model_id, LLMModel.kind == "chat",
+                       LLMModel.enabled.is_(True), LLMProvider.owner_id.is_(None),
+                       LLMProvider.enabled.is_(True), LLMProvider.auto_disable_models.is_(True))
+            )
+            pair = row.first()
+            if pair is None:
+                return
+            model, provider = pair
+            if route_snapshot is not None and (model.model_id, provider.api_key, provider.api_base) != route_snapshot:
+                return
+            # A previous failed probe or real turn confirms an uncertain error.
+            confirmed = permanent or model.health_status == "warning"
+            model.health_status = "unavailable" if permanent else ("quarantined" if confirmed else "warning")
+            model.health_reason = reason
+            model.health_checked_at = now
+            if confirmed:
+                model.enabled = False
+                model.health_auto_disabled = True
+            await db.commit()
+        logger.info("Real turn health failure: model_id={} reason={} confirmed={}", model_id, reason, confirmed)
+        if not confirmed:
+            # A tiny probe checks an uncertain live error without delaying the
+            # user's fallback turn. The claim prevents duplicate checks.
+            await self.check_model(model_id, force=True)
+
     async def check_model(self, model_id: str, *, force: bool = False) -> bool:
         """Claim a model once across workers, probe, and apply only if config is unchanged."""
         now = datetime.now(timezone.utc)
@@ -160,6 +214,7 @@ class ModelHealthService:
             provider = await db.get(LLMProvider, model.provider_id)
             snapshot = (model.model_id, provider.api_key, provider.api_base)
             previous_status = model.health_status
+            previous_checked_at = model.health_checked_at
             model_name = model.model_id
             try:
                 key = self.store._dec(provider.api_key)
@@ -181,7 +236,7 @@ class ModelHealthService:
             try:
                 # Chat turns send function definitions. Verify that route too,
                 # while keeping the probe's output and token use tiny.
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     self.provider.chat(
                         [{"role": "user", "content": "Reply OK."}],
                         tools=_PROBE_TOOLS, model=model_name,
@@ -190,6 +245,21 @@ class ModelHealthService:
                     ),
                     timeout=_PROBE_TIMEOUT,
                 )
+                if not _usable_probe_result(result):
+                    # Some reasoning models consume an eight-token budget
+                    # before producing visible text. Retry only this rare
+                    # empty case with a still-small allowance.
+                    result = await asyncio.wait_for(
+                        self.provider.chat(
+                            [{"role": "user", "content": "Reply OK."}],
+                            tools=_PROBE_TOOLS, model=model_name,
+                            max_tokens=64, temperature=0,
+                            api_key=key or None, api_base=base,
+                        ),
+                        timeout=_PROBE_TIMEOUT,
+                    )
+                if not _usable_probe_result(result):
+                    raise ProviderError("empty health response", error_type="empty_response")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -207,19 +277,27 @@ class ModelHealthService:
                 return False
             # Admin edits during a probe must win. In particular, turning off
             # auto-disable while an HTTP request is in flight cannot disable it.
-            if not provider.enabled or (model.model_id, provider.api_key, provider.api_base) != snapshot:
+            if (not provider.enabled or (model.model_id, provider.api_key, provider.api_base) != snapshot
+                    or model.health_checked_at != previous_checked_at):
                 model.health_claim_until = None
                 await db.commit()
                 return False
             model.health_status = status
-            if status == "warning" and previous_status in {"warning", "quarantined"}:
+            if status == "warning" and (model.health_auto_disabled or previous_status in {"warning", "quarantined"}):
                 model.health_status = "quarantined"
+            if status == "healthy" and provider.auto_disable_models and model.health_auto_disabled:
+                # One tiny successful probe can be a fluke while full chat
+                # turns still fail. Keep the model hidden until a second pass.
+                model.health_status = "healthy" if previous_status == "recovering" else "recovering"
             model.health_reason = reason
             model.health_checked_at = finished
             model.health_claim_until = None
-            if permanent and provider.auto_disable_models and model.enabled:
+            if provider.auto_disable_models and model.health_status in {"quarantined", "unavailable"} and model.enabled:
                 model.enabled = False
                 model.health_auto_disabled = True
+            elif model.health_status == "healthy" and provider.auto_disable_models and model.health_auto_disabled:
+                model.enabled = True
+                model.health_auto_disabled = False
             await db.commit()
         logger.info("Model health check: model_id={} status={} reason={}", model_id, status, reason)
         return True

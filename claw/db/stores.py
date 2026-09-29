@@ -2415,8 +2415,11 @@ class LLMConfigStore:
             for key in ("model_id", "label", "enabled", "cost", "description", "kind"):
                 if key in fields and fields[key] is not None:
                     setattr(row, key, fields[key])
-            if fields.get("enabled") is True or "model_id" in fields:
+            if fields.get("enabled") is not None or "model_id" in fields:
+                # An explicit admin switch always takes ownership of this
+                # setting. A subsequent probe must not undo a manual Off.
                 row.health_auto_disabled = False
+            if fields.get("enabled") is True or "model_id" in fields:
                 row.health_status = "unchecked"
                 row.health_reason = ""
                 row.health_checked_at = None
@@ -2684,6 +2687,8 @@ class LLMConfigStore:
         # Sanitize on read too, so keys stored before sanitization existed (or
         # any stray whitespace) can't crash the outbound HTTP header encoding.
         return {
+            "id": m.id,
+            "health_route": (m.model_id, p.api_key, p.api_base),
             "model_id": m.model_id,
             "api_key": self._clean_key(self._dec(p.api_key)),
             "api_base": p.api_base,
@@ -2939,11 +2944,6 @@ class OAuthAppStore:
             await db.commit()
 
 
-class ProjectContainerConfigStore:
-    """Database-backed global switch; the environment is the initial fallback."""
-
-    _KEY = "project_containers"
-    _INGRESS_KEY = "project_public_ingress"
 class SettingsAclStore:
     """Admin policy for which user-Settings menus are visible.
 
@@ -3003,6 +3003,11 @@ class SettingsAclStore:
         return sorted(k for k, visible in merged.items() if visible is False)
 
 
+class ProjectContainerConfigStore:
+    """Database-backed global switch; the environment is the initial fallback."""
+
+    _KEY = "project_containers"
+    _INGRESS_KEY = "project_public_ingress"
     _ACCESS_KEY = "project_internal_access"
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]):

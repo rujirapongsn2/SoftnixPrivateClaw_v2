@@ -3715,8 +3715,9 @@ class LLMConfigStore:
             for key in ("model_id", "label", "enabled", "cost", "description", "kind"):
                 if key in fields and fields[key] is not None:
                     setattr(row, key, fields[key])
-            if fields.get("enabled") is True or "model_id" in fields:
+            if fields.get("enabled") is not None or "model_id" in fields:
                 row.health_auto_disabled = False
+            if fields.get("enabled") is True or "model_id" in fields:
                 row.health_status = "unchecked"
                 row.health_reason = ""
                 row.health_checked_at = None
@@ -3977,6 +3978,8 @@ class LLMConfigStore:
         # Sanitize on read too, so keys stored before sanitization existed (or
         # any stray whitespace) can't crash the outbound HTTP header encoding.
         return {
+            "id": m.id,
+            "health_route": (m.model_id, p.api_key, p.api_base),
             "model_id": m.model_id,
             "api_key": self._clean_key(self._dec(p.api_key)),
             "api_base": p.api_base,

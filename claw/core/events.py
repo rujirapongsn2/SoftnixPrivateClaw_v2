@@ -23,6 +23,14 @@ class TurnStarted(AgentEvent):
 
 
 @dataclass(slots=True)
+class ModelAvailabilityChanged(AgentEvent):
+    """Prompt connected chats to reload their model picker after a health update."""
+
+    turn_id: str
+    type: str = field(default="model_availability_changed", init=False)
+
+
+@dataclass(slots=True)
 class TextDeltaEvent(AgentEvent):
     turn_id: str
     text: str

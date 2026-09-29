@@ -30,6 +30,37 @@ class FakeProvider:
 
 
 @pytest.mark.asyncio
+async def test_empty_probe_response_does_not_restore_auto_disabled_model(tmp_path):
+    class EmptyProvider(FakeProvider):
+        async def chat(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            return ChatResult(content=None, tool_calls=[])
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/health.db")
+    await init_db(engine)
+    store = LLMConfigStore(factory)
+    provider = await store.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
+    model = await store.create_model(provider.id, "openai/demo", "Demo")
+    fake = EmptyProvider()
+    service = ModelHealthService(store, fake)
+
+    assert await service.check_model(model.id)
+    assert [call[1]["max_tokens"] for call in fake.calls] == [8, 64]
+    assert (await store.list_models())[0].health_status == "warning"
+    assert await service.check_model(model.id, force=True)
+    current = (await store.list_models())[0]
+    assert current.health_status == "quarantined"
+    assert current.enabled is False
+
+    # An empty completion is not evidence that the model recovered.
+    assert await service.check_model(model.id, force=True)
+    current = (await store.list_models())[0]
+    assert current.enabled is False
+    assert current.health_auto_disabled is True
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_daily_probe_disables_only_when_option_is_on_and_failure_is_permanent(tmp_path):
     engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/health.db")
     await init_db(engine)
@@ -60,21 +91,20 @@ async def test_daily_probe_disables_only_when_option_is_on_and_failure_is_perman
     assert await store.resolve("openai/demo") is None
     assert "secret" not in current.health_reason
 
-    # Repaired credentials trigger a fresh probe, while restoration remains
-    # an explicit administrator action.
+    # Repaired credentials trigger a fresh probe and restore only the model
+    # that the health service disabled.
     fake.error = None
     await store.update_provider(provider.id, api_key="repaired-key")
     assert await service.check_model(model.id)
     current = (await store.list_models())[0]
-    assert current.health_status == "healthy"
+    assert current.health_status == "recovering"
     assert current.enabled is False
-    assert current.health_auto_disabled is True
-
-    await store.update_model(model.id, enabled=True)
+    assert await service.check_model(model.id, force=True)
     current = (await store.list_models())[0]
+    assert current.health_status == "healthy"
     assert current.enabled is True
     assert current.health_auto_disabled is False
-    assert current.health_status == "unchecked"
+    assert [m["model_id"] for m in await store.enabled_models()] == ["openai/demo"]
     await engine.dispose()
 
 
@@ -168,7 +198,7 @@ async def test_failed_default_and_fallback_require_manual_selection(tmp_path):
     assert await store.fallback_model_for() is None
     assert await store.resolve("openai/default") is None
     assert [m["model_id"] for m in await store.enabled_models()] == ["openai/other"]
-    assert all(model.enabled for model in await store.list_models())
+    assert all(not model.enabled and model.health_auto_disabled for model in await store.list_models() if model.id != other.id)
     await engine.dispose()
 
 
@@ -218,7 +248,8 @@ async def test_confirmed_transient_failure_is_quarantined_then_recovers(tmp_path
     assert await service.check_due() == 1
     current = (await store.list_models())[0]
     assert current.health_status == "quarantined"
-    assert current.enabled is True
+    assert current.enabled is False
+    assert current.health_auto_disabled is True
     assert await store.enabled_models() == []
     assert await store.resolve("openai/demo") is None
     fake.error = None
@@ -228,8 +259,103 @@ async def test_confirmed_transient_failure_is_quarantined_then_recovers(tmp_path
         ))
         await db.commit()
     assert await service.check_due() == 1
+    assert (await store.list_models())[0].health_status == "recovering"
+    assert (await store.list_models())[0].enabled is False
+    assert await service.check_model(model.id, force=True)
     assert (await store.list_models())[0].health_status == "healthy"
+    assert (await store.list_models())[0].enabled is True
+    assert (await store.list_models())[0].health_auto_disabled is False
     assert [m["model_id"] for m in await store.enabled_models()] == ["openai/demo"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_real_turn_failure_disables_after_confirmation_and_recovers(tmp_path):
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/health.db")
+    await init_db(engine)
+    store = LLMConfigStore(factory)
+    provider = await store.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
+    model = await store.create_model(provider.id, "openai/demo", "Demo")
+    fake = FakeProvider(ProviderError("busy", status_code=503))
+    service = ModelHealthService(store, fake)
+
+    await service.report_failure(model.id, ProviderError("busy", status_code=503))
+    current = (await store.list_models())[0]
+    assert current.health_status == "quarantined"
+    assert current.enabled is False
+    assert current.health_auto_disabled is True
+    assert await store.enabled_models() == []
+    assert len(fake.calls) == 1  # one small confirmation probe
+
+    fake.error = None
+    assert await service.check_model(model.id, force=True)
+    assert (await store.list_models())[0].health_status == "recovering"
+    assert await service.check_model(model.id, force=True)
+    current = (await store.list_models())[0]
+    assert current.health_status == "healthy"
+    assert current.enabled is True
+    assert current.health_auto_disabled is False
+
+    await store.update_model(model.id, enabled=False)
+    assert await service.check_model(model.id, force=True) is False
+    assert (await store.list_models())[0].enabled is False
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_manual_off_overrides_pending_auto_recovery(tmp_path):
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/health.db")
+    await init_db(engine)
+    store = LLMConfigStore(factory)
+    provider = await store.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
+    model = await store.create_model(provider.id, "openai/demo", "Demo")
+    fake = FakeProvider(ProviderError("bad key", status_code=401))
+    service = ModelHealthService(store, fake)
+    assert await service.check_model(model.id)
+    assert (await store.list_models())[0].health_auto_disabled is True
+
+    await store.update_model(model.id, enabled=False)
+    fake.error = None
+    assert await service.check_model(model.id, force=True) is False
+    current = (await store.list_models())[0]
+    assert current.enabled is False
+    assert current.health_auto_disabled is False
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bad_user_request_does_not_disable_shared_model(tmp_path):
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/health.db")
+    await init_db(engine)
+    store = LLMConfigStore(factory)
+    provider = await store.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
+    model = await store.create_model(provider.id, "openai/demo", "Demo")
+    fake = FakeProvider()
+    service = ModelHealthService(store, fake)
+    await service.report_failure(model.id, ProviderError("bad user request", status_code=400))
+    current = (await store.list_models())[0]
+    assert current.health_status == "unchecked"
+    assert current.enabled is True
+    assert fake.calls == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failure_from_old_provider_route_cannot_disable_updated_model(tmp_path):
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/health.db")
+    await init_db(engine)
+    store = LLMConfigStore(factory)
+    provider = await store.create_provider("vendor", "old-key", "https://example.test/v1", auto_disable_models=True)
+    model = await store.create_model(provider.id, "openai/demo", "Demo")
+    snapshot = (await store.resolve("openai/demo"))["health_route"]
+    await store.update_provider(provider.id, api_key="new-key")
+
+    await ModelHealthService(store, FakeProvider()).report_failure(
+        model.id, ProviderError("old key rejected", status_code=401), snapshot,
+    )
+    current = (await store.list_models())[0]
+    assert current.enabled is True
+    assert current.health_status == "unchecked"
     await engine.dispose()
 
 

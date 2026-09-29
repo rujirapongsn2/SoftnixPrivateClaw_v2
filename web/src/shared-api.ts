@@ -767,7 +767,7 @@ export interface LLMModelCfg {
   model_id: string;
   label: string;
   enabled: boolean;
-  health_status: "unchecked" | "healthy" | "warning" | "quarantined" | "unavailable";
+  health_status: "unchecked" | "healthy" | "warning" | "quarantined" | "unavailable" | "recovering";
   health_reason: string;
   health_checked_at: string | null;
   health_auto_disabled: boolean;
