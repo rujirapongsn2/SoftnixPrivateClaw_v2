@@ -48,6 +48,7 @@ from claw.db.stores import (
     MemoryStore,
     MessageStore,
     OAuthAppStore,
+    SettingsAclStore,
     PolicyPlanStore,
     ProjectContainerConfigStore,
     ScheduleStore,
@@ -111,6 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     knowledge_service = KnowledgeService(knowledge, settings.knowledge_root, settings.knowledge)
     shares = ShareStore(factory)
     plans = PolicyPlanStore(factory)
+    settings_acl = SettingsAclStore(factory)
     branding = BrandingStore(factory)
     project_container_config = ProjectContainerConfigStore(factory)
     artifact_jobs = ArtifactJobStore(factory)
@@ -321,6 +323,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         smtp_config=smtp_config,
         plans=plans,
         branding=branding,
+        settings_acl=settings_acl,
         image_rate_limiter=RateLimiter(settings.image.per_minute),
         tts_rate_limiter=RateLimiter(settings.tts.per_minute),
         guardrails=guardrails,

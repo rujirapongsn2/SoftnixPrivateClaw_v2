@@ -650,6 +650,13 @@ export default function App() {
     if (window.location.pathname.startsWith("/chat"))
       window.history.replaceState(null, "", "/chat/privateclaw" + (active ? "/" + encodeURIComponent(active) : ""));
   }, [active]);
+  // Menus the admin has hidden for this user (Control Plane → Menu ACL). Fails
+  // open: an error leaves every menu visible rather than locking the user out.
+  const [hiddenSettings, setHiddenSettings] = useState<string[]>([]);
+  useEffect(() => {
+    if (!user) return;
+    void api.mySettingsAcl().then((r) => setHiddenSettings(r.hidden)).catch(() => setHiddenSettings([]));
+  }, [user?.id]);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
@@ -907,7 +914,7 @@ export default function App() {
                 icon={SettingsIcon}
                 collapsible={{ defaultIsCollapsed: true }}
               >
-                {SETTINGS_SECTIONS.filter(s => sbotEnabled || s.key !== "projects").map((s) => (
+                {SETTINGS_SECTIONS.filter(s => (sbotEnabled || s.key !== "projects") && !hiddenSettings.includes(s.key)).map((s) => (
                   <SideNavItem
                     key={s.key}
                     label={t(s.labelKey)}
@@ -980,7 +987,7 @@ export default function App() {
         </div>
         {adminSection ? (
           <AdminPanel section={adminSection} selfId={user.id} onSectionChange={setAdminSection} />
-        ) : settingsSection ? (
+        ) : settingsSection && !hiddenSettings.includes(settingsSection) ? (
           <SettingsPanel section={settingsSection} />
         ) : (
           <Chat

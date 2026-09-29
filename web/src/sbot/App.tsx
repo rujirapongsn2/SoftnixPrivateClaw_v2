@@ -693,6 +693,13 @@ export default function App() {
     if (window.location.pathname.startsWith("/chat"))
       window.history.replaceState(null, "", "/chat/sbot" + (active ? "/" + encodeURIComponent(active) : ""));
   }, [active]);
+  // Menus the admin has hidden for this user (Control Plane → Menu ACL). Fails
+  // open: an error leaves every menu visible rather than locking the user out.
+  const [hiddenSettings, setHiddenSettings] = useState<string[]>([]);
+  useEffect(() => {
+    if (!user) return;
+    void api.mySettingsAcl().then((r) => setHiddenSettings(r.hidden)).catch(() => setHiddenSettings([]));
+  }, [user?.id]);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
@@ -1082,7 +1089,7 @@ export default function App() {
                 icon={SettingsIcon}
                 collapsible={{ defaultIsCollapsed: true }}
               >
-                {SETTINGS_SECTIONS.map((s) => (
+                {SETTINGS_SECTIONS.filter((s) => !hiddenSettings.includes(s.key)).map((s) => (
                   <SideNavItem
                     key={s.key}
                     label={t(s.labelKey)}
@@ -1179,7 +1186,7 @@ export default function App() {
             selfId={user.id}
             onSectionChange={(section) => setAdminSection(section)}
           />
-        ) : settingsSection ? (
+        ) : settingsSection && !hiddenSettings.includes(settingsSection) ? (
           <SettingsPanel section={settingsSection} />
         ) : openingBotId ? (
           <div className="sbot-transcript-opening" role="status" aria-live="polite">

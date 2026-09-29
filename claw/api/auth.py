@@ -554,6 +554,14 @@ async def me(user: User = Depends(current_user)) -> dict:
     return _user_json(user)
 
 
+@router.get("/settings-acl")
+async def my_settings_acl(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    """Settings menus the admin has hidden for the caller (user → group → global)."""
+    from claw.api.settings_acl import acl_for_user
+
+    return await acl_for_user(state, user)
+
+
 # ---------------------------------------------------------------- OIDC / social login
 
 

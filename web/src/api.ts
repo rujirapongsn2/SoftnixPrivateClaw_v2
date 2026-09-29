@@ -395,6 +395,21 @@ export interface AdminUser extends AuthUser {
 }
 
 export interface GroupInfo {
+export interface SettingsAclTarget {
+  id: string;
+  label: string;
+  email?: string;
+  rules: Record<string, boolean>;
+}
+
+export interface SettingsAclOverview {
+  sections: string[];
+  locked: string[];
+  global: Record<string, boolean>;
+  groups: SettingsAclTarget[];
+  users: SettingsAclTarget[];
+}
+
   id: string;
   name: string;
   is_default: boolean;
@@ -1185,6 +1200,14 @@ export const api = {
 
   // -- admin: usage-tier plans --
   adminListPlans: () => request<PlanInfo[]>("/api/admin/plans"),
+  // -- admin: settings-menu ACL --
+  adminSettingsAcl: () => request<SettingsAclOverview>("/api/admin/settings-acl"),
+  adminSaveSettingsAcl: (body: { scope: "global" | "group" | "user"; target_id?: string | null; rules: Record<string, boolean> }) =>
+    request<SettingsAclOverview>("/api/admin/settings-acl", { method: "PUT", body: JSON.stringify(body) }),
+  adminSettingsAclUsers: (q: string) =>
+    request<{ id: string; label: string; email: string }[]>(`/api/admin/settings-acl/users?q=${encodeURIComponent(q)}`),
+  mySettingsAcl: () => request<{ hidden: string[] }>("/api/auth/settings-acl"),
+
   adminCreatePlan: (plan: PlanCreate) =>
     request<PlanInfo>("/api/admin/plans", { method: "POST", body: JSON.stringify(plan) }),
   adminUpdatePlan: (id: string, patch: PlanPatch) =>
