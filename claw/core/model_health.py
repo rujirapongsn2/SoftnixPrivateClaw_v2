@@ -39,8 +39,11 @@ def _due_at(now: datetime):
     return or_(
         LLMModel.health_checked_at.is_(None),
         LLMModel.health_checked_at <= now - _CHECK_INTERVAL,
-        (LLMModel.health_status == "warning") &
+        (LLMModel.health_status == "warning") & (LLMModel.health_reason != "rate_limited") &
         (LLMModel.health_checked_at <= now - _CONFIRM_INTERVAL),
+        # Rate limiting is capacity, not an outage: re-check gently, never escalate.
+        (LLMModel.health_status == "warning") & (LLMModel.health_reason == "rate_limited") &
+        (LLMModel.health_checked_at <= now - _RETRY_INTERVAL),
         (LLMModel.health_status == "recovering") &
         (LLMModel.health_checked_at <= now - _CONFIRM_INTERVAL),
         (LLMModel.health_status == "quarantined") &
@@ -292,7 +295,11 @@ class ModelHealthService:
                 await db.commit()
                 return False
             model.health_status = status
-            if status == "warning" and (model.health_auto_disabled or previous_status in {"warning", "quarantined"}):
+            # Repeated uncertain failures quarantine, except rate limiting: a
+            # throttled provider is still up and must stay selectable. A model
+            # already disabled for another reason stays disabled.
+            if status == "warning" and (model.health_auto_disabled or (
+                    previous_status in {"warning", "quarantined"} and reason != "rate_limited")):
                 model.health_status = "quarantined"
             if status == "healthy" and provider.auto_disable_models and model.health_auto_disabled:
                 # One tiny successful probe can be a fluke while full chat

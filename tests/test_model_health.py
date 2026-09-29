@@ -163,7 +163,7 @@ async def test_transient_errors_never_auto_disable_and_private_models_are_not_pr
     fake.error = None
     async with factory() as db:
         await db.execute(update(LLMModel).where(LLMModel.id == model.id).values(
-            health_checked_at=datetime.now(timezone.utc) - timedelta(minutes=2)
+            health_checked_at=datetime.now(timezone.utc) - timedelta(minutes=6)
         ))
         await db.commit()
     assert await service.check_due() == 1
@@ -189,7 +189,7 @@ async def test_failed_default_and_fallback_require_manual_selection(tmp_path):
     other = await store.create_model(provider.id, "openai/other", "Other")
     await store.update_model(default.id, is_default=True)
     await store.update_model(fallback.id, is_fallback=True)
-    service = ModelHealthService(store, FakeProvider(ProviderError("busy", status_code=429)))
+    service = ModelHealthService(store, FakeProvider(ProviderError("upstream down", status_code=503)))
     assert await service.check_model(default.id)
     assert await service.check_model(fallback.id)
     assert await store.default_model_for() == "openai/default"
@@ -222,7 +222,7 @@ async def test_bot_mode_uses_same_health_gate(tmp_path):
     store = SbotLLMConfigStore(factory)
     provider = await store.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
     model = await store.create_model(provider.id, "openai/demo", "Demo")
-    service = ModelHealthService(store, FakeProvider(ProviderError("busy", status_code=429)))
+    service = ModelHealthService(store, FakeProvider(ProviderError("upstream down", status_code=503)))
     assert await service.check_model(model.id)
     assert await service.check_model(model.id, force=True)
     assert await store.enabled_models() == []
@@ -237,7 +237,7 @@ async def test_confirmed_transient_failure_is_quarantined_then_recovers(tmp_path
     store = LLMConfigStore(factory)
     provider = await store.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
     model = await store.create_model(provider.id, "openai/demo", "Demo")
-    fake = FakeProvider(ProviderError("busy", status_code=429))
+    fake = FakeProvider(ProviderError("upstream down", status_code=503))
     service = ModelHealthService(store, fake)
     assert await service.check_model(model.id)
     assert (await store.list_models())[0].health_status == "warning"
@@ -381,7 +381,7 @@ async def test_picker_never_substitutes_default_for_quarantined_lineup(tmp_path,
     default = await store.create_model(provider.id, "openai/default", "Default")
     other = await store.create_model(provider.id, "openai/other", "Other")
     await store.update_model(default.id, is_default=True)
-    service = ModelHealthService(store, FakeProvider(ProviderError("busy", status_code=429)))
+    service = ModelHealthService(store, FakeProvider(ProviderError("upstream down", status_code=503)))
     state = SimpleNamespace(
         plans=None, llm_config=store,
         settings=SimpleNamespace(llm=LLMSettings(model="openai/env", api_key="env-key")),
@@ -519,3 +519,27 @@ async def test_concurrent_or_rate_limited_turn_failures_do_not_disable_a_healthy
     assert await service.check_due() == 1
     current = (await store.list_models())[0]
     assert current.enabled is True and current.health_status == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_sustained_rate_limiting_never_quarantines(tmp_path):
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/health.db")
+    await init_db(engine)
+    store = LLMConfigStore(factory)
+    provider = await store.create_provider("vendor", "key", "https://example.test/v1", auto_disable_models=True)
+    model = await store.create_model(provider.id, "openai/demo", "Demo")
+    service = ModelHealthService(store, FakeProvider(ProviderError("busy", status_code=429)))
+    for _ in range(3):
+        assert await service.check_model(model.id, force=True)
+    current = (await store.list_models())[0]
+    assert current.enabled is True and current.health_auto_disabled is False
+    assert current.health_status == "warning" and current.health_reason == "rate_limited"
+    assert [m["model_id"] for m in await store.enabled_models()] == ["openai/demo"]
+    # Re-checked gently (5 min), not every minute.
+    async with factory() as db:
+        await db.execute(update(LLMModel).where(LLMModel.id == model.id).values(
+            health_checked_at=datetime.now(timezone.utc) - timedelta(minutes=2)
+        ))
+        await db.commit()
+    assert await service.check_due() == 0
+    await engine.dispose()
