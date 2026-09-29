@@ -15,6 +15,7 @@ from sbot.core.runtime import AgentRuntime
 from sbot.core.scheduler import SchedulerService
 from sbot.db.models import User
 from sbot.security.policy import PolicyEngine
+from claw.db.stores import SettingsAclStore
 from sbot.db.stores import (
     AuditStore,
     BlueprintStore,
@@ -79,6 +80,7 @@ class AppState:
     project_containers: "ProjectContainerManager"
     # Usage-tier plans (model cost ceilings + daily/per-minute quotas).
     plans: PolicyPlanStore = None  # type: ignore[assignment]
+    settings_acl: "SettingsAclStore" = None  # type: ignore[assignment]
     # Global branding & appearance (Control Plane > Preferences).
     branding: BrandingStore = None  # type: ignore[assignment]
     # Per-user throttle for the /images endpoint (its own limiter, separate

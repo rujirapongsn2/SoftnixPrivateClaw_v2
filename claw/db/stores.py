@@ -2944,6 +2944,65 @@ class ProjectContainerConfigStore:
 
     _KEY = "project_containers"
     _INGRESS_KEY = "project_public_ingress"
+class SettingsAclStore:
+    """Admin policy for which user-Settings menus are visible.
+
+    One AppSetting row (no migration): {"global": {section: bool},
+    "groups": {group_id: {section: bool}}, "users": {user_id: {section: bool}}}
+    where the bool is "visible". A section absent from every applicable scope is
+    visible. Resolution is per section, most specific wins: user → group → global.
+    The document only grows with explicit overrides, so it stays small."""
+
+    _KEY = "settings_acl"
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]):
+        self.factory = factory
+
+    async def get(self) -> dict[str, Any]:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+        data = dict(row.value or {}) if row else {}
+        return {
+            "global": dict(data.get("global") or {}),
+            "groups": dict(data.get("groups") or {}),
+            "users": dict(data.get("users") or {}),
+        }
+
+    async def set_scope(self, scope: str, target_id: str | None, rules: dict[str, bool]) -> None:
+        """Replace one scope's rules. Empty `rules` removes the override."""
+        async with self.factory() as db:
+            # Row lock (no-op on SQLite) so concurrent admin saves don't clobber each other.
+            row = await db.scalar(select(AppSetting).where(AppSetting.key == self._KEY).with_for_update())
+            data = dict(row.value or {}) if row else {}
+            data.setdefault("global", {})
+            data.setdefault("groups", {})
+            data.setdefault("users", {})
+            if scope == "global":
+                data["global"] = dict(rules)
+            else:
+                name = "groups" if scope == "group" else "users"
+                bucket = dict(data[name])
+                if rules:
+                    bucket[target_id] = dict(rules)
+                else:
+                    bucket.pop(target_id, None)
+                data[name] = bucket
+            if row is None:
+                db.add(AppSetting(key=self._KEY, value=data))
+            else:
+                row.value = data
+            await db.commit()
+
+    async def hidden_for(self, user_id: str, group_id: str | None) -> list[str]:
+        """Sections hidden for this user after user → group → global resolution."""
+        data = await self.get()
+        merged: dict[str, bool] = dict(data["global"])
+        if group_id:
+            merged.update(data["groups"].get(group_id) or {})
+        merged.update(data["users"].get(user_id) or {})
+        return sorted(k for k, visible in merged.items() if visible is False)
+
+
     _ACCESS_KEY = "project_internal_access"
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]):

@@ -32,6 +32,7 @@ from claw.db.stores import (
     MemoryStore,
     MessageStore,
     OAuthAppStore,
+    SettingsAclStore,
     PolicyPlanStore,
     ScheduleStore,
     SessionStore,
@@ -87,6 +88,7 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         telegram_config=TelegramConfigStore(db_factory),
         smtp_config=SmtpConfigStore(db_factory),
         plans=PolicyPlanStore(db_factory),
+        settings_acl=SettingsAclStore(db_factory),
         branding=BrandingStore(db_factory),
         image_rate_limiter=RateLimiter(60),
         telegram_mgr=TelegramManager(

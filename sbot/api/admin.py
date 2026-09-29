@@ -20,6 +20,7 @@ from sbot.api import llm_shared as llm
 from sbot.api.auth import _is_pending_imported_account, _send_activation_email
 from sbot.api.branding_shared import ChatBackground, FontSize, Language
 from sbot.api.deps import AppState, get_state, require_admin
+from claw.api.settings_acl import SettingsAclBody, acl_overview, acl_search_users, acl_update
 from sbot.api.file_preview import decode_text_bytes
 from sbot.auth import oidc
 from sbot.auth.passwords import hash_password
@@ -532,6 +533,28 @@ async def set_default_group(
             raise HTTPException(status_code=404, detail="group not found")
     await state.groups.set_default(body.group_id)
     return {"default_group_id": body.group_id}
+
+
+# ---------------------------------------------------------------- settings menu ACL
+
+
+@router.get("/settings-acl")
+async def get_settings_acl(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
+    return await acl_overview(state)
+
+
+@router.put("/settings-acl")
+async def put_settings_acl(
+    body: SettingsAclBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    return await acl_update(state, body)
+
+
+@router.get("/settings-acl/users")
+async def search_settings_acl_users(
+    q: str = "", admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> list:
+    return await acl_search_users(state, q)
 
 
 # ---------------------------------------------------------------- policy plans

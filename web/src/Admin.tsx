@@ -30,6 +30,7 @@ import {
   Globe,
   Info,
   KeyRound,
+  ListChecks,
   LayoutDashboard,
   Mail,
   MessageSquare,
@@ -61,6 +62,7 @@ import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
 import {
   ApiOperationsEditor,
+  SETTINGS_SECTIONS,
   ConnectorBrandTile,
   ConnectorShadowedTools,
   ConnectorToolNames,
@@ -85,6 +87,7 @@ import {
   type ConnectorInfo,
   type ConnectorPreset,
   GroupInfo,
+  type SettingsAclOverview,
   GuardrailRule,
   GuardrailTestResult,
   LLMModelCfg,
@@ -117,6 +120,7 @@ export type AdminSection =
   | "providers"
   | "connectors"
   | "plans"
+  | "acl"
   | "guardrails"
   | "oauth"
   | "telegram"
@@ -149,6 +153,7 @@ export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconTy
   { key: "email", labelKey: "admin.nav.email", icon: Mail },
   { key: "users", labelKey: "admin.nav.users", icon: Users },
   { key: "plans", labelKey: "admin.nav.plans", icon: Gauge },
+  { key: "acl", labelKey: "admin.nav.acl", icon: ListChecks },
   { key: "preferences", labelKey: "admin.nav.preferences", icon: Palette },
   { key: "audit", labelKey: "admin.nav.audit", icon: ScrollText },
 ];
@@ -188,6 +193,7 @@ export function AdminPanel({
         {section === "providers" && <ProvidersPanel llmApi={ADMIN_LLM_API} scope="admin" />}
         {section === "connectors" && <PrebuiltConnectorsPanel />}
         {section === "plans" && <PlansPanel />}
+        {section === "acl" && <SettingsAclPanel />}
         {section === "guardrails" && <GuardrailsPanel />}
         {section === "projects" && <ProjectContainersAdminPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
@@ -2701,6 +2707,172 @@ function PlansPanel() {
 
   // Ranked low→high so the list reads as a ladder (Free → Plus → Pro → …).
   const sorted = [...plans].sort((a, b) => a.rank - b.rank);
+type AclChoice = "inherit" | "show" | "hide";
+
+function SettingsAclPanel() {
+  const t = useT();
+  const toast = useToast();
+  const { error, guard } = useAsyncError();
+  const [overview, setOverview] = useState<SettingsAclOverview | null>(null);
+  const [groups, setGroups] = useState<GroupInfo[]>([]);
+  const [scope, setScope] = useState<"global" | "group" | "user">("global");
+  const [target, setTarget] = useState<{ id: string; label: string } | null>(null);
+  const [query, setQuery] = useState("");
+  const [matches, setMatches] = useState<{ id: string; label: string; email: string }[]>([]);
+  const [draft, setDraft] = useState<Record<string, AclChoice>>({});
+
+  useEffect(() => {
+    void guard(async () => {
+      const [ov, gs] = await Promise.all([api.adminSettingsAcl(), api.adminListGroups()]);
+      setOverview(ov);
+      setGroups(gs);
+    });
+  }, [guard]);
+
+  // Debounced, server-side, capped at 10 rows — never lists every user.
+  useEffect(() => {
+    if (scope !== "user" || query.trim().length < 2) {
+      setMatches([]);
+      return;
+    }
+    const h = window.setTimeout(() => void api.adminSettingsAclUsers(query.trim()).then(setMatches).catch(() => setMatches([])), 250);
+    return () => window.clearTimeout(h);
+  }, [scope, query]);
+
+  const stored: Record<string, boolean> = useMemo(() => {
+    if (!overview) return {};
+    if (scope === "global") return overview.global;
+    const list = scope === "group" ? overview.groups : overview.users;
+    return list.find((x) => x.id === target?.id)?.rules ?? {};
+  }, [overview, scope, target]);
+
+  useEffect(() => {
+    const next: Record<string, AclChoice> = {};
+    for (const [k, v] of Object.entries(stored)) next[k] = v ? "show" : "hide";
+    setDraft(next);
+  }, [stored]);
+
+  const labelOf = useMemo(() => new Map(SETTINGS_SECTIONS.map((s) => [s.key as string, s.labelKey])), []);
+  const editable = overview ? overview.sections.filter((k) => !overview.locked.includes(k)) : [];
+  const ready = scope === "global" || target !== null;
+
+  const save = (rules: Record<string, boolean>) =>
+    guard(async () => {
+      setOverview(await api.adminSaveSettingsAcl({ scope, target_id: scope === "global" ? null : target?.id, rules }));
+      toast({ body: t("admin.acl.saved"), type: "info", autoHideDuration: 2500 });
+    });
+  const saveDraft = () => {
+    const rules: Record<string, boolean> = {};
+    for (const [k, c] of Object.entries(draft)) if (c !== "inherit") rules[k] = c === "show";
+    void save(rules);
+  };
+  const overrides = overview ? (scope === "group" ? overview.groups : scope === "user" ? overview.users : []) : [];
+
+  return (
+    <div className="claw-panel">
+      <Text color="secondary">{t("admin.acl.intro")}</Text>
+      {error && <ErrorText>{error}</ErrorText>}
+      <SegmentedControl
+        value={scope}
+        onChange={(v) => {
+          setScope(v as typeof scope);
+          setTarget(null);
+          setQuery("");
+        }}
+        label={t("admin.nav.acl")}
+        size="sm"
+      >
+        {(["global", "group", "user"] as const).map((k) => (
+          <SegmentedControlItem key={k} value={k} label={t(`admin.acl.scope.${k}`)} />
+        ))}
+      </SegmentedControl>
+
+      {scope === "group" && (
+        <div className="claw-row" style={{ flexWrap: "wrap" }}>
+          {groups.map((g) => (
+            <Button
+              key={g.id}
+              label={g.name}
+              size="sm"
+              variant={target?.id === g.id ? "primary" : "secondary"}
+              clickAction={() => setTarget({ id: g.id, label: g.name })}
+            />
+          ))}
+          {groups.length === 0 && <Text color="secondary">{t("admin.acl.pickGroup")}</Text>}
+        </div>
+      )}
+      {scope === "user" && (
+        <>
+          <TextInput
+            label={t("admin.acl.searchUser")}
+            isLabelHidden
+            placeholder={t("admin.acl.searchUser")}
+            startIcon={<Icon icon={Search} size="sm" color="secondary" />}
+            value={query}
+            onChange={setQuery}
+          />
+          <div className="claw-row" style={{ flexWrap: "wrap" }}>
+            {matches.map((u) => (
+              <Button
+                key={u.id}
+                label={u.label === u.email ? u.email : `${u.label} · ${u.email}`}
+                size="sm"
+                variant={target?.id === u.id ? "primary" : "secondary"}
+                clickAction={() => setTarget({ id: u.id, label: u.label })}
+              />
+            ))}
+          </div>
+        </>
+      )}
+      {scope !== "global" && (
+        <div className="claw-field-group">
+          <Text size="sm" color="secondary">{t("admin.acl.overrides")}</Text>
+          <div className="claw-row" style={{ flexWrap: "wrap" }}>
+            {overrides.map((o) => (
+              <Button
+                key={o.id}
+                label={o.label}
+                size="sm"
+                variant={target?.id === o.id ? "primary" : "secondary"}
+                clickAction={() => setTarget({ id: o.id, label: o.label })}
+              />
+            ))}
+            {overrides.length === 0 && <Text size="sm" color="secondary">{t("admin.acl.none")}</Text>}
+          </div>
+        </div>
+      )}
+
+      {ready && overview && (
+        <Card padding={2}>
+          {target && <Text weight="semibold">{target.label}</Text>}
+          {editable.map((k) => (
+            <div key={k} className="claw-row claw-row-between" style={{ padding: "6px 0" }}>
+              <Text>{t(labelOf.get(k) ?? k)}</Text>
+              <SegmentedControl
+                value={draft[k] ?? "inherit"}
+                onChange={(v) => setDraft({ ...draft, [k]: v as AclChoice })}
+                label={t(labelOf.get(k) ?? k)}
+                size="sm"
+              >
+                {(scope === "global" ? (["show", "hide"] as const) : (["inherit", "show", "hide"] as const)).map((c) => (
+                  <SegmentedControlItem key={c} value={c} label={t(`admin.acl.${c}`)} />
+                ))}
+              </SegmentedControl>
+            </div>
+          ))}
+          <Text size="sm" color="secondary">{t("admin.acl.locked")}</Text>
+          <div className="claw-row">
+            <Button label={t("admin.acl.save")} clickAction={saveDraft} />
+            {scope !== "global" && Object.keys(stored).length > 0 && (
+              <Button label={t("admin.acl.reset")} variant="secondary" clickAction={() => void save({})} />
+            )}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 
   return (
     <div className="claw-panel">

@@ -70,6 +70,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     knowledge = shared.knowledge
     knowledge_service = shared.knowledge_service
     plans = shared.plans
+    settings_acl = shared.settings_acl
     branding = shared.branding
     policy = shared.policy
     browser_broker = shared.browser_broker
@@ -272,6 +273,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         smtp_config=smtp_config,
         plans=plans,
         branding=branding,
+        settings_acl=settings_acl,
         image_rate_limiter=shared.image_rate_limiter if shared else RateLimiter(settings.image.per_minute),
         tts_rate_limiter=shared.tts_rate_limiter if shared else RateLimiter(settings.tts.per_minute),
         guardrails=guardrails,

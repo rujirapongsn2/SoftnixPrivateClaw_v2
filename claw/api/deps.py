@@ -26,6 +26,7 @@ from claw.db.stores import (
     MemoryStore,
     MessageStore,
     OAuthAppStore,
+    SettingsAclStore,
     PolicyPlanStore,
     ScheduleStore,
     SessionStore,
@@ -70,6 +71,8 @@ class AppState:
     smtp_config: SmtpConfigStore
     # Usage-tier plans (model cost ceilings + daily/per-minute quotas).
     plans: PolicyPlanStore = None  # type: ignore[assignment]
+    # Admin policy for which user-Settings menus are visible (user → group → global).
+    settings_acl: SettingsAclStore = None  # type: ignore[assignment]
     # Global branding & appearance (Control Plane > Preferences).
     branding: BrandingStore = None  # type: ignore[assignment]
     # Per-user throttle for the /images endpoint (its own limiter, separate
