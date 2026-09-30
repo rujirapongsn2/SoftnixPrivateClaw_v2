@@ -5,6 +5,7 @@ from sbot.config import TeamWorkSettings
 
 from pydantic import PositiveInt, BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from claw.security.semantic import SemanticGuardrailSettings
 
 
 class LLMSettings(BaseModel):
@@ -294,6 +295,7 @@ class Settings(BaseSettings):
     branding_root: Path = Path("branding")
 
     # When false, the control policy runs in monitor-only mode (logs hits, no mask/block).
+    semantic_guardrails: SemanticGuardrailSettings = Field(default_factory=SemanticGuardrailSettings)
     policy_enforce: bool = True
     # Resource caps (bound in-memory growth at scale).
     max_resident_agents: int = 256
@@ -348,4 +350,7 @@ class Settings(BaseSettings):
 
 
 def load_settings() -> Settings:
-    return Settings()
+    # launchd can start outside the checkout; resolve dotenv from the project,
+    # while process environment variables retain their normal precedence.
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    return Settings(_env_file=env_file) if env_file.is_file() else Settings()

@@ -249,6 +249,14 @@ body {
   outline-offset: 2px;
 }
 
+/* A TextInput already draws its focus ring on the wrapper (:focus-within above).
+   The generic ring would outline the inner <input> as well and stack a second
+   frame inside the first, so drop it there. Inputs with a validation status keep
+   it: their wrapper shows no ring of its own. */
+[data-astryx-theme] .astryx-text-input:not([data-status]) input:focus-visible {
+  outline: none;
+}
+
 /* Chat composer's contenteditable already gets its own focus affordance
    (the composer body's box-shadow deepens on :focus-within) — the generic
    ring above would stack a hard blue rectangle on top of that every time
@@ -4982,3 +4990,37 @@ html[data-chat-bg="grid"] .claw-chat {
 
 .claw-durable-approval { grid-column: 1 / -1; min-width: 0; }
 .claw-durable-approval pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12rem; overflow: auto; }
+
+/* Semantic rules keep long conditions in expandable reading surfaces. */
+.claw-semantic-env { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+
+/* Guardrail rule types and grouped semantic policies. */
+.claw-guardrails-tabs { display: flex; gap: 4px; width: fit-content; max-width: 100%; padding: 4px; border: 1px solid var(--color-border-subtle); border-radius: 12px; background: var(--color-surface-2); }
+.claw-guardrails-tabs button { padding: 9px 18px; border: 0; border-radius: 8px; background: transparent; color: var(--color-text-secondary); font: inherit; cursor: pointer; }
+.claw-guardrails-tabs button[aria-selected="true"] { color: var(--color-text-primary); background: var(--color-surface-1); box-shadow: 0 1px 3px #00000012; font-weight: 600; }
+.claw-guardrails-tabs button:focus-visible { outline: 2px solid var(--color-text-primary); outline-offset: 2px; }
+.claw-guardrails-pane { display: grid; gap: 16px; min-width: 0; }
+.claw-guardrails-pane[hidden] { display: none; }
+/* Semantic rules: one column of rule cards under a small group heading, like the regex tab. */
+.claw-semantic-groups { display: grid; gap: 20px; min-width: 0; }
+.claw-semantic-group { display: grid; gap: 12px; min-width: 0; }
+.claw-semantic-group-header { display: flex; align-items: center; gap: 8px; }
+.claw-semantic-group-header svg { flex-shrink: 0; color: var(--color-text-secondary); }
+.claw-semantic-group-header h3 { margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.claw-semantic-count { border-radius: 12px; padding: 2px 8px; font-size: 12px; background: var(--color-surface-2); color: var(--color-text-secondary); }
+.claw-semantic-rule-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.claw-semantic-rule-head > .claw-row:first-child { min-width: 0; flex: 1 1 280px; }
+.claw-semantic-rule-actions { flex: 0 0 auto; flex-wrap: wrap; }
+.claw-semantic-desc { margin-top: 8px; cursor: pointer; overflow-wrap: anywhere; display: -webkit-box !important; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.claw-semantic-desc.is-open { -webkit-line-clamp: unset; display: block !important; white-space: pre-wrap; }
+.claw-semantic-exclusions { margin-top: 6px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.claw-semantic-hint { margin-top: -8px; overflow-wrap: anywhere; }
+.claw-semantic-hint > summary { cursor: pointer; width: fit-content; font-size: 13px; color: var(--color-text-secondary); }
+.claw-semantic-hint > summary:focus-visible { outline: 2px solid var(--color-text-primary); outline-offset: 2px; border-radius: 4px; }
+.claw-semantic-hint[open] > p { margin-top: 6px; }
+.claw-policy-notice { display: flex; align-items: center; gap: 8px; margin: 4px 0 4px 0; padding: 8px 12px; border-radius: 10px; background: var(--color-surface-2, #f3f3f3); overflow-wrap: anywhere; }
+.claw-semantic-range { flex: 1 1 140px; min-width: 120px; max-width: 260px; }
+@media (max-width: 800px) {
+  .claw-guardrails-tabs { width: 100%; }
+  .claw-guardrails-tabs button { flex: 1; padding-inline: 10px; }
+}

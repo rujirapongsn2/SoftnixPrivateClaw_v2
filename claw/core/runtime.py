@@ -37,6 +37,7 @@ from claw.core.events import (
     TurnStarted,
     ArtifactJobProgress,
     ModelAvailabilityChanged,
+    PolicyNotice,
 )
 from claw.core.limits import RateLimiter
 from claw.core.loop import AgentLoop
@@ -563,6 +564,8 @@ class AgentRuntime:
         # limit; an evicted agent is just a reloadable in-memory object.
         self._agents: "OrderedDict[str, ClawAgent]" = OrderedDict()
         self._session_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
+        # Turns of a session that are in their semantic pre-check (before the session lock).
+        self._semantic_pending: dict[str, int] = {}
         self._rate_limiter = RateLimiter(settings.turns_per_minute)
         self._plan_rate_limiter = RateLimiter(0)
         self._background: set[asyncio.Task] = set()
@@ -994,6 +997,64 @@ class AgentRuntime:
         while (self._inflight > 0 or self._background) and _time.monotonic() < deadline:
             await asyncio.sleep(0.05)
 
+    async def _semantic_input_gate(
+        self, verdict, *, user_id: str, session_id: str, turn_id: str, channel: str, locale: str, announced: bool
+    ) -> str | None:
+        """Act on a semantic guardrail verdict for the user's message.
+
+        Runs before the session lock. Returns the text that ends the turn (blocked, declined,
+        or needs a web confirmation), or None to carry on. warn only shows a notice; confirm
+        asks the user first.
+        """
+        if verdict.action is None:
+            return None
+
+        async def record(outcome: str) -> None:
+            # A failed audit write must never undo the decision that was just made.
+            try:
+                await self.audit.log(
+                    "policy",
+                    {"scope": "input", "action": verdict.action, "outcome": outcome, "rules": verdict.rules, "semantic": True},
+                    user_id=user_id, session_id=session_id,
+                )
+            except Exception:
+                logger.exception("Could not audit the semantic policy decision")
+
+        text = verdict.message or t(f"policy.semantic.{verdict.action}", locale)
+        outcome = verdict.action
+        if verdict.action == "warn":
+            self.bus.publish(session_id, PolicyNotice(turn_id=turn_id, message=text))
+            return None
+        if verdict.action == "confirm":
+            from claw.jobs.provider import current_execution
+
+            if channel == "web" and current_execution.get() is None:
+                if await self.request_confirmation(session_id, turn_id, "policy_review", text):
+                    await record("approved")
+                    return None
+                outcome, text = "declined", t("policy.semantic.declined", locale)
+            else:
+                # Nobody is at a screen to answer (scheduled, chat-bot or background job): the
+                # rule wanted a human's approval, so without one the message is not processed.
+                outcome, text = "needs_web", t("policy.semantic.needs_web", locale)
+        await record(outcome)
+        # This runs before the session lock: announce the turn unless it already was.
+        if not announced:
+            self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
+        self.bus.publish(session_id, TurnError(turn_id=turn_id, message=text))
+        # Keep a placeholder, not the flagged text: history is replayed to the model on later
+        # turns, so a blocked injection or secret request must not ride along in it.
+        await self.messages.append(
+            session_id,
+            [
+                {"role": "user", "content": t("policy.semantic.withheld", locale)},
+                # An assistant line keeps roles alternating for providers that reject two user
+                # messages in a row, and tells the user (on reload) why nothing was answered.
+                {"role": "assistant", "content": text},
+            ],
+        )
+        return text
+
     async def _process_turn(
         self,
         user_id: str,
@@ -1041,8 +1102,40 @@ class AgentRuntime:
                 content = decision.text
                 stored_content = decision.text
 
+        # Semantic guardrail on the way in. Done BEFORE taking the session lock so that a slow
+        # provider, or a user who takes minutes to answer a confirmation, never holds up other
+        # messages in the same conversation. (A resumed background job was checked when it started.)
+        announced = False
+        semantic = getattr(self.policy, "semantic", None) if self.policy is not None else None
+        if semantic is not None and semantic.status()["status"] == "ready" and artifact_job is None:
+            # Show "working" while the check (or the user's confirmation) is pending. Only when no
+            # other turn is running here: a second turn_started would wipe that turn's live text.
+            # "Nobody else" means no turn holds the lock AND none is still in this pre-check, so two
+            # messages arriving together cannot both announce.
+            if not self._session_lock(session_id).locked() and not self._semantic_pending.get(session_id):
+                self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
+                announced = True
+            self._semantic_pending[session_id] = self._semantic_pending.get(session_id, 0) + 1
+            try:
+                verdict = await semantic.evaluate(
+                    content, "input", user_id=user_id, session_id=session_id, background=self._spawn_background
+                )
+                stopped = await self._semantic_input_gate(
+                    verdict, user_id=user_id, session_id=session_id, turn_id=turn_id,
+                    channel=channel, locale=locale, announced=announced,
+                )
+            finally:
+                left = self._semantic_pending.get(session_id, 1) - 1
+                if left > 0:
+                    self._semantic_pending[session_id] = left
+                else:
+                    self._semantic_pending.pop(session_id, None)
+            if stopped is not None:
+                return stopped
+
         async with self._session_lock(session_id):
-            self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
+            if not announced:
+                self.bus.publish(session_id, TurnStarted(turn_id=turn_id))
             try:
                 session = await self.sessions.get(session_id)
                 after_seq = session.last_consolidated_seq if session else 0
@@ -1894,6 +1987,23 @@ class AgentRuntime:
 
                 # Enforce policy on the model's final output before it leaves the system.
                 if self.policy is not None and final:
+                    if getattr(self.policy, "semantic", None) is not None:
+                        verdict = await self.policy.semantic.evaluate(
+                            final, "output", user_id=user_id, session_id=session_id, background=self._spawn_background
+                        )
+                        if verdict.action == "block":
+                            await self.audit.log(
+                                "policy",
+                                {"scope": "output", "action": "block", "rules": verdict.rules, "semantic": True},
+                                user_id=user_id, session_id=session_id,
+                            )
+                            final = verdict.message or t("policy.semantic.output_blocked", locale)
+                            rewrite_final = True
+                        elif verdict.action == "warn":
+                            self.bus.publish(
+                                session_id,
+                                PolicyNotice(turn_id=turn_id, message=verdict.message or t("policy.semantic.warn", locale)),
+                            )
                     out_decision = self.policy.enforce(final, scope="output")
                     if out_decision.matched_rules:
                         await self.audit.log(

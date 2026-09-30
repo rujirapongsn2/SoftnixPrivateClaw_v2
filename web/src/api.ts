@@ -1,3 +1,19 @@
+export type SemanticRuleAction = "monitor" | "warn" | "confirm" | "block";
+export type SemanticRuleDraft = {
+  name: string; condition: string; exclusions: string;
+  scopes: ("input" | "output")[]; enabled: boolean; scale: number;
+  template_id?: string | null;
+  action?: SemanticRuleAction; act_threshold?: number; dry_run?: boolean; message?: string;
+};
+export type SemanticRule = SemanticRuleDraft & { id: string };
+
+export type SemanticGuardrailStatus = {
+  provider: "off" | "jev" | "laya"; mode: "monitor";
+  status: "disabled" | "ready" | "not_configured";
+  configured: { jev: boolean; laya: boolean }; last_error: string | null;
+  fallback?: "jev" | "laya" | null; using_fallback?: boolean; primary_error?: string | null;
+};
+
 import type { LucideIcon } from "lucide-react";
 import {
   File,
@@ -67,6 +83,7 @@ export interface AgentEvent {
   type:
     | "turn_started"
     | "model_availability_changed"
+    | "policy_notice"
     | "text_delta"
     | "thinking_delta"
     | "tool_started"
@@ -1238,8 +1255,15 @@ export const api = {
   },
   adminUsageDimensions: () => request<UsageDimensions>("/api/admin/usage/dimensions"),
 
+  adminSemanticRules: () => request<{ rules: SemanticRule[]; templates: SemanticRule[] }>("/api/admin/guardrails/semantic/rules"),
+  adminCreateSemanticRule: (body: SemanticRuleDraft) => request<SemanticRule>("/api/admin/guardrails/semantic/rules", { method: "POST", body: JSON.stringify(body) }),
+  adminUpdateSemanticRule: (id: string, body: SemanticRuleDraft) => request<SemanticRule>(`/api/admin/guardrails/semantic/rules/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  adminDeleteSemanticRule: (id: string) => request<{ ok: boolean }>(`/api/admin/guardrails/semantic/rules/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  adminTestSemanticGuardrails: (text: string, rule_id?: string, scope: "input" | "output" = "input") =>
+    request<{ status: string; scores?: Record<string, number>; alerts?: Record<string, boolean>; scales?: Record<string, number>;
+      provider?: string; reason?: string; http_status?: number; fallback_from?: string; primary_reason?: string }>("/api/admin/guardrails/semantic/test", { method: "POST", body: JSON.stringify({ text, rule_id, scope }) }),
   adminGuardrails: () =>
-    request<{ monitor_only: boolean; tool_args_exempt: string[]; rules: GuardrailRule[] }>(
+    request<{ monitor_only: boolean; tool_args_exempt: string[]; rules: GuardrailRule[]; semantic: SemanticGuardrailStatus | null }>(
       "/api/admin/guardrails",
     ),
   adminSetMonitorOnly: (monitor_only: boolean) =>

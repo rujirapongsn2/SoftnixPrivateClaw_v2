@@ -119,6 +119,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from claw.jobs.store import JobStore
     jobs = JobStore(factory, secret_box)
     policy = PolicyEngine(monitor_only=not settings.policy_enforce)
+    from claw.security.semantic import SemanticMonitor
+    from claw.security.semantic_rules import SemanticRuleStore
+    policy.semantic = SemanticMonitor(settings.semantic_guardrails, policy, audit, rule_store=SemanticRuleStore(factory))
 
     browser_mgr = None
     if settings.browser.enabled:
@@ -200,6 +203,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             await init_db(engine)
         await jobs.initialize()
+        try:
+            await audit.log("semantic_guardrail_config", policy.semantic.status())
+        except Exception:
+            logger.exception("Could not record the semantic guardrail config; continuing startup")
+        logger.info("Semantic guardrails startup: provider={} status={}", settings.semantic_guardrails.provider, policy.semantic.status()["status"])
         # Ensure the branding asset dir exists (admin-uploaded logos land here).
         try:
             settings.branding_root.mkdir(parents=True, exist_ok=True)

@@ -117,6 +117,34 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "en": "{bot} finished without writing an answer.",
         "th": "{bot} ทำงานจบแล้วแต่ไม่ได้เขียนคำตอบออกมา",
     },
+    "policy.semantic.withheld": {
+        "en": "[Message withheld by policy]",
+        "th": "[ข้อความถูกระงับตามนโยบาย]",
+    },
+    "policy.semantic.block": {
+        "en": "This request was blocked by the organization's content policy.",
+        "th": "คำขอนี้ถูกบล็อกตามนโยบายเนื้อหาขององค์กร",
+    },
+    "policy.semantic.confirm": {
+        "en": "This message may conflict with the organization's policy. Send it anyway?",
+        "th": "ข้อความนี้อาจขัดกับนโยบายขององค์กร ต้องการส่งต่อหรือไม่?",
+    },
+    "policy.semantic.warn": {
+        "en": "Heads up: this may conflict with the organization's policy.",
+        "th": "โปรดทราบ: เนื้อหานี้อาจขัดกับนโยบายขององค์กร",
+    },
+    "policy.semantic.declined": {
+        "en": "Cancelled: the message was not sent.",
+        "th": "ยกเลิกแล้ว ข้อความนี้ไม่ได้ถูกส่ง",
+    },
+    "policy.semantic.needs_web": {
+        "en": "This request needs confirmation, which is only available in the web app. It was not processed.",
+        "th": "คำขอนี้ต้องได้รับการยืนยัน ซึ่งทำได้เฉพาะในเว็บแอป จึงยังไม่ได้ดำเนินการ",
+    },
+    "policy.semantic.output_blocked": {
+        "en": "The response was withheld by the organization's content policy.",
+        "th": "คำตอบถูกระงับตามนโยบายเนื้อหาขององค์กร",
+    },
     "error.rate_limited": {
         "en": "You're sending messages too fast. Please wait a moment and try again.",
         "th": "คุณส่งข้อความถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง",

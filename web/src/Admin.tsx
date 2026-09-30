@@ -1,3 +1,4 @@
+import { SemanticRulesPanel } from "./SemanticRulesPanel";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
@@ -3434,7 +3435,9 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
 
 function GuardrailsPanel() {
   const t = useT();
+  const [ruleTab, setRuleTab] = useState<"regular" | "semantic">("regular");
   const [rules, setRules] = useState<GuardrailRule[]>([]);
+  const [semantic, setSemantic] = useState<Awaited<ReturnType<typeof api.adminGuardrails>>["semantic"]>(null);
   const [monitorOnly, setMonitorOnly] = useState(false);
   const [exempt, setExempt] = useState<string[]>([]);
   const [newExempt, setNewExempt] = useState("");
@@ -3449,6 +3452,7 @@ function GuardrailsPanel() {
     () =>
       api.adminGuardrails().then((r) => {
         setRules(r.rules);
+        setSemantic(r.semantic);
         setMonitorOnly(r.monitor_only);
         setExempt(r.tool_args_exempt);
       }),
@@ -3466,11 +3470,37 @@ function GuardrailsPanel() {
 
   return (
     <div className="claw-panel">
+      <div className="claw-guardrails-tabs" role="tablist" aria-label={t("admin.guardrails.ruleTypes")}>
+        {(["regular", "semantic"] as const).map(tab => <button key={tab} type="button" role="tab" id={`guardrails-tab-${tab}`} aria-selected={ruleTab === tab} aria-controls={`guardrails-panel-${tab}`} tabIndex={ruleTab === tab ? 0 : -1} onClick={() => setRuleTab(tab)} onKeyDown={event => {
+          if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+            event.preventDefault();
+            const next = event.key === "Home" ? "regular" : event.key === "End" ? "semantic" : ruleTab === "regular" ? "semantic" : "regular";
+            setRuleTab(next); document.getElementById(`guardrails-tab-${next}`)?.focus();
+          }
+        }}>{t(`admin.guardrails.${tab}Tab`)}</button>)}
+      </div>
+      {error && <ErrorText>{error}</ErrorText>}
+      <div id="guardrails-panel-semantic" role="tabpanel" aria-labelledby="guardrails-tab-semantic" hidden={ruleTab !== "semantic"} className="claw-guardrails-pane">
+      {semantic && semantic.status !== "ready" && <Card padding={2}>
+        <div className="claw-row claw-row-between">
+          <Text weight="semibold">Semantic Guardrails</Text>
+          <Text size="sm" color="secondary">Monitor · {semantic.provider === "off" ? "Off" : semantic.provider === "jev" ? "Jev" : "OpenThai SystemOne"}</Text>
+        </div>
+        <Text size="sm" as="p" display="block">{t("admin.guardrails.semanticMissing")}</Text>
+        <Text size="sm" color="secondary" display="block">Jev: {t(semantic.configured.jev ? "admin.guardrails.configured" : "admin.guardrails.notConfigured")} · OpenThai SystemOne: {t(semantic.configured.laya ? "admin.guardrails.configured" : "admin.guardrails.notConfigured")}</Text>
+        {semantic.last_error && <Text size="sm" as="p">{t("admin.guardrails.semanticError")}</Text>}
+        <details><summary>{t("admin.guardrails.semanticConfig")}</summary>
+          <pre className="claw-semantic-env">CLAW_SEMANTIC_GUARDRAILS__PROVIDER=jev{"\n"}CLAW_SEMANTIC_GUARDRAILS__JEV__API_KEY=…{"\n"}CLAW_SEMANTIC_GUARDRAILS__LAYA__API_KEY=…</pre>
+        </details>
+      </Card>}
+      <SemanticRulesPanel connected={semantic?.status === "ready"} fallback={semantic?.fallback} usingFallback={semantic?.using_fallback} primaryError={semantic?.primary_error} />
+      </div>
+      <div id="guardrails-panel-regular" role="tabpanel" aria-labelledby="guardrails-tab-regular" hidden={ruleTab !== "regular"} className="claw-guardrails-pane">
       <Card padding={2} variant="muted">
         <div className="claw-row claw-row-between">
           <div>
-            <Text weight="semibold">{t("admin.guardrails.enforcementMode")}</Text>
-            <Text size="sm" color="secondary" as="p">
+            <Text weight="semibold" display="block">{t("admin.guardrails.regexRules")}</Text>
+            <Text size="sm" color="secondary" as="p" display="block">
               {monitorOnly ? t("admin.guardrails.monitorOnlyDesc") : t("admin.guardrails.enforcingDesc")}
             </Text>
           </div>
@@ -3496,7 +3526,7 @@ function GuardrailsPanel() {
       <Card padding={2} variant="muted">
         <div className="claw-panel">
           <div>
-            <Text weight="semibold">{t("admin.guardrails.exemptToolsTitle")}</Text>
+            <Text weight="semibold" display="block">{t("admin.guardrails.exemptToolsTitle")}</Text>
             <Text size="sm" color="secondary" as="p">
               {t("admin.guardrails.exemptToolsDesc1")}{" "}
               <code>[REDACTED_EMAIL]</code>
@@ -3567,8 +3597,6 @@ function GuardrailsPanel() {
           />
         )}
       </div>
-      {error && <ErrorText>{error}</ErrorText>}
-
       {adding && (
         <Card padding={2}>
           <div className="claw-panel">
@@ -3634,6 +3662,7 @@ function GuardrailsPanel() {
       {rules.map((r) => (
         <RuleCard key={r.id} rule={r} reload={reload} guard={guard} />
       ))}
+      </div>
     </div>
   );
 }
