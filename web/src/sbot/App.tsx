@@ -84,7 +84,7 @@ function SidebarBrand() {
         <span><strong>PrivateClaw</strong><small>Personal AI workspace</small></span>
       </a>
       <a className="claw-mode-menu-item claw-mode-menu-item--active" href="/chat/sbot">
-        <span><strong>Bot Mode</strong><small>Work with your bot team</small></span><span aria-hidden="true">✓</span>
+        <span><strong>SBot</strong><small>Work with your bot team</small></span><span aria-hidden="true">✓</span>
       </a>
     </div>
   );

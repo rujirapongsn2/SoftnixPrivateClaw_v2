@@ -38,7 +38,7 @@ export function SoftnixMark({ size = 24 }: { size?: number }) {
 }
 
 /** Full product lockup shown in the sidebar. */
-export function Brand({ height = 24, name = "Bot Mode" }: { height?: number; name?: string }) {
+export function Brand({ height = 24, name = "SBot" }: { height?: number; name?: string }) {
   return (
     <span className="claw-brand">
       <SoftnixLogo height={height} slot="sidebar" />
