@@ -31,6 +31,15 @@ class ModelAvailabilityChanged(AgentEvent):
 
 
 @dataclass(slots=True)
+class PolicyNotice(AgentEvent):
+    """Non-blocking heads-up from a semantic guardrail rule with the "warn" action."""
+
+    turn_id: str
+    message: str
+    type: str = field(default="policy_notice", init=False)
+
+
+@dataclass(slots=True)
 class TextDeltaEvent(AgentEvent):
     turn_id: str
     text: str

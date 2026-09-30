@@ -246,6 +246,7 @@ const CONFIRM_COPY_KEY: Record<string, { pending: string; approved: string }> = 
   project: { pending: "chat.confirm.project.pending", approved: "chat.confirm.project.approved" },
   workflow: { pending: "chat.confirm.workflow.pending", approved: "chat.confirm.workflow.approved" },
   spawn: { pending: "chat.confirm.spawn.pending", approved: "chat.confirm.spawn.approved" },
+  policy_review: { pending: "chat.confirm.policy.pending", approved: "chat.confirm.policy.approved" },
 };
 function confirmTitle(
   t: (key: string) => string,
@@ -302,7 +303,8 @@ type TranscriptItem =
       liveText?: string;
     }
   | { kind: "tools"; calls: ToolCallRow[] }
-  | { kind: "confirm"; row: ConfirmRow };
+  | { kind: "confirm"; row: ConfirmRow }
+  | { kind: "notice"; message: string };
 
 function toTranscriptItem(m: ChatMessageRow): TranscriptItem {
   return {
@@ -1151,6 +1153,13 @@ export function Chat({
           setPlan(nextPlan);
           break;
         }
+        case "policy_notice":
+          // A semantic guardrail "warn": informational, never blocks the turn.
+          setItems((prev) => {
+            if (!event.message || prev.some((it) => it.kind === "notice" && it.message === event.message && prev.indexOf(it) === prev.length - 1)) return prev;
+            return [...prev, { kind: "notice", message: event.message }];
+          });
+          break;
         case "tool_confirm_request":
           openExecIfEnabled();
           setItems((prev) => {
@@ -2955,6 +2964,11 @@ export function Chat({
                   })}
                 />
                 )
+              ) : item.kind === "notice" ? (
+                <div key={i} className="claw-policy-notice" role="status">
+                  <Icon icon={ShieldAlert} size="sm" color="secondary" />
+                  <Text size="sm" color="secondary">{item.message}</Text>
+                </div>
               ) : item.kind === "confirm" ? (
                 <div key={i} className={`claw-confirm claw-confirm--${item.row.status}`}>
                   <div className="claw-confirm-head">

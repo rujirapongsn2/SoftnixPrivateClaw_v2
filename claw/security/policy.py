@@ -122,6 +122,7 @@ class PolicyEngine:
         monitor_only: bool = False,
         tool_args_exempt: Iterable[str] | None = None,
     ):
+        self.semantic = None
         self.rules: list[PolicyRule] = list(rules if rules is not None else _BUILTINS)
         # Global kill-switch: when True, block/mask are downgraded to monitor
         # so operators can observe hits before enforcing.

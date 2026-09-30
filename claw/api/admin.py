@@ -1143,6 +1143,7 @@ async def get_guardrails(admin: User = Depends(require_admin), state: AppState =
         "monitor_only": monitor_only,
         "tool_args_exempt": exempt,
         "rules": [_rule_row(r) for r in rules],
+        "semantic": state.policy.semantic.status() if getattr(state.policy, "semantic", None) else None,
     }
 
 
@@ -1616,3 +1617,77 @@ async def get_team_policy(state: AppState = Depends(get_state), admin: User = De
 @router.put('/team-policy')
 async def put_team_policy(body: OrganizationPolicy, state: AppState = Depends(get_state), admin: User = Depends(require_admin)):
     return await save_policy(state.users.factory, state.settings, body, admin.id)
+
+
+from claw.security.semantic_rules import SemanticRuleBody, SemanticRuleLimit, TEMPLATES, TEST_LIMITER, rule_store_for
+
+
+class SemanticTestBody(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
+    rule_id: str | None = Field(default=None, max_length=100)
+    scope: str = "input"
+
+
+@router.get("/guardrails/semantic/rules")
+async def list_semantic_rules(admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
+    return {"rules": await rule_store_for(state).list(), "templates": TEMPLATES}
+
+
+@router.post("/guardrails/semantic/rules")
+async def create_semantic_rule(body: SemanticRuleBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
+    try:
+        rule = await rule_store_for(state).create(body)
+    except SemanticRuleLimit as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    await state.audit.log("semantic_rule_change", {"action": "create", "rule_id": rule["id"], "enabled": False, "scale": rule["scale"]}, user_id=admin.id)
+    return rule
+
+
+@router.put("/guardrails/semantic/rules/{rule_id}")
+async def update_semantic_rule(rule_id: str, body: SemanticRuleBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
+    try:
+        rule = await rule_store_for(state).update(rule_id, body)
+    except SemanticRuleLimit as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Semantic rule not found")
+    await state.audit.log("semantic_rule_change", {"action": "update", "rule_id": rule_id, "enabled": rule["enabled"], "scale": rule["scale"]}, user_id=admin.id)
+    return rule
+
+
+@router.delete("/guardrails/semantic/rules/{rule_id}")
+async def delete_semantic_rule(rule_id: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
+    if not await rule_store_for(state).delete(rule_id):
+        raise HTTPException(status_code=404, detail="Semantic rule not found")
+    await state.audit.log("semantic_rule_change", {"action": "delete", "rule_id": rule_id}, user_id=admin.id)
+    return {"ok": True}
+
+
+@router.post("/guardrails/semantic/test")
+async def test_semantic_guardrails(
+    body: SemanticTestBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+) -> dict:
+    # Reject bad input before it can spend the rate-limit budget or hide behind "disabled".
+    if body.scope not in ("input", "output"):
+        raise HTTPException(status_code=422, detail="Invalid scope")
+    monitor = getattr(state.policy, "semantic", None)
+    if monitor is None:
+        return {"status": "disabled", "mode": "monitor", "provider": "off"}
+    if not TEST_LIMITER.allow(admin.id):
+        raise HTTPException(status_code=429, detail="Too many semantic tests; wait a minute and try again")
+    rule = None
+    if body.rule_id and body.rule_id.startswith("tpl:"):
+        # An unsaved built-in template can be tested before it is ever stored.
+        rule = next((dict(item) for item in TEMPLATES if item["id"] == body.rule_id[4:]), None)
+        if rule is None:
+            raise HTTPException(status_code=404, detail="Semantic rule not found")
+        rule["id"] = body.rule_id
+        if body.scope not in rule["scopes"]:
+            raise HTTPException(status_code=422, detail="Rule does not apply to this scope")
+    elif body.rule_id:
+        rule = await rule_store_for(state).get(body.rule_id)
+        if rule is None:
+            raise HTTPException(status_code=404, detail="Semantic rule not found")
+        if body.scope not in rule["scopes"]:
+            raise HTTPException(status_code=422, detail="Rule does not apply to this scope")
+    return await monitor.observe(body.text, body.scope, user_id=admin.id, force_log=True, test_rule=rule)
