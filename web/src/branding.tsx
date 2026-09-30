@@ -724,6 +724,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
       "The browser extension pairs Sbot with Chrome on your computer, so it's set up on a desktop — not on a phone or tablet. Open Softnix Sbot on your computer, then go to Settings → Client & Extention.",
     "settings.browserExt.notEnabled":
       "The browser extension is not enabled on this server. An administrator must set CLAW_BROWSER__CLIENT_EXTENSION_ENABLED=true to allow pairing.",
+    "settings.browserExt.title": "Chrome extension",
     "settings.browserExt.intro":
       "Pair your own Chrome so Sbot can act inside your real browser tabs (logged-in sites, multi-step flows) instead of an isolated server browser.",
     "settings.browserExt.paired": "Paired",
@@ -2182,6 +2183,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
       "ส่วนขยายเบราว์เซอร์จับคู่ Sbot กับ Chrome บนคอมพิวเตอร์ของคุณ จึงต้องตั้งค่าบนเดสก์ท็อป ไม่ใช่บนโทรศัพท์หรือแท็บเล็ต เปิด Softnix Sbot บนคอมพิวเตอร์ของคุณ แล้วไปที่ ตั้งค่า → ส่วนขยายเบราว์เซอร์",
     "settings.browserExt.notEnabled":
       "ส่วนขยายเบราว์เซอร์ยังไม่ได้เปิดใช้งานบนเซิร์ฟเวอร์นี้ ผู้ดูแลระบบต้องตั้งค่า CLAW_BROWSER__CLIENT_EXTENSION_ENABLED=true เพื่ออนุญาตให้จับคู่ได้",
+    "settings.browserExt.title": "ส่วนขยาย Chrome",
     "settings.browserExt.intro":
       "จับคู่ Chrome ของคุณเองเพื่อให้ Sbot ทำงานในแท็บเบราว์เซอร์จริงของคุณ (เว็บไซต์ที่ล็อกอินไว้ ขั้นตอนหลายขั้น) แทนที่จะเป็นเบราว์เซอร์แยกต่างหากบนเซิร์ฟเวอร์",
     "settings.browserExt.paired": "จับคู่แล้ว",

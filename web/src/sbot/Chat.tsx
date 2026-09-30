@@ -2379,6 +2379,8 @@ export function Chat({
               style={{ display: "none" }}
               onChange={(e) => void onPickFiles(e.target.files)}
             />
+            {/* Where the task runs sits above the input, next to what you are about to ask. */}
+            <LocalWorkspacePicker sessionId={sessionId} ensureSession={onRequireSession} disabled={busy || Boolean(running)} />
             <ChatComposer
               onSubmit={imageMode ? (value) => void generateImage(value) : send}
               value={imageMode ? imagePrompt : undefined}
@@ -2865,7 +2867,6 @@ export function Chat({
                 ) : undefined
               }
             />
-            <LocalWorkspacePicker sessionId={sessionId} ensureSession={onRequireSession} disabled={busy || Boolean(running)} />
             {isEmpty && (() => {
               const activeCategory = SUGGESTIONS.find((c) => c.key === suggestionCategory);
               if (!activeCategory) {

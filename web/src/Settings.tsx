@@ -3564,9 +3564,11 @@ function TelegramPanel() {
 
 // ---------------------------------------------------------------- Browser extension
 
+// "Client & Extension" holds two unrelated installs (a desktop app and a Chrome extension), so
+// each is its own titled group rather than one panel read as a single thing.
 function LocalAgentPanel() {
-  return <div className="claw-panel">
-    <Text weight="semibold">Softnix Local Agent</Text>
+  return <section className="claw-panel claw-settings-group" aria-labelledby="settings-local-agent">
+    <h3 id="settings-local-agent">Softnix Local Agent</h3>
     <div className="claw-row">
       <a className="sbot-local-download" href="/modes/sbot/api/local-workspaces/downloads/macos-arm64?v=2.2.3" download>
         <Download size={16} />Download for Mac · Apple silicon
@@ -3578,7 +3580,7 @@ function LocalAgentPanel() {
       <p>Open the app to restart the service.</p>
       <code>~/.local/bin/softnix-local-agent restart</code>
     </details>
-  </div>;
+  </section>;
 }
 
 function BrowserExtensionPanel() {
@@ -3604,9 +3606,10 @@ function BrowserExtensionPanel() {
   // rather than showing a flow that can't complete here.
   if (isMobile) {
     return (
-      <div className="claw-panel">
+      <section className="claw-panel claw-settings-group" aria-labelledby="settings-browser-extension">
+        <h3 id="settings-browser-extension">{t("settings.browserExt.title")}</h3>
         <Text color="secondary">{t("settings.browserExt.mobileNotice")}</Text>
-      </div>
+      </section>
     );
   }
 
@@ -3614,9 +3617,10 @@ function BrowserExtensionPanel() {
 
   if (!status.client_extension_enabled) {
     return (
-      <div className="claw-panel">
+      <section className="claw-panel claw-settings-group" aria-labelledby="settings-browser-extension">
+        <h3 id="settings-browser-extension">{t("settings.browserExt.title")}</h3>
         <Text color="secondary">{t("settings.browserExt.notEnabled")}</Text>
-      </div>
+      </section>
     );
   }
 
@@ -3625,7 +3629,8 @@ function BrowserExtensionPanel() {
     : "";
 
   return (
-    <div className="claw-panel">
+    <section className="claw-panel claw-settings-group" aria-labelledby="settings-browser-extension">
+      <h3 id="settings-browser-extension">{t("settings.browserExt.title")}</h3>
       <Text color="secondary">{t("settings.browserExt.intro")}</Text>
 
       <div className="claw-row">
@@ -3648,8 +3653,8 @@ function BrowserExtensionPanel() {
       {error && <ErrorText>{error}</ErrorText>}
 
       <Card padding={2} variant="muted">
-        <Text weight="semibold">{t("settings.browserExt.step1Title")}</Text>
-        <Text size="sm" color="secondary" as="p">
+        <Text weight="semibold" display="block">{t("settings.browserExt.step1Title")}</Text>
+        <Text size="sm" color="secondary" as="p" display="block">
           {t("settings.browserExt.step1Desc")}
         </Text>
         <div className="claw-row">
@@ -3664,8 +3669,8 @@ function BrowserExtensionPanel() {
       </Card>
 
       <Card padding={2} variant="muted">
-        <Text weight="semibold">{t("settings.browserExt.step2Title")}</Text>
-        <Text size="sm" color="secondary" as="p">
+        <Text weight="semibold" display="block">{t("settings.browserExt.step2Title")}</Text>
+        <Text size="sm" color="secondary" as="p" display="block">
           {t("settings.browserExt.step2Desc")}
         </Text>
         <div className="claw-row">
@@ -3714,7 +3719,7 @@ function BrowserExtensionPanel() {
           }
         />
       )}
-    </div>
+    </section>
   );
 }
 
