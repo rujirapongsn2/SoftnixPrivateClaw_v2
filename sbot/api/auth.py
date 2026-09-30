@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from sbot.api.branding_shared import ChatBackground, FontSize, Language
+from sbot.api.branding_shared import ChatBackground, ColorTheme, FontSize, Language
 from sbot.api.deps import AppState, current_user, get_state
 from sbot.auth import oidc
 from sbot.auth.activation import make_activation_token, verify_activation_token
@@ -71,6 +71,7 @@ class PreferencesBody(BaseModel):
     language: Language | None = None
     font_size: FontSize | None = None
     chat_background: ChatBackground | None = None
+    color_theme: ColorTheme | None = None
     execution_panel_enabled: bool | None = None
 
 
@@ -96,6 +97,7 @@ def _user_json(user: User) -> dict:
         "language": user.ui_language,
         "font_size": user.font_size,
         "chat_background": user.chat_background,
+        "color_theme": user.color_theme,
         # Desktop UI's Execution panel: off by default, opt-in only via
         # Settings > Profile > Preferences (no admin-level default to inherit).
         "execution_panel_enabled": user.execution_panel_enabled,
@@ -478,6 +480,7 @@ async def update_preferences(
         ui_language=body.language,
         font_size=body.font_size,
         chat_background=body.chat_background,
+        color_theme=body.color_theme,
         execution_panel_enabled=body.execution_panel_enabled,
     )
     if updated is None:

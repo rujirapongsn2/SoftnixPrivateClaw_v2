@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sbot.api import connector_shared as connectors
 from sbot.api import llm_shared as llm
 from sbot.api.auth import _is_pending_imported_account, _send_activation_email
-from sbot.api.branding_shared import ChatBackground, FontSize, Language
+from sbot.api.branding_shared import ChatBackground, ColorTheme, FontSize, Language
 from sbot.api.deps import AppState, get_state, require_admin
 from claw.api.settings_acl import SettingsAclBody, acl_overview, acl_search_users, acl_update
 from sbot.api.file_preview import decode_text_bytes
@@ -108,6 +108,7 @@ def _user_row(user: User, sessions: int, group_names: dict[str, str], plan_names
         "language": user.ui_language,
         "font_size": user.font_size,
         "chat_background": user.chat_background,
+        "color_theme": user.color_theme,
         "execution_panel_enabled": user.execution_panel_enabled,
         "project_containers_enabled": user.project_containers_enabled,
         "project_container_limit": user.project_container_limit,
@@ -1569,6 +1570,7 @@ class BrandingBody(BaseModel):
     language: Language = "en"
     font_size: FontSize = "small"
     chat_background: ChatBackground = "solid"
+    color_theme: ColorTheme | None = None
 
 
 @router.get("/branding")
@@ -1586,6 +1588,7 @@ async def set_branding(
         language=body.language,
         font_size=body.font_size,
         chat_background=body.chat_background,
+        color_theme=body.color_theme,
     )
 
 

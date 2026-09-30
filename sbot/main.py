@@ -184,6 +184,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         sandbox=runtime.sandbox,
         settings=settings,
         llm_config=llm_config,
+        model_health=model_health,
         skills=skills,
         memory=memory_service,
         knowledge=knowledge,

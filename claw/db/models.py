@@ -93,6 +93,7 @@ class User(Base):
     ui_language: Mapped[str | None] = mapped_column(String(8), nullable=True)
     font_size: Mapped[str | None] = mapped_column(String(16), nullable=True)
     chat_background: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    color_theme: Mapped[str | None] = mapped_column(String(24), nullable=True)
     # Whether the desktop UI's Execution panel (live tool-call timeline) is
     # shown at all. Unlike the appearance fields above there's no global
     # default to inherit — it's plain off-by-default, opt-in per user.

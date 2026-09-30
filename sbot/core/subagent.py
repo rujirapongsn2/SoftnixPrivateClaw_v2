@@ -17,6 +17,7 @@ from typing import Any
 from loguru import logger
 
 from sbot.core.loop import AgentLoop
+from sbot.core.model_health import run_with_model_health
 from sbot.core.turn_context import current_turn_confirmation, current_turn_deadline
 from sbot.providers.base import LLMProvider, ProviderError
 from sbot.sandbox.ephemeral import EphemeralSandbox
@@ -70,6 +71,8 @@ class SubagentManager:
         project_access: Any = None,
         arg_guard: Any = None,
         llm_config: Any = None,
+        model_health: Any = None,
+        on_model_availability_changed: Any = None,
     ):
         self.provider = provider
         self.sandbox = sandbox
@@ -82,6 +85,8 @@ class SubagentManager:
         self.project_access = project_access
         self.arg_guard = arg_guard
         self.llm_config = llm_config
+        self.model_health = model_health
+        self.on_model_availability_changed = on_model_availability_changed
         self._sem = asyncio.Semaphore(max_concurrent)
 
     async def _model_route(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -97,6 +102,7 @@ class SubagentManager:
             resolved = await self.llm_config.resolve(fallback_id, None)
             if resolved is not None:
                 fallback = {
+                    **resolved,
                     "model": resolved["model_id"],
                     "api_key": resolved["api_key"] or None,
                     "api_base": resolved["api_base"] or None,
@@ -107,6 +113,7 @@ class SubagentManager:
             found = await self.llm_config.resolve(default_id, None) if default_id else None
         if found is not None:
             primary = {
+                **found,
                 "model": found["model_id"],
                 "api_key": found["api_key"] or None,
                 "api_base": found["api_base"] or None,
@@ -182,10 +189,12 @@ class SubagentManager:
             ]
             turn_id = f"sub-{uuid.uuid4().hex[:8]}"
             try:
-                outcome = await loop.run_turn(
+                outcome = await run_with_model_health(
+                    loop, primary, fallback, self.model_health,
                     turn_id,
                     messages,
                     lambda _ev: None,
+                    on_model_availability_changed=self.on_model_availability_changed,
                     model=primary["model"],
                     api_key=primary["api_key"],
                     api_base=primary["api_base"],
