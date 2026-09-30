@@ -11,6 +11,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import {
   api,
   type BrandingChatBackground,
+  type BrandingColorTheme,
   type BrandingFontSize,
   type BrandingLanguage,
   type BrandingLogoSlot,
@@ -21,17 +22,19 @@ const DEFAULT_BRANDING: PublicBranding = {
   language: "en",
   font_size: "small",
   chat_background: "solid",
+  color_theme: "softnix",
   logos: { login: null, chat: null, sidebar: null },
 };
 
 /** The logged-in user's own Settings > Profile > Preferences — each field
  * null means "no personal override, inherit the global default". Logos stay
  * admin-only/global (there's no per-user logo concept), so only these three
- * fields exist here. */
+ * appearance fields exist here. */
 export interface UserAppearanceOverride {
   language: BrandingLanguage | null;
   font_size: BrandingFontSize | null;
   chat_background: BrandingChatBackground | null;
+  color_theme: BrandingColorTheme | null;
   // Desktop UI's Execution panel: off by default, no admin-level default to
   // inherit — unlike the three fields above, this is a plain boolean.
   execution_panel_enabled: boolean;
@@ -63,10 +66,11 @@ const BrandingContext = createContext<BrandingContextValue>({
 /** Apply the appearance choices that live as root-level attributes (the CSS in
  * styles.css keys off these). Kept out of React render so it also works for the
  * standalone share view. */
-function applyAppearance(font_size: BrandingFontSize, chat_background: BrandingChatBackground) {
+function applyAppearance(font_size: BrandingFontSize, chat_background: BrandingChatBackground, color_theme: BrandingColorTheme) {
   const root = document.documentElement;
   root.setAttribute("data-font-size", font_size);
   root.setAttribute("data-chat-bg", chat_background);
+  root.setAttribute("data-color-theme", color_theme);
 }
 
 export function BrandingProvider({ children }: { children: React.ReactNode }) {
@@ -76,7 +80,7 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
   const load = useCallback(async () => {
     try {
       const cfg = await api.getBranding();
-      setGlobalBranding(cfg);
+      setGlobalBranding({ ...cfg, color_theme: cfg.color_theme ?? "softnix" });
     } catch {
       // Network/endpoint failure → leave whatever branding is already
       // loaded (built-in defaults on first load, or last-known-good on a
@@ -98,13 +102,14 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
       language: userOverride?.language ?? globalBranding.language,
       font_size: userOverride?.font_size ?? globalBranding.font_size,
       chat_background: userOverride?.chat_background ?? globalBranding.chat_background,
+      color_theme: userOverride?.color_theme ?? globalBranding.color_theme,
     }),
     [globalBranding, userOverride],
   );
 
   useEffect(() => {
-    applyAppearance(branding.font_size, branding.chat_background);
-  }, [branding.font_size, branding.chat_background]);
+    applyAppearance(branding.font_size, branding.chat_background, branding.color_theme);
+  }, [branding.font_size, branding.chat_background, branding.color_theme]);
 
   const executionPanelEnabled = userOverride?.execution_panel_enabled ?? false;
 
@@ -417,6 +422,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.profile.languageDesc":
       "Applies to key interface surfaces and the AI's replies. English is the default.",
     "settings.profile.fontSize": "Font size",
+    "settings.profile.colorTheme": "Color theme",
+    "settings.profile.themeSoftnix": "Softnix",
+    "settings.profile.themeLight": "Light",
     "settings.profile.fontSize.small": "Small",
     "settings.profile.fontSize.medium": "Medium",
     "settings.profile.fontSize.large": "Large",
@@ -964,6 +972,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.fallbackNoCandidates": "Add and enable another chat model to use fallback.",
     "admin.providers.fallbackPlanHint": "Available when the user's plan permits this cost tier.",
     "admin.providers.fallbackUnavailable": "Fallback is unavailable. Choose another available model.",
+    "admin.providers.autoDisableWithoutFallback": "Auto disable is on without a fallback model. Choose a fallback to handle chat failures.",
     "admin.providers.fallbackUnavailableLabel": "unavailable",
     "admin.providers.addProvider": "Add provider",
     "admin.providers.noProvidersTitle": "No providers",
@@ -1229,6 +1238,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.preferences.languageEnglish": "English",
     "admin.preferences.languageThai": "ไทย (Thai)",
     "admin.preferences.fontSize": "Font size",
+    "admin.preferences.colorTheme": "Color theme",
+    "admin.preferences.themeSoftnix": "Softnix",
+    "admin.preferences.themeLight": "Light",
     "admin.preferences.fontSmall": "Small",
     "admin.preferences.fontMedium": "Medium",
     "admin.preferences.fontLarge": "Large",
@@ -1783,6 +1795,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.profile.languageDesc":
       "มีผลกับหน้าจอหลักของระบบและคำตอบของ AI ค่าเริ่มต้นคือภาษาอังกฤษ",
     "settings.profile.fontSize": "ขนาดตัวอักษร",
+    "settings.profile.colorTheme": "ธีมสี",
+    "settings.profile.themeSoftnix": "Softnix",
+    "settings.profile.themeLight": "สว่าง",
     "settings.profile.fontSize.small": "เล็ก",
     "settings.profile.fontSize.medium": "กลาง",
     "settings.profile.fontSize.large": "ใหญ่",
@@ -2328,6 +2343,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.fallbackNoCandidates": "เพิ่มและเปิดใช้งานโมเดลแชทอีกหนึ่งโมเดลเพื่อใช้เป็นโมเดลสำรอง",
     "admin.providers.fallbackPlanHint": "ใช้งานได้เมื่อแพ็กเกจของผู้ใช้รองรับระดับราคานี้",
     "admin.providers.fallbackUnavailable": "โมเดลสำรองไม่พร้อมใช้งาน กรุณาเลือกโมเดลอื่นที่พร้อมใช้งาน",
+    "admin.providers.autoDisableWithoutFallback": "เปิด Auto disable แต่ยังไม่ได้ตั้งค่าโมเดลสำรอง กรุณาเลือกโมเดลสำรองเพื่อรองรับกรณีแชทล้มเหลว",
     "admin.providers.fallbackUnavailableLabel": "ไม่พร้อมใช้งาน",
     "admin.providers.addProvider": "เพิ่มผู้ให้บริการ",
     "admin.providers.noProvidersTitle": "ยังไม่มีผู้ให้บริการ",
@@ -2592,6 +2608,9 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.preferences.languageEnglish": "English",
     "admin.preferences.languageThai": "ไทย (Thai)",
     "admin.preferences.fontSize": "ขนาดตัวอักษร",
+    "admin.preferences.colorTheme": "ธีมสี",
+    "admin.preferences.themeSoftnix": "Softnix",
+    "admin.preferences.themeLight": "สว่าง",
     "admin.preferences.fontSmall": "เล็ก",
     "admin.preferences.fontMedium": "กลาง",
     "admin.preferences.fontLarge": "ใหญ่",

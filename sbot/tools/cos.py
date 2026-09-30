@@ -546,6 +546,8 @@ class DelegateTool(Tool):
         arg_guard: Any = None,
         reliability: Any = None,
         llm_settings: Any = None,
+        model_health: Any = None,
+        on_model_availability_changed: Any = None,
     ):
         self.bot_store = bot_store
         self.owner_id = owner_id
@@ -565,6 +567,8 @@ class DelegateTool(Tool):
             model=model,
             llm_settings=llm_settings,
             llm_config=llm_config,
+            model_health=model_health,
+            on_model_availability_changed=on_model_availability_changed,
             owner_id=owner_id,
             skills=skills,
             memory=memory,

@@ -63,6 +63,7 @@ import {
   BlueprintInfo,
   BlueprintVersion,
   BrandingChatBackground,
+  BrandingColorTheme,
   BrandingFontSize,
   BrandingLanguage,
   ConnectorGlobalSummary,
@@ -632,16 +633,17 @@ function BlueprintCard({ item, onChanged }: { item: BlueprintInfo; onChanged: ()
 
 /** Settings > Profile > Preferences — a personal override of the Control
  * Plane's global branding defaults (Admin.tsx's PreferencesPanel). Unset
- * fields (me.language/font_size/chat_background === null) show whichever
+ * fields with a null personal value show whichever
  * value is currently in effect (the global default), same as the admin
  * panel's own fields — saving only sends the field(s) actually changed, so
- * the other two stay whatever they already were (override or inherited). */
+ * the other fields stay whatever they already were (override or inherited). */
 function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUser) => void }) {
   const t = useT();
   const { branding, setUserOverride } = useBranding();
   const [language, setLanguage] = useState<BrandingLanguage>(me.language ?? branding.language);
   const [fontSize, setFontSize] = useState<BrandingFontSize>(me.font_size ?? branding.font_size);
   const [chatBg, setChatBg] = useState<BrandingChatBackground>(me.chat_background ?? branding.chat_background);
+  const [colorTheme, setColorTheme] = useState<BrandingColorTheme>(me.color_theme ?? branding.color_theme);
   const [execPanel, setExecPanel] = useState(me.execution_panel_enabled);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
@@ -650,20 +652,20 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
   const dirtyLanguage = language !== (me.language ?? branding.language);
   const dirtyFontSize = fontSize !== (me.font_size ?? branding.font_size);
   const dirtyChatBg = chatBg !== (me.chat_background ?? branding.chat_background);
+  const dirtyColorTheme = colorTheme !== (me.color_theme ?? branding.color_theme);
   const dirtyExecPanel = execPanel !== me.execution_panel_enabled;
-  const dirty = dirtyLanguage || dirtyFontSize || dirtyChatBg || dirtyExecPanel;
+  const dirty = dirtyLanguage || dirtyFontSize || dirtyChatBg || dirtyColorTheme || dirtyExecPanel;
 
   const save = async () => {
     setSaving(true);
     setSaveError("");
     try {
-      // Only send the field(s) actually changed — the backend leaves
-      // omitted fields' stored overrides untouched, so sending all three
-      // unconditionally would silently pin the other two forever.
+      // Only send changed fields so inherited values stay inherited.
       const updated = await api.updateMyPreferences({
         ...(dirtyLanguage ? { language } : {}),
         ...(dirtyFontSize ? { font_size: fontSize } : {}),
         ...(dirtyChatBg ? { chat_background: chatBg } : {}),
+        ...(dirtyColorTheme ? { color_theme: colorTheme } : {}),
         ...(dirtyExecPanel ? { execution_panel_enabled: execPanel } : {}),
       });
       onSaved(updated);
@@ -671,6 +673,7 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
         language: updated.language,
         font_size: updated.font_size,
         chat_background: updated.chat_background,
+        color_theme: updated.color_theme,
         execution_panel_enabled: updated.execution_panel_enabled,
       });
       toast({ body: t("settings.profile.preferencesSaved"), type: "info", autoHideDuration: 2500 });
@@ -715,6 +718,13 @@ function PreferencesCard({ me, onSaved }: { me: AuthUser; onSaved: (user: AuthUs
               <SegmentedControlItem value="small" label={t("settings.profile.fontSize.small")} />
               <SegmentedControlItem value="medium" label={t("settings.profile.fontSize.medium")} />
               <SegmentedControlItem value="large" label={t("settings.profile.fontSize.large")} />
+            </SegmentedControl>
+          </div>
+          <div>
+            <Text weight="semibold">{t("settings.profile.colorTheme")}</Text>
+            <SegmentedControl value={colorTheme} onChange={(v) => setColorTheme(v as BrandingColorTheme)} label={t("settings.profile.colorTheme")}>
+              <SegmentedControlItem value="softnix" label={t("settings.profile.themeSoftnix")} />
+              <SegmentedControlItem value="chatgpt_light" label={t("settings.profile.themeLight")} />
             </SegmentedControl>
           </div>
           <div>

@@ -30,6 +30,7 @@ async def test_store_returns_defaults_when_unset(db_factory):
         "language": "en",
         "font_size": "small",
         "chat_background": "solid",
+        "color_theme": "softnix",
         "logo_login": None,
         "logo_chat": None,
         "logo_sidebar": None,
@@ -38,9 +39,10 @@ async def test_store_returns_defaults_when_unset(db_factory):
 
 async def test_store_set_and_logo_roundtrip(db_factory):
     store = BrandingStore(db_factory)
-    await store.set(language="th", font_size="large", chat_background="grid")
+    await store.set(language="th", font_size="large", chat_background="grid", color_theme="chatgpt_light")
     cfg = await store.get()
     assert (cfg["language"], cfg["font_size"], cfg["chat_background"]) == ("th", "large", "grid")
+    assert cfg["color_theme"] == "chatgpt_light"
 
     prev = await store.set_logo("login", "login-aaaa.png")
     assert prev is None  # nothing there before
@@ -63,8 +65,10 @@ async def test_store_get_is_cached_across_calls_but_reflects_writes(db_factory):
     store = BrandingStore(db_factory)
     assert (await store.get())["language"] == "en"
 
-    await store.set(language="th", font_size="small", chat_background="solid")
+    await store.set(language="th", font_size="small", chat_background="solid", color_theme="chatgpt_light")
     assert (await store.get())["language"] == "th"  # write invalidates this instance's cache
+    await store.set(language="en", font_size="small", chat_background="solid")
+    assert (await store.get())["color_theme"] == "chatgpt_light"  # older clients omit the new field
 
     prev = await store.set_logo("chat", "chat-xyz.png")
     assert prev is None
@@ -91,6 +95,7 @@ async def test_public_branding_needs_no_auth(db_factory):
         assert r.status_code == 200
         body = r.json()
         assert body["language"] == "en"
+        assert body["color_theme"] == "softnix"
         assert body["logos"] == {"login": None, "chat": None, "sidebar": None}
 
 
@@ -102,12 +107,36 @@ async def test_admin_set_branding_reflected_publicly(db_factory):
         admin_token, _ = await _register(c, "admin@x.io")  # first = admin
         r = await c.put(
             "/api/admin/branding",
-            json={"language": "th", "font_size": "medium", "chat_background": "dots"},
+            json={"language": "th", "font_size": "medium", "chat_background": "dots", "color_theme": "chatgpt_light"},
             headers=_bearer(admin_token),
         )
         assert r.status_code == 200, r.text
         pub = (await c.get("/api/branding")).json()
         assert (pub["language"], pub["font_size"], pub["chat_background"]) == ("th", "medium", "dots")
+        assert pub["color_theme"] == "chatgpt_light"
+
+
+async def test_personal_theme_override_is_independent_of_global_default(db_factory):
+    app = build_api_app(db_factory)
+    async with client(app) as c:
+        admin_token, _ = await _register(c, "admin@x.io")
+        user_token, user = await _register(c, "user@x.io")
+        admin_headers = _bearer(admin_token)
+        user_headers = _bearer(user_token)
+
+        assert user["color_theme"] is None
+        global_set = await c.put(
+            "/api/admin/branding",
+            json={"language": "en", "font_size": "small", "chat_background": "solid", "color_theme": "chatgpt_light"},
+            headers=admin_headers,
+        )
+        assert global_set.status_code == 200
+        personal = await c.put("/api/auth/preferences", json={"color_theme": "softnix"}, headers=user_headers)
+        assert personal.status_code == 200
+        assert personal.json()["color_theme"] == "softnix"
+        assert (await c.get("/api/branding")).json()["color_theme"] == "chatgpt_light"
+        other_field = await c.put("/api/auth/preferences", json={"language": "th"}, headers=user_headers)
+        assert other_field.json()["color_theme"] == "softnix"
 
 
 async def test_put_branding_rejects_invalid_enum(db_factory):
@@ -120,6 +149,12 @@ async def test_put_branding_rejects_invalid_enum(db_factory):
             headers=_bearer(admin_token),
         )
         assert r.status_code == 422
+        invalid_theme = await c.put(
+            "/api/admin/branding",
+            json={"language": "en", "font_size": "small", "chat_background": "solid", "color_theme": "unknown"},
+            headers=_bearer(admin_token),
+        )
+        assert invalid_theme.status_code == 422
 
 
 async def test_non_admin_cannot_change_branding(db_factory):

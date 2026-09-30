@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from claw.api import connector_shared as connectors
 from claw.api import llm_shared as llm
 from claw.api.auth import _is_pending_imported_account, _send_activation_email
-from claw.api.branding_shared import ChatBackground, FontSize, Language
+from claw.api.branding_shared import ChatBackground, ColorTheme, FontSize, Language
 from claw.api.deps import AppState, get_state, require_admin
 from claw.api.settings_acl import SettingsAclBody, acl_overview, acl_search_users, acl_update
 from claw.api.file_preview import decode_text_bytes
@@ -92,6 +92,7 @@ def _user_row(user: User, sessions: int, group_names: dict[str, str], plan_names
         "language": user.ui_language,
         "font_size": user.font_size,
         "chat_background": user.chat_background,
+        "color_theme": user.color_theme,
         "execution_panel_enabled": user.execution_panel_enabled,
     }
 
@@ -1529,6 +1530,7 @@ class BrandingBody(BaseModel):
     language: Language = "en"
     font_size: FontSize = "small"
     chat_background: ChatBackground = "solid"
+    color_theme: ColorTheme | None = None
 
 
 @router.get("/branding")
@@ -1546,6 +1548,7 @@ async def set_branding(
         language=body.language,
         font_size=body.font_size,
         chat_background=body.chat_background,
+        color_theme=body.color_theme,
     )
 
 

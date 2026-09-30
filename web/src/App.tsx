@@ -23,6 +23,7 @@ import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
 import { ApiError, AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
+import { useAutoHideScrollbar } from "./useAutoHideScrollbar";
 
 const PROVIDER_LABELS: Record<string, string> = { google: "Google", microsoft: "Microsoft" };
 const PROVIDER_LOGO: Record<string, string> = {
@@ -633,6 +634,7 @@ function Auth({
 }
 
 export default function App() {
+  const onSidebarScroll = useAutoHideScrollbar();
   const t = useT();
   const { setUserOverride } = useBranding();
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -756,6 +758,7 @@ export default function App() {
             language: user.language,
             font_size: user.font_size,
             chat_background: user.chat_background,
+            color_theme: user.color_theme,
             execution_panel_enabled: user.execution_panel_enabled,
           }
         : null,
@@ -893,6 +896,7 @@ export default function App() {
       )}
       <SideNav
         className="claw-sidenav"
+        onScrollCapture={onSidebarScroll}
         // Force full-width (never rail) while in drawer mode; use the rail
         // toggle only on desktop.
         collapsible={{

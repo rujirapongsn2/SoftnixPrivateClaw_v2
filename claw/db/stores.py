@@ -1201,15 +1201,16 @@ class UserStore:
         ui_language: str | None = None,
         font_size: str | None = None,
         chat_background: str | None = None,
+        color_theme: str | None = None,
         execution_panel_enabled: bool | None = None,
     ) -> User | None:
         """Settings > Profile > Preferences — a personal override of the
-        Control Plane's global branding defaults. All three are stored null
+        Control Plane's global branding defaults. Appearance overrides are null
         until the user's first save (see BrandingStore for the global
         fallback these are layered on top of in the frontend). Each field is
         independent: a None here means "leave this field's stored override
         alone", not "clear it" — mirrors update_flags/update_profile above so
-        saving one field never wipes the other two back to null."""
+        saving one field never wipes the others back to null."""
         async with self.factory() as db:
             user = await db.get(User, user_id)
             if user is None:
@@ -1220,6 +1221,8 @@ class UserStore:
                 user.font_size = font_size
             if chat_background is not None:
                 user.chat_background = chat_background
+            if color_theme is not None:
+                user.color_theme = color_theme
             if execution_panel_enabled is not None:
                 user.execution_panel_enabled = execution_panel_enabled
             await db.commit()
@@ -3385,11 +3388,13 @@ class BrandingStore:
     LANGUAGES = ("en", "th")
     FONT_SIZES = ("small", "medium", "large")
     CHAT_BACKGROUNDS = ("solid", "dots", "grid")
+    COLOR_THEMES = ("softnix", "chatgpt_light")
     LOGO_SLOTS = ("login", "chat", "sidebar")
     _DEFAULTS: dict[str, Any] = {
         "language": "en",
         "font_size": "small",
         "chat_background": "solid",
+        "color_theme": "softnix",
         "logo_login": None,
         "logo_chat": None,
         "logo_sidebar": None,
@@ -3412,6 +3417,7 @@ class BrandingStore:
         language: str,
         font_size: str,
         chat_background: str,
+        color_theme: str | None = None,
     ) -> dict[str, Any]:
         """Update the non-logo preferences (logos are managed by set_logo /
         clear_logo so an image upload and a preference change stay independent).
@@ -3423,12 +3429,16 @@ class BrandingStore:
             raise ValueError(f"invalid font_size: {font_size!r}")
         if chat_background not in self.CHAT_BACKGROUNDS:
             raise ValueError(f"invalid chat_background: {chat_background!r}")
+        if color_theme is not None and color_theme not in self.COLOR_THEMES:
+            raise ValueError(f"invalid color_theme: {color_theme!r}")
         async with self.factory() as db:
             row = await db.get(AppSetting, self._KEY)
             current = {**self._DEFAULTS, **(row.value if row else {})}
             current["language"] = language
             current["font_size"] = font_size
             current["chat_background"] = chat_background
+            if color_theme is not None:
+                current["color_theme"] = color_theme
             if row is None:
                 db.add(AppSetting(key=self._KEY, value=current))
             else:

@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from loguru import logger
+from sbot.core.events import ModelAvailabilityChanged
 
 from sbot.core.mission_engine import (
     TERMINAL_STATUSES,
@@ -84,6 +85,7 @@ class MissionService:
         messages: Any = None,
         bus: Any = None,
         sessions: Any = None,
+        model_health: Any = None,
     ):
         # handle(user_id, session_id, prompt) -> final content, same shape the
         # scheduler and heartbeat fire turns through. A mission deliberately
@@ -104,6 +106,7 @@ class MissionService:
         self.sandbox = sandbox
         self.settings = settings
         self.llm_config = llm_config
+        self.model_health = model_health
         # A mission node is the only place a specialist works unsupervised, so
         # it is the place that most needs its skills and its own memory — see
         # `SpecialistRunner.context_block`.
@@ -123,6 +126,10 @@ class MissionService:
         self._start_locks = KeyedLocks()
         self._bot_slots = KeyedSlots(1)
         self._owner_slots = KeyedSlots(settings.team_work.max_parallel_per_owner)
+
+    def _notify_model_availability(self, turn_id: str) -> None:
+        if self.bus is not None:
+            self.bus.broadcast(ModelAvailabilityChanged(turn_id=turn_id))
 
     async def submit_work(self, owner_id, session_id, mission_id, goal, nodes, coordinator_id, member_ids=None):
         """Persist a bounded job before acknowledging it. One application worker.
@@ -851,6 +858,8 @@ class MissionService:
             workspace=self.settings.workspaces_root / mission.owner_id,
             model=self.settings.llm.model,
             llm_config=self.llm_config,
+            model_health=self.model_health,
+            on_model_availability_changed=self._notify_model_availability,
             llm_settings=self.settings.llm,
             owner_id=mission.owner_id,
             project_access=self.project_access,
@@ -1075,6 +1084,8 @@ class MissionService:
             workspace=self.settings.workspaces_root / mission.owner_id,
             model=self.settings.llm.model,
             llm_config=self.llm_config,
+            model_health=self.model_health,
+            on_model_availability_changed=self._notify_model_availability,
             llm_settings=self.settings.llm,
             owner_id=mission.owner_id,
             skills=self.skills,

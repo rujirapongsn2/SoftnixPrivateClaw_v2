@@ -346,6 +346,7 @@ async def public_branding(response: Response, state: AppState = Depends(get_stat
         "language": cfg["language"],
         "font_size": cfg["font_size"],
         "chat_background": cfg["chat_background"],
+        "color_theme": cfg["color_theme"],
         "logos": logos,
     }
 

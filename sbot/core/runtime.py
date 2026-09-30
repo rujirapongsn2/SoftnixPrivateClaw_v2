@@ -216,6 +216,8 @@ class ClawAgent:
         connectors: Any = None,
         project_access: Any = None,
         blueprints: "BlueprintStore | None" = None,
+        model_health: "ModelHealthService | None" = None,
+        on_model_availability_changed: Any = None,
     ):
         self.user_id = user_id
         self.workspace = workspace
@@ -251,6 +253,8 @@ class ClawAgent:
             owner_id=user_id,
             project_access=project_access,
             llm_config=llm_config,
+            model_health=model_health,
+            on_model_availability_changed=on_model_availability_changed,
         )
         self.tools.register(SpawnTool(subagents))
         self.tools.register(WorkflowTool(WorkflowService(provider, subagents, model=settings.llm.model)))
@@ -314,6 +318,8 @@ class ClawAgent:
                 workspace=workspace,
                 model=settings.llm.model,
                 llm_config=llm_config,
+                model_health=model_health,
+                on_model_availability_changed=on_model_availability_changed,
                 skills=skills,
                 memory=memory,
                 knowledge=knowledge,
@@ -794,6 +800,8 @@ class AgentRuntime:
             # cached agent must not carry one session's id into another's turn.
             group_session_id=session_id if group_members is not None else None,
             llm_config=self.llm_config,
+            model_health=self.model_health,
+            on_model_availability_changed=lambda turn_id: self.bus.broadcast(ModelAvailabilityChanged(turn_id=turn_id)),
             missions=self.missions,
             connectors=self.connectors,
             project_access=self.project_access,

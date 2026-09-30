@@ -20,6 +20,7 @@ from sbot.core.builtin_skills import builtin_skills
 from sbot.core.events import DelegatedTask, TurnCompleted, TurnError, TurnStarted
 from sbot.core.keyed_locks import KeyedLocks
 from sbot.core.loop import AgentLoop
+from sbot.core.model_health import run_with_model_health
 from sbot.core.memory import memory_scope
 from sbot.core.turn_context import current_turn_confirmation, current_turn_deadline
 from sbot.providers.base import ProviderError
@@ -391,6 +392,8 @@ class SpecialistRunner:
         project_access: Any = None,
         arg_guard: Any = None,
         llm_settings: Any = None,
+        model_health: Any = None,
+        on_model_availability_changed: Any = None,
     ):
         from sbot.config import LLMSettings
         self.llm_settings = llm_settings or LLMSettings()
@@ -399,6 +402,8 @@ class SpecialistRunner:
         self.workspace = workspace
         self.model = model
         self.llm_config = llm_config
+        self.model_health = model_health
+        self.on_model_availability_changed = on_model_availability_changed
         self.owner_id = owner_id
         self.skills = skills
         self.memory = memory
@@ -516,6 +521,7 @@ class SpecialistRunner:
                 found = await self.llm_config.resolve(default_id, self.owner_id)
         if found is not None:
             resolved = {
+                **found,
                 "model": found["model_id"],
                 "api_key": found["api_key"] or None,
                 "api_base": found["api_base"] or None,
@@ -536,6 +542,7 @@ class SpecialistRunner:
         if found is None:
             return None
         return {
+            **found,
             "model": found["model_id"],
             "api_key": found["api_key"] or None,
             "api_base": found["api_base"] or None,
@@ -627,7 +634,8 @@ class SpecialistRunner:
             tools.get('finish_step').result = recorded
             return SpecialistOutcome(text=recorded.get('summary', ''),
                                      artifacts=recorded.get('artifacts', []))
-        outcome = await loop.run_turn(
+        outcome = await run_with_model_health(
+            loop, model, fallback, self.model_health,
             turn_id,
             [
                 {"role": "system", "content": system_prompt},
@@ -636,6 +644,7 @@ class SpecialistRunner:
                 *([{"role": "user", "content": "Continue the unfinished step from these completed actions. Read existing files first. Split large writes into small sections. Do not repeat completed actions. Finish with finish_step."}] if resume_messages else []),
             ],
             emit,
+            on_model_availability_changed=self.on_model_availability_changed,
             model=model["model"],
             api_key=model["api_key"],
             api_base=model["api_base"],

@@ -7,3 +7,4 @@ from typing import Literal
 Language = Literal["en", "th"]
 FontSize = Literal["small", "medium", "large"]
 ChatBackground = Literal["solid", "dots", "grid"]
+ColorTheme = Literal["softnix", "chatgpt_light"]

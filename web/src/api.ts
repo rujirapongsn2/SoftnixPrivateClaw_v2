@@ -377,6 +377,7 @@ export interface AuthUser {
   language: BrandingLanguage | null;
   font_size: BrandingFontSize | null;
   chat_background: BrandingChatBackground | null;
+  color_theme: BrandingColorTheme | null;
   // Desktop UI's Execution panel: off by default, no admin-level default to
   // inherit — a plain boolean, unlike the appearance overrides above.
   execution_panel_enabled: boolean;
@@ -682,12 +683,14 @@ export interface SmtpAdminConfigBody {
 export type BrandingLanguage = "en" | "th";
 export type BrandingFontSize = "small" | "medium" | "large";
 export type BrandingChatBackground = "solid" | "dots" | "grid";
+export type BrandingColorTheme = "softnix" | "chatgpt_light";
 export type BrandingLogoSlot = "login" | "chat" | "sidebar";
 // Public shape (GET /api/branding) — logos are ready-to-use URLs or null.
 export interface PublicBranding {
   language: BrandingLanguage;
   font_size: BrandingFontSize;
   chat_background: BrandingChatBackground;
+  color_theme: BrandingColorTheme;
   logos: Record<BrandingLogoSlot, string | null>;
 }
 // Admin shape (GET/PUT /api/admin/branding) — logos are raw stored filenames.
@@ -695,6 +698,7 @@ export interface AdminBranding {
   language: BrandingLanguage;
   font_size: BrandingFontSize;
   chat_background: BrandingChatBackground;
+  color_theme: BrandingColorTheme;
   logo_login: string | null;
   logo_chat: string | null;
   logo_sidebar: string | null;
@@ -703,6 +707,7 @@ export interface BrandingBody {
   language: BrandingLanguage;
   font_size: BrandingFontSize;
   chat_background: BrandingChatBackground;
+  color_theme: BrandingColorTheme;
 }
 // Settings > Profile > Preferences — unlike admin's BrandingBody (always a
 // full save), a personal override save only sends the field(s) the user
@@ -711,6 +716,7 @@ export interface PreferencesUpdateBody {
   language?: BrandingLanguage;
   font_size?: BrandingFontSize;
   chat_background?: BrandingChatBackground;
+  color_theme?: BrandingColorTheme;
   execution_panel_enabled?: boolean;
 }
 

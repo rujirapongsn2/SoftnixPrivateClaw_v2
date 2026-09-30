@@ -65,6 +65,11 @@ class EventBus:
             # listMessages — drop the live buffer.
             self._replay.pop(session_id, None)
 
+    def broadcast(self, event: AgentEvent) -> None:
+        """Notify all connected sessions of a shared, non-sensitive change."""
+        for session_id in list(self._subscribers):
+            self.publish(session_id, event)
+
     @asynccontextmanager
     async def subscribe(self, session_id: str) -> AsyncIterator["asyncio.Queue[AgentEvent]"]:
         queue: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=_QUEUE_MAX)

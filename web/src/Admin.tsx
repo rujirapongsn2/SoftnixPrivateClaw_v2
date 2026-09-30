@@ -78,6 +78,7 @@ import {
   ActivityPoint,
   AdminBranding,
   type BrandingChatBackground,
+  type BrandingColorTheme,
   type BrandingFontSize,
   type BrandingLanguage,
   type BrandingLogoSlot,
@@ -1325,6 +1326,7 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
     provider.models.map((model) => ({ provider, model })).filter(({ model }) => model.kind === "chat"),
   );
   const fallbackModel = chatModels.find(({ model }) => model.is_fallback);
+  const autoDisableWithoutFallback = !fallbackModel && providers.some((provider) => provider.auto_disable_models);
   const fallbackUnavailable = Boolean(fallbackModel && (
     !fallbackModel.model.enabled || !fallbackModel.provider.enabled
     || (fallbackModel.provider.auto_disable_models && ["quarantined", "unavailable"].includes(fallbackModel.model.health_status))
@@ -1406,6 +1408,11 @@ export function ProvidersPanel({ llmApi, scope }: { llmApi: LlmApi; scope: Provi
               </select>
             </label>
           </div>
+          {autoDisableWithoutFallback && (
+            <div className="claw-info-box is-warning" role="status">
+              <Text size="sm">{t("admin.providers.autoDisableWithoutFallback")}</Text>
+            </div>
+          )}
           {fallbackUnavailable && fallbackModel && (
             <div className="claw-info-box is-warning" role="status">
               <Text size="sm">
@@ -4242,6 +4249,7 @@ function PreferencesPanel() {
   const [language, setLanguage] = useState<BrandingLanguage>("en");
   const [fontSize, setFontSize] = useState<BrandingFontSize>("small");
   const [chatBg, setChatBg] = useState<BrandingChatBackground>("solid");
+  const [colorTheme, setColorTheme] = useState<BrandingColorTheme>("softnix");
   const [saving, setSaving] = useState(false);
   const { error, guard } = useAsyncError();
   const toast = useToast();
@@ -4251,6 +4259,7 @@ function PreferencesPanel() {
     setLanguage(c.language);
     setFontSize(c.font_size);
     setChatBg(c.chat_background);
+    setColorTheme(c.color_theme ?? "softnix");
   }, []);
 
   const reload = useCallback(() => api.adminGetBranding().then(apply), [apply]);
@@ -4261,13 +4270,13 @@ function PreferencesPanel() {
   if (error && !cfg) return <ErrorText>{error}</ErrorText>;
   if (!cfg) return <Text color="secondary">{t("admin.common.loading")}</Text>;
 
-  const dirty = language !== cfg.language || fontSize !== cfg.font_size || chatBg !== cfg.chat_background;
+  const dirty = language !== cfg.language || fontSize !== cfg.font_size || chatBg !== cfg.chat_background || colorTheme !== (cfg.color_theme ?? "softnix");
 
   const save = () => {
     setSaving(true);
     void guard(async () => {
       try {
-        const next = await api.adminSetBranding({ language, font_size: fontSize, chat_background: chatBg });
+        const next = await api.adminSetBranding({ language, font_size: fontSize, chat_background: chatBg, color_theme: colorTheme });
         setCfg((prev) => (prev ? { ...prev, ...next } : next));
         await refresh(); // apply live (font size / chat bg / language) without a reload
         toast({ body: t("admin.preferences.savedToast"), type: "info", autoHideDuration: 2500 });
@@ -4316,6 +4325,13 @@ function PreferencesPanel() {
               <SegmentedControlItem value="small" label={t("admin.preferences.fontSmall")} />
               <SegmentedControlItem value="medium" label={t("admin.preferences.fontMedium")} />
               <SegmentedControlItem value="large" label={t("admin.preferences.fontLarge")} />
+            </SegmentedControl>
+          </div>
+          <div>
+            <Text weight="semibold">{t("admin.preferences.colorTheme")}</Text>
+            <SegmentedControl value={colorTheme} onChange={(v) => setColorTheme(v as BrandingColorTheme)} label={t("admin.preferences.colorTheme")}>
+              <SegmentedControlItem value="softnix" label={t("admin.preferences.themeSoftnix")} />
+              <SegmentedControlItem value="chatgpt_light" label={t("admin.preferences.themeLight")} />
             </SegmentedControl>
           </div>
           <div>
