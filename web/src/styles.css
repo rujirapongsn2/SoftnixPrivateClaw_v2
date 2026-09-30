@@ -1318,7 +1318,7 @@ html[data-chat-bg="grid"] .claw-chat {
 }
 
 /* ---- local workspace picker ---- */
-.sbot-local-workspace { position: relative; display: inline-flex; margin: 10px 0 0 8px; font-size: 14px; }
+.sbot-local-workspace { position: relative; display: inline-flex; margin: 0 0 6px 4px; font-size: 14px; }
 .sbot-local-workspace-trigger { display: inline-flex; align-items: center; gap: 8px; padding: 6px 8px; color: var(--color-text-secondary, #6d6d6d); background: transparent; border: 0; border-radius: 8px; font: inherit; cursor: pointer; }
 .sbot-local-workspace-trigger:hover { background: color-mix(in srgb, var(--color-text-primary, #222) 6%, transparent); color: var(--color-text-primary, #222); }
 .sbot-local-workspace-trigger:disabled { opacity: .5; cursor: default; }
@@ -5019,6 +5019,8 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-semantic-hint > summary:focus-visible { outline: 2px solid var(--color-text-primary); outline-offset: 2px; border-radius: 4px; }
 .claw-semantic-hint[open] > p { margin-top: 6px; }
 .claw-policy-notice { display: flex; align-items: center; gap: 8px; margin: 4px 0 4px 0; padding: 8px 12px; border-radius: 10px; background: var(--color-surface-2, #f3f3f3); overflow-wrap: anywhere; }
+.claw-settings-group > h3 { margin: 0; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.claw-settings-group + .claw-settings-group { margin-top: 12px; padding-top: 28px; border-top: 1px solid var(--color-border-subtle, #e5e5e5); }
 .claw-semantic-range { flex: 1 1 140px; min-width: 120px; max-width: 260px; }
 @media (max-width: 800px) {
   .claw-guardrails-tabs { width: 100%; }
