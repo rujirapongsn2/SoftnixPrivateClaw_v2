@@ -134,6 +134,24 @@ class UserGroup(Base):
     project_container_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
+class UserGroupMember(Base):
+    """A user's membership of a group. A user may belong to any number of groups.
+
+    This table is the source of truth for membership. `User.group_id` is kept only as a mirror
+    of the user's *primary* (first) group, so older readers and a rollback keep working; nothing
+    that grants access may read it (see claw/db/memberships.py)."""
+
+    __tablename__ = "user_group_members"
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("user_groups.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    # 0 = the user's primary group; order of the rest is the order the admin chose.
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class PolicyPlan(Base):
     """A usage tier (Free/Plus/Pro/Max/Unlimited-style) governing which models a
     user may use (by cost ceiling) and their daily/per-minute quotas. Assigned
@@ -579,9 +597,9 @@ class AppSetting(Base):
 class KnowledgeBase(Base):
     """A user-created knowledge collection (an OKF "bundle"). Documents uploaded
     into it are parsed, chunked, and made searchable by the agent. `private`
-    bundles are visible only to their owner; `group` ones to the owner's
-    current organizational group (User.group_id, resolved live) plus any
-    groups listed in KnowledgeBaseSharedGroup; `public` ones to all users."""
+    bundles are visible only to their owner; `group` ones to the groups
+    listed in KnowledgeBaseSharedGroup (chosen by the owner, never inferred from the owner's
+    own memberships); `public` ones to all users."""
 
     __tablename__ = "knowledge_bases"
 

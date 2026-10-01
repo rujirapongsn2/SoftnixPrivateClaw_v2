@@ -178,6 +178,7 @@ async def test_queryable_dataset_respects_group_sharing(db_factory, tmp_path):
     base = await knowledge.create_base(
         owner.id, "Sales Data", visibility="group", kind="queryable"
     )
+    await knowledge.set_shared_groups(base.id, [sales.id])
 
     source = tmp_path / "sales.csv"
     source.write_text("region,sales\nBangkok,100\nNorth,50\n", encoding="utf-8")

@@ -19,9 +19,11 @@ async def test_sharing_access_and_revocation(db_factory, stores, store_type, too
         db.add(group)
         db.add(other_group)
         await db.flush()
-        await db.execute(update(User).where(User.id.in_([owner.id, peer.id])).values(group_id=group.id))
-        await db.execute(update(User).where(User.id == outsider.id).values(group_id=other_group.id))
         await db.commit()
+    # Membership (not the mirrored users.group_id) is what grants access.
+    for member in (owner, peer):
+        await stores['users'].set_groups(member.id, [group.id])
+    await stores['users'].set_groups(outsider.id, [other_group.id])
     skills = store_type(db_factory)
     private = await skills.upsert(owner.id, 'private-procedure', content='PRIVATE')
     shared = await skills.upsert(owner.id, 'team-procedure', content='TEAM', visibility='group')
@@ -46,16 +48,12 @@ async def test_sharing_access_and_revocation(db_factory, stores, store_type, too
     await skills.upsert(owner.id, shared.name, visibility='private')
     assert 'Error' in await reader.execute(name=shared.name)
     await skills.upsert(owner.id, shared.name, visibility='group')
-    async with db_factory() as db:
-        # The share remains with Engineering even after its owner moves to
-        # Marketing; it must not silently follow the owner to a new group.
-        await db.execute(update(User).where(User.id == owner.id).values(group_id=other_group.id))
-        await db.commit()
+    # The share remains with Engineering even after its owner moves to
+    # Marketing; it must not silently follow the owner to a new group.
+    await stores['users'].set_groups(owner.id, [other_group.id])
     assert 'TEAM' in await reader.execute(name=shared.name)
     assert shared.id not in {s.id for s in await skills.available_for_user(outsider.id)}
-    async with db_factory() as db:
-        await db.execute(update(User).where(User.id == peer.id).values(group_id=None))
-        await db.commit()
+    await stores['users'].set_groups(peer.id, [])
     assert 'Error' in await reader.execute(name=shared.name)
 
     # An inactive personal copy cannot hide an enabled, opted-in shared skill.
@@ -67,9 +65,7 @@ async def test_sharing_access_and_revocation(db_factory, stores, store_type, too
     assert 'SHARED' in await outsider_reader.execute(name='collision')
     await skills.upsert(owner.id, public.name, enabled=False)
     assert public.id not in {s.id for s in await skills.available_for_user(outsider.id)}
-    async with db_factory() as db:
-        await db.execute(update(User).where(User.id == outsider.id).values(group_id=None))
-        await db.commit()
+    await stores['users'].set_groups(outsider.id, [])
     with pytest.raises(ValueError, match='Join a group'):
         await skills.upsert(outsider.id, 'invalid-share', visibility='group')
 

@@ -404,21 +404,109 @@ function ProjectsPanel() {
 
 type BlueprintVisibility = BlueprintInfo["visibility"];
 
+// "Share with groups" for anything with group visibility (knowledge bases, blueprints). The chosen
+// groups ARE the audience: being in a group does not share anything with it on its own, so joining
+// another group later never widens who can see an item. Groups the viewer belongs to are marked.
+const AUDIENCE_FILTER_THRESHOLD = 12;
+
+function GroupAudiencePicker({
+  groups,
+  selected,
+  onChange,
+  myGroupIds,
+}: {
+  groups: SimpleGroup[];
+  selected: string[];
+  onChange: (ids: string[]) => void;
+  myGroupIds: string[];
+}) {
+  const t = useT();
+  const [filter, setFilter] = useState("");
+  const needle = filter.trim().toLowerCase();
+  const visible = groups.filter((g) => !needle || selected.includes(g.id) || g.name.toLowerCase().includes(needle));
+  return (
+    <div className="claw-field-group">
+      <Text size="sm" color="secondary">{t("settings.audience.shareWith")}</Text>
+      {groups.length > AUDIENCE_FILTER_THRESHOLD && (
+        <TextInput
+          label={t("settings.audience.filter")}
+          isLabelHidden
+          placeholder={t("settings.audience.filter")}
+          value={filter}
+          onChange={setFilter}
+        />
+      )}
+      <div className="claw-row" style={{ flexWrap: "wrap" }}>
+        {visible.map((g) => (
+          <Button
+            key={g.id}
+            label={myGroupIds.includes(g.id) ? `${g.name} · ${t("settings.audience.yours")}` : g.name}
+            size="sm"
+            variant={selected.includes(g.id) ? "primary" : "secondary"}
+            clickAction={() => onChange(selected.includes(g.id) ? selected.filter((id) => id !== g.id) : [...selected, g.id])}
+          />
+        ))}
+      </div>
+      {selected.length === 0 ? (
+        <ErrorText>{t("settings.audience.chooseOne")}</ErrorText>
+      ) : (
+        <Text size="sm" color="secondary" as="p" display="block">{t("settings.audience.pinned")}</Text>
+      )}
+    </div>
+  );
+}
+
+// Choosing "Group" starts from the viewer's only group, so the common single-group case needs no extra click.
+function startAudience(current: string[], myGroupIds: string[]): string[] {
+  return current.length === 0 && myGroupIds.length === 1 ? myGroupIds : current;
+}
+
 function BlueprintVisibilityPicker({
   value,
   onChange,
+  groups,
+  myGroupIds,
+  sharedGroupIds,
+  onSharedGroupIdsChange,
 }: {
   value: BlueprintVisibility;
   onChange: (value: BlueprintVisibility) => void;
+  groups: SimpleGroup[];
+  myGroupIds: string[];
+  sharedGroupIds: string[];
+  onSharedGroupIdsChange: (ids: string[]) => void;
 }) {
   const t = useT();
   return (
-    <SegmentedControl value={value} onChange={(next) => onChange(next as BlueprintVisibility)} label={t("settings.blueprints.visibility")}>
-      <SegmentedControlItem value="private" label={t("settings.blueprints.private")} />
-      <SegmentedControlItem value="group" label={t("settings.blueprints.group")} />
-      <SegmentedControlItem value="public" label={t("settings.blueprints.public")} />
-    </SegmentedControl>
+    <div className="claw-field-group">
+      <SegmentedControl
+        value={value}
+        onChange={(next) => {
+          onChange(next as BlueprintVisibility);
+          if (next === "group") onSharedGroupIdsChange(startAudience(sharedGroupIds, myGroupIds));
+        }}
+        label={t("settings.blueprints.visibility")}
+      >
+        <SegmentedControlItem value="private" label={t("settings.blueprints.private")} />
+        <SegmentedControlItem value="group" label={t("settings.blueprints.group")} />
+        <SegmentedControlItem value="public" label={t("settings.blueprints.public")} />
+      </SegmentedControl>
+      {value === "group" && (
+        <GroupAudiencePicker groups={groups} selected={sharedGroupIds} onChange={onSharedGroupIdsChange} myGroupIds={myGroupIds} />
+      )}
+    </div>
   );
+}
+
+// The groups list and the viewer's own groups, loaded once for the pickers on this page.
+function useGroupContext() {
+  const [groups, setGroups] = useState<SimpleGroup[]>([]);
+  const [myGroupIds, setMyGroupIds] = useState<string[]>([]);
+  useEffect(() => {
+    void api.listGroups().then(setGroups).catch(() => setGroups([]));
+    void api.me().then((me) => setMyGroupIds(me.group_ids ?? (me.group_id ? [me.group_id] : []))).catch(() => setMyGroupIds([]));
+  }, []);
+  return { groups, myGroupIds };
 }
 
 function blueprintSize(bytes: number): string {
@@ -438,6 +526,8 @@ function BlueprintsPanel() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [visibility, setVisibility] = useState<BlueprintVisibility>("private");
+  const [sharedGroupIds, setSharedGroupIds] = useState<string[]>([]);
+  const { groups, myGroupIds } = useGroupContext();
   const [saving, setSaving] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
@@ -459,12 +549,18 @@ function BlueprintsPanel() {
     setSaving(true);
     setError("");
     try {
-      await api.createBlueprint(file, { name: name.trim(), description: description.trim(), visibility });
+      await api.createBlueprint(file, {
+        name: name.trim(),
+        description: description.trim(),
+        visibility,
+        ...(visibility === "group" ? { shared_group_ids: sharedGroupIds } : {}),
+      });
       setCreating(false);
       setFile(null);
       setName("");
       setDescription("");
       setVisibility("private");
+      setSharedGroupIds([]);
       if (fileRef.current) fileRef.current.value = "";
       await reload();
       toast({ body: t("settings.blueprints.created"), type: "info", autoHideDuration: 2500 });
@@ -492,9 +588,20 @@ function BlueprintsPanel() {
             </div>
             <TextInput label={t("settings.blueprints.name")} value={name} onChange={setName} />
             <TextArea label={t("settings.blueprints.description")} value={description} onChange={setDescription} rows={2} />
-            <BlueprintVisibilityPicker value={visibility} onChange={setVisibility} />
+            <BlueprintVisibilityPicker
+              value={visibility}
+              onChange={setVisibility}
+              groups={groups}
+              myGroupIds={myGroupIds}
+              sharedGroupIds={sharedGroupIds}
+              onSharedGroupIdsChange={setSharedGroupIds}
+            />
             <div className="claw-row">
-              <Button label={saving ? "…" : t("settings.blueprints.save")} isDisabled={saving || !file || !name.trim()} clickAction={create} />
+              <Button
+                label={saving ? "…" : t("settings.blueprints.save")}
+                isDisabled={saving || !file || !name.trim() || (visibility === "group" && sharedGroupIds.length === 0)}
+                clickAction={create}
+              />
               <Button label={t("settings.common.cancel")} variant="ghost" clickAction={() => setCreating(false)} />
             </div>
           </div>
@@ -505,13 +612,23 @@ function BlueprintsPanel() {
       ) : items.length === 0 && !creating ? (
         <EmptyState icon={<Icon icon={FileType} size="lg" />} title={t("settings.blueprints.emptyTitle")} description={t("settings.blueprints.emptyDesc")} />
       ) : (
-        items.map((item) => <BlueprintCard key={item.id} item={item} onChanged={reload} />)
+        items.map((item) => <BlueprintCard key={item.id} item={item} onChanged={reload} groups={groups} myGroupIds={myGroupIds} />)
       )}
     </div>
   );
 }
 
-function BlueprintCard({ item, onChanged }: { item: BlueprintInfo; onChanged: () => Promise<void> }) {
+function BlueprintCard({
+  item,
+  onChanged,
+  groups,
+  myGroupIds,
+}: {
+  item: BlueprintInfo;
+  onChanged: () => Promise<void>;
+  groups: SimpleGroup[];
+  myGroupIds: string[];
+}) {
   const t = useT();
   const toast = useToast();
   const [versions, setVersions] = useState<BlueprintVersion[] | null>(null);
@@ -520,6 +637,7 @@ function BlueprintCard({ item, onChanged }: { item: BlueprintInfo; onChanged: ()
   const [name, setName] = useState(item.name);
   const [description, setDescription] = useState(item.description);
   const [visibility, setVisibility] = useState<BlueprintVisibility>(item.visibility);
+  const [sharedGroupIds, setSharedGroupIds] = useState<string[]>(item.shared_group_ids ?? []);
   const [busy, setBusy] = useState(false);
   const versionRef = useRef<HTMLInputElement | null>(null);
 
@@ -549,7 +667,12 @@ function BlueprintCard({ item, onChanged }: { item: BlueprintInfo; onChanged: ()
   const saveMetadata = async () => {
     setBusy(true);
     try {
-      await api.updateBlueprint(item.id, { name: name.trim(), description: description.trim(), visibility });
+      await api.updateBlueprint(item.id, {
+        name: name.trim(),
+        description: description.trim(),
+        visibility,
+        ...(visibility === "group" ? { shared_group_ids: sharedGroupIds } : {}),
+      });
       setEditing(false);
       await onChanged();
     } finally {
@@ -578,6 +701,9 @@ function BlueprintCard({ item, onChanged }: { item: BlueprintInfo; onChanged: ()
               <div className="claw-row">
                 <Text weight="semibold">{item.name}</Text>
                 <Badge variant={item.visibility === "public" ? "success" : item.visibility === "group" ? "info" : "neutral"} icon={<Icon icon={visibilityIcon} size="xsm" />} label={t(`settings.blueprints.${item.visibility}`)} />
+                {item.visibility === "group" && (item.shared_group_names ?? []).map((g) => (
+                  <Badge key={g} variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={g} />
+                ))}
               </div>
               <Text size="xsm" color="secondary">{item.filename} · v{item.current_version} · {blueprintSize(item.size)}</Text>
               {!item.is_owner && <Text size="xsm" color="secondary">{t("settings.blueprints.sharedBy", { owner: item.owner_name || "—" })}</Text>}
@@ -596,9 +722,20 @@ function BlueprintCard({ item, onChanged }: { item: BlueprintInfo; onChanged: ()
             <div className="claw-panel">
               <TextInput label={t("settings.blueprints.name")} value={name} onChange={setName} />
               <TextArea label={t("settings.blueprints.description")} value={description} onChange={setDescription} rows={2} />
-              <BlueprintVisibilityPicker value={visibility} onChange={setVisibility} />
+              <BlueprintVisibilityPicker
+                value={visibility}
+                onChange={setVisibility}
+                groups={groups}
+                myGroupIds={myGroupIds}
+                sharedGroupIds={sharedGroupIds}
+                onSharedGroupIdsChange={setSharedGroupIds}
+              />
               <div className="claw-row">
-                <Button label={t("settings.blueprints.save")} isDisabled={busy || !name.trim()} clickAction={saveMetadata} />
+                <Button
+                  label={t("settings.blueprints.save")}
+                  isDisabled={busy || !name.trim() || (visibility === "group" && sharedGroupIds.length === 0)}
+                  clickAction={saveMetadata}
+                />
                 <Button label={t("settings.common.cancel")} variant="ghost" clickAction={() => setEditing(false)} />
               </div>
             </div>
@@ -858,6 +995,16 @@ function SkillDetailModal({
 function SkillsPanel() {
   const t = useT();
   const toast = useToast();
+  // The viewer's own groups: a skill shared with "group" goes to ONE of them, so with several we ask.
+  const [myGroups, setMyGroups] = useState<SimpleGroup[]>([]);
+  useEffect(() => {
+    void Promise.all([api.me(), api.listGroups()])
+      .then(([me, all]) => {
+        const ids = me.group_ids ?? (me.group_id ? [me.group_id] : []);
+        setMyGroups(ids.map((id) => all.find((g) => g.id === id)).filter((g): g is SimpleGroup => Boolean(g)));
+      })
+      .catch(() => setMyGroups([]));
+  }, []);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -962,6 +1109,9 @@ function SkillsPanel() {
   if (editing) {
     const readOnly = !!editing.builtin || !!editing.read_only;
     const sharingNeedsScope = sharing && (editing.visibility ?? "private") === "private";
+    const sharesWithGroup = (editing.visibility ?? "private") === "group";
+    // Several groups and none picked yet (a skill already shared keeps its group until the owner changes it).
+    const needsGroupChoice = sharesWithGroup && myGroups.length > 1 && !editing.shared_group_id;
     return (
       <div className="claw-panel">
         {readOnly && (
@@ -1011,6 +1161,20 @@ function SkillsPanel() {
             {sharingNeedsScope && (
               <Text size="sm" color="secondary" as="p">{t("settings.skills.chooseShareScope")}</Text>
             )}
+            {sharesWithGroup && myGroups.length > 1 && (
+              <div className="claw-row" style={{ flexWrap: "wrap" }}>
+                <Text size="sm" color="secondary">{t("settings.skills.shareWithGroup")}</Text>
+                {myGroups.map((g) => (
+                  <Button
+                    key={g.id}
+                    label={g.name}
+                    size="sm"
+                    variant={editing.shared_group_id === g.id ? "primary" : "secondary"}
+                    clickAction={() => setEditing({ ...editing, shared_group_id: g.id })}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
         {!readOnly && (connectors.length > 0 || pickableGlobalConnectors.length > 0) && (
@@ -1055,13 +1219,14 @@ function SkillsPanel() {
             <Button
               label={sharing ? t("settings.skills.share") : t("settings.skills.save")}
               icon={<Icon icon="check" size="sm" />}
-              isDisabled={sharingNeedsScope}
+              isDisabled={sharingNeedsScope || needsGroupChoice}
               clickAction={() =>
                 guard(async () => {
                   const visibility = editing.visibility ?? "private";
                   const saved = await api.saveSkill({
                     id: editing.id,
                     visibility,
+                    ...(visibility === "group" && editing.shared_group_id ? { shared_group_id: editing.shared_group_id } : {}),
                     name: (editing.name ?? "").trim(),
                     description: editing.description ?? "",
                     content: editing.content ?? "",
@@ -3739,20 +3904,21 @@ function VisibilitySelector({
   onChange,
   sharedGroupIds,
   onSharedGroupIdsChange,
-  myGroupId,
-  myGroupName,
+  myGroupIds,
   groups,
 }: {
   visibility: "private" | "group" | "public";
   onChange: (v: "private" | "group" | "public") => void;
   sharedGroupIds: string[];
   onSharedGroupIdsChange: (ids: string[]) => void;
-  myGroupId: string | null;
-  myGroupName: string | null;
+  myGroupIds: string[];
   groups: SimpleGroup[];
 }) {
   const t = useT();
-  const otherGroups = groups.filter((g) => g.id !== myGroupId);
+  const choose = (v: "private" | "group" | "public") => {
+    onChange(v);
+    if (v === "group") onSharedGroupIdsChange(startAudience(sharedGroupIds, myGroupIds));
+  };
   return (
     <div className="claw-field-group">
       <Text size="sm" color="secondary">
@@ -3763,57 +3929,29 @@ function VisibilitySelector({
           label={t("settings.knowledge.private")}
           size="sm"
           variant={visibility === "private" ? "primary" : "secondary"}
-          clickAction={() => onChange("private")}
+          clickAction={() => choose("private")}
         />
         <Button
           label={t("settings.knowledge.group")}
           size="sm"
           variant={visibility === "group" ? "primary" : "secondary"}
-          isDisabled={!myGroupId}
-          clickAction={() => onChange("group")}
+          isDisabled={myGroupIds.length === 0}
+          clickAction={() => choose("group")}
         />
         <Button
           label={t("settings.knowledge.public")}
           size="sm"
           variant={visibility === "public" ? "primary" : "secondary"}
-          clickAction={() => onChange("public")}
+          clickAction={() => choose("public")}
         />
       </div>
-      {!myGroupId && (
+      {myGroupIds.length === 0 && (
         <Text size="sm" color="secondary">
           {t("settings.knowledge.joinGroupFirst")}
         </Text>
       )}
-      {visibility === "group" && myGroupId && (
-        <>
-          <Text size="sm" color="secondary">
-            {t("settings.knowledge.defaultSharedWith", { group: myGroupName ?? "—" })}
-          </Text>
-          {otherGroups.length > 0 && (
-            <>
-              <Text size="sm" color="secondary">
-                {t("settings.knowledge.alsoShareWith")}
-              </Text>
-              <div className="claw-row">
-                {otherGroups.map((g) => (
-                  <Button
-                    key={g.id}
-                    label={g.name}
-                    size="sm"
-                    variant={sharedGroupIds.includes(g.id) ? "primary" : "secondary"}
-                    clickAction={() =>
-                      onSharedGroupIdsChange(
-                        sharedGroupIds.includes(g.id)
-                          ? sharedGroupIds.filter((id) => id !== g.id)
-                          : [...sharedGroupIds, g.id],
-                      )
-                    }
-                  />
-                ))}
-              </div>
-            </>
-          )}
-        </>
+      {visibility === "group" && myGroupIds.length > 0 && (
+        <GroupAudiencePicker groups={groups} selected={sharedGroupIds} onChange={onSharedGroupIdsChange} myGroupIds={myGroupIds} />
       )}
     </div>
   );
@@ -3830,7 +3968,7 @@ function KnowledgePanel() {
   const [visibility, setVisibility] = useState<"private" | "group" | "public">("private");
   const [sharedGroupIds, setSharedGroupIds] = useState<string[]>([]);
   const [groups, setGroups] = useState<SimpleGroup[]>([]);
-  const [myGroupId, setMyGroupId] = useState<string | null>(null);
+  const [myGroupIds, setMyGroupIds] = useState<string[]>([]);
   const toast = useToast();
   const t = useT();
 
@@ -3853,10 +3991,9 @@ function KnowledgePanel() {
   useEffect(() => load(), [load]);
   useEffect(() => {
     void api.listGroups().then(setGroups);
-    void api.me().then((me) => setMyGroupId(me.group_id));
+    void api.me().then((me) => setMyGroupIds(me.group_ids ?? (me.group_id ? [me.group_id] : [])));
   }, []);
 
-  const myGroupName = groups.find((g) => g.id === myGroupId)?.name ?? null;
 
   const create = async () => {
     if (!name.trim()) return;
@@ -3934,12 +4071,16 @@ function KnowledgePanel() {
               onChange={setVisibility}
               sharedGroupIds={sharedGroupIds}
               onSharedGroupIdsChange={setSharedGroupIds}
-              myGroupId={myGroupId}
-              myGroupName={myGroupName}
+              myGroupIds={myGroupIds}
               groups={groups}
             />
             <div className="claw-row">
-              <Button label={t("settings.knowledge.create")} variant="primary" onClick={create}>
+              <Button
+                label={t("settings.knowledge.create")}
+                variant="primary"
+                isDisabled={visibility === "group" && sharedGroupIds.length === 0}
+                onClick={create}
+              >
                 {t("settings.knowledge.create")}
               </Button>
               <Button label={t("settings.common.cancel")} variant="ghost" onClick={() => setCreating(false)}>
@@ -3968,8 +4109,7 @@ function KnowledgePanel() {
               onPatch={patchBase}
               toast={toast}
               groups={groups}
-              myGroupId={myGroupId}
-              myGroupName={myGroupName}
+              myGroupIds={myGroupIds}
             />
           ))}
         </div>
@@ -3991,16 +4131,14 @@ function KnowledgeCard({
   onPatch,
   toast,
   groups,
-  myGroupId,
-  myGroupName,
+  myGroupIds,
 }: {
   kb: KnowledgeBase;
   onChanged: () => void;
   onPatch: (id: string, patch: Partial<KnowledgeBase>) => void;
   toast: ReturnType<typeof useToast>;
   groups: SimpleGroup[];
-  myGroupId: string | null;
-  myGroupName: string | null;
+  myGroupIds: string[];
 }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
@@ -4244,8 +4382,7 @@ function KnowledgeCard({
               onChange={setDraftVisibility}
               sharedGroupIds={draftSharedGroupIds}
               onSharedGroupIdsChange={setDraftSharedGroupIds}
-              myGroupId={myGroupId}
-              myGroupName={myGroupName}
+              myGroupIds={myGroupIds}
               groups={groups}
             />
             <div className="claw-row">
@@ -4253,7 +4390,7 @@ function KnowledgeCard({
                 label={t("settings.common.save")}
                 size="sm"
                 variant="primary"
-                isDisabled={visibilityBusy}
+                isDisabled={visibilityBusy || (draftVisibility === "group" && draftSharedGroupIds.length === 0)}
                 clickAction={saveVisibility}
               />
               <Button

@@ -24,7 +24,11 @@ from sqlalchemy import (
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import exists as sa_exists
 from sqlalchemy.orm import aliased
+
+from claw.db import memberships as gm
+from claw.db.models import UserGroupMember, _uuid as _new_id
 
 from claw.core.plans import cost_allowed, cost_rank
 from claw.db.models import (
@@ -540,9 +544,10 @@ class SkillStore:
             viewer = await db.get(User, user_id)
             if viewer is None:
                 return []
-            shared_scope = Skill.visibility == "public"
-            if viewer.group_id:
-                shared_scope = or_(shared_scope, (Skill.visibility == "group") & (Skill.shared_group_id == viewer.group_id))
+            shared_scope = or_(
+                Skill.visibility == "public",
+                (Skill.visibility == "group") & Skill.shared_group_id.in_(gm.member_group_ids_subquery(user_id)),
+            )
             rows = await db.scalars(
                 select(Skill).join(User, User.id == Skill.user_id).where(
                     or_(Skill.user_id == user_id,
@@ -586,10 +591,10 @@ class SkillStore:
             visibility = fields.get("visibility")
             if visibility is not None and visibility not in {"private", "group", "public"}:
                 raise ValueError("invalid skill visibility")
-            owner = None
+            owner_groups: list[str] = []
             if visibility == "group":
-                owner = await db.get(User, user_id)
-                if owner is None or not owner.group_id:
+                owner_groups = await gm.group_ids_of(db, user_id)
+                if not owner_groups:
                     raise ValueError("Join a group before sharing a skill with your group")
             if skill is None:
                 skill = Skill(user_id=user_id, name=name)
@@ -600,9 +605,20 @@ class SkillStore:
                 if key in fields and fields[key] is not None:
                     setattr(skill, key, fields[key])
             if visibility == "group":
-                # An explicit Group selection captures the group at this time;
-                # ordinary content edits retain the original sharing target.
-                skill.shared_group_id = owner.group_id
+                # The target is one of the owner's groups. An explicit choice wins; otherwise the
+                # existing target is kept while the owner is still in it; a single-group owner needs
+                # no choice. Members of other groups never gain access by the owner joining them.
+                wanted = fields.get("shared_group_id")
+                if wanted is not None:
+                    if wanted not in owner_groups:
+                        raise ValueError("You can only share with a group you belong to")
+                    skill.shared_group_id = wanted
+                elif skill.shared_group_id in owner_groups:
+                    pass
+                elif len(owner_groups) == 1:
+                    skill.shared_group_id = owner_groups[0]
+                else:
+                    raise ValueError("Choose which of your groups to share this skill with")
             elif visibility in {"private", "public"}:
                 skill.shared_group_id = None
             # Unlike the fields above, connector_id's presence itself is the
@@ -620,9 +636,10 @@ class SkillStore:
             viewer = await db.get(User, user_id)
             if viewer is None:
                 return False
-            shared_scope = Skill.visibility == "public"
-            if viewer.group_id:
-                shared_scope = or_(shared_scope, (Skill.visibility == "group") & (Skill.shared_group_id == viewer.group_id))
+            shared_scope = or_(
+                Skill.visibility == "public",
+                (Skill.visibility == "group") & Skill.shared_group_id.in_(gm.member_group_ids_subquery(user_id)),
+            )
             skill = await db.scalar(
                 select(Skill).join(User, User.id == Skill.user_id).where(
                     Skill.id == skill_id,
@@ -1032,8 +1049,10 @@ class UserStore:
         is_admin: bool = False,
         role: str = "user",
         group_id: str | None = None,
+        group_ids: Sequence[str] | None = None,
         signup_method: str = "password",
     ) -> User:
+        """`group_ids` (any number, first = primary) wins over the legacy single `group_id`."""
         async with self.factory() as db:
             user = User(
                 email=email,
@@ -1041,10 +1060,11 @@ class UserStore:
                 password_hash=password_hash,
                 is_admin=is_admin,
                 role=role,
-                group_id=group_id,
                 signup_method=signup_method,
             )
             db.add(user)
+            await db.flush()
+            await gm.set_memberships(db, user, group_ids if group_ids is not None else [group_id])
             await db.commit()
             return user
 
@@ -1069,9 +1089,19 @@ class UserStore:
         must not be silently mislabeled as a duplicate."""
         if not rows:
             return {}
+
+        def add_imported(db: AsyncSession, r: dict[str, Any]) -> None:
+            row = dict(r)
+            gid = row.pop("group_id", None)
+            row.setdefault("id", _new_id())
+            user = User(group_id=gid, **row)  # group_id mirrors the primary group
+            db.add(user)
+            if gid:
+                db.add(UserGroupMember(user_id=user.id, group_id=gid))
+
         async with self.factory() as db:
             for r in rows:
-                db.add(User(**r))
+                add_imported(db, r)
             try:
                 await db.commit()
                 return {}
@@ -1082,7 +1112,7 @@ class UserStore:
         failed: dict[str, str] = {}
         for r in rows:
             async with self.factory() as db:
-                db.add(User(**r))
+                add_imported(db, r)
                 try:
                     await db.commit()
                 except IntegrityError:
@@ -1094,14 +1124,28 @@ class UserStore:
         return failed
 
     async def assign_group(self, user_id: str, group_id: str | None) -> User | None:
-        """Set (or clear, with None) a user's organizational group."""
+        """Make `group_id` the user's only group (or clear them with None)."""
+        return await self.set_groups(user_id, [group_id] if group_id else [])
+
+    async def set_groups(self, user_id: str, group_ids: Sequence[str]) -> User | None:
+        """Replace the user's groups. The first id is the primary group (mirrored on
+        users.group_id). Raises ValueError for an unknown group id."""
         async with self.factory() as db:
             user = await db.get(User, user_id)
             if user is None:
                 return None
-            user.group_id = group_id
+            await gm.set_memberships(db, user, group_ids)
             await db.commit()
             return user
+
+    async def group_ids_for(self, user_id: str) -> list[str]:
+        async with self.factory() as db:
+            return await gm.group_ids_of(db, user_id)
+
+    async def memberships_for(self, user_ids: list[str]) -> dict[str, list[str]]:
+        """{user_id: [group_id, ...]} in one query, for building user lists."""
+        async with self.factory() as db:
+            return await gm.memberships_of(db, user_ids)
 
     async def assign_plan(self, user_id: str, plan_id: str | None) -> User | None:
         """Set (or clear, with None) a user's usage-tier plan. None falls back
@@ -1154,6 +1198,8 @@ class UserStore:
             await db.execute(McpConnector.__table__.delete().where(McpConnector.owner_id == user_id))
             for model in (ChatSession, Memory, Skill, Schedule, UsageRecord, UsageDaily, Feedback):
                 await db.execute(model.__table__.delete().where(model.user_id == user_id))
+            # Group memberships too, or group sizes keep counting a user who no longer exists.
+            await db.execute(UserGroupMember.__table__.delete().where(UserGroupMember.user_id == user_id))
             await db.delete(user)
             await db.commit()
             return True
@@ -1369,7 +1415,20 @@ class GroupStore:
             row = await db.get(UserGroup, group_id)
             if row is None:
                 return False
-            await db.execute(User.__table__.update().where(User.group_id == group_id).values(group_id=None))
+            await db.execute(UserGroupMember.__table__.delete().where(UserGroupMember.group_id == group_id))
+            # Members keep their other groups: the mirrored primary moves to the earliest remaining
+            # membership, or clears. One set-based statement, however big the group was.
+            await db.execute(
+                update(User)
+                .where(User.group_id == group_id)
+                .values(
+                    group_id=select(UserGroupMember.group_id)
+                    .where(UserGroupMember.user_id == User.id)
+                    .order_by(UserGroupMember.position, UserGroupMember.created_at, UserGroupMember.group_id)
+                    .limit(1)
+                    .scalar_subquery()
+                )
+            )
             # Drop any explicit knowledge-base shares into this group too —
             # same "don't rely on ON DELETE CASCADE" reasoning as above.
             await db.execute(
@@ -1407,12 +1466,9 @@ class GroupStore:
             return await db.scalar(select(UserGroup).where(UserGroup.is_default.is_(True)).limit(1))
 
     async def counts_by_group(self) -> dict[str, int]:
-        """user_id count per group_id (excludes ungrouped)."""
+        """Member count per group_id (a user in several groups counts in each)."""
         async with self.factory() as db:
-            rows = await db.execute(
-                select(User.group_id, func.count()).where(User.group_id.is_not(None)).group_by(User.group_id)
-            )
-            return {gid: n for gid, n in rows.all()}
+            return await gm.counts_by_group(db)
 
 
 _PLAN_FIELDS = (
@@ -1571,19 +1627,29 @@ class PolicyPlanStore:
         if not by_id:
             return None
         async with self.factory() as db:
-            row = (
+            row = (await db.execute(select(User.plan_id).where(User.id == user_id))).first()
+            group_plan_ids = (
                 await db.execute(
-                    select(User.plan_id, UserGroup.plan_id)
-                    .select_from(User)
-                    .join(UserGroup, User.group_id == UserGroup.id, isouter=True)
-                    .where(User.id == user_id)
+                    select(UserGroup.plan_id)
+                    .join(UserGroupMember, UserGroupMember.group_id == UserGroup.id)
+                    .where(UserGroupMember.user_id == user_id, UserGroup.plan_id.is_not(None))
                 )
-            ).first()
+            ).scalars().all()
         if row is not None:
-            plan_id = row[0] or row[1]
-            if plan_id and plan_id in by_id:
-                return by_id[plan_id]
+            if row[0]:
+                # A personal plan always decides; if it no longer resolves, that means the default.
+                return by_id.get(row[0]) or cache["default"]
+            best = self._best_plan(by_id, group_plan_ids)
+            if best is not None:
+                return best
         return cache["default"]
+
+    @staticmethod
+    def _best_plan(by_id: dict[str, dict[str, Any]], plan_ids) -> dict[str, Any] | None:
+        """With several groups, the member gets the highest-ranked plan among them (ties by
+        name, so the choice is stable). Their own plan, if set, always wins before this."""
+        plans = [by_id[p] for p in set(plan_ids) if p in by_id]
+        return max(plans, key=lambda p: (p["rank"], p["name"])) if plans else None
 
     async def resolve_for_users(self, user_ids: list[str]) -> dict[str, dict[str, Any] | None]:
         """Batched resolve_for_user() for a known set of ids — one query
@@ -1596,19 +1662,27 @@ class PolicyPlanStore:
         if not by_id:
             return {uid: None for uid in user_ids}
         async with self.factory() as db:
-            rows = (
+            rows = (await db.execute(select(User.id, User.plan_id).where(User.id.in_(user_ids)))).all()
+            group_rows = (
                 await db.execute(
-                    select(User.id, User.plan_id, UserGroup.plan_id)
-                    .select_from(User)
-                    .join(UserGroup, User.group_id == UserGroup.id, isouter=True)
-                    .where(User.id.in_(user_ids))
+                    select(UserGroupMember.user_id, UserGroup.plan_id)
+                    .join(UserGroup, UserGroup.id == UserGroupMember.group_id)
+                    .where(UserGroupMember.user_id.in_(user_ids), UserGroup.plan_id.is_not(None))
                 )
             ).all()
-        found = {row[0]: (row[1] or row[2]) for row in rows}
-        return {
-            uid: by_id.get(found.get(uid) or "", cache["default"]) if uid in found else cache["default"]
-            for uid in user_ids
-        }
+        own = {row[0]: row[1] for row in rows}
+        via_groups: dict[str, list[str]] = {}
+        for uid, pid in group_rows:
+            via_groups.setdefault(uid, []).append(pid)
+        out: dict[str, dict[str, Any] | None] = {}
+        for uid in user_ids:
+            if uid not in own:
+                out[uid] = cache["default"]
+            elif own[uid]:
+                out[uid] = by_id.get(own[uid]) or cache["default"]
+            else:
+                out[uid] = self._best_plan(by_id, via_groups.get(uid, [])) or cache["default"]
+        return out
 
     async def counts_by_plan(self) -> dict[str, int]:
         """Direct-assignment user count per plan_id (excludes users covered only
@@ -2996,12 +3070,21 @@ class SettingsAclStore:
                 row.value = data
             await db.commit()
 
-    async def hidden_for(self, user_id: str, group_id: str | None) -> list[str]:
-        """Sections hidden for this user after user → group → global resolution."""
+    async def hidden_for(self, user_id: str, group_ids: Sequence[str] | str | None) -> list[str]:
+        """Sections hidden for this user after user → group(s) → global resolution.
+
+        With several groups, a menu a group explicitly SHOWS stays visible even if another group hides
+        it (access is the union of what the user's groups allow); otherwise any group hiding it hides it.
+        """
+        if isinstance(group_ids, str):
+            group_ids = [group_ids]
         data = await self.get()
         merged: dict[str, bool] = dict(data["global"])
-        if group_id:
-            merged.update(data["groups"].get(group_id) or {})
+        by_group: dict[str, bool] = {}
+        for gid in group_ids or []:
+            for section, visible in (data["groups"].get(gid) or {}).items():
+                by_group[section] = by_group.get(section, False) or bool(visible)
+        merged.update(by_group)
         merged.update(data["users"].get(user_id) or {})
         return sorted(k for k, visible in merged.items() if visible is False)
 
@@ -3503,7 +3586,7 @@ class KnowledgeStore:
 
     async def create_base(
         self, owner_id: str, name: str, description: str = "", visibility: str = "private",
-        kind: str = "general",
+        kind: str = "general", shared_group_ids: Sequence[str] | None = None,
     ) -> KnowledgeBase:
         async with self.factory() as db:
             kb = KnowledgeBase(
@@ -3514,6 +3597,11 @@ class KnowledgeStore:
                 kind=kind if kind in {"general", "queryable"} else "general",
             )
             db.add(kb)
+            await db.flush()
+            if kb.visibility == "group":
+                # Same transaction as the base: it is never saved as "group" with no audience.
+                for group_id in dict.fromkeys(g for g in (shared_group_ids or []) if g):
+                    db.add(KnowledgeBaseSharedGroup(kb_id=kb.id, group_id=group_id))
             await db.commit()
             await db.refresh(kb)
             return kb
@@ -3548,14 +3636,20 @@ class KnowledgeStore:
                             KnowledgeBaseSharedGroup.kb_id == kb_id
                         )
                     )
+            if kb.visibility == "group" and fields.get("shared_group_ids") is not None:
+                # Replaced in the same transaction as the visibility change.
+                await db.execute(
+                    KnowledgeBaseSharedGroup.__table__.delete().where(KnowledgeBaseSharedGroup.kb_id == kb_id)
+                )
+                for group_id in dict.fromkeys(g for g in fields["shared_group_ids"] if g):
+                    db.add(KnowledgeBaseSharedGroup(kb_id=kb_id, group_id=group_id))
             await db.commit()
             await db.refresh(kb)
             return kb
 
     async def set_shared_groups(self, kb_id: str, group_ids: list[str]) -> None:
-        """Replace the set of additional groups a `group`-visibility base is
-        shared with (the owner's own group is always included and never
-        stored here — see KnowledgeBase.visibility)."""
+        """Replace the groups a `group`-visibility base is shared with. This list is the whole
+        audience: the owner's own memberships are not added implicitly."""
         async with self.factory() as db:
             await db.execute(
                 KnowledgeBaseSharedGroup.__table__.delete().where(KnowledgeBaseSharedGroup.kb_id == kb_id)
@@ -3565,9 +3659,28 @@ class KnowledgeStore:
             await db.commit()
 
     async def owner_group_id(self, owner_id: str) -> str | None:
+        """The owner's primary group (kept for older callers; use owner_group_ids for access)."""
         async with self.factory() as db:
             owner = await db.get(User, owner_id)
             return owner.group_id if owner is not None else None
+
+    async def owner_group_ids(self, owner_id: str) -> list[str]:
+        async with self.factory() as db:
+            return await gm.group_ids_of(db, owner_id)
+
+    async def group_can_read(self, kb_id: str, owner_id: str, viewer_id: str) -> bool:
+        """Whether `viewer` reaches a group-visibility base: one of their groups is in the list of
+        groups the owner shared it with. The owner's own memberships grant nothing by themselves."""
+        async with self.factory() as db:
+            mine = set(await gm.group_ids_of(db, viewer_id))
+            if not mine:
+                return False
+            shared = (
+                await db.execute(
+                    select(KnowledgeBaseSharedGroup.group_id).where(KnowledgeBaseSharedGroup.kb_id == kb_id)
+                )
+            ).scalars().all()
+            return bool(mine & set(shared))
 
     async def shared_group_ids(self, kb_id: str) -> list[str]:
         async with self.factory() as db:
@@ -3585,102 +3698,80 @@ class KnowledgeStore:
         return list(rows)
 
     async def list_accessible(self, user_id: str) -> list[dict[str, Any]]:
-        """Bases the user can see — their own, all public, and any `group`
-        base whose owner shares the viewer's *current* group (default or
-        explicitly shared) — each with a doc count."""
-        owner = aliased(User)
+        """Bases the user can see — their own, all public, and any `group` base that shares a group
+        with them (the owner's *current* groups, or groups explicitly added) — each with a doc count."""
         async with self.factory() as db:
-            viewer = await db.get(User, user_id)
-            viewer_group_id = viewer.group_id if viewer is not None else None
-            group_clause = self._group_visible_clause(owner, viewer_group_id)
             stmt = (
-                select(KnowledgeBase, owner.group_id)
-                .join(owner, owner.id == KnowledgeBase.owner_id)
-                .outerjoin(
-                    KnowledgeBaseSharedGroup,
-                    (KnowledgeBaseSharedGroup.kb_id == KnowledgeBase.id)
-                    & (KnowledgeBaseSharedGroup.group_id == viewer_group_id),
-                )
+                select(KnowledgeBase)
                 .where(
                     (KnowledgeBase.owner_id == user_id)
                     | (KnowledgeBase.visibility == "public")
-                    | group_clause
+                    | self._group_visible_clause(user_id)
                 )
-                .distinct()
                 .order_by(KnowledgeBase.updated_at.desc())
             )
-            rows = (await db.execute(stmt)).all()
+            bases = list((await db.execute(stmt)).scalars().all())
             counts = dict(
                 (
                     await db.execute(select(KnowledgeDoc.kb_id, func.count()).group_by(KnowledgeDoc.kb_id))
                 ).all()
             )
-            group_names = {g.id: g.name for g in (await db.execute(select(UserGroup))).scalars().all()}
-            # Explicit shares are only the caller's own business to see —
-            # one bounded bulk query over just their own group-visibility
-            # bases, not per-row.
-            own_group_kb_ids = [
-                kb.id for kb, _ in rows if kb.owner_id == user_id and kb.visibility == "group"
-            ]
+            # The groups each visible group-base is shared with: one bounded bulk query over the
+            # result set, not per row. Only the owner is told the ids (it is their setting).
+            group_kb_ids = [kb.id for kb in bases if kb.visibility == "group"]
             shared_by_kb: dict[str, list[str]] = {}
-            if own_group_kb_ids:
+            if group_kb_ids:
                 for row in await db.execute(
                     select(KnowledgeBaseSharedGroup.kb_id, KnowledgeBaseSharedGroup.group_id).where(
-                        KnowledgeBaseSharedGroup.kb_id.in_(own_group_kb_ids)
+                        KnowledgeBaseSharedGroup.kb_id.in_(group_kb_ids)
                     )
                 ):
                     shared_by_kb.setdefault(row.kb_id, []).append(row.group_id)
-        return [
-            {
-                "id": kb.id,
-                "name": kb.name,
-                "description": kb.description,
-                "visibility": kb.visibility,
-                "kind": kb.kind,
-                "owner_id": kb.owner_id,
-                "is_owner": kb.owner_id == user_id,
-                "owner_group_name": group_names.get(owner_group_id),
-                "shared_group_ids": shared_by_kb.get(kb.id, []) if kb.owner_id == user_id else [],
-                "docs": int(counts.get(kb.id, 0)),
-                "updated_at": kb.updated_at.isoformat(),
-            }
-            for kb, owner_group_id in rows
-        ]
+            # Names only for the groups that actually appear, not the whole organisation's list.
+            needed = {g for ids in shared_by_kb.values() for g in ids}
+            group_names = (
+                {g.id: g.name for g in (await db.execute(select(UserGroup).where(UserGroup.id.in_(needed)))).scalars()}
+                if needed
+                else {}
+            )
+        out = []
+        for kb in bases:
+            names = sorted(group_names[g] for g in shared_by_kb.get(kb.id, []) if g in group_names)
+            out.append(
+                {
+                    "id": kb.id,
+                    "name": kb.name,
+                    "description": kb.description,
+                    "visibility": kb.visibility,
+                    "kind": kb.kind,
+                    "owner_id": kb.owner_id,
+                    "is_owner": kb.owner_id == user_id,
+                    # The groups this base is shared with (kept under the old keys for the UI).
+                    "owner_group_name": ", ".join(names) or None,
+                    "owner_group_names": names,
+                    "shared_group_ids": shared_by_kb.get(kb.id, []) if kb.owner_id == user_id else [],
+                    "docs": int(counts.get(kb.id, 0)),
+                    "updated_at": kb.updated_at.isoformat(),
+                }
+            )
+        return out
 
     async def accessible_ids(self, user_id: str) -> list[str]:
-        owner = aliased(User)
         async with self.factory() as db:
-            viewer = await db.get(User, user_id)
-            viewer_group_id = viewer.group_id if viewer is not None else None
-            group_clause = self._group_visible_clause(owner, viewer_group_id)
-            stmt = (
-                select(KnowledgeBase.id)
-                .join(owner, owner.id == KnowledgeBase.owner_id)
-                .outerjoin(
-                    KnowledgeBaseSharedGroup,
-                    (KnowledgeBaseSharedGroup.kb_id == KnowledgeBase.id)
-                    & (KnowledgeBaseSharedGroup.group_id == viewer_group_id),
-                )
-                .where(
-                    (KnowledgeBase.owner_id == user_id)
-                    | (KnowledgeBase.visibility == "public")
-                    | group_clause
-                )
-                .distinct()
+            stmt = select(KnowledgeBase.id).where(
+                (KnowledgeBase.owner_id == user_id)
+                | (KnowledgeBase.visibility == "public")
+                | self._group_visible_clause(user_id)
             )
-            rows = (await db.execute(stmt)).scalars().all()
-        return list(rows)
+            return list((await db.execute(stmt)).scalars().all())
 
     @staticmethod
-    def _group_visible_clause(owner: Any, viewer_group_id: str | None):
-        """`group`-visibility match: the viewer has a group, and either the
-        owner's *current* group is the viewer's group (default share) or an
-        explicit KnowledgeBaseSharedGroup row exists for the viewer's group
-        (joined in by the caller, filtered to viewer_group_id already)."""
-        if viewer_group_id is None:
-            return sa_false()
-        return (KnowledgeBase.visibility == "group") & (
-            (owner.group_id == viewer_group_id) | (KnowledgeBaseSharedGroup.group_id == viewer_group_id)
+    def _group_visible_clause(viewer_id: str):
+        """`group`-visibility match: one of the viewer's groups is in the base's explicit list
+        (KnowledgeBaseSharedGroup). A viewer with no group matches nothing."""
+        return (KnowledgeBase.visibility == "group") & sa_exists().where(
+            KnowledgeBaseSharedGroup.kb_id == KnowledgeBase.id,
+            KnowledgeBaseSharedGroup.group_id.in_(gm.member_group_ids_subquery(viewer_id)),
         )
 
     async def delete_base(self, kb_id: str) -> None:

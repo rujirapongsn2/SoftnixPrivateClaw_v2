@@ -28,6 +28,9 @@ class SkillBody(BaseModel):
     content: str = ""
     enabled: bool = True
     visibility: Literal["private", "group", "public"] | None = None
+    # Which of the owner's groups a "group" skill is shared with. Only needed when the owner is in
+    # several; an existing target is kept, and a single-group owner needs none.
+    shared_group_id: str | None = None
     id: str | None = None
     # The MCP connector this skill's instructions rely on, if any — lets the
     # runtime resolve that connector's CURRENT tool names live every turn
@@ -63,6 +66,7 @@ def _skill_json(
         "updated_at": s.updated_at.isoformat(),
         "builtin": builtin,
         "visibility": getattr(s, "visibility", "private"),
+        "shared_group_id": getattr(s, "shared_group_id", None),
         "owner_name": owner_name,
         "read_only": builtin or (viewer_id is not None and s.user_id != viewer_id),
         "subscription_enabled": getattr(s, "subscription_enabled", s.enabled),
@@ -190,7 +194,7 @@ async def upsert_skill(
         if not any(s.id == body.id and s.name == name.strip() for s in owned_skills):
             raise HTTPException(status_code=403, detail="Only the owner can edit this skill")
     existing = await state.skills.get_by_name(user.id, name.strip())
-    if body.visibility == "group" and not user.group_id:
+    if body.visibility == "group" and not await state.users.group_ids_for(user.id):
         raise HTTPException(status_code=400, detail="Join a group before sharing a skill with your group")
     if body.connector_id is not None:
         # A skill may link either the caller's own connector or an
@@ -222,11 +226,16 @@ async def upsert_skill(
     if save_error:
         raise HTTPException(status_code=400, detail=save_error)
     warnings = await reference_warnings(state.skills, user.id, name.strip(), content)
-    skill = await state.skills.upsert(
-        user.id,
-        name.strip(),
-        **updates,
-    )
+    if body.visibility == "group" and body.shared_group_id:
+        updates["shared_group_id"] = body.shared_group_id
+    try:
+        skill = await state.skills.upsert(
+            user.id,
+            name.strip(),
+            **updates,
+        )
+    except ValueError as exc:  # e.g. "Choose which of your groups to share this skill with"
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     result = _skill_json(skill)
     result["warnings"] = warnings
     return result

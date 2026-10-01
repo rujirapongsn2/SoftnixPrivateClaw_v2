@@ -41,7 +41,7 @@ async def test_public_base_visible_to_everyone(db_factory, stores):
     assert kb.id in await knowledge.accessible_ids(other.id)
 
 
-async def test_group_base_visible_to_owners_own_group_by_default(db_factory, stores):
+async def test_group_base_is_visible_only_to_the_groups_it_is_shared_with(db_factory, stores):
     users = UserStore(db_factory)
     groups = GroupStore(db_factory)
     knowledge = KnowledgeStore(db_factory, is_postgres=False)
@@ -54,16 +54,20 @@ async def test_group_base_visible_to_owners_own_group_by_default(db_factory, sto
     ungrouped = await users.create(email="ungrouped@x.y", password_hash="h")
 
     kb = await knowledge.create_base(owner.id, "Sales KB", visibility="group")
+    # No audience chosen yet: the owner's own membership grants the group nothing by itself.
+    assert kb.id in await knowledge.accessible_ids(owner.id)
+    assert kb.id not in await knowledge.accessible_ids(same_group.id)
 
+    await knowledge.set_shared_groups(kb.id, [sales.id])
     assert kb.id in await knowledge.accessible_ids(owner.id)
     assert kb.id in await knowledge.accessible_ids(same_group.id)
     assert kb.id not in await knowledge.accessible_ids(other_group.id)
     assert kb.id not in await knowledge.accessible_ids(ungrouped.id)
 
 
-async def test_group_base_follows_owner_when_owners_group_changes(db_factory, stores):
-    """Resolution is live — moving the owner to a different group changes who
-    can see the base without touching the KnowledgeBase row at all."""
+async def test_group_base_stays_with_its_groups_when_the_owner_moves(db_factory, stores):
+    """The audience is pinned: moving the owner, or adding them to another group, neither
+    drops the groups it was shared with nor exposes it to the new one."""
     users = UserStore(db_factory)
     groups = GroupStore(db_factory)
     knowledge = KnowledgeStore(db_factory, is_postgres=False)
@@ -77,13 +81,15 @@ async def test_group_base_follows_owner_when_owners_group_changes(db_factory, st
     )
 
     kb = await knowledge.create_base(owner.id, "Movable KB", visibility="group")
+    await knowledge.set_shared_groups(kb.id, [sales.id])
     assert kb.id in await knowledge.accessible_ids(sales_person.id)
     assert kb.id not in await knowledge.accessible_ids(marketing_person.id)
 
-    await users.assign_group(owner.id, marketing.id)
-
-    assert kb.id not in await knowledge.accessible_ids(sales_person.id)
-    assert kb.id in await knowledge.accessible_ids(marketing_person.id)
+    await users.set_groups(owner.id, [sales.id, marketing.id])  # joins a second group
+    assert kb.id not in await knowledge.accessible_ids(marketing_person.id)  # no silent widening
+    await users.assign_group(owner.id, marketing.id)  # and even leaves the original one
+    assert kb.id in await knowledge.accessible_ids(sales_person.id)
+    assert kb.id not in await knowledge.accessible_ids(marketing_person.id)
 
 
 async def test_group_base_explicit_additional_share(db_factory, stores):
@@ -141,7 +147,8 @@ async def test_list_accessible_includes_owner_group_name_and_shared_ids(db_facto
 
     rows = await knowledge.list_accessible(owner.id)
     row = next(r for r in rows if r["id"] == kb.id)
-    assert row["owner_group_name"] == "sales5"
+    assert row["owner_group_name"] == "marketing5"  # the groups it is shared with
+    assert row["owner_group_names"] == ["marketing5"]
     assert row["shared_group_ids"] == [marketing.id]
 
 

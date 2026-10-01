@@ -336,6 +336,19 @@ class Blueprint(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
+class BlueprintSharedGroup(Base):
+    """The groups a `group`-visibility blueprint is shared with. Pinned by the owner (like a skill's
+    shared group): the owner joining another group does not widen who can see it."""
+
+    __tablename__ = "sbot_blueprint_shared_groups"
+    __table_args__ = (Index("ix_sbot_blueprint_shared_groups_group", "group_id"),)
+
+    blueprint_id: Mapped[str] = mapped_column(
+        ForeignKey("sbot_blueprints.id", ondelete="CASCADE"), primary_key=True
+    )
+    group_id: Mapped[str] = mapped_column(ForeignKey("user_groups.id", ondelete="CASCADE"), primary_key=True)
+
+
 class BlueprintVersion(Base):
     """One immutable file revision of a Blueprint."""
 

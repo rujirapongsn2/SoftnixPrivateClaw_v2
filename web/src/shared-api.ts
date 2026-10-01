@@ -168,6 +168,9 @@ export interface BlueprintInfo {
   mime: string;
   size: number;
   updated_at: string;
+  // For a "group" blueprint: the groups it is shared with (ids only for the owner).
+  shared_group_ids?: string[];
+  shared_group_names?: string[];
 }
 
 export interface BlueprintVersion {
@@ -295,6 +298,8 @@ export interface SkillInfo {
   warnings?: string[];
   bundle?: { version: string; source: string; sha256: string; files: string[]; license: string } | null;
   visibility?: "private" | "group" | "public";
+  // Which of the owner's groups a "group" skill is shared with.
+  shared_group_id?: string | null;
   owner_name?: string;
   read_only?: boolean;
   subscription_enabled?: boolean;
@@ -536,7 +541,8 @@ export interface AuthUser {
   // — the frontend uses this to decide whether to show a "change password"
   // form on the Profile settings page.
   has_password: boolean;
-  group_id: string | null;
+  group_id: string | null; // the primary group
+  group_ids?: string[]; // every group the user belongs to (primary first)
   // Personal appearance overrides (Settings > Profile > Preferences). Null
   // until the user's first save there — meaning "inherit the Control Plane's
   // global branding default" (see branding.tsx's merge logic).
@@ -557,6 +563,8 @@ export interface AdminUser extends AuthUser {
   signup_method: "password" | "google" | "microsoft" | "admin_created" | "dev_token" | "imported";
   sessions: number;
   group_name: string | null;
+  group_ids: string[];
+  group_names: string[];
   plan_id: string | null;
   plan_name: string | null;
   created_at: string;
@@ -1270,18 +1278,22 @@ export const api = {
   listBlueprints: () => request<BlueprintInfo[]>("/api/blueprints"),
   createBlueprint: async (
     file: File,
-    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"] },
+    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"]; shared_group_ids?: string[] },
   ): Promise<BlueprintInfo> => {
     const form = new FormData();
     form.append("file", file);
     form.append("name", data.name);
     form.append("description", data.description ?? "");
     form.append("visibility", data.visibility);
+    for (const id of data.shared_group_ids ?? []) form.append("shared_group_ids", id);
     const resp = await fetch(endpoint("/api/blueprints"), { method: "POST", headers: authHeaders(), body: form });
     if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
     return resp.json();
   },
-  updateBlueprint: (id: string, patch: Partial<Pick<BlueprintInfo, "name" | "description" | "visibility">>) =>
+  updateBlueprint: (
+    id: string,
+    patch: Partial<Pick<BlueprintInfo, "name" | "description" | "visibility" | "shared_group_ids">>,
+  ) =>
     request<BlueprintInfo>(`/api/blueprints/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteBlueprint: (id: string) => request(`/api/blueprints/${id}`, { method: "DELETE" }),
   listBlueprintVersions: (id: string) =>
@@ -1310,7 +1322,7 @@ export const api = {
   saveArtifactAsBlueprint: (
     sessionId: string,
     path: string,
-    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"] },
+    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"]; shared_group_ids?: string[] },
   ) => request<BlueprintInfo>("/api/blueprints/from-artifact", {
     method: "POST",
     body: JSON.stringify({ session_id: sessionId, path, ...data }),
@@ -1467,11 +1479,11 @@ export const api = {
     password: string,
     is_admin: boolean,
     display_name = "",
-    group_id: string | null = null,
+    group_ids: string[] = [],
   ) =>
     request<AdminUser>("/api/admin/users", {
       method: "POST",
-      body: JSON.stringify({ email, password, is_admin, display_name, group_id }),
+      body: JSON.stringify({ email, password, is_admin, display_name, group_ids }),
     }),
   adminUpdateUser: (
     id: string,
@@ -1482,6 +1494,7 @@ export const api = {
       display_name?: string;
       password?: string;
       group_id?: string | null;
+      group_ids?: string[]; // replaces the user's groups (first = primary)
       plan_id?: string | null;
       project_policy?: { enabled: boolean | null; max_containers: number | null };
     },
