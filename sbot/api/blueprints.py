@@ -98,9 +98,9 @@ async def _readable(state: AppState, user: User, blueprint_id: str) -> Blueprint
         raise HTTPException(status_code=404, detail="blueprint not found")
     if row.owner_id == user.id or row.visibility == "public":
         return row
-    if row.visibility == "group" and user.group_id is not None:
-        owner = await state.users.get(row.owner_id)
-        if owner is not None and owner.group_id == user.group_id:
+    if row.visibility == "group":
+        # Readable when the viewer shares at least one group with the owner.
+        if set(await state.users.group_ids_for(user.id)) & set(await state.users.group_ids_for(row.owner_id)):
             return row
     raise HTTPException(status_code=403, detail="you don't have access to this blueprint")
 

@@ -57,7 +57,7 @@ async def acl_update(state, body: SettingsAclBody) -> dict:
 
 
 async def acl_for_user(state, user) -> dict:
-    hidden = await state.settings_acl.hidden_for(user.id, user.group_id)
+    hidden = await state.settings_acl.hidden_for(user.id, await state.users.group_ids_for(user.id))
     return {"hidden": [k for k in hidden if k not in LOCKED_SECTIONS]}
 
 

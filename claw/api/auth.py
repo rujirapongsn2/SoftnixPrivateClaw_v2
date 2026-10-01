@@ -75,7 +75,7 @@ class PreferencesBody(BaseModel):
     execution_panel_enabled: bool | None = None
 
 
-def _user_json(user: User) -> dict:
+def _user_json(user: User, group_ids: list[str] | None = None) -> dict:
     return {
         "id": user.id,
         "email": user.email,
@@ -91,6 +91,9 @@ def _user_json(user: User) -> dict:
         # separate admin-only lookup. The frontend resolves the display name
         # via the org-wide GET /api/groups list.
         "group_id": user.group_id,
+        # Every group the viewer belongs to (the first is the primary one in group_id). Falls back to
+        # the mirrored primary when the caller did not look the memberships up.
+        "group_ids": list(group_ids) if group_ids is not None else ([user.group_id] if user.group_id else []),
         # Personal appearance overrides — null until the user's first Save in
         # Settings > Profile > Preferences, meaning "inherit the Control
         # Plane's global branding default" (see branding.tsx's merge logic).
@@ -104,9 +107,10 @@ def _user_json(user: User) -> dict:
     }
 
 
-def _issue(state: AppState, user: User) -> dict:
+async def _issue(state: AppState, user: User) -> dict:
     token = create_access_token(user.id, state.settings.secret_key, state.settings.token_ttl_seconds)
-    return {"access_token": token, "token_type": "bearer", "user": _user_json(user)}
+    group_ids = await state.users.group_ids_for(user.id)
+    return {"access_token": token, "token_type": "bearer", "user": _user_json(user, group_ids)}
 
 
 async def _log_auth(state: AppState, event: str, user: User, method: str = "password") -> None:
@@ -344,11 +348,11 @@ async def register(body: RegisterBody, state: AppState = Depends(get_state)) -> 
         display_name=body.display_name,
         is_admin=(total == 0),
         role="admin" if total == 0 else "user",
-        group_id=default_group.id if default_group else None,
+        group_ids=[default_group.id] if default_group else [],
         signup_method="password",
     )
     await _log_auth(state, "register", user)
-    return _issue(state, user)
+    return await _issue(state, user)
 
 
 @router.post("/login")
@@ -371,7 +375,7 @@ async def login(body: LoginBody, state: AppState = Depends(get_state)) -> dict:
     if not user.is_active:
         raise HTTPException(status_code=403, detail="account suspended")
     await _log_auth(state, "login", user)
-    return _issue(state, user)
+    return await _issue(state, user)
 
 
 @router.post("/forgot-password")
@@ -436,7 +440,7 @@ async def reset_password(body: ResetPasswordBody, state: AppState = Depends(get_
         # re-fetch. The write was legitimate and is already logged/notified
         # — just don't hand back a session for a now-suspended account.
         raise HTTPException(status_code=403, detail="account suspended")
-    return _issue(state, updated)
+    return await _issue(state, updated)
 
 
 @router.post("/change-password")
@@ -490,7 +494,7 @@ async def update_preferences(
         {"event": "preferences_updated", "email": updated.email},
         user_id=updated.id,
     )
-    return _user_json(updated)
+    return _user_json(updated, await state.users.group_ids_for(updated.id))
 
 
 @router.post("/activation")
@@ -540,7 +544,7 @@ async def complete_registration(body: CompleteRegistrationBody, state: AppState 
     # Detached (like the activation send) so a slow/unreachable SMTP server
     # never delays the login response the user is waiting on.
     _spawn_background(_send_activation_confirmed_email(state, updated.id))
-    return _issue(state, updated)
+    return await _issue(state, updated)
 
 
 @router.post("/logout")
@@ -553,8 +557,8 @@ async def logout(user: User = Depends(current_user), state: AppState = Depends(g
 
 
 @router.get("/me")
-async def me(user: User = Depends(current_user)) -> dict:
-    return _user_json(user)
+async def me(user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
+    return _user_json(user, await state.users.group_ids_for(user.id))
 
 
 @router.get("/settings-acl")
@@ -618,7 +622,7 @@ async def _upsert_oidc_user(state: AppState, provider: str, email: str, name: st
         display_name=name or email.split("@")[0],
         is_admin=(total == 0),
         role="admin" if total == 0 else "user",
-        group_id=default_group.id if default_group else None,
+        group_ids=[default_group.id] if default_group else [],
         signup_method=provider,
     )
 

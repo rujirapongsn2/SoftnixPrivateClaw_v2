@@ -54,6 +54,8 @@ class CreateUserBody(BaseModel):
     is_admin: bool = False
     # Organizational group (optional). Empty/None = ungrouped.
     group_id: str | None = None
+    # Any number of groups (first = primary). Wins over group_id when given.
+    group_ids: list[str] | None = None
     # Usage-tier plan (optional). Empty/None = fall back to group/default plan.
     plan_id: str | None = None
 
@@ -67,6 +69,9 @@ class UpdateUserBody(BaseModel):
     # Group assignment. Sentinel "__unset__" (the default) means "leave as-is";
     # None/"" means "move to ungrouped"; a real id moves to that group.
     group_id: str | None = "__unset__"
+    # Replace the user's groups with exactly these (first = primary). None = leave as-is; [] = ungroup.
+    # Wins over group_id when both are sent.
+    group_ids: list[str] | None = None
     # Plan assignment, same "__unset__" sentinel semantics as group_id.
     plan_id: str | None = "__unset__"
     project_policy: "UserProjectPolicyBody | None" = None
@@ -87,7 +92,14 @@ class UserProjectPolicyBody(BaseModel):
         return self
 
 
-def _user_row(user: User, sessions: int, group_names: dict[str, str], plan_names: dict[str, str]) -> dict:
+def _user_row(
+    user: User,
+    sessions: int,
+    group_names: dict[str, str],
+    plan_names: dict[str, str],
+    group_ids: list[str] | None = None,
+) -> dict:
+    ids = [g for g in (group_ids if group_ids is not None else [user.group_id] if user.group_id else []) if g in group_names]
     return {
         "id": user.id,
         "email": user.email,
@@ -98,8 +110,11 @@ def _user_row(user: User, sessions: int, group_names: dict[str, str], plan_names
         "signup_method": user.signup_method,
         "has_password": bool(user.password_hash),
         "sessions": sessions,
-        "group_id": user.group_id,
-        "group_name": group_names.get(user.group_id) if user.group_id else None,
+        # Primary group (first of group_ids) — kept so older clients still see one group.
+        "group_id": ids[0] if ids else None,
+        "group_name": group_names[ids[0]] if ids else None,
+        "group_ids": ids,
+        "group_names": [group_names[g] for g in ids],
         "plan_id": user.plan_id,
         "plan_name": plan_names.get(user.plan_id) if user.plan_id else None,
         "created_at": user.created_at.isoformat(),
@@ -132,6 +147,17 @@ async def _valid_plan_id(state: AppState, plan_id: str | None) -> str | None:
     return plan_id
 
 
+async def _valid_group_ids(state: AppState, group_ids: list[str] | None) -> list[str]:
+    """Deduped, blank-free group ids; 404 if any is unknown."""
+    wanted = list(dict.fromkeys(g for g in (group_ids or []) if g))
+    if wanted:
+        names = await _group_names(state)
+        for gid in wanted:
+            if gid not in names:
+                raise HTTPException(status_code=404, detail="group not found")
+    return wanted
+
+
 async def _valid_group_id(state: AppState, group_id: str | None) -> str | None:
     """Normalize an incoming group id: blank → None; otherwise 404 if unknown."""
     if not group_id:
@@ -148,7 +174,8 @@ async def list_users(admin: User = Depends(require_admin), state: AppState = Dep
     counts = await state.sessions.count_by_user()
     names = await _group_names(state)
     plan_names = await _plan_names(state)
-    return [_user_row(u, counts.get(u.id, 0), names, plan_names) for u in users]
+    memberships = await state.users.memberships_for([u.id for u in users])
+    return [_user_row(u, counts.get(u.id, 0), names, plan_names, memberships.get(u.id)) for u in users]
 
 
 @router.post("/users")
@@ -157,20 +184,27 @@ async def create_user(
 ) -> dict:
     if await state.users.get_by_email(body.email) is not None:
         raise HTTPException(status_code=409, detail="email already registered")
-    group_id = await _valid_group_id(state, body.group_id)
+    if body.group_ids is not None:
+        group_ids = await _valid_group_ids(state, body.group_ids)
+    else:
+        legacy = await _valid_group_id(state, body.group_id)
+        group_ids = [legacy] if legacy else []
     plan_id = await _valid_plan_id(state, body.plan_id)
-    user = await state.users.create(
-        email=body.email,
-        password_hash=hash_password(body.password),
-        display_name=body.display_name,
-        is_admin=body.is_admin,
-        role="admin" if body.is_admin else "user",
-        group_id=group_id,
-        signup_method="admin_created",
-    )
+    try:
+        user = await state.users.create(
+            email=body.email,
+            password_hash=hash_password(body.password),
+            display_name=body.display_name,
+            is_admin=body.is_admin,
+            role="admin" if body.is_admin else "user",
+            group_ids=group_ids,
+            signup_method="admin_created",
+        )
+    except ValueError as exc:  # a group removed since it was validated
+        raise HTTPException(status_code=404, detail="group not found") from exc
     if plan_id is not None:
         user = await state.users.assign_plan(user.id, plan_id)
-    return _user_row(user, 0, await _group_names(state), await _plan_names(state))
+    return _user_row(user, 0, await _group_names(state), await _plan_names(state), group_ids)
 
 
 @router.patch("/users/{user_id}")
@@ -196,8 +230,13 @@ async def update_user(
             password_hash=hash_password(body.password) if body.password else None,
         )
     # "__unset__" means the caller didn't touch the group; anything else assigns.
-    if body.group_id != "__unset__":
-        updated = await state.users.assign_group(user_id, await _valid_group_id(state, body.group_id))
+    try:
+        if body.group_ids is not None:
+            updated = await state.users.set_groups(user_id, await _valid_group_ids(state, body.group_ids))
+        elif body.group_id != "__unset__":
+            updated = await state.users.assign_group(user_id, await _valid_group_id(state, body.group_id))
+    except ValueError as exc:  # a group removed since it was validated
+        raise HTTPException(status_code=404, detail="group not found") from exc
     if body.plan_id != "__unset__":
         updated = await state.users.assign_plan(user_id, await _valid_plan_id(state, body.plan_id))
     if body.project_policy is not None:
@@ -205,7 +244,13 @@ async def update_user(
             user_id, body.project_policy.enabled, body.project_policy.max_containers
         )
     counts = await state.sessions.count_by_user()
-    return _user_row(updated, counts.get(updated.id, 0), await _group_names(state), await _plan_names(state))
+    return _user_row(
+        updated,
+        counts.get(updated.id, 0),
+        await _group_names(state),
+        await _plan_names(state),
+        await state.users.group_ids_for(updated.id),
+    )
 
 
 @router.delete("/users/{user_id}")

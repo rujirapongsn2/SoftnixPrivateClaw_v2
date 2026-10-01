@@ -111,3 +111,24 @@ async def test_save_blueprint_tool_copies_workspace_file_without_linking_source(
 
     source.write_bytes(b"changed-working-copy")
     assert (root / version.storage_path).read_bytes() == b"template-v1"
+
+
+@pytest.mark.asyncio
+async def test_group_blueprint_is_readable_by_anyone_sharing_a_group_with_the_owner(stores):
+    users = stores["users"]
+    groups = GroupStore(users.factory)
+    a = await groups.create("A")
+    b = await groups.create("B")
+    c = await groups.create("C")
+    owner = await users.create("bp-owner@example.com", group_ids=[a.id, b.id])
+    in_b = await users.create("bp-b@example.com", group_ids=[c.id, b.id])  # shares B through its second group
+    in_c = await users.create("bp-c@example.com", group_ids=[c.id])
+    store = BlueprintStore(users.factory)
+    await store.create(
+        blueprint_id="bp-multi", owner_id=owner.id, name="Template", description="", visibility="group",
+        filename="t.docx", mime="application/octet-stream", size=1, storage_path="bp-multi/v1/t.docx",
+    )
+    assert {r["id"] for r in await store.list_accessible(in_b.id)} == {"bp-multi"}
+    assert {r["id"] for r in await store.list_accessible(in_c.id)} == set()
+    await users.set_groups(in_b.id, [c.id])  # leaving the shared group closes access
+    assert {r["id"] for r in await store.list_accessible(in_b.id)} == set()

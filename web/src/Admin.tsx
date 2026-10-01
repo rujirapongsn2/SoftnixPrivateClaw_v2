@@ -4947,47 +4947,70 @@ function AuditPanel() {
 
 const USERS_PAGE = 20;
 
-// Single-select group picker (chips) for the Add/Edit user forms, with an
-// inline "create group" so a group can be added without leaving the form.
+// Group picker (chips) for the Add/Edit user forms, with an inline "create group" so a group can be
+// added without leaving the form. A user can belong to several groups: each chip toggles one, and the
+// first one chosen is the primary. `multiple={false}` keeps the one-group behaviour (bulk import).
+const GROUP_FILTER_THRESHOLD = 12;
+
 function GroupPicker({
   groups,
   value,
   onChange,
   onCreate,
+  multiple = true,
 }: {
   groups: GroupInfo[];
-  value: string | null;
-  onChange: (id: string | null) => void;
+  value: string[];
+  onChange: (ids: string[]) => void;
   onCreate: (name: string) => Promise<GroupInfo>;
+  multiple?: boolean;
 }) {
   const t = useT();
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
+  const [filter, setFilter] = useState("");
   const create = () =>
     void onCreate(name.trim()).then((g) => {
-      onChange(g.id);
+      onChange(multiple ? [...value, g.id] : [g.id]);
       setName("");
       setAdding(false);
     });
+  const toggle = (id: string) => {
+    if (!multiple) return onChange([id]);
+    onChange(value.includes(id) ? value.filter((v) => v !== id) : [...value, id]);
+  };
+  // Many groups would otherwise be a wall of chips: past a dozen, offer a filter (selected ones stay visible).
+  const needle = filter.trim().toLowerCase();
+  const visible = groups.filter((g) => !needle || value.includes(g.id) || g.name.toLowerCase().includes(needle));
   return (
     <div className="claw-field-group">
       <Text size="sm" color="secondary">
-        {t("admin.users.group")}
+        {multiple ? t("admin.users.groups") : t("admin.users.group")}
       </Text>
-      <div className="claw-row">
+      {groups.length > GROUP_FILTER_THRESHOLD && (
+        <TextInput
+          label={t("admin.users.filterGroups")}
+          isLabelHidden
+          placeholder={t("admin.users.filterGroups")}
+          startIcon={<Icon icon={Search} size="sm" color="secondary" />}
+          value={filter}
+          onChange={setFilter}
+        />
+      )}
+      <div className="claw-row" style={{ flexWrap: "wrap" }}>
         <Button
           label={t("admin.users.noGroup")}
           size="sm"
-          variant={value === null ? "primary" : "secondary"}
-          clickAction={() => onChange(null)}
+          variant={value.length === 0 ? "primary" : "secondary"}
+          clickAction={() => onChange([])}
         />
-        {groups.map((g) => (
+        {visible.map((g) => (
           <Button
             key={g.id}
-            label={g.name}
+            label={multiple && value[0] === g.id && value.length > 1 ? `${g.name} ★` : g.name}
             size="sm"
-            variant={value === g.id ? "primary" : "secondary"}
-            clickAction={() => onChange(g.id)}
+            variant={value.includes(g.id) ? "primary" : "secondary"}
+            clickAction={() => toggle(g.id)}
           />
         ))}
         {adding ? (
@@ -5013,6 +5036,9 @@ function GroupPicker({
           />
         )}
       </div>
+      {multiple && value.length > 1 && (
+        <Text size="sm" color="secondary" as="p" display="block">{t("admin.users.primaryGroupHint")}</Text>
+      )}
     </div>
   );
 }
@@ -5515,7 +5541,7 @@ function UserImportDialog({
                   <Text color="secondary">
                     {t("admin.users.import.confirmDesc", { count: String(summary.valid) })}
                   </Text>
-                  <GroupPicker groups={groups} value={groupId} onChange={setGroupId} onCreate={onCreateGroup} />
+                  <GroupPicker groups={groups} value={groupId ? [groupId] : []} onChange={(ids) => setGroupId(ids[0] ?? null)} onCreate={onCreateGroup} multiple={false} />
                 </>
               )}
               {step === "results" && result && (
@@ -5615,7 +5641,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
-  const [newGroupId, setNewGroupId] = useState<string | null>(null);
+  const [newGroupIds, setNewGroupIds] = useState<string[]>([]);
   const [newPlanId, setNewPlanId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [visible, setVisible] = useState(USERS_PAGE);
@@ -5629,6 +5655,8 @@ function UsersPanel({ selfId }: { selfId: string }) {
   // unconsidered default).
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkTarget, setBulkTarget] = useState<string | null | undefined>(undefined);
+  // "add" keeps each user's other groups; "move" replaces them (and "No group" clears all).
+  const [bulkMode, setBulkMode] = useState<"add" | "move">("add");
   const [bulkApplying, setBulkApplying] = useState(false);
   const { error, guard } = useAsyncError();
   const toast = useToast();
@@ -5658,7 +5686,8 @@ function UsersPanel({ selfId }: { selfId: string }) {
   // A default group is a fine starting selection for a new user; leave the plan
   // on "Default plan" (null) so new users inherit the deployment default.
   useEffect(() => {
-    setNewGroupId(groups.find((g) => g.is_default)?.id ?? null);
+    const def = groups.find((g) => g.is_default)?.id;
+    setNewGroupIds(def ? [def] : []);
     setNewPlanId(null);
   }, [groups, creating]);
 
@@ -5684,14 +5713,14 @@ function UsersPanel({ selfId }: { selfId: string }) {
   const suspended = users.filter((u) => !u.is_active).length;
   const q = query.trim().toLowerCase();
   const filtered = users.filter((u) => {
-    if (groupFilter === "none" && u.group_id) return false;
-    if (groupFilter !== "all" && groupFilter !== "none" && u.group_id !== groupFilter) return false;
+    if (groupFilter === "none" && u.group_ids.length > 0) return false;
+    if (groupFilter !== "all" && groupFilter !== "none" && !u.group_ids.includes(groupFilter)) return false;
     if (q && !(u.display_name || "").toLowerCase().includes(q) && !u.email.toLowerCase().includes(q))
       return false;
     return true;
   });
   const shown = filtered.slice(0, visible);
-  const ungrouped = users.filter((u) => !u.group_id).length;
+  const ungrouped = users.filter((u) => u.group_ids.length === 0).length;
 
   const toggleSelect = (id: string) =>
     setSelectedIds((prev) => {
@@ -5723,14 +5752,17 @@ function UsersPanel({ selfId }: { selfId: string }) {
   const applyBulkGroup = () => {
     if (bulkTarget === undefined || selectedIds.size === 0) return;
     const targetName = bulkTarget === null ? t("admin.users.noGroup") : groups.find((g) => g.id === bulkTarget)?.name || t("admin.users.group");
-    if (!window.confirm(t("admin.users.moveConfirm", { count: String(selectedIds.size), target: targetName }))) return;
+    const adding = bulkMode === "add" && bulkTarget !== null;
+    if (!window.confirm(t(adding ? "admin.users.addConfirm" : "admin.users.moveConfirm", { count: String(selectedIds.size), target: targetName }))) return;
     void guard(async () => {
       setBulkApplying(true);
       const ids = Array.from(selectedIds);
       let failed = 0;
       for (const id of ids) {
         try {
-          await api.adminUpdateUser(id, { group_id: bulkTarget });
+          const current = users.find((x) => x.id === id)?.group_ids ?? [];
+          const next = bulkTarget === null ? [] : adding ? [...new Set([...current, bulkTarget])] : [bulkTarget];
+          await api.adminUpdateUser(id, { group_ids: next });
         } catch {
           failed += 1;
         }
@@ -5741,7 +5773,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
       toast({
         body:
           failed === 0
-            ? t("admin.users.movedToast", { count: String(ids.length), target: targetName })
+            ? t(adding ? "admin.users.addedToGroupToast" : "admin.users.movedToast", { count: String(ids.length), target: targetName })
             : t("admin.users.movedPartialToast", { moved: String(ids.length - failed), failed: String(failed) }),
         type: failed === 0 ? "info" : "error",
         autoHideDuration: failed === 0 ? 2500 : 4000,
@@ -5858,7 +5890,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
               value={password}
               onChange={setPassword}
             />
-            <GroupPicker groups={groups} value={newGroupId} onChange={setNewGroupId} onCreate={createGroup} />
+            <GroupPicker groups={groups} value={newGroupIds} onChange={setNewGroupIds} onCreate={createGroup} />
             {plans.length > 0 && <PlanPicker plans={plans} value={newPlanId} onChange={setNewPlanId} />}
             <label className="claw-toggle-inline">
               <Switch value={isAdmin} label={t("admin.users.makeAdmin")} isLabelHidden changeAction={setIsAdmin} />
@@ -5881,7 +5913,7 @@ function UsersPanel({ selfId }: { selfId: string }) {
                       password,
                       isAdmin,
                       displayName.trim(),
-                      newGroupId,
+                      newGroupIds,
                     );
                     if (newPlanId) await api.adminUpdateUser(created.id, { plan_id: newPlanId });
                     toast({ body: t("admin.providers.addedToast", { name: displayName.trim() || email.trim() }), type: "info", autoHideDuration: 2500 });
@@ -5922,9 +5954,18 @@ function UsersPanel({ selfId }: { selfId: string }) {
               </label>
               {selectedIds.size > 0 && (
                 <div className="claw-row">
-                  <Text size="sm" color="secondary">
-                    {t("admin.users.moveTo")}
-                  </Text>
+                  <Button
+                    label={t("admin.users.bulkAdd")}
+                    size="sm"
+                    variant={bulkMode === "add" ? "primary" : "secondary"}
+                    clickAction={() => setBulkMode("add")}
+                  />
+                  <Button
+                    label={t("admin.users.bulkMove")}
+                    size="sm"
+                    variant={bulkMode === "move" ? "primary" : "secondary"}
+                    clickAction={() => setBulkMode("move")}
+                  />
                   <Button
                     label={t("admin.users.noGroup")}
                     size="sm"
@@ -6061,7 +6102,7 @@ function UserRow({
   const [editing, setEditing] = useState(false);
   const [displayName, setDisplayName] = useState(u.display_name);
   const [newPassword, setNewPassword] = useState("");
-  const [groupId, setGroupId] = useState<string | null>(u.group_id);
+  const [groupIds, setGroupIds] = useState<string[]>(u.group_ids);
   const [planId, setPlanId] = useState<string | null>(u.plan_id);
   const [projectEnabled, setProjectEnabled] = useState<boolean | null>(u.project_containers_enabled);
   const [projectLimit, setProjectLimit] = useState(u.project_container_limit?.toString() ?? "");
@@ -6091,8 +6132,11 @@ function UserRow({
             )}
             {isSelf && <Badge variant="neutral" label={t("admin.users.you")} />}
             <SignupMethodBadge method={u.signup_method} />
-            {u.group_name && (
-              <Badge variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={u.group_name} />
+            {u.group_names.slice(0, 3).map((name) => (
+              <Badge key={name} variant="neutral" icon={<Icon icon={Users} size="xsm" />} label={name} />
+            ))}
+            {u.group_names.length > 3 && (
+              <Badge variant="neutral" label={`+${u.group_names.length - 3}`} />
             )}
             {u.plan_name && (
               <Badge variant="neutral" icon={<Icon icon={Gauge} size="xsm" />} label={u.plan_name} />
@@ -6166,7 +6210,7 @@ function UserRow({
             clickAction={() => {
               setDisplayName(u.display_name);
               setNewPassword("");
-              setGroupId(u.group_id);
+              setGroupIds(u.group_ids);
               setPlanId(u.plan_id);
               setProjectEnabled(u.project_containers_enabled);
               setProjectLimit(u.project_container_limit?.toString() ?? "");
@@ -6206,7 +6250,7 @@ function UserRow({
             value={newPassword}
             onChange={setNewPassword}
           />
-          <GroupPicker groups={groups} value={groupId} onChange={setGroupId} onCreate={createGroup} />
+          <GroupPicker groups={groups} value={groupIds} onChange={setGroupIds} onCreate={createGroup} />
           {plans.length > 0 && <PlanPicker plans={plans} value={planId} onChange={setPlanId} />}
           <UserProjectPolicyPicker
             enabled={projectEnabled}
@@ -6230,7 +6274,7 @@ function UserRow({
                 guard(async () => {
                   await api.adminUpdateUser(u.id, {
                     display_name: displayName.trim(),
-                    group_id: groupId,
+                    group_ids: groupIds,
                     plan_id: planId,
                     project_policy: {
                       enabled: projectEnabled,

@@ -80,12 +80,8 @@ async def _readable_base(state: AppState, user: User, kb_id: str):
         raise HTTPException(status_code=404, detail="knowledge base not found")
     if kb.owner_id == user.id or kb.visibility == "public":
         return kb
-    if kb.visibility == "group" and user.group_id is not None:
-        owner_group_id = await state.knowledge.owner_group_id(kb.owner_id)
-        if owner_group_id == user.group_id:
-            return kb
-        if user.group_id in await state.knowledge.shared_group_ids(kb_id):
-            return kb
+    if kb.visibility == "group" and await state.knowledge.group_can_read(kb_id, kb.owner_id, user.id):
+        return kb
     raise HTTPException(status_code=403, detail="you don't have access to this knowledge base")
 
 

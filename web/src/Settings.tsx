@@ -858,6 +858,16 @@ function SkillDetailModal({
 function SkillsPanel() {
   const t = useT();
   const toast = useToast();
+  // The viewer's own groups: a skill shared with "group" goes to ONE of them, so with several we ask.
+  const [myGroups, setMyGroups] = useState<SimpleGroup[]>([]);
+  useEffect(() => {
+    void Promise.all([api.me(), api.listGroups()])
+      .then(([me, all]) => {
+        const ids = me.group_ids ?? (me.group_id ? [me.group_id] : []);
+        setMyGroups(ids.map((id) => all.find((g) => g.id === id)).filter((g): g is SimpleGroup => Boolean(g)));
+      })
+      .catch(() => setMyGroups([]));
+  }, []);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -962,6 +972,9 @@ function SkillsPanel() {
   if (editing) {
     const readOnly = !!editing.builtin || !!editing.read_only;
     const sharingNeedsScope = sharing && (editing.visibility ?? "private") === "private";
+    const sharesWithGroup = (editing.visibility ?? "private") === "group";
+    // Several groups and none picked yet (a skill already shared keeps its group until the owner changes it).
+    const needsGroupChoice = sharesWithGroup && myGroups.length > 1 && !editing.shared_group_id;
     return (
       <div className="claw-panel">
         {readOnly && (
@@ -1011,6 +1024,20 @@ function SkillsPanel() {
             {sharingNeedsScope && (
               <Text size="sm" color="secondary" as="p">{t("settings.skills.chooseShareScope")}</Text>
             )}
+            {sharesWithGroup && myGroups.length > 1 && (
+              <div className="claw-row" style={{ flexWrap: "wrap" }}>
+                <Text size="sm" color="secondary">{t("settings.skills.shareWithGroup")}</Text>
+                {myGroups.map((g) => (
+                  <Button
+                    key={g.id}
+                    label={g.name}
+                    size="sm"
+                    variant={editing.shared_group_id === g.id ? "primary" : "secondary"}
+                    clickAction={() => setEditing({ ...editing, shared_group_id: g.id })}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
         {!readOnly && (connectors.length > 0 || pickableGlobalConnectors.length > 0) && (
@@ -1055,13 +1082,14 @@ function SkillsPanel() {
             <Button
               label={sharing ? t("settings.skills.share") : t("settings.skills.save")}
               icon={<Icon icon="check" size="sm" />}
-              isDisabled={sharingNeedsScope}
+              isDisabled={sharingNeedsScope || needsGroupChoice}
               clickAction={() =>
                 guard(async () => {
                   const visibility = editing.visibility ?? "private";
                   const saved = await api.saveSkill({
                     id: editing.id,
                     visibility,
+                    ...(visibility === "group" && editing.shared_group_id ? { shared_group_id: editing.shared_group_id } : {}),
                     name: (editing.name ?? "").trim(),
                     description: editing.description ?? "",
                     content: editing.content ?? "",
@@ -3739,20 +3767,20 @@ function VisibilitySelector({
   onChange,
   sharedGroupIds,
   onSharedGroupIdsChange,
-  myGroupId,
-  myGroupName,
+  myGroupIds,
   groups,
 }: {
   visibility: "private" | "group" | "public";
   onChange: (v: "private" | "group" | "public") => void;
   sharedGroupIds: string[];
   onSharedGroupIdsChange: (ids: string[]) => void;
-  myGroupId: string | null;
-  myGroupName: string | null;
+  myGroupIds: string[];
   groups: SimpleGroup[];
 }) {
   const t = useT();
-  const otherGroups = groups.filter((g) => g.id !== myGroupId);
+  const hasGroup = myGroupIds.length > 0;
+  const myGroupNames = myGroupIds.map((id) => groups.find((g) => g.id === id)?.name).filter(Boolean).join(", ");
+  const otherGroups = groups.filter((g) => !myGroupIds.includes(g.id));
   return (
     <div className="claw-field-group">
       <Text size="sm" color="secondary">
@@ -3769,7 +3797,7 @@ function VisibilitySelector({
           label={t("settings.knowledge.group")}
           size="sm"
           variant={visibility === "group" ? "primary" : "secondary"}
-          isDisabled={!myGroupId}
+          isDisabled={!hasGroup}
           clickAction={() => onChange("group")}
         />
         <Button
@@ -3779,15 +3807,15 @@ function VisibilitySelector({
           clickAction={() => onChange("public")}
         />
       </div>
-      {!myGroupId && (
+      {!hasGroup && (
         <Text size="sm" color="secondary">
           {t("settings.knowledge.joinGroupFirst")}
         </Text>
       )}
-      {visibility === "group" && myGroupId && (
+      {visibility === "group" && hasGroup && (
         <>
           <Text size="sm" color="secondary">
-            {t("settings.knowledge.defaultSharedWith", { group: myGroupName ?? "—" })}
+            {t("settings.knowledge.defaultSharedWith", { group: myGroupNames || "—" })}
           </Text>
           {otherGroups.length > 0 && (
             <>
@@ -3830,7 +3858,7 @@ function KnowledgePanel() {
   const [visibility, setVisibility] = useState<"private" | "group" | "public">("private");
   const [sharedGroupIds, setSharedGroupIds] = useState<string[]>([]);
   const [groups, setGroups] = useState<SimpleGroup[]>([]);
-  const [myGroupId, setMyGroupId] = useState<string | null>(null);
+  const [myGroupIds, setMyGroupIds] = useState<string[]>([]);
   const toast = useToast();
   const t = useT();
 
@@ -3853,10 +3881,9 @@ function KnowledgePanel() {
   useEffect(() => load(), [load]);
   useEffect(() => {
     void api.listGroups().then(setGroups);
-    void api.me().then((me) => setMyGroupId(me.group_id));
+    void api.me().then((me) => setMyGroupIds(me.group_ids ?? (me.group_id ? [me.group_id] : [])));
   }, []);
 
-  const myGroupName = groups.find((g) => g.id === myGroupId)?.name ?? null;
 
   const create = async () => {
     if (!name.trim()) return;
@@ -3934,8 +3961,7 @@ function KnowledgePanel() {
               onChange={setVisibility}
               sharedGroupIds={sharedGroupIds}
               onSharedGroupIdsChange={setSharedGroupIds}
-              myGroupId={myGroupId}
-              myGroupName={myGroupName}
+              myGroupIds={myGroupIds}
               groups={groups}
             />
             <div className="claw-row">
@@ -3968,8 +3994,7 @@ function KnowledgePanel() {
               onPatch={patchBase}
               toast={toast}
               groups={groups}
-              myGroupId={myGroupId}
-              myGroupName={myGroupName}
+              myGroupIds={myGroupIds}
             />
           ))}
         </div>
@@ -3991,16 +4016,14 @@ function KnowledgeCard({
   onPatch,
   toast,
   groups,
-  myGroupId,
-  myGroupName,
+  myGroupIds,
 }: {
   kb: KnowledgeBase;
   onChanged: () => void;
   onPatch: (id: string, patch: Partial<KnowledgeBase>) => void;
   toast: ReturnType<typeof useToast>;
   groups: SimpleGroup[];
-  myGroupId: string | null;
-  myGroupName: string | null;
+  myGroupIds: string[];
 }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
@@ -4244,8 +4267,7 @@ function KnowledgeCard({
               onChange={setDraftVisibility}
               sharedGroupIds={draftSharedGroupIds}
               onSharedGroupIdsChange={setDraftSharedGroupIds}
-              myGroupId={myGroupId}
-              myGroupName={myGroupName}
+              myGroupIds={myGroupIds}
               groups={groups}
             />
             <div className="claw-row">

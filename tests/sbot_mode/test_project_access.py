@@ -59,3 +59,25 @@ async def test_project_tool_passes_the_fresh_user_limit_to_every_mutating_call(s
     assert await tool.execute("first-app", "start") == "ok"
     assert await tool.execute("second-app", "exec", "true") == "ok"
     assert received == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_project_policy_with_several_groups_is_the_union(stores):
+    groups = GroupStore(stores["users"].factory)
+    locked = await groups.create("Locked")
+    small = await groups.create("Small")
+    big = await groups.create("Big")
+    await groups.set_project_policy(small.id, True, 2)
+    await groups.set_project_policy(big.id, True, 5)
+    policy = ProjectAccessPolicy(stores["users"])
+    user = await stores["users"].create("multi@sbot.ai", group_ids=[locked.id, small.id, big.id])
+
+    access = await policy.resolve(user.id)  # any group that allows it opens it, with the largest limit
+    assert (access.allowed, access.max_containers, access.source) == (True, 5, "group")
+
+    only_locked = await stores["users"].create("locked@sbot.ai", group_ids=[locked.id])
+    denied = await policy.resolve(only_locked.id)
+    assert (denied.allowed, denied.max_containers, denied.source) == (False, 0, "group")
+
+    await stores["users"].set_project_policy(user.id, False, None)  # a personal override still wins
+    assert (await policy.resolve(user.id)).source == "user" and not (await policy.resolve(user.id)).allowed
