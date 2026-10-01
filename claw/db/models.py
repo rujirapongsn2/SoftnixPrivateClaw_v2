@@ -597,9 +597,9 @@ class AppSetting(Base):
 class KnowledgeBase(Base):
     """A user-created knowledge collection (an OKF "bundle"). Documents uploaded
     into it are parsed, chunked, and made searchable by the agent. `private`
-    bundles are visible only to their owner; `group` ones to the owner's
-    current organizational group (User.group_id, resolved live) plus any
-    groups listed in KnowledgeBaseSharedGroup; `public` ones to all users."""
+    bundles are visible only to their owner; `group` ones to the groups
+    listed in KnowledgeBaseSharedGroup (chosen by the owner, never inferred from the owner's
+    own memberships); `public` ones to all users."""
 
     __tablename__ = "knowledge_bases"
 

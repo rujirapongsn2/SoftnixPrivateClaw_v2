@@ -2,9 +2,8 @@
 
 A knowledge base is an OKF bundle. Uploads are parsed + chunked automatically —
 the user never deals with formats. Private bases are visible only to their
-owner; group bases to the owner's current organizational group (plus any
-groups explicitly shared into via `shared_group_ids`); public ones to
-everyone. Only the owner may modify or delete a base.
+owner; group bases to the groups the owner chose (`shared_group_ids`, pinned:
+joining a group never widens who can see a base); public ones to everyone. Only the owner may modify or delete a base.
 """
 
 import os
@@ -16,6 +15,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from claw.api.group_sharing import resolve_share_groups
 from sbot.api.deps import AppState, current_user, get_state
 from sbot.db.models import User
 
@@ -34,9 +34,8 @@ class CreateKBBody(BaseModel):
     description: str = ""
     visibility: Visibility = "private"
     kind: KnowledgeKind = "general"
-    # Only meaningful when visibility == "group" — additional groups beyond
-    # the owner's own (which is always included by default, see
-    # KnowledgeBase.visibility).
+    # Only meaningful when visibility == "group": the groups it is shared with (the whole
+    # audience). Omit it to use the owner's only group; an owner in several must choose.
     shared_group_ids: list[str] | None = None
 
 
@@ -94,14 +93,15 @@ async def list_bases(user: User = Depends(current_user), state: AppState = Depen
 async def create_base(
     body: CreateKBBody, user: User = Depends(current_user), state: AppState = Depends(get_state)
 ) -> dict:
+    # Decide the audience before anything is created, so a bad choice leaves nothing behind.
+    audience = (
+        await resolve_share_groups(state, user.id, body.shared_group_ids) if body.visibility == "group" else []
+    )
     kb = await state.knowledge.create_base(
         owner_id=user.id, name=body.name, description=body.description,
-        visibility=body.visibility, kind=body.kind,
+        visibility=body.visibility, kind=body.kind, shared_group_ids=audience,
     )
-    shared_group_ids: list[str] = []
-    if kb.visibility == "group" and body.shared_group_ids:
-        await state.knowledge.set_shared_groups(kb.id, body.shared_group_ids)
-        shared_group_ids = await state.knowledge.shared_group_ids(kb.id)
+    shared_group_ids = await state.knowledge.shared_group_ids(kb.id) if kb.visibility == "group" else []
     return {
         "id": kb.id,
         "name": kb.name,
@@ -118,7 +118,15 @@ async def create_base(
 async def update_base(
     kb_id: str, body: UpdateKBBody, user: User = Depends(current_user), state: AppState = Depends(get_state)
 ) -> dict:
-    await _owned_base(state, user, kb_id)
+    current = await _owned_base(state, user, kb_id)
+    audience: list[str] | None = None
+    if (body.visibility or current.visibility) == "group" and (
+        body.shared_group_ids is not None or current.visibility != "group"
+    ):
+        # Newly group-shared, or the owner changed the list: validate before changing anything.
+        audience = await resolve_share_groups(
+            state, user.id, body.shared_group_ids, await state.knowledge.shared_group_ids(kb_id)
+        )
     try:
         kb = await state.knowledge.update_base(
             kb_id,
@@ -126,12 +134,11 @@ async def update_base(
             description=body.description,
             visibility=body.visibility,
             kind=body.kind,
+            shared_group_ids=audience,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     shared_group_ids: list[str] = []
-    if kb.visibility == "group" and body.shared_group_ids is not None:
-        await state.knowledge.set_shared_groups(kb_id, body.shared_group_ids)
     if kb.visibility == "group":
         shared_group_ids = await state.knowledge.shared_group_ids(kb_id)
     return {

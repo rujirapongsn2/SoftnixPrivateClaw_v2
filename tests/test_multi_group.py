@@ -96,37 +96,149 @@ async def test_skill_sharing_with_several_groups(db_factory, stores, store_type)
 
 
 @pytest.mark.parametrize("store_type", [KnowledgeStore, SbotKnowledgeStore])
-async def test_group_knowledge_is_visible_through_any_shared_group(db_factory, stores, store_type):
+async def test_group_knowledge_is_visible_only_through_the_groups_it_was_shared_with(db_factory, stores, store_type):
     a, b, c = await _groups(db_factory, "A", "B", "C")
-    owner, v_ab, v_c, v_none = await _users(stores, "kowner", "v_ab", "v_c", "v_none")
+    owner, v_a, v_ac, v_c, v_none = await _users(stores, "kowner", "v_a", "v_ac", "v_c", "v_none")
     users = stores["users"]
-    await users.set_groups(owner.id, [a])
-    await users.set_groups(v_ab.id, [c, a])  # shares A with the owner via its second group
+    await users.set_groups(owner.id, [a, b])
+    await users.set_groups(v_a.id, [a])
+    await users.set_groups(v_ac.id, [c, a])  # reaches A through its second group
     await users.set_groups(v_c.id, [c])
     kb_store = store_type(db_factory)
     kb = await kb_store.create_base(owner_id=owner.id, name="Team KB", description="", visibility="group", kind="documents")
+    await kb_store.set_shared_groups(kb.id, [a])
 
     ids = kb_store.accessible_ids
-    assert kb.id in await ids(v_ab.id)
+    assert kb.id in await ids(v_a.id) and kb.id in await ids(v_ac.id)
     assert kb.id not in await ids(v_c.id) and kb.id not in await ids(v_none.id)
-    assert await kb_store.group_can_read(kb.id, owner.id, v_ab.id)
+    assert await kb_store.group_can_read(kb.id, owner.id, v_ac.id)
     assert not await kb_store.group_can_read(kb.id, owner.id, v_c.id)
 
-    # Explicitly adding group C opens it to C's members; the owner's own groups stay in force.
-    await kb_store.set_shared_groups(kb.id, [c])
-    assert kb.id in await ids(v_c.id) and await kb_store.group_can_read(kb.id, owner.id, v_c.id)
-    rows = {r["id"]: r for r in await kb_store.list_accessible(v_ab.id)}
-    assert rows[kb.id]["owner_group_names"] == ["A"] and rows[kb.id]["owner_group_name"] == "A"
-
-    # Moving the owner into a second group extends the base to that group too (resolved live).
-    await users.set_groups(owner.id, [a, b])
+    # The owner is ALSO in B, but that exposes nothing to B's members: only the chosen list counts.
     (in_b,) = await _users(stores, "in_b")
     await users.set_groups(in_b.id, [b])
-    assert kb.id in await ids(in_b.id)
-    assert {r["id"] for r in await kb_store.list_accessible(in_b.id)} == {kb.id}
+    assert kb.id not in await ids(in_b.id)
+    # Joining a further group later widens nothing either.
+    await users.set_groups(owner.id, [a, b, c])
+    assert kb.id not in await ids(in_b.id) and kb.id not in await ids(v_c.id)
+
+    # The owner can share with a group they are not in, and the list is replaced as a whole.
+    await kb_store.set_shared_groups(kb.id, [c])
+    assert kb.id in await ids(v_c.id) and kb.id not in await ids(v_a.id)
+    rows = {r["id"]: r for r in await kb_store.list_accessible(v_ac.id)}
+    assert rows[kb.id]["owner_group_names"] == ["C"] and rows[kb.id]["shared_group_ids"] == []  # ids are the owner's
+    mine = {r["id"]: r for r in await kb_store.list_accessible(owner.id)}
+    assert mine[kb.id]["shared_group_ids"] == [c]
     # Private bases never leak through a shared group.
     private = await kb_store.create_base(owner_id=owner.id, name="Mine", description="", visibility="private", kind="documents")
-    assert private.id not in await ids(in_b.id)
+    assert private.id not in await ids(v_c.id)
+
+
+async def test_knowledge_and_blueprint_api_pin_the_groups(db_factory, tmp_path):
+    from sbot.api.blueprints import router as bp_router
+    from sbot.api.deps import current_user as sbot_user
+    from sbot.api.deps import get_state as sbot_state
+    from claw.api.deps import current_user, get_state
+    from sbot.db.stores import BlueprintStore
+
+    app = build_api_app(db_factory)
+    app.state.claw.blueprints = BlueprintStore(db_factory)
+    app.state.claw.settings.blueprints_root = tmp_path / "bp"
+    app.include_router(bp_router)
+    app.dependency_overrides[sbot_state] = get_state
+    app.dependency_overrides[sbot_user] = current_user
+    async with client(app) as c:
+        admin, _ = await _register(c, "pin-admin@x.io")
+        h = _bearer(admin)
+        ga = (await c.post("/api/admin/groups", json={"name": "A"}, headers=h)).json()
+        gb = (await c.post("/api/admin/groups", json={"name": "B"}, headers=h)).json()
+        owner = (await c.post("/api/admin/users", headers=h, json={"email": "o@x.io", "password": "password123", "group_ids": [ga["id"], gb["id"]]})).json()
+        single = (await c.post("/api/admin/users", headers=h, json={"email": "s@x.io", "password": "password123", "group_ids": [ga["id"]]})).json()
+        member_b = (await c.post("/api/admin/users", headers=h, json={"email": "mb@x.io", "password": "password123", "group_ids": [gb["id"]]})).json()
+        tok = {}
+        for email in ("o@x.io", "s@x.io", "mb@x.io"):
+            r = await c.post("/api/auth/login", json={"email": email, "password": "password123"})
+            tok[email] = _bearer(r.json()["access_token"])
+
+        # Knowledge: an owner in two groups must choose; a one-group owner needs no choice.
+        r = await c.post("/api/knowledge", headers=tok["o@x.io"], json={"name": "K", "visibility": "group"})
+        assert r.status_code == 422, r.text
+        r = await c.post("/api/knowledge", headers=tok["o@x.io"], json={"name": "K", "visibility": "group", "shared_group_ids": ["nope"]})
+        assert r.status_code == 404
+        r = await c.post("/api/knowledge", headers=tok["o@x.io"], json={"name": "K", "visibility": "group", "shared_group_ids": [ga["id"]]})
+        assert r.status_code == 200 and r.json()["shared_group_ids"] == [ga["id"]]
+        kb_id = r.json()["id"]
+        r = await c.post("/api/knowledge", headers=tok["s@x.io"], json={"name": "S", "visibility": "group"})
+        assert r.status_code == 200 and r.json()["shared_group_ids"] == [ga["id"]]  # defaulted to their only group
+        assert (await c.get(f"/api/knowledge/{kb_id}/documents", headers=tok["s@x.io"])).status_code == 200
+        assert (await c.get(f"/api/knowledge/{kb_id}/documents", headers=tok["mb@x.io"])).status_code == 403  # owner is in B too: still no
+        # Switching an existing private base to group needs the same choice.
+        priv = (await c.post("/api/knowledge", headers=tok["o@x.io"], json={"name": "P"})).json()
+        assert (await c.patch(f"/api/knowledge/{priv['id']}", headers=tok["o@x.io"], json={"visibility": "group"})).status_code == 422
+        r = await c.patch(f"/api/knowledge/{priv['id']}", headers=tok["o@x.io"], json={"visibility": "group", "shared_group_ids": [gb["id"]]})
+        assert r.status_code == 200 and r.json()["shared_group_ids"] == [gb["id"]]
+        assert (await c.get(f"/api/knowledge/{priv['id']}/documents", headers=tok["mb@x.io"])).status_code == 200
+        # Changing other fields keeps the audience.
+        r = await c.patch(f"/api/knowledge/{priv['id']}", headers=tok["o@x.io"], json={"description": "d"})
+        assert r.json()["shared_group_ids"] == [gb["id"]]
+
+        # Blueprints behave the same way.
+        data = {"name": "T", "visibility": "group"}
+        files = {"file": ("t.docx", b"x" * 20, "application/octet-stream")}
+        r = await c.post("/api/blueprints", headers=tok["o@x.io"], data=data, files=files)
+        assert r.status_code == 422, r.text
+        r = await c.post("/api/blueprints", headers=tok["o@x.io"], data=data | {"shared_group_ids": [gb["id"]]}, files=files)
+        assert r.status_code == 200, r.text
+        bp = r.json()
+        assert bp["shared_group_ids"] == [gb["id"]] and bp["shared_group_names"] == ["B"]
+        assert bp["id"] in [x["id"] for x in (await c.get("/api/blueprints", headers=tok["mb@x.io"])).json()]
+        assert bp["id"] not in [x["id"] for x in (await c.get("/api/blueprints", headers=tok["s@x.io"])).json()]
+        r = await c.patch(f"/api/blueprints/{bp['id']}", headers=tok["o@x.io"], json={"shared_group_ids": [ga["id"]]})
+        assert r.status_code == 200 and r.json()["shared_group_ids"] == [ga["id"]]
+        assert bp["id"] in [x["id"] for x in (await c.get("/api/blueprints", headers=tok["s@x.io"])).json()]
+        assert bp["id"] not in [x["id"] for x in (await c.get("/api/blueprints", headers=tok["mb@x.io"])).json()]
+    assert owner["group_ids"] and single["group_ids"] and member_b["group_ids"]
+
+
+def _pin_migration():
+    import pathlib
+
+    return importlib.import_module(
+        "migrations.versions." + next(p.stem for p in pathlib.Path("migrations/versions").glob("*_pin_group_shares.py"))
+    )
+
+
+def test_pin_migration_keeps_todays_exposure_for_existing_group_items():
+    migration = _pin_migration()
+    engine = sa.create_engine("sqlite://")
+    with engine.begin() as conn:
+        for ddl in (
+            "CREATE TABLE user_groups (id VARCHAR(32) PRIMARY KEY)",
+            "CREATE TABLE users (id VARCHAR(32) PRIMARY KEY)",
+            "CREATE TABLE user_group_members (user_id VARCHAR(32), group_id VARCHAR(32), position INTEGER DEFAULT 0)",
+            "CREATE TABLE knowledge_bases (id VARCHAR(32) PRIMARY KEY, owner_id VARCHAR(32), visibility VARCHAR(16))",
+            "CREATE TABLE knowledge_base_shared_groups (kb_id VARCHAR(32), group_id VARCHAR(32), PRIMARY KEY (kb_id, group_id))",
+            "CREATE TABLE sbot_blueprints (id VARCHAR(32) PRIMARY KEY, owner_id VARCHAR(32), visibility VARCHAR(16))",
+        ):
+            conn.execute(sa.text(ddl))
+        conn.execute(sa.text("INSERT INTO user_groups VALUES ('g1'), ('g2'), ('g3')"))
+        conn.execute(sa.text("INSERT INTO users VALUES ('owner'), ('solo')"))
+        conn.execute(sa.text("INSERT INTO user_group_members (user_id, group_id) VALUES ('owner','g1'), ('owner','g2'), ('solo','g3')"))
+        conn.execute(sa.text("INSERT INTO knowledge_bases VALUES ('kb-g','owner','group'), ('kb-p','owner','private'), ('kb-solo','solo','group')"))
+        conn.execute(sa.text("INSERT INTO knowledge_base_shared_groups VALUES ('kb-g','g3'), ('kb-g','g1')"))  # g1 already explicit
+        conn.execute(sa.text("INSERT INTO sbot_blueprints VALUES ('bp-g','owner','group'), ('bp-pub','owner','public')"))
+        with Operations.context(MigrationContext.configure(conn)):
+            migration.upgrade()
+        kb = sorted(conn.execute(sa.text("SELECT kb_id, group_id FROM knowledge_base_shared_groups")).all())
+        # kb-g keeps its extra g3 and gains the owner's current groups (g1 not duplicated); private/public get nothing.
+        assert kb == [("kb-g", "g1"), ("kb-g", "g2"), ("kb-g", "g3"), ("kb-solo", "g3")]
+        bp = sorted(conn.execute(sa.text("SELECT blueprint_id, group_id FROM sbot_blueprint_shared_groups")).all())
+        assert bp == [("bp-g", "g1"), ("bp-g", "g2")]
+        with Operations.context(MigrationContext.configure(conn)):
+            migration.downgrade()
+        assert "sbot_blueprint_shared_groups" not in sa.inspect(conn).get_table_names()
+        assert conn.execute(sa.text("SELECT count(*) FROM knowledge_base_shared_groups")).scalar() == 4  # superset: nothing lost
+    engine.dispose()
 
 
 async def test_plan_with_several_groups_takes_the_highest_ranked_and_own_plan_wins(db_factory, stores):
@@ -304,3 +416,35 @@ async def test_a_group_removed_during_the_request_is_a_404_not_a_500(db_factory,
         assert r.status_code == 404
         r = await c.post("/api/admin/users", headers=h, json={"email": "r2@x.io", "password": "password123", "group_ids": [g["id"]]})
         assert r.status_code == 404
+
+
+@pytest.mark.parametrize("store_type", [KnowledgeStore, SbotKnowledgeStore])
+async def test_knowledge_visibility_and_audience_change_together(db_factory, stores, store_type):
+    a, b = await _groups(db_factory, "A", "B")
+    (owner,) = await _users(stores, "atomic")
+    kb_store = store_type(db_factory)
+    # Created as a group base WITH its audience in one step: there is no moment it is group-visible to nobody.
+    kb = await kb_store.create_base(owner.id, "K", visibility="group", shared_group_ids=[a])
+    assert await kb_store.shared_group_ids(kb.id) == [a]
+    await kb_store.update_base(kb.id, shared_group_ids=[b])  # audience replaced, visibility untouched
+    assert await kb_store.shared_group_ids(kb.id) == [b]
+    await kb_store.update_base(kb.id, visibility="private", shared_group_ids=[a])  # leaving group clears it, ids ignored
+    assert await kb_store.shared_group_ids(kb.id) == []
+    await kb_store.update_base(kb.id, visibility="group", shared_group_ids=[a, b])  # back to group with a new list
+    assert sorted(await kb_store.shared_group_ids(kb.id)) == sorted([a, b])
+
+
+async def test_blueprint_visibility_and_audience_change_together(db_factory, stores):
+    from sbot.db.stores import BlueprintStore
+
+    a, b = await _groups(db_factory, "A", "B")
+    (owner,) = await _users(stores, "bpatomic")
+    store = BlueprintStore(db_factory)
+    await store.create(blueprint_id="bp1", owner_id=owner.id, name="B", description="", visibility="group",
+                       filename="a.docx", mime="x", size=1, storage_path="bp1/v1/a.docx", shared_group_ids=[a])
+    await store.update("bp1", shared_group_ids=[b])
+    assert await store.shared_group_ids("bp1") == [b]
+    await store.update("bp1", visibility="public")  # no longer a group item: the audience goes with it
+    assert await store.shared_group_ids("bp1") == []
+    await store.update("bp1", visibility="group", shared_group_ids=[a, b])
+    assert sorted(await store.shared_group_ids("bp1")) == sorted([a, b])

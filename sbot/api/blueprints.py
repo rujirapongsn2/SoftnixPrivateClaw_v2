@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from claw.api.group_sharing import resolve_share_groups
 from sbot.api.deps import AppState
 from sbot.db.models import Blueprint, BlueprintVersion, User
 from sbot.filenames import safe_filename
@@ -48,6 +49,8 @@ class UpdateBlueprintBody(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = None
     visibility: Visibility | None = None
+    # The groups a "group" blueprint is shared with (the whole audience). Omit to keep them.
+    shared_group_ids: list[str] | None = None
 
 
 class MaterializeBody(BaseModel):
@@ -60,6 +63,7 @@ class ArtifactBlueprintBody(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
     visibility: Visibility = "private"
+    shared_group_ids: list[str] | None = None
 
 
 def _safe_name(name: str) -> str:
@@ -98,10 +102,9 @@ async def _readable(state: AppState, user: User, blueprint_id: str) -> Blueprint
         raise HTTPException(status_code=404, detail="blueprint not found")
     if row.owner_id == user.id or row.visibility == "public":
         return row
-    if row.visibility == "group":
-        # Readable when the viewer shares at least one group with the owner.
-        if set(await state.users.group_ids_for(user.id)) & set(await state.users.group_ids_for(row.owner_id)):
-            return row
+    if row.visibility == "group" and await state.blueprints.group_can_read(blueprint_id, user.id):
+        # One of the viewer's groups is in the list the owner chose.
+        return row
     raise HTTPException(status_code=403, detail="you don't have access to this blueprint")
 
 
@@ -151,7 +154,10 @@ async def _create_from_path(
     name: str,
     description: str,
     visibility: Visibility,
+    shared_group_ids: list[str] | None = None,
 ) -> dict:
+    # Decide the audience first so a bad choice leaves no file or row behind.
+    audience = await resolve_share_groups(state, user.id, shared_group_ids) if visibility == "group" else []
     blueprint_id = uuid.uuid4().hex
     storage_rel = f"{blueprint_id}/v1/{filename}"
     destination = state.settings.blueprints_root / storage_rel
@@ -168,6 +174,7 @@ async def _create_from_path(
             mime=mime,
             size=size,
             storage_path=storage_rel,
+            shared_group_ids=audience,
         )
     except Exception:
         shutil.rmtree(destination.parents[1], ignore_errors=True)
@@ -189,6 +196,7 @@ async def create_blueprint(
     name: str = Form(..., min_length=1, max_length=120),
     description: str = Form(""),
     visibility: Visibility = Form("private"),
+    shared_group_ids: list[str] | None = Form(None),
     user: User = Depends(current_user),
     state: AppState = Depends(get_state),
 ) -> dict:
@@ -197,6 +205,7 @@ async def create_blueprint(
         return await _create_from_path(
             state, user, staged, filename=filename, mime=mime, size=size,
             name=name, description=description, visibility=visibility,
+            shared_group_ids=shared_group_ids,
         )
     finally:
         staged.unlink(missing_ok=True)
@@ -228,6 +237,7 @@ async def create_from_artifact(
     return await _create_from_path(
         state, user, source, filename=filename, mime=mime, size=size,
         name=body.name, description=body.description, visibility=body.visibility,
+        shared_group_ids=body.shared_group_ids,
     )
 
 
@@ -238,8 +248,18 @@ async def update_blueprint(
     user: User = Depends(current_user),
     state: AppState = Depends(get_state),
 ) -> dict:
-    await _owned(state, user, blueprint_id)
-    await state.blueprints.update(blueprint_id, **body.model_dump(exclude_none=True))
+    current = await _owned(state, user, blueprint_id)
+    audience: list[str] | None = None
+    if (body.visibility or current.visibility) == "group" and (
+        body.shared_group_ids is not None or current.visibility != "group"
+    ):
+        audience = await resolve_share_groups(
+            state, user.id, body.shared_group_ids, await state.blueprints.shared_group_ids(blueprint_id)
+        )
+    # Visibility and audience change together in one transaction.
+    await state.blueprints.update(
+        blueprint_id, **body.model_dump(exclude_none=True, exclude={"shared_group_ids"}), shared_group_ids=audience
+    )
     rows = await state.blueprints.list_accessible(user.id)
     return next(row for row in rows if row["id"] == blueprint_id)
 

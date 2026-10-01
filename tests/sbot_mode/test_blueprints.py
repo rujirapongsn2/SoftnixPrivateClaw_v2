@@ -37,6 +37,7 @@ async def test_blueprint_visibility_and_versions(stores):
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         size=12,
         storage_path="bp-group/v1/quote.docx",
+        shared_group_ids=[team.id],
     )
     await store.create(
         blueprint_id="bp-public",
@@ -114,7 +115,7 @@ async def test_save_blueprint_tool_copies_workspace_file_without_linking_source(
 
 
 @pytest.mark.asyncio
-async def test_group_blueprint_is_readable_by_anyone_sharing_a_group_with_the_owner(stores):
+async def test_group_blueprint_is_readable_through_any_group_it_is_shared_with(stores):
     users = stores["users"]
     groups = GroupStore(users.factory)
     a = await groups.create("A")
@@ -127,6 +128,7 @@ async def test_group_blueprint_is_readable_by_anyone_sharing_a_group_with_the_ow
     await store.create(
         blueprint_id="bp-multi", owner_id=owner.id, name="Template", description="", visibility="group",
         filename="t.docx", mime="application/octet-stream", size=1, storage_path="bp-multi/v1/t.docx",
+        shared_group_ids=[b.id],
     )
     assert {r["id"] for r in await store.list_accessible(in_b.id)} == {"bp-multi"}
     assert {r["id"] for r in await store.list_accessible(in_c.id)} == set()

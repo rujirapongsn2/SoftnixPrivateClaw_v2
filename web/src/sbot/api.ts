@@ -200,6 +200,9 @@ export interface BlueprintInfo {
   mime: string;
   size: number;
   updated_at: string;
+  // For a "group" blueprint: the groups it is shared with (ids only for the owner).
+  shared_group_ids?: string[];
+  shared_group_names?: string[];
 }
 
 export interface BlueprintVersion {
@@ -1223,18 +1226,22 @@ export const api = {
   listBlueprints: () => request<BlueprintInfo[]>("/api/blueprints"),
   createBlueprint: async (
     file: File,
-    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"] },
+    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"]; shared_group_ids?: string[] },
   ): Promise<BlueprintInfo> => {
     const form = new FormData();
     form.append("file", file);
     form.append("name", data.name);
     form.append("description", data.description ?? "");
     form.append("visibility", data.visibility);
+    for (const id of data.shared_group_ids ?? []) form.append("shared_group_ids", id);
     const resp = await fetch(endpoint("/api/blueprints"), { method: "POST", headers: authHeaders(), body: form });
     if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
     return resp.json();
   },
-  updateBlueprint: (id: string, patch: Partial<Pick<BlueprintInfo, "name" | "description" | "visibility">>) =>
+  updateBlueprint: (
+    id: string,
+    patch: Partial<Pick<BlueprintInfo, "name" | "description" | "visibility" | "shared_group_ids">>,
+  ) =>
     request<BlueprintInfo>(`/api/blueprints/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteBlueprint: (id: string) => request(`/api/blueprints/${id}`, { method: "DELETE" }),
   listBlueprintVersions: (id: string) =>
@@ -1263,7 +1270,7 @@ export const api = {
   saveArtifactAsBlueprint: (
     sessionId: string,
     path: string,
-    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"] },
+    data: { name: string; description?: string; visibility: BlueprintInfo["visibility"]; shared_group_ids?: string[] },
   ) => request<BlueprintInfo>("/api/blueprints/from-artifact", {
     method: "POST",
     body: JSON.stringify({ session_id: sessionId, path, ...data }),

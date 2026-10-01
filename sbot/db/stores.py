@@ -39,6 +39,7 @@ from sbot.db.models import (
     AppSetting,
     AuditEvent,
     Blueprint,
+    BlueprintSharedGroup,
     BlueprintVersion,
     Bot,
     ChatSession,
@@ -2725,6 +2726,9 @@ class GroupStore:
                     KnowledgeBaseSharedGroup.group_id == group_id
                 )
             )
+            await db.execute(
+                BlueprintSharedGroup.__table__.delete().where(BlueprintSharedGroup.group_id == group_id)
+            )
             await db.delete(row)
             await db.commit()
             return True
@@ -4597,7 +4601,7 @@ class KnowledgeStore:
 
     async def create_base(
         self, owner_id: str, name: str, description: str = "", visibility: str = "private",
-        kind: str = "general",
+        kind: str = "general", shared_group_ids: Sequence[str] | None = None,
     ) -> KnowledgeBase:
         async with self.factory() as db:
             kb = KnowledgeBase(
@@ -4608,6 +4612,11 @@ class KnowledgeStore:
                 kind=kind if kind in {"general", "queryable"} else "general",
             )
             db.add(kb)
+            await db.flush()
+            if kb.visibility == "group":
+                # Same transaction as the base: it is never saved as "group" with no audience.
+                for group_id in dict.fromkeys(g for g in (shared_group_ids or []) if g):
+                    db.add(KnowledgeBaseSharedGroup(kb_id=kb.id, group_id=group_id))
             await db.commit()
             await db.refresh(kb)
             return kb
@@ -4642,14 +4651,20 @@ class KnowledgeStore:
                             KnowledgeBaseSharedGroup.kb_id == kb_id
                         )
                     )
+            if kb.visibility == "group" and fields.get("shared_group_ids") is not None:
+                # Replaced in the same transaction as the visibility change.
+                await db.execute(
+                    KnowledgeBaseSharedGroup.__table__.delete().where(KnowledgeBaseSharedGroup.kb_id == kb_id)
+                )
+                for group_id in dict.fromkeys(g for g in fields["shared_group_ids"] if g):
+                    db.add(KnowledgeBaseSharedGroup(kb_id=kb_id, group_id=group_id))
             await db.commit()
             await db.refresh(kb)
             return kb
 
     async def set_shared_groups(self, kb_id: str, group_ids: list[str]) -> None:
-        """Replace the set of additional groups a `group`-visibility base is
-        shared with (the owner's own group is always included and never
-        stored here — see KnowledgeBase.visibility)."""
+        """Replace the groups a `group`-visibility base is shared with. This list is the whole
+        audience: the owner's own memberships are not added implicitly."""
         async with self.factory() as db:
             await db.execute(
                 KnowledgeBaseSharedGroup.__table__.delete().where(KnowledgeBaseSharedGroup.kb_id == kb_id)
@@ -4669,14 +4684,12 @@ class KnowledgeStore:
             return await gm.group_ids_of(db, owner_id)
 
     async def group_can_read(self, kb_id: str, owner_id: str, viewer_id: str) -> bool:
-        """Whether `viewer` reaches a group-visibility base: they share at least one group with the
-        owner, or one of their groups was explicitly added to the base."""
+        """Whether `viewer` reaches a group-visibility base: one of their groups is in the list of
+        groups the owner shared it with. The owner's own memberships grant nothing by themselves."""
         async with self.factory() as db:
             mine = set(await gm.group_ids_of(db, viewer_id))
             if not mine:
                 return False
-            if mine & set(await gm.group_ids_of(db, owner_id)):
-                return True
             shared = (
                 await db.execute(
                     select(KnowledgeBaseSharedGroup.group_id).where(KnowledgeBaseSharedGroup.kb_id == kb_id)
@@ -4718,23 +4731,27 @@ class KnowledgeStore:
                     await db.execute(select(KnowledgeDoc.kb_id, func.count()).group_by(KnowledgeDoc.kb_id))
                 ).all()
             )
-            group_names = {g.id: g.name for g in (await db.execute(select(UserGroup))).scalars().all()}
-            owner_groups = await gm.memberships_of(db, list({kb.owner_id for kb in bases}))
-            # Explicit shares are only the caller's own business to see —
-            # one bounded bulk query over just their own group-visibility
-            # bases, not per-row.
-            own_group_kb_ids = [kb.id for kb in bases if kb.owner_id == user_id and kb.visibility == "group"]
+            # The groups each visible group-base is shared with: one bounded bulk query over the
+            # result set, not per row. Only the owner is told the ids (it is their setting).
+            group_kb_ids = [kb.id for kb in bases if kb.visibility == "group"]
             shared_by_kb: dict[str, list[str]] = {}
-            if own_group_kb_ids:
+            if group_kb_ids:
                 for row in await db.execute(
                     select(KnowledgeBaseSharedGroup.kb_id, KnowledgeBaseSharedGroup.group_id).where(
-                        KnowledgeBaseSharedGroup.kb_id.in_(own_group_kb_ids)
+                        KnowledgeBaseSharedGroup.kb_id.in_(group_kb_ids)
                     )
                 ):
                     shared_by_kb.setdefault(row.kb_id, []).append(row.group_id)
+            # Names only for the groups that actually appear, not the whole organisation's list.
+            needed = {g for ids in shared_by_kb.values() for g in ids}
+            group_names = (
+                {g.id: g.name for g in (await db.execute(select(UserGroup).where(UserGroup.id.in_(needed)))).scalars()}
+                if needed
+                else {}
+            )
         out = []
         for kb in bases:
-            names = [group_names[g] for g in owner_groups.get(kb.owner_id, []) if g in group_names]
+            names = sorted(group_names[g] for g in shared_by_kb.get(kb.id, []) if g in group_names)
             out.append(
                 {
                     "id": kb.id,
@@ -4744,6 +4761,7 @@ class KnowledgeStore:
                     "kind": kb.kind,
                     "owner_id": kb.owner_id,
                     "is_owner": kb.owner_id == user_id,
+                    # The groups this base is shared with (kept under the old keys for the UI).
                     "owner_group_name": ", ".join(names) or None,
                     "owner_group_names": names,
                     "shared_group_ids": shared_by_kb.get(kb.id, []) if kb.owner_id == user_id else [],
@@ -4764,18 +4782,12 @@ class KnowledgeStore:
 
     @staticmethod
     def _group_visible_clause(viewer_id: str):
-        """`group`-visibility match for a viewer in any number of groups: the owner is in at least
-        one of the viewer's groups (their *current* membership), or an explicit
-        KnowledgeBaseSharedGroup row names one of them. No group = no match."""
-        mine = gm.member_group_ids_subquery(viewer_id)
-        owner_member = aliased(UserGroupMember)
-        owner_overlap = sa_exists().where(
-            owner_member.user_id == KnowledgeBase.owner_id, owner_member.group_id.in_(mine)
+        """`group`-visibility match: one of the viewer's groups is in the base's explicit list
+        (KnowledgeBaseSharedGroup). A viewer with no group matches nothing."""
+        return (KnowledgeBase.visibility == "group") & sa_exists().where(
+            KnowledgeBaseSharedGroup.kb_id == KnowledgeBase.id,
+            KnowledgeBaseSharedGroup.group_id.in_(gm.member_group_ids_subquery(viewer_id)),
         )
-        explicit = sa_exists().where(
-            KnowledgeBaseSharedGroup.kb_id == KnowledgeBase.id, KnowledgeBaseSharedGroup.group_id.in_(mine)
-        )
-        return (KnowledgeBase.visibility == "group") & (owner_overlap | explicit)
 
     async def delete_base(self, kb_id: str) -> None:
         async with self.factory() as db:
@@ -5061,6 +5073,7 @@ class BlueprintStore:
         mime: str,
         size: int,
         storage_path: str,
+        shared_group_ids: Sequence[str] = (),
     ) -> Blueprint:
         async with self.factory() as db:
             row = Blueprint(
@@ -5083,9 +5096,40 @@ class BlueprintStore:
                     created_by=owner_id,
                 )
             )
+            if row.visibility == "group":
+                for group_id in dict.fromkeys(g for g in shared_group_ids if g):
+                    db.add(BlueprintSharedGroup(blueprint_id=blueprint_id, group_id=group_id))
             await db.commit()
             await db.refresh(row)
             return row
+
+    async def set_shared_groups(self, blueprint_id: str, group_ids: Sequence[str]) -> None:
+        """Replace the groups a `group`-visibility blueprint is shared with (the whole audience)."""
+        async with self.factory() as db:
+            await db.execute(
+                BlueprintSharedGroup.__table__.delete().where(BlueprintSharedGroup.blueprint_id == blueprint_id)
+            )
+            for group_id in dict.fromkeys(g for g in group_ids if g):
+                db.add(BlueprintSharedGroup(blueprint_id=blueprint_id, group_id=group_id))
+            await db.commit()
+
+    async def shared_group_ids(self, blueprint_id: str) -> list[str]:
+        async with self.factory() as db:
+            rows = await db.execute(
+                select(BlueprintSharedGroup.group_id).where(BlueprintSharedGroup.blueprint_id == blueprint_id)
+            )
+            return list(rows.scalars())
+
+    async def group_can_read(self, blueprint_id: str, viewer_id: str) -> bool:
+        """One of the viewer's groups is in the blueprint's explicit list."""
+        async with self.factory() as db:
+            hit = await db.scalar(
+                select(BlueprintSharedGroup.blueprint_id).where(
+                    BlueprintSharedGroup.blueprint_id == blueprint_id,
+                    BlueprintSharedGroup.group_id.in_(gm.member_group_ids_subquery(viewer_id)),
+                ).limit(1)
+            )
+            return hit is not None
 
     async def get(self, blueprint_id: str) -> Blueprint | None:
         async with self.factory() as db:
@@ -5119,10 +5163,9 @@ class BlueprintStore:
     async def list_accessible(self, user_id: str) -> list[dict[str, Any]]:
         owner = aliased(User)
         async with self.factory() as db:
-            owner_member = aliased(UserGroupMember)
             group_clause = (Blueprint.visibility == "group") & sa_exists().where(
-                owner_member.user_id == Blueprint.owner_id,
-                owner_member.group_id.in_(gm.member_group_ids_subquery(user_id)),
+                BlueprintSharedGroup.blueprint_id == Blueprint.id,
+                BlueprintSharedGroup.group_id.in_(gm.member_group_ids_subquery(user_id)),
             )
             rows = (
                 await db.execute(
@@ -5141,12 +5184,31 @@ class BlueprintStore:
                     .order_by(Blueprint.updated_at.desc())
                 )
             ).all()
+            shared_by_bp: dict[str, list[str]] = {}
+            group_bp_ids = [bp.id for bp, _v, _n in rows if bp.visibility == "group"]
+            if group_bp_ids:
+                for row in await db.execute(
+                    select(BlueprintSharedGroup.blueprint_id, BlueprintSharedGroup.group_id).where(
+                        BlueprintSharedGroup.blueprint_id.in_(group_bp_ids)
+                    )
+                ):
+                    shared_by_bp.setdefault(row.blueprint_id, []).append(row.group_id)
+            needed = {g for ids in shared_by_bp.values() for g in ids}
+            group_names = (
+                {g.id: g.name for g in (await db.execute(select(UserGroup).where(UserGroup.id.in_(needed)))).scalars()}
+                if needed
+                else {}
+            )
         return [
             {
                 "id": bp.id,
                 "name": bp.name,
                 "description": bp.description,
                 "visibility": bp.visibility,
+                "shared_group_ids": shared_by_bp.get(bp.id, []) if bp.owner_id == user_id else [],
+                "shared_group_names": sorted(
+                    group_names[g] for g in shared_by_bp.get(bp.id, []) if g in group_names
+                ),
                 "owner_id": bp.owner_id,
                 "owner_name": owner_name or "",
                 "is_owner": bp.owner_id == user_id,
@@ -5170,6 +5232,17 @@ class BlueprintStore:
                 row.description = str(fields["description"])
             if fields.get("visibility") in self._VISIBILITIES:
                 row.visibility = str(fields["visibility"])
+                if row.visibility != "group":
+                    await db.execute(
+                        BlueprintSharedGroup.__table__.delete().where(BlueprintSharedGroup.blueprint_id == blueprint_id)
+                    )
+            if row.visibility == "group" and fields.get("shared_group_ids") is not None:
+                # Replaced in the same transaction as the visibility change.
+                await db.execute(
+                    BlueprintSharedGroup.__table__.delete().where(BlueprintSharedGroup.blueprint_id == blueprint_id)
+                )
+                for group_id in dict.fromkeys(g for g in fields["shared_group_ids"] if g):
+                    db.add(BlueprintSharedGroup(blueprint_id=blueprint_id, group_id=group_id))
             row.updated_at = datetime.now(timezone.utc)
             await db.commit()
             await db.refresh(row)
@@ -5256,6 +5329,9 @@ class BlueprintStore:
 
     async def delete(self, blueprint_id: str) -> None:
         async with self.factory() as db:
+            await db.execute(
+                BlueprintSharedGroup.__table__.delete().where(BlueprintSharedGroup.blueprint_id == blueprint_id)
+            )
             await db.execute(
                 BlueprintVersion.__table__.delete().where(BlueprintVersion.blueprint_id == blueprint_id)
             )
