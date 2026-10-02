@@ -296,7 +296,12 @@ async def delete_session(
     state: AppState = Depends(get_state),
 ) -> dict:
     await _owned_session(state, user, session_id)
+    # What the chat says it created, read before the chat is gone.
+    hints = await state.messages.file_hints(session_id)
     await state.sessions.delete(session_id)
+    from claw.workspace.session_files import purge_session_files
+
+    await purge_session_files(state, user.id, hints, _user_workspace(state, user.id))
     return {"deleted": True}
 
 
@@ -791,13 +796,20 @@ async def upload_attachments(
     import mimetypes
 
     result = []
+    accounts = getattr(state.runtime, "workspace_accounts", None)
     for upload in files:
         data = await upload.read()
         if len(data) > _MAX_ATTACHMENT_BYTES:
             raise HTTPException(status_code=413, detail=f"{upload.filename} exceeds the size limit")
+        if accounts is not None:
+            full = await accounts.check(user.id, len(data), 1)
+            if full:
+                raise HTTPException(status_code=413, detail=full.removeprefix("Error: "))
         name = f"{uuid.uuid4().hex[:8]}-{_safe_name(upload.filename or 'file')}"
         path = uploads / name
         path.write_bytes(data)
+        if accounts is not None:
+            accounts.note_written(user.id, len(data))
         rel = f"uploads/{name}"
         mime = upload.content_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
         result.append(
@@ -894,6 +906,13 @@ async def generate_image(
         )
         raise HTTPException(status_code=403, detail="Your plan does not include image generation.")
 
+    # A full workspace is refused before the paid provider call, not after it.
+    accounts = getattr(state.runtime, "workspace_accounts", None)
+    if accounts is not None:
+        full = await accounts.check(user.id, state.settings.image.max_bytes, 1)
+        if full:
+            raise HTTPException(status_code=413, detail=full.removeprefix("Error: "))
+
     mode = "images_endpoint" if resolved["model_prefix"] in _IMAGES_ENDPOINT_PREFIXES else "chat"
 
     # Reserve the images/day slot atomically BEFORE the paid provider call:
@@ -959,6 +978,8 @@ async def generate_image(
     # filesystem tool).
     await asyncio.to_thread((uploads / name).write_bytes, data)
     await asyncio.to_thread(_prune_generated_images, uploads, state.settings.image.max_stored_per_user)
+    if accounts is not None:
+        accounts.forget(user.id)
     rel = f"uploads/{name}"
 
     # Persist as a user prompt + an artifact-only assistant message so it shows

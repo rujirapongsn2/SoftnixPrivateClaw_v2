@@ -4836,6 +4836,13 @@ html[data-chat-bg="grid"] .claw-chat {
   .claw-artifact-blueprint-actions { flex: 1; }
   .claw-artifact-blueprint-actions .claw-artifact-card { flex: 1; min-width: 0; }
 }
+.claw-media-preview-video {
+  display: block;
+  width: 100%;
+  max-height: min(70vh, 640px);
+  background: #000;
+}
+.claw-media-preview-audio { display: block; width: 100%; padding: 8px 12px; box-sizing: border-box; }
 .claw-document-preview-pdf {
   display: block;
   width: 100%;

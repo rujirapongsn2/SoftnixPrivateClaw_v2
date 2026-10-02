@@ -14,6 +14,7 @@ from claw.api.knowledge import router as knowledge_router
 from claw.api.manage import router as manage_router
 from claw.api.routes import router as core_router
 from claw.api.telegram import router as telegram_router
+from claw.api.workspace_admin import router as workspace_admin_router
 from claw.browser.broker import BrowserBrokerStore
 from claw.channels.link import LinkCodeService
 from claw.channels.telegram import TelegramManager
@@ -45,12 +46,14 @@ from claw.db.stores import (
 )
 from claw.knowledge.service import KnowledgeService
 from claw.security.policy import PolicyEngine
+from claw.workspace.policy import WorkspacePolicyStore
 
 
 def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
     app = FastAPI()
     app.include_router(auth_router)
     app.include_router(admin_router)
+    app.include_router(workspace_admin_router)
     app.include_router(browser_ext_router)
     app.include_router(manage_router)
     app.include_router(telegram_router)
@@ -60,9 +63,10 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
     broker_root = Path(tempfile.mkdtemp(prefix="claw-broker-")) / "_browser_broker"
     knowledge_store = KnowledgeStore(db_factory, is_postgres=False)
     knowledge_root = Path(tempfile.mkdtemp(prefix="claw-knowledge-"))
+    # _env_file=None keeps tests hermetic — never read the developer's .env.
+    settings = Settings(dev_token="t", secret_key="test-secret", _env_file=None, **settings_kwargs)
     app.state.claw = AppState(
-        # _env_file=None keeps tests hermetic — never read the developer's .env.
-        settings=Settings(dev_token="t", secret_key="test-secret", _env_file=None, **settings_kwargs),
+        settings=settings,
         runtime=None,
         bus=None,
         users=UserStore(db_factory),
@@ -97,6 +101,7 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         telegram=None,
         groups=GroupStore(db_factory),
         shares=ShareStore(db_factory),
+        workspace_policy=WorkspacePolicyStore(db_factory, settings),
     )
     return app
 

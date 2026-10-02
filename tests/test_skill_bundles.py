@@ -21,6 +21,7 @@ from claw.db.models import Skill, SkillBundleVersion
 from claw.db.stores import SkillStore
 from claw.tools.skills import ManageSkillTool, ReadSkillTool
 from sbot.tools.skills import ManageSkillTool as SbotManager, ReadSkillTool as SbotReader
+from sbot.db.stores import SkillStore as SbotSkillStore
 
 
 def bundle(extra=None, name="demo"):
@@ -920,3 +921,148 @@ def test_migration_keeps_existing_text_skill():
             None,
         )
         assert "skill_bundle_versions" in sa.inspect(connection).get_table_names()
+
+
+def multi_bundle(names=("alpha", "beta", "gamma"), extra=None):
+    """Several skills in one ZIP, one folder each; `beta` links to its sibling `alpha`."""
+    files = {}
+    for name in names:
+        files[f"{name}/SKILL.md"] = f"---\nname: {name}\ndescription: Does {name}\n---\nBody of {name}."
+    files["beta/SKILL.md"] = "---\nname: beta\ndescription: Does beta\n---\nSee [alpha](../alpha/SKILL.md)."
+    files.update(extra or {})
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for p, c in files.items():
+            z.writestr(p, c)
+    return out.getvalue()
+
+
+def test_parse_bundles_reads_every_skill_and_notes_sibling_links():
+    from claw.skills.bundles import parse_bundles
+
+    parsed = {b["name"]: b for b in parse_bundles(multi_bundle())}
+    assert set(parsed) == {"alpha", "beta", "gamma"}
+    assert list(parsed["alpha"]["files"]) == ["SKILL.md"]  # no skill sees another's files
+    notes = parsed["beta"]["metadata"]["warnings"]
+    assert len(notes) == 1 and "alpha" in notes[0] and "read_skill" in notes[0] and "gamma" not in notes[0]
+    # parse_bundle still means "exactly one skill" for callers that expect that (GitHub import, the tool).
+    with pytest.raises(ValueError, match="exactly one"):
+        parse_bundle(multi_bundle())
+    assert parse_bundle(bundle())["name"] == "demo"
+
+
+def test_parse_bundles_edge_cases():
+    from claw.skills.bundles import parse_bundles
+
+    # A SKILL.md nested inside a skill is one of its files, not another skill.
+    nested = parse_bundles(multi_bundle(extra={"alpha/examples/SKILL.md": "---\nname: ignored\ndescription: x\n---\n"}))
+    assert sorted(b["name"] for b in nested) == ["alpha", "beta", "gamma"]
+    assert "examples/SKILL.md" in next(b for b in nested if b["name"] == "alpha")["files"]
+    # A SKILL.md at the archive root owns everything beneath it.
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("SKILL.md", "---\nname: solo\ndescription: d\n---\nx")
+        z.writestr("other/SKILL.md", "---\nname: inner\ndescription: d\n---\nx")
+    assert [b["name"] for b in parse_bundles(out.getvalue())] == ["solo"]
+    # A genuinely missing link is still an error, and says which skill it came from.
+    with pytest.raises(ValueError, match="missing reference"):
+        parse_bundles(multi_bundle(extra={"gamma/notes.md": "[x](nope.md)"}))
+    # One bad skill rejects the whole ZIP, naming it.
+    with pytest.raises(ValueError, match="description is required.*gamma"):
+        parse_bundles(multi_bundle(extra={"gamma/SKILL.md": "---\nname: gamma\n---\nx"}))
+    with pytest.raises(ValueError, match="at least one|must contain a SKILL.md"):
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as z:
+            z.writestr("readme.md", "hi")
+        parse_bundles(out.getvalue())
+
+
+async def test_install_bundles_is_all_or_nothing(db_factory, stores, monkeypatch):
+    import claw.skills.bundles as bundles
+    from claw.skills.bundles import install_bundles, parse_bundles
+
+    owner = await stores["users"].get_or_create_by_email("multi-owner@test.local")
+    store = SkillStore(db_factory)
+    parsed = parse_bundles(multi_bundle())
+    skills = await install_bundles(store, owner.id, parsed)
+    assert sorted(s.name for s in skills) == ["alpha", "beta", "gamma"]
+    assert sorted(s.name for s in await store.list_for_user(owner.id)) == ["alpha", "beta", "gamma"]
+
+    # A clash on ANY name rejects the whole set: nothing partial is left behind.
+    other = await stores["users"].get_or_create_by_email("multi-other@test.local")
+    await install_bundle(store, other.id, parse_bundle(bundle(name="beta")))  # `other` already owns a "beta"
+    with pytest.raises(ValueError, match="already exists.*beta"):
+        await install_bundles(store, other.id, parsed)
+    assert [s.name for s in await store.list_for_user(other.id)] == ["beta"]
+
+    # The quota covers the set as a whole, and the same name twice in one ZIP is refused.
+    third = await stores["users"].get_or_create_by_email("multi-third@test.local")
+    monkeypatch.setattr(bundles, "MAX_BUNDLES_PER_USER", 2)
+    with pytest.raises(ValueError, match="up to 2.*has 3"):
+        await install_bundles(store, third.id, parsed)
+    assert await store.list_for_user(third.id) == []
+    with pytest.raises(ValueError, match="two skills with the same name"):
+        await install_bundles(store, third.id, [parsed[0], parsed[0]])
+
+
+@pytest.mark.parametrize("bot_mode", [False, True])
+async def test_import_endpoint_installs_a_multi_skill_zip(db_factory, bot_mode):
+    from tests.conftest_app import build_api_app, client
+    from tests.test_manage import _bearer, _register
+
+    app = build_api_app(db_factory)
+    if bot_mode:
+        from sbot.api.manage import router
+        from sbot.api.deps import get_state as sbot_state, current_user as sbot_user
+        from claw.api.deps import get_state, current_user
+
+        app.router.routes = [r for r in app.router.routes if not getattr(r, "path", "").startswith("/api/skills")]
+        app.include_router(router)
+        app.dependency_overrides[sbot_state] = get_state
+        app.dependency_overrides[sbot_user] = current_user
+        app.state.claw.skills = SbotSkillStore(db_factory)
+    async with client(app) as c:
+        token, _ = await _register(c, f"multi-import-{bot_mode}@example.com")
+        files = {"file": ("bundle.zip", multi_bundle(), "application/zip")}
+        r = await c.post("/api/skills/import", files=files, headers=_bearer(token))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert sorted(x["name"] for x in body["imported"]) == ["alpha", "beta", "gamma"]
+        assert any(w.startswith("beta:") and "alpha" in w for w in body["warnings"])
+        names = [s["name"] for s in (await c.get("/api/skills", headers=_bearer(token))).json() if not s.get("builtin")]
+        assert sorted(names) == ["alpha", "beta", "gamma"]
+        # Importing the same ZIP again is rejected as a whole (names already taken), not half-applied.
+        again = await c.post("/api/skills/import", files=files, headers=_bearer(token))
+        assert again.status_code == 400 and "already exists" in again.text
+        # A single-skill ZIP keeps the old response shape.
+        single = await c.post("/api/skills/import", files={"file": ("one.zip", bundle(name="solo-skill"), "application/zip")}, headers=_bearer(token))
+        assert single.status_code == 200 and "imported" not in single.json() and single.json()["name"] == "solo-skill"
+
+
+def test_a_second_skill_md_is_never_swallowed_silently():
+    from claw.skills.bundles import parse_bundles
+
+    def zip_of(files):
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as z:
+            for path, content in files.items():
+                z.writestr(path, content)
+        return out.getvalue()
+
+    root_plus_nested = zip_of({
+        "SKILL.md": "---\nname: root-skill\ndescription: d\n---\nx",
+        "extras/other/SKILL.md": "---\nname: other\ndescription: d\n---\nx",
+    })
+    # The strict single-skill form (GitHub import, the manage tool) refuses the ambiguity, as it always did.
+    with pytest.raises(ValueError, match="exactly one"):
+        parse_bundle(root_plus_nested)
+    # The multi-skill form keeps the nested file but says so.
+    (only,) = parse_bundles(root_plus_nested)
+    assert only["name"] == "root-skill" and "extras/other/SKILL.md" in only["files"]
+    assert any("nested SKILL.md" in w for w in only["metadata"]["warnings"])
+    # Sibling links and nested files are reported together, neither hiding the other.
+    both = {b["name"]: b for b in parse_bundles(multi_bundle(extra={"beta/examples/SKILL.md": "---\nname: x\ndescription: d\n---\n"}))}
+    texts = " | ".join(both["beta"]["metadata"]["warnings"])
+    assert "nested SKILL.md" in texts and "read_skill" in texts
+    with pytest.raises(ValueError, match="exactly one"):
+        parse_bundle(multi_bundle(names=("alpha",)))  # beta is added by the helper too -> two skills

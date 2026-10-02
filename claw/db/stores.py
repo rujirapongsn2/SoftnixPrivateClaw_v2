@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Integer,
     String,
+    Text,
     bindparam,
     case,
     cast,
@@ -123,6 +124,85 @@ class MessageStore:
                 .values(content=content)
             )
             await db.commit()
+
+    async def file_hints(self, session_id: str) -> dict[str, Any]:
+        """What a session says about workspace files, for cleaning up when it is deleted.
+
+        Returns the assistant/tool messages' `meta` and `tool_calls` (artifact
+        chips, files the agent wrote) and the user messages' text that names
+        attachments, plus the time of the last message. Only the columns needed
+        are loaded, and tool results (the bulky part of a transcript) are not.
+        """
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(Message.role, Message.meta, Message.tool_calls, Message.content)
+                    .order_by(Message.seq)
+                    .where(
+                        Message.session_id == session_id,
+                        (Message.meta.is_not(None))
+                        | (Message.tool_calls.is_not(None))
+                        | ((Message.role == "user") & Message.content.like("%[Attached:%")),
+                    )
+                )
+            ).all()
+            last = await db.scalar(select(func.max(Message.created_at)).where(Message.session_id == session_id))
+        return {
+            "meta": [r.meta for r in rows if r.meta],
+            "tool_calls": [r.tool_calls for r in rows if r.tool_calls],
+            "user_text": [r.content for r in rows if r.role == "user" and "[Attached:" in (r.content or "")],
+            "last_message_at": last,
+        }
+
+    async def paths_still_referenced(self, user_id: str, paths: Sequence[str]) -> set[str]:
+        """Which of `paths` any remaining chat of this user still uses.
+
+        A path counts as used when a chat shows it as a file chip (`meta.artifacts`)
+        or its record has a `write_file` / `edit_file` / `generate_workbook` call
+        for it: a file two chats worked on belongs to neither alone.
+        """
+        import json
+
+        found: set[str] = set()
+        wanted = list(dict.fromkeys(paths))
+        for start in range(0, len(wanted), 25):
+            chunk = wanted[start : start + 25]
+            # LIKE only narrows the rows; the exact match is made on the parsed value below.
+            patterns = [
+                "%" + p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for p in chunk
+            ]
+            async with self.factory() as db:
+                rows = (
+                    await db.execute(
+                        select(Message.meta, Message.tool_calls)
+                        .join(ChatSession, ChatSession.id == Message.session_id)
+                        .where(
+                            ChatSession.user_id == user_id,
+                            or_(
+                                *[cast(Message.meta, Text).like(pattern, escape="\\") for pattern in patterns],
+                                *[cast(Message.tool_calls, Text).like(pattern, escape="\\") for pattern in patterns],
+                            ),
+                        )
+                    )
+                ).all()
+            wanted_set = set(chunk)
+            for meta, calls in rows:
+                for artifact in (meta or {}).get("artifacts") or []:
+                    if artifact in wanted_set:
+                        found.add(artifact)
+                for call in calls or []:
+                    function = (call or {}).get("function") or {}
+                    if function.get("name") not in {"write_file", "edit_file", "generate_workbook"}:
+                        continue
+                    try:
+                        args = json.loads(function.get("arguments") or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(args, dict):
+                        for key in ("path", "output"):
+                            if args.get(key) in wanted_set:
+                                found.add(args[key])
+        return found
 
     async def recent(self, session_id: str, *, after_seq: int = 0, limit: int = 200) -> list[dict[str, Any]]:
         """Load recent messages in chronological order, in LLM message format."""

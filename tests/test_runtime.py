@@ -343,7 +343,8 @@ async def test_truncated_empty_answer_is_reported_not_silently_blank(stores, tmp
     visible "cut off" message — an empty turn_completed looks to the user like
     the app finished and did nothing."""
 
-    provider = FakeProvider([[ChatResult(content=None, finish_reason="length")]])
+    # The loop retries a cut-off response twice before giving up, so it is cut every time.
+    provider = FakeProvider([[ChatResult(content=None, finish_reason="length")] for _ in range(3)])
     runtime = make_runtime(stores, provider, tmp_path)
     user = await stores["users"].get_or_create_by_email("cut@x.y")
     session = await stores["sessions"].create(user.id)
@@ -382,7 +383,7 @@ async def test_files_created_by_a_turn_that_ends_empty_are_still_reachable(store
     provider = FakeProvider(
         [
             [ChatResult(content=None, tool_calls=[write])],
-            [ChatResult(content=None, finish_reason="length")],
+            *([ChatResult(content=None, finish_reason="length")] for _ in range(3)),  # retried twice, still cut
         ]
     )
     runtime = make_runtime(stores, provider, tmp_path)
@@ -711,3 +712,31 @@ async def test_vision_rejection_from_provider_gets_clear_message(stores, tmp_pat
     result = await runtime.handle_message(user.id, session.id, "what is this?", media=[str(image_path)])
 
     assert "vision-capable model" in result.lower()
+
+
+async def test_a_response_cut_at_the_output_cap_is_recovered_not_reported(stores, tmp_path):
+    from claw.providers.base import ChatResult
+
+    cut = [ChatResult(content=None, finish_reason="length", usage={"prompt_tokens": 10, "completion_tokens": 900})]
+    provider = FakeProvider([cut, text_turn("here is the answer")])
+    runtime = make_runtime(stores, provider, tmp_path)
+    user = await stores["users"].get_or_create_by_email("cut-recovers@x.y")
+    session = await stores["sessions"].create(user.id)
+
+    result = await runtime.handle_message(user.id, session.id, "do the long task")
+    assert result == "here is the answer"
+    stored = [m["content"] for m in await stores["messages"].recent(session.id) if m["role"] == "assistant"]
+    assert stored == ["here is the answer"]  # no "hit the length limit" line, no retry note
+
+
+async def test_a_response_that_keeps_getting_cut_still_ends_with_the_length_notice(stores, tmp_path):
+    from claw.providers.base import ChatResult
+
+    def cut():
+        return [ChatResult(content=None, finish_reason="length", usage={"prompt_tokens": 10, "completion_tokens": 900})]
+
+    runtime = make_runtime(stores, FakeProvider([cut(), cut(), cut()]), tmp_path)
+    user = await stores["users"].get_or_create_by_email("cut-persists@x.y")
+    session = await stores["sessions"].create(user.id)
+    result = await runtime.handle_message(user.id, session.id, "do the long task")
+    assert result == t("error.truncated", "en")

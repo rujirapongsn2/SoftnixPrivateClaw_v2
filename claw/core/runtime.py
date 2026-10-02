@@ -6,6 +6,7 @@ of concurrent users share the event loop.
 """
 
 import asyncio
+import hashlib
 import platform
 import re
 import time
@@ -28,6 +29,7 @@ from claw.core.context import (
     swap_images_for_description,
     vision_note,
 )
+from claw.workspace.usage import is_cleanup_command
 from claw.core.turn_context import current_session_id, current_turn_deadline
 from claw.core.events import (
     ToolConfirmRequest,
@@ -90,6 +92,7 @@ from claw.workflows.service import WorkflowService
 if TYPE_CHECKING:
     from claw.db.stores import BlueprintStore, LLMConfigStore
     from claw.core.model_health import ModelHealthService
+    from claw.workspace.usage import WorkspaceAccounts
 
 _STORED_TOOL_RESULT_CAP = 4000
 
@@ -127,7 +130,7 @@ _INFORMATION_REQUEST_RE = re.compile(
 _ARTIFACT_CORE_TOOLS = {
     "generate_workbook",
     "read_skill", "read_file", "read_excel", "read_csv", "read_pdf", "read_docx",
-    "list_dir", "write_file", "edit_file", "exec", "update_plan",
+    "list_dir", "write_file", "edit_file", "exec", "update_plan", "save_connector_file",
 }
 _ARTIFACT_DISCOVERY_TOOLS = {"web_search", "web_fetch", "search_knowledge", "query_knowledge_dataset"}
 _ARTIFACT_SKILL_HINTS = {
@@ -169,6 +172,59 @@ def _is_artifact_task(content: str, media: list[str] | None = None) -> bool:
     return False
 
 
+# Producing a deliverable through a connector or a render pipeline: "render the
+# five scenes", "merge them into one file", "let me download it". Not an office
+# file the artifact scaffolding knows how to build, so such a job keeps its full
+# tool and context scope (the connector doing the rendering must stay reachable).
+_DELIVERY_ACTION_RE = re.compile(
+    r"(?:\b(?:render|compile|combine|merge|assemble|package|bundle|stitch|concatenate)\b|"
+    # Bare "รวม" also means "total"/"including" (รวมยอด, รวมถึง): only the
+    # "combine … into" shape counts, e.g. "รวมให้ผมเป็นไฟล์เดียว".
+    r"เรนเดอร์|รวม(?:ให้)?(?:ผม|ฉัน|หนู|เรา)?(?:เข้า)?เป็น|รวม(?:คลิป|วิดีโอ|วีดีโอ|ซีน|ฉาก)|ประกอบ|ตัดต่อ|ต่อกัน)",
+    re.IGNORECASE,
+)
+_DELIVERY_TARGET_RE = re.compile(
+    r"(?:\b(?:video|videos|mp4|mov|webm|gif|audio|mp3|wav|image|images|png|jpe?g|svg|clip|clips|"
+    r"scene|scenes|frames?|file|files)\b|วิดีโอ|วีดีโอ|คลิป|ภาพ|รูป|เสียง|ซีน|ฉาก|ไฟล์)",
+    re.IGNORECASE,
+)
+_DOWNLOAD_DELIVERY_RE = re.compile(
+    r"(?:ให้(?:ผม|ฉัน|หนู|เรา|ดิฉัน)?\s*ดาวน์โหลด|ลิงก์ดาวน์โหลด|ลิงค์ดาวน์โหลด|"
+    r"\bfor (?:me to )?download\b|\bdownload link\b|\bdownloadable\b|\bso (?:that )?I can download\b)",
+    re.IGNORECASE,
+)
+
+
+# "How do I merge files in git?" asks for knowledge, not for a merged file.
+# "Can you / could you" stay requests, as do Thai "...ได้ไหม" asks.
+_HOW_TO_QUESTION_RE = re.compile(
+    r"^\s*(?:how|what|why|when|where|which|is|are|does|do|should|can i|could i)\b|"
+    r"(?:อย่างไร|ยังไง|ทำไม|คืออะไร|วิธี)",
+    re.IGNORECASE,
+)
+
+
+def _is_delivery_task(content: str) -> bool:
+    """A request to render, merge, or hand over a produced file for download."""
+    text = re.sub(r"https?://\S+", "", content or "", flags=re.IGNORECASE)
+    for clause in _ARTIFACT_CLAUSE_SPLIT_RE.split(text):
+        clause = clause.strip()
+        if not clause or _INFORMATION_REQUEST_RE.search(clause) or _HOW_TO_QUESTION_RE.search(clause):
+            continue
+        if _DOWNLOAD_DELIVERY_RE.search(clause):
+            return True
+        action = _DELIVERY_ACTION_RE.search(clause)
+        target = _DELIVERY_TARGET_RE.search(clause)
+        if action and target and abs(action.start() - target.start()) <= 60:
+            return True
+    return False
+
+
+def _keeps_full_scope(job: dict | None) -> bool:
+    """Whether an artifact job runs with the chat's full tools and context."""
+    return bool(job and (job.get("promoted") or job.get("full_scope")))
+
+
 def _checkpoint_tool_names(messages: list[dict]) -> set[str]:
     names: set[str] = set()
     for message in messages:
@@ -177,6 +233,64 @@ def _checkpoint_tool_names(messages: list[dict]) -> set[str]:
             if name:
                 names.add(name)
     return names
+
+
+# Tools whose success says nothing about the task moving forward: a plan update
+# always "succeeds", so it must not keep a stuck turn running in the background.
+_PROGRESS_NEUTRAL_TOOLS = {"update_plan"}
+# A promoted job remembers this many result fingerprints to tell new progress
+# from a repeat; bounded so a long job cannot grow its checkpoint row forever.
+_PROGRESS_SIGNATURES_KEPT = 500
+# How many of the last tool calls the "stopped without progress" note names.
+_STUCK_STEPS_SHOWN = 4
+
+
+def _tool_call_pairs(messages: list[dict]) -> list[tuple[str, str, str]]:
+    """(tool name, arguments, result text) for each answered tool call, in order."""
+    calls: dict[str, tuple[str, str]] = {}
+    pairs: list[tuple[str, str, str]] = []
+    for message in messages:
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") or {}
+                calls[str(call.get("id") or "")] = (
+                    str(function.get("name") or ""), str(function.get("arguments") or "")
+                )
+        elif message.get("role") == "tool":
+            name, arguments = calls.get(str(message.get("tool_call_id") or ""), ("", ""))
+            if name:
+                content = message.get("content")
+                pairs.append((name, arguments, content if isinstance(content, str) else str(content or "")))
+    return pairs
+
+
+def _progress_signatures(messages: list[dict]) -> set[str]:
+    """Fingerprints of the successful tool results in `messages`.
+
+    The result text is part of the fingerprint: running the same call again and
+    getting the same answer is a repeat, not progress.
+    """
+    signatures: set[str] = set()
+    for name, arguments, result in _tool_call_pairs(messages):
+        if name in _PROGRESS_NEUTRAL_TOOLS or result.lstrip().startswith("Error"):
+            continue
+        digest = hashlib.sha256(f"{name}\0{arguments}\0{result[:4000]}".encode("utf-8", "replace"))
+        signatures.add(digest.hexdigest()[:16])
+    return signatures
+
+
+def _stuck_summary(messages: list[dict], locale: str) -> str:
+    """Name the last few steps, so a run that stopped without progress says where."""
+    steps = []
+    for name, _arguments, result in _tool_call_pairs(messages)[-_STUCK_STEPS_SHOWN:]:
+        text = result.strip()
+        if text.startswith("Error"):
+            first = " ".join(text.splitlines()[:2])[:160]
+            steps.append(f"- {name}: {first}")
+        else:
+            steps.append(f"- {name}: {t('artifact.stepOk', locale)}")
+    note = t("artifact.noProgress", locale)
+    return f"{note}\n" + "\n".join(steps) if steps else note
 
 
 def _artifact_tool_scope(
@@ -301,11 +415,17 @@ class ClawAgent:
         sessions: SessionStore | None = None,
         blueprints: "BlueprintStore | None" = None,
         llm_config: "LLMConfigStore | None" = None,
+        quota: "WorkspaceAccounts | None" = None,
     ):
         self.user_id = user_id
         self.workspace = workspace
         self.policy = policy
-        self.tools = ToolRegistry(on_execute=self._audit_tool)
+        self.quota = quota
+        self.tools = ToolRegistry(
+            on_execute=self._audit_tool,
+            gate=self._quota_gate if quota is not None else None,
+            settled=self._quota_settled if quota is not None else None,
+        )
         if blueprints is not None:
             from sbot.tools.blueprint import SaveBlueprintTool
             self.tools.register(SaveBlueprintTool(blueprints, settings.blueprints_root, workspace, user_id))
@@ -367,16 +487,27 @@ class ClawAgent:
             self.tools.register(doc_tool)
         from claw.jobs.workbook import GenerateWorkbookTool
         self.tools.register(GenerateWorkbookTool(workspace))
+        from claw.tools.connector_files import SaveConnectorFileTool
+        self.tools.register(
+            SaveConnectorFileTool(
+                self.tools,
+                workspace,
+                settings.connectors.max_download_bytes,
+                quota=(lambda incoming: quota.check(user_id, incoming, 1)) if quota is not None else None,
+            )
+        )
         self.loop = AgentLoop(
             provider=provider,
             tools=self.tools,
             model=settings.llm.model,
             max_iterations=settings.llm.max_iterations,
             max_tokens=settings.llm.max_tokens,
+            max_recovery_output_tokens=settings.llm.max_recovery_output_tokens,
             temperature=settings.llm.temperature,
             arg_guard=self._guard_tool_args if policy is not None else None,
             workspace=workspace,
             max_turn_seconds=settings.llm.max_turn_seconds,
+            snapshot_max_files=settings.workspace.snapshot_max_files,
         )
 
     def _guard_tool_args(self, tool_name: str, args: dict) -> tuple[dict, str | None]:
@@ -419,6 +550,18 @@ class ClawAgent:
             return
         loop.create_task(self._audit_store.log("policy", payload, user_id=self.user_id))
 
+    async def _quota_gate(self, name: str, params: dict) -> str | None:
+        """Refuse a write while the user's workspace is over its storage quota."""
+        return await self.quota.gate(self.user_id, name, params)
+
+    def _quota_settled(self, name: str, params: dict, result: str) -> None:
+        """Keep the cached usage honest after a tool that may have written files."""
+        if name == "write_file" and not result.startswith("Error"):
+            self.quota.note_written(self.user_id, len(str(params.get("content") or "").encode("utf-8")))
+        elif name in {"exec", "edit_file", "generate_workbook", "render_diagram", "save_connector_file"}:
+            # A command that only deletes/lists files has just freed space: measure again at once.
+            self.quota.forget(self.user_id, now=name == "exec" and is_cleanup_command(str(params.get("command") or "")))
+
     def _audit_tool(self, name: str, params: dict, result: str) -> None:
         payload = {"tool": name, "params_preview": str(params)[:500], "result_preview": result[:500]}
         try:
@@ -458,7 +601,12 @@ class ClawAgent:
             "that finishes what it starts.\n\n"
             f"## Runtime\n{runtime}\n\n"
             f"## Workspace\nYour workspace is mounted for file tools; shell commands run "
-            f"in an isolated sandbox with the same workspace at /workspace.\n\n"
+            f"in an isolated sandbox with the same workspace at /workspace.\n"
+            "It is the user's persistent storage and has a size limit, so keep it tidy: put scratch "
+            "files in `/workspace/.tmp/` (they are deleted automatically), and never install packages "
+            "or `git clone` into it — do that inside the sandbox's `/tmp` in the same command "
+            "(`cd /tmp && git clone … && …`; `/tmp` is discarded when the command ends) and copy only "
+            "the result into `/workspace`.\n\n"
             "## Answering directly\n"
             "Most requests are best answered straight from your own knowledge, in the chat, "
             "with no tool call at all — writing a PRD, a marketing plan, an email, a strategy, "
@@ -555,6 +703,8 @@ class AgentRuntime:
         self.usage = usage
         self.schedules = schedules
         self.scheduler = scheduler
+        # Set by create_app once the policy store exists; None = no quota (tests, embedding).
+        self.workspace_accounts: "WorkspaceAccounts | None" = None
         self.sandbox = EphemeralSandbox(settings.sandbox)
         self.assembler = ContextAssembler(
             token_counter=provider.count_tokens,
@@ -577,6 +727,22 @@ class AgentRuntime:
         # holds the future; the WS handler resolves it when the user answers.
         self._confirmations: dict[str, dict] = {}
         self._artifact_tasks: dict[str, asyncio.Task] = {}
+
+    async def _artifact_job_budget(self) -> dict:
+        """The Background job policy budget a new artifact job runs under."""
+        job_policy = await self.artifact_jobs.resource_policy() if self.artifact_jobs is not None else {}
+        configured_policy = self.settings.team_work
+        # Use the same effective defaults the Control Plane displays. Falling
+        # back to LLMSettings here made a fresh installation show 5M tokens in
+        # the UI while normal-chat jobs silently stopped at 300K.
+        return {
+            "seconds": job_policy.get("max_job_seconds", configured_policy.max_job_seconds),
+            "tokens": job_policy.get("max_job_tokens", configured_policy.max_job_tokens),
+            "extensions": job_policy.get(
+                "max_resource_adjustments", configured_policy.max_resource_adjustments,
+            ) if job_policy.get("automatic_resources", configured_policy.automatic_resources) else 0,
+            "recoveries": job_policy.get("max_step_recoveries", configured_policy.max_step_recoveries),
+        }
 
     def _artifact_event(self, job: dict, message: str = "") -> ArtifactJobProgress:
         return ArtifactJobProgress(
@@ -739,6 +905,7 @@ class AgentRuntime:
             sessions=self.sessions,
             blueprints=self.blueprints,
             llm_config=self.llm_config,
+            quota=self.workspace_accounts,
         )
         self._agents[user_id] = agent
         self._agents.move_to_end(user_id)
@@ -835,7 +1002,14 @@ class AgentRuntime:
                 model = previous.get("model") or model
                 permission_mode = str(previous.get("permission_mode") or "ask")
         checkpoint_content = content
-        create_artifact_job = channel == "web" and _is_artifact_task(content, media)
+        file_task = channel == "web" and _is_artifact_task(content, media)
+        # Durable jobs (when enabled) own their own admission and tool scoping;
+        # delivery wording only widens the legacy resumable-job path.
+        delivery_task = (
+            channel == "web" and not file_task and not self.settings.durable_jobs_privateclaw
+            and _is_delivery_task(content)
+        )
+        create_artifact_job = file_task or delivery_task
         from claw.jobs.research import is_multistep_research
         shared_kind = ('artifact' if create_artifact_job else
                        'research' if channel == 'web' and is_multistep_research(content) else None)
@@ -865,8 +1039,6 @@ class AgentRuntime:
                 ):
                     return None
             else:
-                job_policy = await self.artifact_jobs.resource_policy()
-                configured_policy = self.settings.team_work
                 now = datetime.now(timezone.utc).isoformat()
                 artifact_job_id = uuid.uuid4().hex
                 artifact_job = await self.artifact_jobs.create(
@@ -884,27 +1056,8 @@ class AgentRuntime:
                         "status": "queued",
                         "segment": 1,
                         "max_segments": self.settings.llm.artifact_job_max_segments,
-                        "budget": {
-                            # Use the same effective defaults the Control Plane
-                            # displays. Falling back to LLMSettings here made a
-                            # fresh installation show 5M tokens in the UI while
-                            # normal-chat jobs silently stopped at 300K.
-                            "seconds": job_policy.get(
-                                "max_job_seconds", configured_policy.max_job_seconds
-                            ),
-                            "tokens": job_policy.get(
-                                "max_job_tokens", configured_policy.max_job_tokens
-                            ),
-                            "extensions": job_policy.get(
-                                "max_resource_adjustments",
-                                configured_policy.max_resource_adjustments,
-                            ) if job_policy.get(
-                                "automatic_resources", configured_policy.automatic_resources
-                            ) else 0,
-                            "recoveries": job_policy.get(
-                                "max_step_recoveries", configured_policy.max_step_recoveries
-                            ),
-                        },
+                        "full_scope": delivery_task,
+                        "budget": await self._artifact_job_budget(),
                         "elapsed_seconds": 0.0,
                         "token_count": 0,
                         "cost_usd": 0.0,
@@ -931,6 +1084,9 @@ class AgentRuntime:
         accounting_token = foreground_accounting.set(
             ForegroundAccounting(self.durable_jobs, user_id, session_id) if channel == "web" and self.settings.durable_jobs_privateclaw
             and self.durable_jobs is not None and artifact_job is None else None)
+        # Filled by _process_turn when a chat turn that ran out of time is moved
+        # into a background job mid-turn, so cancel/cleanup below can find it.
+        promoted_jobs: list[str] = []
         self._inflight += 1
         self._active_turns[session_id] = self._active_turns.get(session_id, 0) + 1
         try:
@@ -942,8 +1098,9 @@ class AgentRuntime:
                 self.bus.publish(session_id, self._artifact_event(artifact_job, t("artifact.started", locale)))
             result = await self._process_turn(
                 user_id, session_id, content, channel, locale, media, model, permission_mode,
-                artifact_job=artifact_job,
+                artifact_job=artifact_job, promoted_jobs=promoted_jobs,
             )
+            artifact_job_id = artifact_job_id or (promoted_jobs[0] if promoted_jobs else None)
             # Policy/rate/model-gating failures return before the segmented loop
             # can set a terminal job state. Never leave such a job looking active
             # (and therefore eligible for an incorrect restart recovery).
@@ -964,6 +1121,7 @@ class AgentRuntime:
             self.bus.publish(session_id, TurnCompleted(turn_id=signal.turn_id, content=''))
             return None
         except asyncio.CancelledError:
+            artifact_job_id = artifact_job_id or (promoted_jobs[0] if promoted_jobs else None)
             if artifact_job_id and self.artifact_jobs is not None:
                 latest = await self.artifact_jobs.get(artifact_job_id)
                 if latest and latest.get("status") != "cancelled":
@@ -980,8 +1138,8 @@ class AgentRuntime:
                     await foreground.close()
                 except Exception:
                     logger.warning("Foreground journal retained for reconciliation after close failure")
-            if artifact_job_id:
-                self._artifact_tasks.pop(artifact_job_id, None)
+            for job_id in {artifact_job_id, *promoted_jobs} - {None}:
+                self._artifact_tasks.pop(job_id, None)
             self._inflight -= 1
             remaining = self._active_turns.get(session_id, 1) - 1
             if remaining <= 0:
@@ -1066,6 +1224,7 @@ class AgentRuntime:
         model: str | None = None,
         permission_mode: str = "auto",
         artifact_job: dict | None = None,
+        promoted_jobs: list[str] | None = None,
     ) -> str | None:
         """Process one user message; events stream to the bus, messages persist to DB.
 
@@ -1425,7 +1584,7 @@ class AgentRuntime:
                             "not ask the user to make private content public or export/download it "
                             "instead.\n\n" + lines
                         )
-                if artifact_job:
+                if artifact_job and not _keeps_full_scope(artifact_job):
                     # Artifact segments pay this context cost on every provider
                     # round trip. Retain secondary context only when the request
                     # actually refers to it; otherwise the output skill and scoped
@@ -1446,7 +1605,7 @@ class AgentRuntime:
                     if not preset_named:
                         connectors_summary = ""
                 runtime_ctx = build_runtime_context(channel, locale)
-                if artifact_job:
+                if artifact_job and not _keeps_full_scope(artifact_job):
                     runtime_ctx += (
                         "\n\n[Resumable Artifact Job]\n"
                         "Work in explicit phases. Read each skill and source document once, then save normalized "
@@ -1466,6 +1625,7 @@ class AgentRuntime:
                         "a source reference and confirmation status per row, then validate source headings, "
                         "quantities, duplicate scope, and source inconsistencies before claiming coverage."
                     )
+                if artifact_job:
                     if artifact_job.get("pending_call"):
                         runtime_ctx += (
                             "\nA tool call from the previous process has an uncertain outcome. "
@@ -1596,6 +1756,10 @@ class AgentRuntime:
                             session_id=session_id)
                     model_used = effective_model or self.settings.llm.model
                     artifact_limit_reached = False
+                    # Set when an automatic continuation stops because the last run
+                    # made no progress; appended to the reply so the user sees why.
+                    stop_note = ""
+                    stopped_no_progress = False
                     if artifact_job and self.artifact_jobs is not None:
                         artifact_job = await self.artifact_jobs.update(
                             str(artifact_job["id"]), model=model_used
@@ -1702,7 +1866,10 @@ class AgentRuntime:
                                 checkpoint_messages,
                                 connected_names,
                             )
-                            if artifact_job
+                            # A promoted chat keeps the tools it was already using:
+                            # it is not a file job, so artifact scoping could cut off
+                            # the connector it needs for the next step.
+                            if artifact_job and not _keeps_full_scope(artifact_job)
                             else None
                         )
                         from claw.jobs.provider import current_execution
@@ -1832,6 +1999,71 @@ class AgentRuntime:
                             ) or artifact_job
                             break
 
+                        just_promoted = False
+                        if (
+                            artifact_job is None
+                            and (outcome.timed_out or outcome.reached_max_iterations)
+                            and channel == "web"
+                            and self.artifact_jobs is not None
+                            and self.settings.llm.auto_continue_turns
+                            and foreground is None
+                            and durable_context is None
+                        ):
+                            # An ordinary chat turn ran out of time or steps. Keep
+                            # going in the background only when it was getting
+                            # somewhere; a turn that only repeated or failed stops
+                            # here and says where it got stuck.
+                            signatures = _progress_signatures(checkpoint_messages)
+                            if resume_written or signatures:
+                                job_budget = await self._artifact_job_budget()
+                                seconds_cap = float(job_budget.get("seconds", self.settings.llm.artifact_job_max_seconds))
+                                tokens_cap = int(job_budget.get("tokens", self.settings.llm.artifact_job_max_tokens))
+                                now = datetime.now(timezone.utc).isoformat()
+                                artifact_job = await self.artifact_jobs.create({
+                                    "id": uuid.uuid4().hex,
+                                    "turn_id": turn_id,
+                                    "user_id": user_id,
+                                    "session_id": session_id,
+                                    "content": content,
+                                    "channel": channel,
+                                    "locale": locale,
+                                    "media": list(media or []),
+                                    "model": model or "",
+                                    "permission_mode": permission_mode,
+                                    "status": "running",
+                                    "promoted": True,
+                                    "segment": segment,
+                                    "max_segments": self.settings.llm.artifact_job_max_segments,
+                                    "budget": job_budget,
+                                    "elapsed_seconds": elapsed_seconds,
+                                    "token_count": token_count,
+                                    "cost_usd": cumulative_cost,
+                                    "usage": dict(cumulative_usage),
+                                    "metrics": dict(cumulative_metrics),
+                                    "checkpoint_messages": checkpoint_messages,
+                                    "tool_results": {},
+                                    "pending_call": None,
+                                    "written": resume_written,
+                                    "progress_signatures": sorted(signatures)[:_PROGRESS_SIGNATURES_KEPT],
+                                    "progress_files": resume_written,
+                                    "user_message_persisted": True,
+                                    "user_seq": user_seq,
+                                    "created_at": now,
+                                    "updated_at": now,
+                                })
+                                just_promoted = True
+                                if promoted_jobs is not None:
+                                    promoted_jobs.append(str(artifact_job["id"]))
+                                current = asyncio.current_task()
+                                if current is not None:
+                                    # Lets the job card's cancel button stop this task.
+                                    self._artifact_tasks[str(artifact_job["id"])] = current
+                                logger.info(
+                                    "Turn {} promoted to background job {} (files={} new_results={})",
+                                    turn_id, artifact_job["id"], len(resume_written), len(signatures),
+                                )
+                            else:
+                                stop_note = _stuck_summary(checkpoint_messages, locale)
                         if not (
                             artifact_job
                             and (outcome.timed_out or outcome.reached_max_iterations)
@@ -1845,7 +2077,24 @@ class AgentRuntime:
                                 or cumulative_cost < self.settings.llm.artifact_job_max_cost_usd
                             )
                         )
-                        if segment >= int(artifact_job.get("max_segments") or 1):
+                        if can_resume and artifact_job.get("promoted") and not just_promoted:
+                            # A promoted job has no file-shaped goal to measure, so
+                            # every segment has to earn the next one: a new file or
+                            # a successful result it had not seen before.
+                            known = set(artifact_job.get("progress_signatures") or [])
+                            fresh = _progress_signatures(outcome.new_messages) - known
+                            new_files = set(resume_written) - set(artifact_job.get("progress_files") or [])
+                            if fresh or new_files:
+                                artifact_job = await self.artifact_jobs.update(
+                                    str(artifact_job["id"]),
+                                    progress_signatures=[*known, *sorted(fresh)][-_PROGRESS_SIGNATURES_KEPT:],
+                                    progress_files=resume_written,
+                                ) or artifact_job
+                            else:
+                                stop_note = _stuck_summary(outcome.new_messages, locale)
+                                stopped_no_progress = True
+                                can_resume = False
+                        if can_resume and segment >= int(artifact_job.get("max_segments") or 1):
                             # Extensions require a newly produced file, not a
                             # successful-looking infrastructure error or retry.
                             progressed = bool(set(resume_written) - set(artifact_job.get("extension_files") or []))
@@ -1860,7 +2109,8 @@ class AgentRuntime:
                         if not can_resume:
                             artifact_limit_reached = True
                             artifact_job = await self.artifact_jobs.update(
-                                str(artifact_job["id"]), stop_reason="budget_exhausted"
+                                str(artifact_job["id"]),
+                                stop_reason="no_progress" if stopped_no_progress else "budget_exhausted",
                             ) or artifact_job
                             break
                         segment += 1
@@ -1870,7 +2120,10 @@ class AgentRuntime:
                         ) or artifact_job
                         self.bus.publish(
                             session_id,
-                            self._artifact_event(artifact_job, t("artifact.resuming", locale, segment=segment)),
+                            self._artifact_event(
+                                artifact_job,
+                                t("artifact.promoted" if just_promoted else "artifact.resuming", locale, segment=segment),
+                            ),
                         )
                 except ProviderError as exc:
                     detail = str(exc)
@@ -1927,12 +2180,15 @@ class AgentRuntime:
                     # something: publishing an empty TurnCompleted renders as a
                     # finished turn with no answer, which is indistinguishable
                     # from the app silently doing nothing.
+                    # A run stopped for lack of progress hit no cumulative limit;
+                    # saying it did would hide the real reason (in stop_note).
+                    budget_stop = artifact_limit_reached and not stopped_no_progress
                     if outcome.timed_out:
-                        final = t("artifact.limitReached", locale) if artifact_limit_reached else t("error.turn_timeout", locale)
+                        final = t("artifact.limitReached", locale) if budget_stop else t("error.turn_timeout", locale)
                     elif outcome.usage_limit_reached:
                         final = t("artifact.limitReached", locale)
                     elif outcome.reached_max_iterations:
-                        final = t("error.max_iterations", locale)
+                        final = t("artifact.limitReached", locale) if budget_stop else t("error.max_iterations", locale)
                     elif outcome.finish_reason == "length":
                         final = t("error.truncated", locale)
                     else:
@@ -1950,6 +2206,8 @@ class AgentRuntime:
                         extra = len(produced) - len(shown)
                         listed = ", ".join(shown) + (f", +{extra}" if extra > 0 else "")
                         final = f"{final}\n\n{t('error.partial_artifacts', locale, files=listed)}"
+                    if stop_note:
+                        final = f"{final}\n\n{stop_note}"
                     logger.warning(
                         "Turn {} produced no content (finish_reason={} iterations={} artifacts={})",
                         turn_id,
@@ -1965,8 +2223,14 @@ class AgentRuntime:
                     # meant to. Mark where it stops instead. (Artifacts are not
                     # listed here the way they are above: this turn DID answer, and
                     # the file chips are attached further down regardless.)
-                    marker = "artifact.limitReachedPartial" if artifact_limit_reached else "error.turn_timeout_partial"
+                    marker = (
+                        "artifact.limitReachedPartial"
+                        if artifact_limit_reached and not stopped_no_progress
+                        else "error.turn_timeout_partial"
+                    )
                     final = f"{final}\n\n{t(marker, locale)}"
+                    if stop_note:
+                        final = f"{final}\n\n{stop_note}"
                     rewrite_final = True
                     logger.warning(
                         "Turn {} was cut off mid-answer by its time budget (iterations={} chars={})",
@@ -2030,7 +2294,13 @@ class AgentRuntime:
                 # User message was already persisted at turn start; store only the
                 # new assistant/tool messages this turn produced.
                 to_store = []
-                for msg in outcome.new_messages:
+                # A promoted chat streamed every segment live, so its transcript
+                # keeps all of them (an artifact job keeps only the last, its
+                # earlier segments being file-building scaffolding).
+                stored_messages = (
+                    checkpoint_messages if artifact_job and artifact_job.get("promoted") else outcome.new_messages
+                )
+                for msg in stored_messages:
                     entry = dict(msg)
                     if (
                         entry.get("role") == "tool"
@@ -2101,7 +2371,8 @@ class AgentRuntime:
                         session_id,
                         self._artifact_event(
                             artifact_job,
-                            t("artifact.limitReached", locale)
+                            t("artifact.stoppedNoProgress", locale) if stopped_no_progress
+                            else t("artifact.limitReached", locale)
                             if artifact_limit_reached
                             else t("artifact.completed", locale),
                         ),

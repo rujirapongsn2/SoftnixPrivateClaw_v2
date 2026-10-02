@@ -297,6 +297,8 @@ export interface WorkingPlan {
 export interface SkillInfo {
   warnings?: string[];
   bundle?: { version: string; source: string; sha256: string; files: string[]; license: string } | null;
+  // Present when one ZIP installed several skills (this object is the first of them).
+  imported?: { id: string; name: string }[];
   visibility?: "private" | "group" | "public";
   // Which of the owner's groups a "group" skill is shared with.
   shared_group_id?: string | null;
@@ -1129,6 +1131,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  adminWorkspacePolicy: () => request<import("./api").WorkspacePolicyResponse>("/api/admin/workspace-policy"),
+  adminSaveWorkspacePolicy: (policy: import("./api").WorkspacePolicy) => request<import("./api").WorkspacePolicyResponse>("/api/admin/workspace-policy", {method: "PUT", body: JSON.stringify(policy)}),
   adminTeamPolicy: () => request<import("./api").TeamPolicy>("/api/admin/team-policy"),
   adminSaveTeamPolicy: (policy: import("./api").TeamPolicy) => request<import("./api").TeamPolicy>("/api/admin/team-policy", {method: "PUT", body: JSON.stringify(policy)}),
   register: (email: string, password: string, display_name = "") =>

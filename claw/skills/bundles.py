@@ -20,6 +20,7 @@ MAX_ARCHIVE = 12 * 1024 * 1024
 MAX_EXPANDED = 24 * 1024 * 1024
 MAX_FILE = 2 * 1024 * 1024
 MAX_BUNDLES_PER_USER = 20
+MAX_SKILLS_PER_ARCHIVE = 20
 MAX_BUNDLE_BYTES_PER_USER = 100 * 1024 * 1024
 ALLOWED = {
     ".md",
@@ -160,7 +161,9 @@ async def prepare_bundle(store, user_id: str, bundle: dict) -> dict:
     """Attach non-blocking reference diagnostics before installation."""
     warnings = await reference_warnings(store, user_id, bundle["name"], bundle["content"])
     if warnings:
-        bundle = {**bundle, "metadata": {**bundle["metadata"], "warnings": warnings}}
+        # Keep the notes found while parsing (links to sibling skills) alongside the reference warnings.
+        merged = [*bundle["metadata"].get("warnings", []), *warnings]
+        bundle = {**bundle, "metadata": {**bundle["metadata"], "warnings": merged}}
     return bundle
 
 
@@ -172,9 +175,30 @@ def safe_path(path):
 
 
 def parse_bundle(data: bytes, source="ZIP upload"):
+    """Parse an archive that holds exactly one skill (what GitHub imports and the manage tool expect)."""
+    return parse_bundles(data, source, single=True)[0]
+
+
+def _skill_roots(skill_files: list[str]) -> list[str]:
+    """Directories of the skills in an archive. A SKILL.md nested inside another skill's folder is a
+    file of that skill, not a second skill; a SKILL.md at the archive root owns everything."""
+    roots = sorted({str(PurePosixPath(p).parent) for p in skill_files})
+    if "." in roots:
+        return ["."]
+    return [r for r in roots if not any(r != other and r.startswith(other + "/") for other in roots)]
+
+
+def parse_bundles(data: bytes, source="ZIP upload", single: bool = False) -> list[dict]:
+    """Parse an archive holding one or more skills, each in its own folder with a SKILL.md.
+
+    The archive-wide limits (size, file count, paths, symlinks) apply to the whole ZIP; each skill is
+    then validated on its own. Links from one skill to a sibling skill in the same ZIP are allowed
+    (they come back as non-blocking warnings, since read_skill resolves paths per skill).
+
+    `single=True` is the strict form for callers that mean one skill (GitHub import, the manage tool):
+    any second SKILL.md in the archive, nested or not, is refused as ambiguous."""
     if len(data) > MAX_ARCHIVE:
         raise ValueError("ZIP exceeds 12 MB")
-    files = {}
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             entries = archive.infolist()
@@ -190,50 +214,63 @@ def parse_bundle(data: bytes, source="ZIP upload"):
                 if path in paths:
                     raise ValueError("Duplicate archive path")
                 paths[path] = info
-            roots = [p for p in paths if PurePosixPath(p).name == "SKILL.md"]
-            if len(roots) != 1:
+            skill_files = [p for p in paths if PurePosixPath(p).name == "SKILL.md"]
+            if not skill_files:
+                raise ValueError("ZIP must contain a SKILL.md")
+            if single and len(skill_files) != 1:
                 raise ValueError("ZIP must contain exactly one SKILL.md")
-            root = str(PurePosixPath(roots[0]).parent)
-            prefix = "" if root == "." else root + "/"
-            for path, info in paths.items():
-                if not path.startswith(prefix):
-                    continue
-                relative = path[len(prefix) :]
-                if info.file_size > MAX_FILE:
-                    raise ValueError(f"File exceeds 2 MB: {relative}")
-                if PurePosixPath(relative).suffix.lower() not in ALLOWED and PurePosixPath(
-                    relative
-                ).name not in {"LICENSE", "NOTICE"}:
-                    raise ValueError(f"Unsupported file type: {relative}")
-                files[relative] = base64.b64encode(archive.read(info)).decode("ascii")
-            # Preserve the enclosing repository's redistribution notice too.
-            for parent in PurePosixPath(root).parents:
-                candidate = str(parent / "LICENSE")
-                if "LICENSE" not in files and candidate in paths:
-                    if paths[candidate].file_size > MAX_FILE:
-                        raise ValueError("License file exceeds 2 MB")
-                    files["LICENSE"] = base64.b64encode(archive.read(paths[candidate])).decode("ascii")
+            roots = _skill_roots(skill_files)
+            if len(roots) > MAX_SKILLS_PER_ARCHIVE:
+                raise ValueError(f"ZIP holds more than {MAX_SKILLS_PER_ARCHIVE} skills")
+            digest = hashlib.sha256(data).hexdigest()
+            return [_build_bundle(archive, paths, root, roots, digest, source) for root in roots]
     except (zipfile.BadZipFile, RuntimeError, NotImplementedError) as exc:
         raise ValueError("Invalid or encrypted ZIP") from exc
+
+
+def _build_bundle(archive, paths: dict, root: str, roots: list[str], digest: str, source: str) -> dict:
+    files = {}
+    prefix = "" if root == "." else root + "/"
+    for path, info in paths.items():
+        if not path.startswith(prefix):
+            continue
+        relative = path[len(prefix) :]
+        if info.file_size > MAX_FILE:
+            raise ValueError(f"File exceeds 2 MB: {relative}")
+        if PurePosixPath(relative).suffix.lower() not in ALLOWED and PurePosixPath(
+            relative
+        ).name not in {"LICENSE", "NOTICE"}:
+            raise ValueError(f"Unsupported file type: {relative}")
+        files[relative] = base64.b64encode(archive.read(info)).decode("ascii")
+    # Preserve the enclosing repository's redistribution notice too.
+    for parent in PurePosixPath(root).parents:
+        candidate = str(parent / "LICENSE")
+        if "LICENSE" not in files and candidate in paths:
+            if paths[candidate].file_size > MAX_FILE:
+                raise ValueError("License file exceeds 2 MB")
+            files["LICENSE"] = base64.b64encode(archive.read(paths[candidate])).decode("ascii")
     content = base64.b64decode(files["SKILL.md"]).decode("utf-8-sig")
+    where = f" ({root})" if len(roots) > 1 else ""
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.S)
     if not match:
-        raise ValueError("SKILL.md needs YAML frontmatter with name and description")
+        raise ValueError(f"SKILL.md needs YAML frontmatter with name and description{where}")
     try:
         meta = yaml.safe_load(match[1])
     except yaml.YAMLError as exc:
-        raise ValueError("Invalid YAML frontmatter in SKILL.md") from exc
+        raise ValueError(f"Invalid YAML frontmatter in SKILL.md{where}") from exc
     if (
         not isinstance(meta, dict)
         or not isinstance(meta.get("name"), str)
         or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", str(meta.get("name", "")))
         or len(meta["name"]) > 64
     ):
-        raise ValueError("Skill name must be kebab-case, at most 64 characters")
+        raise ValueError(f"Skill name must be kebab-case, at most 64 characters{where}")
     description = meta.get("description")
     if not isinstance(description, str) or not description.strip():
-        raise ValueError("Skill description is required")
+        raise ValueError(f"Skill description is required{where}")
     warnings = []
+    sibling_links: dict[str, set[str]] = {}  # sibling skill name -> files that link to it
+    sibling_roots = [r for r in roots if r != root and r != "."]
     for path, encoded in files.items():
         if not path.endswith(".md"):
             continue
@@ -243,37 +280,70 @@ def parse_bundle(data: bytes, source="ZIP upload"):
             if not link or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", link):
                 continue
             resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), link))
-            if resolved not in files:
-                warnings.append(f"{path}: missing reference {link}")
+            if resolved in files:
+                continue
+            # A link that leaves this skill and lands on a sibling skill in the same ZIP is fine.
+            outside = posixpath.normpath(posixpath.join(prefix, posixpath.dirname(path), link)) if root != "." else ""
+            sibling = next((r for r in sibling_roots if outside == r or outside.startswith(r + "/")), None)
+            if sibling is not None and outside in paths:
+                sibling_links.setdefault(PurePosixPath(sibling).name, set()).add(path)
+                continue
+            warnings.append(f"{path}: missing reference {link}")
     if warnings:
         raise ValueError("; ".join(warnings[:5]))
     extra = meta.get("metadata") or {}
     if not isinstance(extra, dict) or not isinstance(extra.get("version", "1"), (str, int, float)):
         raise ValueError("Invalid skill version metadata")
-    digest = hashlib.sha256(data).hexdigest()
     size_bytes = sum(len(base64.b64decode(encoded)) for encoded in files.values())
+    metadata = {
+        "source": source,
+        "sha256": digest,
+        "version": str(extra.get("version", "1")),
+        "license": str(meta.get("license", "")),
+        "files": sorted(files),
+        "size_bytes": size_bytes,
+    }
+    nested = sorted(p for p in files if p != "SKILL.md" and PurePosixPath(p).name == "SKILL.md")
+    if nested:
+        # Never silently swallow what looks like another skill: say it was kept as a plain file.
+        metadata.setdefault("warnings", []).append(
+            f"contains {len(nested)} nested SKILL.md file(s) ({', '.join(nested[:3])}); they are kept as "
+            "plain files of this skill, not imported as separate skills."
+        )
+    if sibling_links:
+        # One short note per skill, not one per link.
+        metadata.setdefault("warnings", []).append(
+            "links to other skills in the same ZIP ("
+            + ", ".join(sorted(sibling_links))
+            + "); the relative links do not resolve at run time, so read them with read_skill(name=...)."
+        )
     return dict(
         name=meta["name"],
         description=description[:500],
         content=content,
         files=files,
-        metadata={
-            "source": source,
-            "sha256": digest,
-            "version": str(extra.get("version", "1")),
-            "license": str(meta.get("license", "")),
-            "files": sorted(files),
-            "size_bytes": size_bytes,
-        },
+        metadata=metadata,
     )
 
 
 async def install_bundle(store, user_id, bundle):
     """Create a new private skill; imports never silently overwrite existing skills."""
+    return (await install_bundles(store, user_id, [bundle]))[0]
+
+
+async def install_bundles(store, user_id, bundles: list[dict]):
+    """Create several skills from one archive in a single transaction: either all are installed or none.
+
+    One quota decision covers the whole set, and no name may clash with a built-in, an existing skill,
+    or another skill in the same set."""
     from claw.core.builtin_skills import get_builtin_skill
 
-    if get_builtin_skill(bundle["name"]):
-        raise ValueError("This name is reserved by a built-in skill")
+    names = [bundle["name"] for bundle in bundles]
+    for name in names:
+        if get_builtin_skill(name):
+            raise ValueError("This name is reserved by a built-in skill")
+    if len(set(names)) != len(names):
+        raise ValueError("The ZIP contains two skills with the same name")
     async with store.factory() as db:
         # Lock the owner row where supported so concurrent imports share one
         # quota decision instead of each independently passing it.
@@ -289,37 +359,46 @@ async def install_bundle(store, user_id, bundle):
             .scalars()
             .all()
         )
-        if len(sources) >= MAX_BUNDLES_PER_USER:
-            raise ValueError(f"You can import up to {MAX_BUNDLES_PER_USER} skill bundles")
+        if len(sources) + len(bundles) > MAX_BUNDLES_PER_USER:
+            extra = f" (this ZIP has {len(bundles)})" if len(bundles) > 1 else ""
+            raise ValueError(f"You can import up to {MAX_BUNDLES_PER_USER} skill bundles{extra}")
         used_bytes = sum(int((item or {}).get("size_bytes", 0)) for item in sources)
-        incoming_bytes = int(bundle["metadata"].get("size_bytes", 0))
+        incoming_bytes = sum(int(bundle["metadata"].get("size_bytes", 0)) for bundle in bundles)
         if used_bytes + incoming_bytes > MAX_BUNDLE_BYTES_PER_USER:
             limit_mb = MAX_BUNDLE_BYTES_PER_USER // (1024 * 1024)
             raise ValueError(f"Imported skill bundles exceed the {limit_mb} MB storage limit")
-        existing = await db.scalar(
-            select(Skill).where(Skill.user_id == user_id, Skill.name == bundle["name"])
+        taken = set(
+            (await db.execute(select(Skill.name).where(Skill.user_id == user_id, Skill.name.in_(names)))).scalars()
         )
-        if existing:
-            raise ValueError("A skill with this name already exists; choose a different package name")
-        version_id = uuid.uuid4().hex
-        skill = Skill(
-            user_id=user_id,
-            name=bundle["name"],
-            description=bundle["description"],
-            content=bundle["content"],
-            enabled=True,
-            bundle_id=version_id,
-            bundle_metadata=bundle["metadata"],
-        )
-        db.add(skill)
-        await db.flush()
-        db.add(
-            SkillBundleVersion(
-                id=version_id, skill_id=skill.id, files=bundle["files"], source=bundle["metadata"]
+        if taken:
+            if len(bundles) == 1:
+                raise ValueError("A skill with this name already exists; choose a different package name")
+            raise ValueError(
+                "A skill with this name already exists; choose a different package name: "
+                + ", ".join(sorted(taken))
             )
-        )
+        skills = []
+        for bundle in bundles:
+            version_id = uuid.uuid4().hex
+            skill = Skill(
+                user_id=user_id,
+                name=bundle["name"],
+                description=bundle["description"],
+                content=bundle["content"],
+                enabled=True,
+                bundle_id=version_id,
+                bundle_metadata=bundle["metadata"],
+            )
+            db.add(skill)
+            await db.flush()
+            db.add(
+                SkillBundleVersion(
+                    id=version_id, skill_id=skill.id, files=bundle["files"], source=bundle["metadata"]
+                )
+            )
+            skills.append(skill)
         await db.commit()
-        return skill
+        return skills
 
 
 async def resource(store, user_id, name, path, binary=False):

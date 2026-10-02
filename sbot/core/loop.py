@@ -36,7 +36,7 @@ from sbot.core.turn_context import (
     current_turn_locale,
 )
 from sbot.i18n import t
-from sbot.providers.registry import context_window
+from sbot.providers.registry import context_window, output_window
 from sbot.tools.project import (
     PROJECT_ACTIONS_COVERED_BY_TASK_APPROVAL,
     PROJECT_ACTIONS_REQUIRING_CONFIRMATION,
@@ -598,7 +598,9 @@ class AgentLoop:
                                 prompt,
                                 tools=definitions,
                                 model=effective_model,
-                                max_tokens=request_output_tokens,
+                                # Never ask for more than the model can write (when that is known): the
+                                # configured cap is global, a lower per-model limit would be rejected.
+                                max_tokens=min(request_output_tokens, output_window(effective_model) or request_output_tokens),
                                 temperature=self.temperature,
                                 api_key=api_key,
                                 api_base=api_base,

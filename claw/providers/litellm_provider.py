@@ -429,6 +429,7 @@ class LiteLLMProvider(LLMProvider):
         run_char = ""
         run_len = 0
         truncated_repeat = False
+        degenerate = False
 
         stream = None
         transport_stream_started = False
@@ -530,6 +531,7 @@ class LiteLLMProvider(LLMProvider):
             # bloat the next turn's context; keep the good prefix.
             full_content = full_content.rstrip(run_char)
             finish_reason = "length"
+            degenerate = True
             logger.warning(
                 "Cut a runaway repetition loop from {} (char {!r})", model, run_char
             )
@@ -553,6 +555,7 @@ class LiteLLMProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
+            degenerate=degenerate,
         )
 
     async def _cloudflare_chat(
