@@ -37,6 +37,10 @@ class ChatResult:
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
+    # True when the provider cut the stream because the model fell into a runaway repetition loop.
+    # finish_reason is then "length" too, but a bigger output budget would only feed the loop, so
+    # the agent loop must not try to recover from it.
+    degenerate: bool = False
 
     @property
     def has_tool_calls(self) -> bool:

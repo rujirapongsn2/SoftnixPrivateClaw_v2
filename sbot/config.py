@@ -14,12 +14,17 @@ class LLMSettings(BaseModel):
     model: str = "anthropic/claude-sonnet-4-5"
     api_key: str = ""
     api_base: str = ""
-    # Output cap per LLM call. Reasoning models (Qwen3, DeepSeek-R1, …) spend
+    # Output cap per LLM call. Reasoning models (Qwen3, DeepSeek-R1, DeepSeek V4, …) spend
     # this budget on hidden thinking *before* writing any visible answer, so a
     # tight cap makes them return an empty completion (finish_reason="length")
     # rather than a short one — 4096 was low enough to do that on a single
-    # tool-using turn.
-    max_tokens: int = 16384
+    # tool-using turn, and 16384 on a long agentic one. A model's own output limit still
+    # wins when it is lower (the request is clamped to it), so this is safe to raise.
+    max_tokens: int = 32768
+    # When a response is cut off by the cap above (nothing usable written, or a cut-off tool call
+    # that is never run), the agent loop retries up to twice with the cap doubled, never past this
+    # value or the model's own limit. The higher ceiling is only reached after a real truncation.
+    max_recovery_output_tokens: int = 65536
     model_output_limits: dict[str, PositiveInt] = Field(default_factory=dict)
     temperature: float = 0.1
     max_iterations: int = 60

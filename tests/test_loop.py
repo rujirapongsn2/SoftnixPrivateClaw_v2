@@ -1173,3 +1173,105 @@ def test_prompt_size_estimates_images_instead_of_measuring_base64():
     ]
 
     assert _prompt_size(prompt) == _IMAGE_BLOCK_CHARS + len("what is this?")
+
+
+# ------------------------------------------------------------- output-limit recovery
+
+
+def cut(content=None, calls=(), degenerate=False):
+    """A response the provider stopped at the output cap."""
+    return [ChatResult(content=content, tool_calls=list(calls), finish_reason="length",
+                       usage={"prompt_tokens": 10, "completion_tokens": 1000}, degenerate=degenerate)]
+
+
+class CountingTool(Tool):
+    name = "count"
+    description = "Record the call"
+    parameters = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+
+    def __init__(self):
+        self.ran: list[str] = []
+
+    async def execute(self, text: str, **_: Any) -> str:
+        self.ran.append(text)
+        return "ok"
+
+
+async def test_an_empty_response_cut_at_the_cap_is_retried_with_a_larger_cap():
+    provider = FakeProvider([cut(), text_turn("done")])  # e.g. a reasoning model that spent it all thinking
+    loop = AgentLoop(provider, ToolRegistry(), max_tokens=1000, max_recovery_output_tokens=4000)
+    outcome = await loop.run_turn("t", [{"role": "user", "content": "hi"}], lambda e: None)
+
+    assert outcome.final_content == "done" and outcome.finish_reason == "stop" and outcome.iterations == 2
+    assert provider.max_tokens_seen == [1000, 2000]
+    notice = provider.calls[1][-1]
+    assert notice["role"] == "system" and "cut off by the output limit" in notice["content"]
+    # The retry guidance is for that one request only: it never reaches the stored transcript or later prompts.
+    assert not any("output limit" in str(m) for m in outcome.new_messages)
+    assert outcome.usage["completion_tokens"] >= 1000  # the wasted attempt is still counted
+
+
+async def test_a_cut_off_tool_call_is_never_run_and_is_retried_smaller():
+    tool = CountingTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    half = ToolCall(id="c1", name="count", arguments={"text": "half a script"})  # JSON the provider "repaired"
+    whole = ToolCall(id="c2", name="count", arguments={"text": "small"})
+    provider = FakeProvider([cut(calls=[half]), [ChatResult(content=None, tool_calls=[whole])], text_turn("finished")])
+    loop = AgentLoop(provider, registry, max_tokens=1000, max_recovery_output_tokens=4000)
+    outcome = await loop.run_turn("t", [{"role": "user", "content": "go"}], lambda e: None)
+
+    assert tool.ran == ["small"]  # the truncated call did not execute
+    assert outcome.final_content == "finished"
+    assert "count" in provider.calls[1][-1]["content"] and "NOT run" in provider.calls[1][-1]["content"]
+
+
+async def test_retries_stop_after_two_and_a_cut_off_call_still_does_not_run():
+    tool = CountingTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    call = ToolCall(id="c", name="count", arguments={"text": "never"})
+    provider = FakeProvider([cut(calls=[call]), cut(calls=[call]), cut(calls=[call]), text_turn("unused")])
+    loop = AgentLoop(provider, registry, max_tokens=1000, max_recovery_output_tokens=3000)
+    outcome = await loop.run_turn("t", [{"role": "user", "content": "go"}], lambda e: None)
+
+    assert tool.ran == []
+    assert outcome.final_content is None and outcome.finish_reason == "length"  # the runtime reports it
+    assert provider.max_tokens_seen == [1000, 2000, 3000]  # doubled, then held at the ceiling
+    assert len(provider.calls) == 3
+
+
+async def test_runaway_repetition_and_partial_answers_are_left_alone():
+    degenerate = FakeProvider([cut(content="ababab", degenerate=True), text_turn("unused")])
+    outcome = await AgentLoop(degenerate, ToolRegistry(), max_tokens=1000, max_recovery_output_tokens=4000).run_turn(
+        "t", [{"role": "user", "content": "hi"}], lambda e: None)
+    assert len(degenerate.calls) == 1 and outcome.finish_reason == "length"  # a bigger budget would only feed the loop
+
+    partial = FakeProvider([cut(content="a long answer that was cut"), text_turn("unused")])
+    outcome = await AgentLoop(partial, ToolRegistry(), max_tokens=1000, max_recovery_output_tokens=4000).run_turn(
+        "t", [{"role": "user", "content": "hi"}], lambda e: None)
+    assert len(partial.calls) == 1 and outcome.final_content == "a long answer that was cut"
+
+
+async def test_the_cap_never_exceeds_what_the_model_can_write_or_fit(monkeypatch):
+    import claw.core.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "output_window", lambda model: 6000)
+    provider = FakeProvider([cut(), text_turn("ok")])
+    await AgentLoop(provider, ToolRegistry(), max_tokens=4000, max_recovery_output_tokens=64000).run_turn(
+        "t", [{"role": "user", "content": "hi"}], lambda e: None)
+    assert provider.max_tokens_seen == [4000, 6000]  # doubled to 8000, clamped to the model's 6000
+
+    monkeypatch.setattr(loop_module, "output_window", lambda model: None)  # unknown model: the configured value stands
+    monkeypatch.setattr(loop_module, "context_window", lambda model: 3000)  # a small window leaves little room
+    provider = FakeProvider([text_turn("ok")])
+    await AgentLoop(provider, ToolRegistry(), max_tokens=32768).run_turn("t", [{"role": "user", "content": "hi"}], lambda e: None)
+    assert 1 <= provider.max_tokens_seen[0] < 3000
+
+
+def test_default_caps_are_large_enough_for_reasoning_models():
+    from claw.config import LLMSettings
+    from sbot.config import LLMSettings as SbotLLMSettings
+
+    for settings in (LLMSettings(), SbotLLMSettings()):
+        assert settings.max_tokens == 32768 and settings.max_recovery_output_tokens == 65536

@@ -249,6 +249,12 @@ CLAW_SANDBOX__IMAGE=${SANDBOX_IMAGE}
 CLAW_SANDBOX__NETWORK=bridge
 CLAW_SANDBOX__TIMEOUT_SECONDS=120
 
+# Per-user workspace limits (2 GB / 50,000 files) and automatic deletion of old scratch
+# files and attachments (7 days). A new installation enforces them from the start; an
+# existing .env without this line only observes and logs (Control Plane > Preferences >
+# Workspace storage turns enforcement on).
+CLAW_WORKSPACE__ENFORCE=true
+
 # Persistent data (attachments/agent files + knowledge OKF bundles).
 CLAW_WORKSPACES_ROOT=${DATA_DIR}/workspaces
 CLAW_KNOWLEDGE_ROOT=${DATA_DIR}/knowledge

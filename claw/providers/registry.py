@@ -126,6 +126,28 @@ def context_window(model: str | None) -> int | None:
 
 
 @lru_cache(maxsize=256)
+def output_window(model: str | None) -> int | None:
+    """Most tokens the model can write in one response, or None when unknown.
+
+    Same source and prefix-stripping as context_window(). Unknown stays None, never a guess: callers
+    then use the operator's configured cap instead of inventing a limit."""
+    name = (model or "").strip()
+    if not name:
+        return None
+    try:
+        from litellm import model_cost
+    except ImportError:  # pragma: no cover - litellm is a hard dependency
+        return None
+    parts = name.split("/")
+    for start in range(len(parts)):
+        info = model_cost.get("/".join(parts[start:])) or {}
+        value = info.get("max_output_tokens")
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+@lru_cache(maxsize=256)
 def _model_pricing(model: str | None) -> tuple[float, float] | None:
     """Return LiteLLM's local input/output USD-per-token rates when known."""
     name = (model or "").strip()

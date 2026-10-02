@@ -322,6 +322,8 @@ export interface WorkingPlan {
 
 export interface SkillInfo {
   bundle?: { version: string; source: string; sha256: string; files: string[]; license: string } | null;
+  // Present when one ZIP installed several skills (this object is the first of them).
+  imported?: { id: string; name: string }[];
   visibility?: "private" | "group" | "public";
   // Which of the owner's groups a "group" skill is shared with.
   shared_group_id?: string | null;

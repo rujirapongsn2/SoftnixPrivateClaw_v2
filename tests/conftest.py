@@ -31,6 +31,7 @@ class FakeProvider(LLMProvider):
     def __init__(self, turns: list[list[ProviderEvent]]):
         self.turns = list(turns)
         self.calls: list[list[dict[str, Any]]] = []
+        self.max_tokens_seen: list[int] = []
 
     async def stream_chat(
         self,
@@ -43,6 +44,7 @@ class FakeProvider(LLMProvider):
         api_base: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         self.calls.append(list(messages))
+        self.max_tokens_seen.append(max_tokens)
         if not self.turns:
             yield ChatResult(content="(exhausted)")
             return

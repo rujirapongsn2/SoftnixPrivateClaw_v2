@@ -208,7 +208,8 @@ Providers** (or `.env` → `CLAW_LLM__API_KEY`).
 ## Configuration
 
 All settings are environment variables prefixed `CLAW_` (nested keys use `__`, e.g.
-`CLAW_LLM__MODEL`). See `.env.example` for the full annotated list — database, auth,
+`CLAW_LLM__MODEL`). See [docs/environment.md](docs/environment.md) for what every variable in
+`.env.example` does (in Thai), or `.env.example` itself for the full annotated list — database, auth,
 OIDC social login, LLM defaults, sandbox limits, knowledge storage, speech-to-text,
 browser automation, Telegram, and rate limits. Anything an admin can also configure
 live in-app (LLM providers/models, guardrails, OAuth apps) takes precedence per chat.

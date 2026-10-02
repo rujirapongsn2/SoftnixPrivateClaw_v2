@@ -28,6 +28,7 @@ import {
   Diamond,
   ExternalLink,
   Gauge,
+  HardDrive,
   Globe,
   Info,
   KeyRound,
@@ -201,7 +202,7 @@ export function AdminPanel({
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
         {section === "email" && <EmailConfigPanel />}
-        {section === "preferences" && <><TeamPolicyPanel /><PreferencesPanel /></>}
+        {section === "preferences" && <><TeamPolicyPanel /><WorkspacePolicyPanel /><PreferencesPanel /></>}
         {section === "audit" && <AuditPanel />}
         {section === "users" && <UsersPanel selfId={selfId} />}
       </div>
@@ -6297,6 +6298,90 @@ function UserRow({
   );
 }
 
+
+function WorkspacePolicyPanel() {
+  const t = useT();
+  const [policy, setPolicy] = useState<import("./api").WorkspacePolicy | null>(null);
+  const [defaults, setDefaults] = useState<import("./api").WorkspacePolicy | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    api.adminWorkspacePolicy().then(({defaults: d, ...p}) => { setPolicy(p); setDefaults(d); }).catch(e => setError(String(e)));
+  }, []);
+  const fields = [
+    ["quota_mb", "admin.workspacePolicy.quotaMb", "admin.workspacePolicy.quotaMbHint"],
+    ["quota_files", "admin.workspacePolicy.quotaFiles", "admin.workspacePolicy.quotaFilesHint"],
+    ["tmp_retention_days", "admin.workspacePolicy.tmpDays", "admin.workspacePolicy.tmpDaysHint"],
+    ["uploads_retention_days", "admin.workspacePolicy.uploadsDays", "admin.workspacePolicy.uploadsDaysHint"],
+  ] as const;
+  return (
+    <Card padding={2} className="claw-team-policy-card">
+      <div className="claw-team-policy-header">
+        <div className="claw-team-policy-icon"><Icon icon={HardDrive} size="sm" /></div>
+        <div>
+          <Text weight="semibold">{t("admin.workspacePolicy.title")}</Text>
+          <Text size="sm" color="secondary">{t("admin.workspacePolicy.description")}</Text>
+        </div>
+      </div>
+      {error && <div className="claw-team-policy-error" role="alert">{error}</div>}
+      {policy && (
+        <form className="claw-team-policy-form" onSubmit={async e => {
+          e.preventDefault(); setBusy(true); setError(""); setSaved(false);
+          try {
+            const {defaults: d, ...next} = await api.adminSaveWorkspacePolicy(policy);
+            setPolicy(next); setDefaults(d); setSaved(true);
+          } catch (e) { setError(String(e)); } finally { setBusy(false); }
+        }}>
+          <div className="claw-team-policy-switch">
+            <CheckboxInput
+              label={t("admin.workspacePolicy.enforce")}
+              description={t("admin.workspacePolicy.enforceDescription")}
+              value={policy.enforce}
+              onChange={(enforce) => { setPolicy({...policy, enforce}); setSaved(false); }}
+            />
+          </div>
+          <div className="claw-team-policy-switch">
+            <CheckboxInput
+              label={t("admin.workspacePolicy.cleanup")}
+              description={t("admin.workspacePolicy.cleanupDescription")}
+              value={policy.cleanup_enabled}
+              onChange={(cleanup_enabled) => { setPolicy({...policy, cleanup_enabled}); setSaved(false); }}
+            />
+          </div>
+          <div className="claw-team-policy-section">
+            <div className="claw-team-policy-section-title">
+              <Text weight="semibold" size="sm">{t("admin.workspacePolicy.limits")}</Text>
+              <Text size="sm" color="secondary">{t("admin.workspacePolicy.limitsDescription")}</Text>
+            </div>
+            <div className="claw-team-policy-grid">
+              {fields.map(([key, label, hint]) => (
+                <label className="claw-team-policy-field" key={key}>
+                  <span>{t(label)}</span>
+                  <input
+                    type="number"
+                    required
+                    min={0}
+                    step={1}
+                    value={policy[key]}
+                    onChange={e => { setPolicy({...policy, [key]: Math.max(0, Math.trunc(Number(e.target.value)))}); setSaved(false); }}
+                  />
+                  <Text size="xsm" color="secondary">
+                    {t(hint)}{defaults ? ` · ${t("admin.workspacePolicy.default", {value: String(defaults[key])})}` : ""}
+                  </Text>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="claw-team-policy-actions">
+            {saved && <Text size="sm" color="secondary" role="status">{t("admin.workspacePolicy.saved")}</Text>}
+            <Button label={t(busy ? "admin.teamPolicy.saving" : "admin.teamPolicy.save")} type="submit" isDisabled={busy} />
+          </div>
+        </form>
+      )}
+    </Card>
+  );
+}
 
 function TeamPolicyPanel() {
   const t = useT();

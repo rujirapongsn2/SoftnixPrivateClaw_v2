@@ -14,6 +14,7 @@ from claw.core.runtime import AgentRuntime
 from claw.core.scheduler import SchedulerService
 from claw.db.models import User
 from claw.security.policy import PolicyEngine
+from claw.workspace.policy import WorkspacePolicyStore
 from claw.db.stores import (
     AuditStore,
     BrandingStore,
@@ -86,6 +87,8 @@ class AppState:
     project_containers: "ProjectContainerManager | None" = None
     jobs: object | None = None
     model_health: ModelHealthService | None = None
+    # Workspace storage policy (quota + retention), editable in the Control Plane.
+    workspace_policy: WorkspacePolicyStore | None = None
 
 
 def get_state(request: Request) -> AppState:

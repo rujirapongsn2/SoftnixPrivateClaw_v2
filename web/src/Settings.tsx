@@ -1079,6 +1079,16 @@ function SkillsPanel() {
         const imported = file
           ? await api.importSkill(file)
           : await api.importGithubSkill(repository.trim(), commit.trim());
+        if (imported.imported && imported.imported.length > 1) {
+          // A ZIP with several skills installs them all (or none).
+          toast({
+            body: t("settings.skills.importedMany", {
+              count: String(imported.imported.length),
+              names: imported.imported.map((s) => s.name).join(", "),
+            }),
+            type: "info",
+          });
+        }
         if (imported.warnings?.length) {
           toast({ body: imported.warnings.join("\n"), type: "info" });
         }

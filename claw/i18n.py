@@ -98,6 +98,22 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "en": "Continuing automatically from checkpoint (segment {segment}).",
         "th": "กำลังทำต่ออัตโนมัติจากจุดบันทึก (ช่วงที่ {segment})",
     },
+    "artifact.promoted": {
+        "en": "This chat reached its time or step limit while still making progress, so it is continuing as a background job (segment {segment}). You can cancel it.",
+        "th": "แชตนี้ถึงขีดจำกัดเวลาหรือจำนวนขั้นตอน แต่งานยังคืบหน้าอยู่ จึงทำต่อเป็นงานเบื้องหลัง (ช่วงที่ {segment}) กดยกเลิกได้",
+    },
+    "artifact.noProgress": {
+        "en": "Stopped continuing automatically: the last run made no progress (no new file and no new successful tool result). Last steps:",
+        "th": "หยุดทำต่ออัตโนมัติ เพราะรอบล่าสุดไม่มีความคืบหน้า (ไม่มีไฟล์ใหม่ และไม่มีผลลัพธ์เครื่องมือใหม่ที่สำเร็จ) ขั้นตอนล่าสุด:",
+    },
+    "artifact.stoppedNoProgress": {
+        "en": "Background job stopped: the last run made no progress.",
+        "th": "งานเบื้องหลังหยุดแล้ว เพราะรอบล่าสุดไม่มีความคืบหน้า",
+    },
+    "artifact.stepOk": {
+        "en": "succeeded",
+        "th": "สำเร็จ",
+    },
     "artifact.completed": {
         "en": "Artifact job completed.",
         "th": "งานสร้างไฟล์เสร็จแล้ว",

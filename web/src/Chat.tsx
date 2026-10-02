@@ -60,6 +60,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorText } from "./ErrorText";
 import { ExecutionPanel } from "./ExecutionPanel";
+import { MediaPreview, PLAYABLE_MEDIA_RE } from "./MediaPreview";
 import {
   AgentEvent,
   ApiError,
@@ -2540,6 +2541,11 @@ export function Chat({
                             if (PREVIEWABLE_HTML_RE.test(p)) {
                               return (
                                 <HtmlPreview key={p} sessionId={sessionId} path={p} href={href} />
+                              );
+                            }
+                            if (PLAYABLE_MEDIA_RE.test(p)) {
+                              return (
+                                <MediaPreview key={p} sessionId={sessionId} path={p} href={href} />
                               );
                             }
                             if (/\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(p)) {

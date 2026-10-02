@@ -145,6 +145,8 @@ export interface WorkingPlan {
 export interface SkillInfo {
   warnings?: string[];
   bundle?: { version: string; source: string; sha256: string; files: string[]; license: string } | null;
+  // Present when one ZIP installed several skills (this object is the first of them).
+  imported?: { id: string; name: string }[];
   visibility?: "private" | "group" | "public";
   // Which of the owner's groups a "group" skill is shared with.
   shared_group_id?: string | null;
@@ -914,6 +916,21 @@ export interface TeamPolicy {
   model_output_limits: Record<string, number>;
 }
 
+export interface WorkspacePolicy {
+  quota_mb: number;
+  quota_files: number;
+  tmp_retention_days: number;
+  uploads_retention_days: number;
+  cleanup_enabled: boolean;
+  /** false = observe only: nothing is blocked or deleted, the server log says what would be. */
+  enforce: boolean;
+}
+
+export interface WorkspacePolicyResponse extends WorkspacePolicy {
+  /** Values from the environment, used until an administrator saves an override. */
+  defaults: WorkspacePolicy;
+}
+
 export interface DurableJob {
   job_id: string; status: string; reason: string; locale: string; deliveries: number;
   steps: {id: string; status: string; reason: string; actor: string; approval?: {key: string; tool: string; arguments: string} | null}[];
@@ -923,6 +940,8 @@ export const api = {
   approveDurableStep: (job: string, step: string, key: string, approved: boolean) => request<DurableJob>(`/api/jobs/${encodeURIComponent(job)}/steps/${encodeURIComponent(step)}/approval`, {method: 'POST', body: JSON.stringify({key, approved})}),
   listDurableJobs: (sessionId: string) => request<DurableJob[]>(`/api/jobs?session_id=${encodeURIComponent(sessionId)}`),
   controlDurableJob: (id: string, action: 'cancel' | 'resume') => request<DurableJob>(`/api/jobs/${encodeURIComponent(id)}/${action}`, {method: 'POST'}),
+  adminWorkspacePolicy: () => request<import("./api").WorkspacePolicyResponse>("/api/admin/workspace-policy"),
+  adminSaveWorkspacePolicy: (policy: import("./api").WorkspacePolicy) => request<import("./api").WorkspacePolicyResponse>("/api/admin/workspace-policy", {method: "PUT", body: JSON.stringify(policy)}),
   adminTeamPolicy: () => request<TeamPolicy>("/api/admin/team-policy"),
   adminSaveTeamPolicy: (policy: TeamPolicy) => request<TeamPolicy>("/api/admin/team-policy", {method: "PUT", body: JSON.stringify(policy)}),
   register: (email: string, password: string, display_name = "") =>

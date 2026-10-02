@@ -177,6 +177,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # that both exist (scheduler depends on the runtime's turn handler).
     runtime.scheduler = scheduler
 
+    from claw.workspace.cleanup import WorkspaceCleanupService
+    from claw.workspace.policy import WorkspacePolicyStore
+    from claw.workspace.usage import WorkspaceAccounts
+
+    workspace_policy = WorkspacePolicyStore(factory, settings)
+    runtime.workspace_accounts = WorkspaceAccounts(settings.workspaces_root, workspace_policy)
+    workspace_cleanup = WorkspaceCleanupService(settings.workspaces_root, workspace_policy, settings, audit)
+
     async def _heartbeat_turn(user_id: str, session_id: str, prompt: str) -> str | None:
         return await runtime.handle_message(user_id, session_id, prompt, channel="heartbeat")
 
@@ -238,6 +246,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         scheduler.start()
         model_health.start()
         heartbeat.start()
+        workspace_cleanup.start()
         await runtime.recover_artifact_jobs()
         await knowledge_service.start()
         # Telegram: an admin-saved config in the DB is authoritative once it
@@ -294,6 +303,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await scheduler.stop()
         await model_health.stop()
         await heartbeat.stop()
+        await workspace_cleanup.stop()
         await knowledge_service.stop()
         await telegram_mgr.stop()
         await runtime.drain()
@@ -347,6 +357,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project_container_config=project_container_config,
         project_containers=None,
         jobs=jobs,
+        workspace_policy=workspace_policy,
     )
     app.state.claw.blueprints = blueprints
     from sbot.api.blueprints import router as blueprint_router
@@ -401,6 +412,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router)
     if not settings.sbot_enabled:
         app.include_router(admin_router)
+    from claw.api.workspace_admin import router as workspace_admin_router
+
+    app.include_router(workspace_admin_router)
     app.include_router(browser_ext_router)
     app.include_router(connector_oauth_router)
     app.include_router(knowledge_router)

@@ -110,18 +110,26 @@ async def import_github_skill(body: SkillGitImport, user: User = Depends(current
 @router.post("/skills/import")
 async def import_skill(file: UploadFile = File(...), user: User = Depends(current_user), state: AppState = Depends(get_state)) -> dict:
     import asyncio
-    from claw.skills.bundles import MAX_ARCHIVE, parse_bundle, install_bundle, prepare_bundle
+    from claw.skills.bundles import MAX_ARCHIVE, parse_bundles, install_bundles, prepare_bundle
     from sqlalchemy.exc import IntegrityError
     data = await file.read(MAX_ARCHIVE + 1)
     try:
-        bundle = await asyncio.to_thread(parse_bundle, data)
-        bundle = await prepare_bundle(state.skills, user.id, bundle)
-        skill = await install_bundle(state.skills, user.id, bundle)
+        # A ZIP may hold several skills (one folder each); they are installed together or not at all.
+        bundles = await asyncio.to_thread(parse_bundles, data)
+        bundles = [await prepare_bundle(state.skills, user.id, bundle) for bundle in bundles]
+        skills = await install_bundles(state.skills, user.id, bundles)
     except (ValueError, UnicodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="Skill name already exists") from exc
-    return _skill_json(skill, viewer_id=user.id)
+    result = _skill_json(skills[0], viewer_id=user.id)
+    if len(skills) > 1:
+        # Same shape as a single import (the first skill), plus the whole list for the UI.
+        result["imported"] = [{"id": s.id, "name": s.name} for s in skills]
+        result["warnings"] = [
+            f"{s.name}: {w}" for s in skills for w in (getattr(s, "bundle_metadata", None) or {}).get("warnings", [])
+        ]
+    return result
 
 
 @router.get("/skills")

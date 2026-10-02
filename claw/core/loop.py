@@ -7,6 +7,7 @@ per session and adapters consume events from the bus.
 
 import asyncio
 import json
+import os
 import random
 import re
 import time
@@ -27,7 +28,7 @@ from claw.core.events import (
     ToolStarted,
 )
 from claw.providers.base import ChatResult, LLMProvider, ProviderError, TextDelta, ThinkingDelta
-from claw.providers.registry import context_window
+from claw.providers.registry import context_window, output_window
 from claw.tools.registry import ToolRegistry
 
 Emit = Callable[[AgentEvent], None]
@@ -140,6 +141,30 @@ def _add_estimated_usage(totals: dict[str, int], prompt_chars: int, streamed_cha
     """
     totals["prompt_tokens"] += int(prompt_chars / _ESTIMATED_CHARS_PER_TOKEN)
     totals["completion_tokens"] += int(streamed_chars / _ESTIMATED_CHARS_PER_TOKEN)
+
+
+# A response cut off by the output cap is retried at most this many times per turn.
+_MAX_OUTPUT_CONTINUATIONS = 2
+_OUTPUT_RECOVERY_NOTICE = (
+    "Your previous response was cut off by the output limit before it finished"
+    "{discarded}. Continue from the conversation above and do not repeat work that is already done. "
+    "Think briefly, then act: keep each tool call small (split long file content into sections and "
+    "save progress incrementally) and give the user a short, complete answer."
+)
+
+
+def _output_cap(model: str | None, wanted: int, request_tokens: int, window_override: int | None) -> int:
+    """Tokens to allow for one response: what is wanted, but never more than the model can write or
+    than still fits in its window next to the prompt. Unknown limits are not guessed (the operator's
+    value is used as is), so a private gateway keeps working exactly as configured."""
+    cap = wanted
+    known_output = output_window(model)
+    if known_output:
+        cap = min(cap, known_output)
+    window = window_override if window_override and window_override > 0 else context_window(model)
+    if window:
+        cap = min(cap, window - request_tokens - 256)
+    return max(1, cap)
 
 
 def _compaction_ceiling_chars(
@@ -374,26 +399,56 @@ def _split_artifacts(written: list[str]) -> tuple[list[str], list[str]]:
     return visible, [p for p in written if p not in shown]
 
 
-def _snapshot_workspace(workspace: Path) -> dict[str, float]:
+class _Snapshot(dict):
+    """Workspace-relative path -> mtime, plus whether the walk was cut short."""
+
+    truncated: bool = False
+
+
+# Folders never walked: hidden ones (.git, .tmp, .venv …) and the usual dependency/cache trees.
+_SNAPSHOT_SKIP_DIRS = _ARTIFACT_IGNORE_DIRS | {"venv", "site-packages"}
+_DEFAULT_SNAPSHOT_MAX_FILES = 20_000
+
+
+def _snapshot_workspace(workspace: Path, limit: int = _DEFAULT_SNAPSHOT_MAX_FILES) -> _Snapshot:
     """Map workspace-relative file path -> mtime, skipping cache/VCS/hidden files.
 
     Used to detect files an `exec` command creates or modifies (e.g. a chart a
     Python snippet writes with matplotlib), which the file-writing tools don't
-    track. Kept cheap: a single tree walk of the user's workspace.
+    track. It runs before and after every command, so it must stay cheap on a
+    big workspace: skipped folders are never entered (not walked and filtered
+    afterwards), and the walk stops at `limit` files and says so, because a
+    partial listing would report arbitrary files as "new". Blocking: call it
+    via a thread.
     """
-    snap: dict[str, float] = {}
-    if not workspace.exists():
+    snap = _Snapshot()
+    root = str(workspace)
+    if not os.path.isdir(root):
         return snap
-    for p in workspace.rglob("*"):
-        rel = p.relative_to(workspace)
-        if any(part.startswith(".") or part in _ARTIFACT_IGNORE_DIRS for part in rel.parts):
-            continue
-        if p.suffix in _ARTIFACT_IGNORE_SUFFIXES or not p.is_file():
-            continue
+    stack = [(root, "")]
+    while stack:
+        directory, prefix = stack.pop()
         try:
-            snap[str(rel)] = p.stat().st_mtime
+            entries = list(os.scandir(directory))
         except OSError:
             continue
+        for entry in entries:
+            name = entry.name
+            if name.startswith("."):
+                continue
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if name not in _SNAPSHOT_SKIP_DIRS:
+                        stack.append((entry.path, f"{prefix}{name}/"))
+                elif entry.is_file(follow_symlinks=False):
+                    if os.path.splitext(name)[1] in _ARTIFACT_IGNORE_SUFFIXES:
+                        continue
+                    if len(snap) >= limit:
+                        snap.truncated = True
+                        return snap
+                    snap[f"{prefix}{name}"] = entry.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                continue
     return snap
 
 
@@ -469,6 +524,8 @@ class AgentLoop:
         arg_guard: ArgGuard | None = None,
         workspace: Path | None = None,
         max_turn_seconds: float = 600,
+        max_recovery_output_tokens: int | None = None,
+        snapshot_max_files: int = _DEFAULT_SNAPSHOT_MAX_FILES,
     ):
         self.provider = provider
         self.tools = tools
@@ -476,9 +533,12 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.max_turn_seconds = max_turn_seconds
         self.max_tokens = max_tokens
+        # Ceiling for the retry that follows a response cut off by the output cap (never below the cap).
+        self.max_recovery_output_tokens = max(max_tokens, max_recovery_output_tokens or max_tokens)
         self.temperature = temperature
         self.arg_guard = arg_guard
         self.workspace = workspace
+        self.snapshot_max_files = snapshot_max_files
 
     async def run_turn(
         self,
@@ -534,7 +594,12 @@ class AgentLoop:
         # `baseline` lets us also detect files an `exec` command created (e.g. a
         # saved chart) by diffing the workspace.
         written: list[str] = list(dict.fromkeys(resume_written or []))
-        baseline = _snapshot_workspace(self.workspace) if self.workspace is not None else {}
+        baseline = (
+            await asyncio.to_thread(_snapshot_workspace, self.workspace, self.snapshot_max_files)
+            if self.workspace is not None
+            else _Snapshot()
+        )
+        snapshot_skipped_logged = False
         started = time.monotonic()
         first_text_at: float | None = None
         tool_call_count = 0
@@ -563,11 +628,19 @@ class AgentLoop:
         # model has made progress (for example edit script → rerun generator).
         recovery_generation = bool(resume_tool_results)
         fallback_selected = False
-        ceiling = _compaction_ceiling_chars(effective_model, self.max_tokens, context_window)
+        # Output-limit recovery: how many times this turn was retried after a cut-off response, the
+        # (possibly raised) cap for the next call, and the one-shot instruction for that retry.
+        output_continuations = 0
+        request_output_tokens = self.max_tokens
+        recovery_notice: str | None = None
+        # Reserve room for the raised cap a cut-off retry may use, as the sbot loop does.
+        ceiling = _compaction_ceiling_chars(effective_model, self.max_recovery_output_tokens, context_window)
         if fallback_available:
             ceiling = min(
                 ceiling,
-                _compaction_ceiling_chars(fallback_model, self.max_tokens, fallback_context_window),
+                _compaction_ceiling_chars(
+                    fallback_model, self.max_recovery_output_tokens, fallback_context_window
+                ),
             )
 
         for _iteration in range(self.max_iterations):
@@ -588,6 +661,12 @@ class AgentLoop:
                 prompt = _prompt_messages(working, base_len, sent_results)
                 size = _prompt_size(prompt)
                 logger.info("Turn {} compacted stale tool results to {} chars", turn_id, size)
+            if recovery_notice:
+                # Sent once, to this request only: it is guidance for the retry, not part of the
+                # conversation, so it never reaches the stored transcript.
+                prompt = [*prompt, {"role": "system", "content": recovery_notice}]
+                size = _prompt_size(prompt)
+                recovery_notice = None
             if not tool_defs_chars:
                 tool_defs_chars = len(json.dumps(definitions, ensure_ascii=False, default=str))
             prompt_chars = max(prompt_chars, size)
@@ -616,9 +695,9 @@ class AgentLoop:
                     max(0, remaining_tokens),
                 )
                 break
-            request_max_tokens = self.max_tokens
+            request_max_tokens = _output_cap(effective_model, request_output_tokens, request_tokens, context_window)
             if remaining_tokens is not None:
-                request_max_tokens = max(1, min(self.max_tokens, remaining_tokens - request_tokens))
+                request_max_tokens = max(1, min(request_max_tokens, remaining_tokens - request_tokens))
             # Text streamed so far this iteration. The user has already seen it,
             # so if the deadline cuts the stream off mid-answer it is kept as
             # the turn's answer rather than thrown away for a bare error.
@@ -805,6 +884,43 @@ class AgentLoop:
             for key in usage_total:
                 usage_total[key] += result.usage.get(key, 0)
 
+            if result.finish_reason in ("length", "max_tokens"):
+                if (
+                    not result.degenerate
+                    and (result.has_tool_calls or not result.content)
+                    and output_continuations < _MAX_OUTPUT_CONTINUATIONS
+                ):
+                    # The response ran into the output cap before saying or doing anything usable
+                    # (typically a reasoning model that spent it all on thinking, or a tool call that
+                    # was cut off mid-argument). Retry with room to spare instead of giving up.
+                    # A cut-off call is NEVER executed: repaired partial arguments are not an
+                    # instruction to run half a script. A runaway repetition loop is not retried
+                    # either — a bigger budget would only feed it.
+                    discarded = [tc.name for tc in result.tool_calls]
+                    output_continuations += 1
+                    request_output_tokens = min(self.max_recovery_output_tokens, request_output_tokens * 2)
+                    logger.warning(
+                        "Turn {} hit its output limit (attempt {}/{}); retrying with up to {} tokens"
+                        "{}",
+                        turn_id,
+                        output_continuations,
+                        _MAX_OUTPUT_CONTINUATIONS,
+                        request_output_tokens,
+                        f" (discarded unfinished call(s): {', '.join(discarded)})" if discarded else "",
+                    )
+                    if result.content:
+                        working.append({"role": "assistant", "content": result.content})
+                    recovery_notice = _OUTPUT_RECOVERY_NOTICE.format(
+                        discarded=(
+                            f"; its tool call(s) were NOT run: {', '.join(discarded)}" if discarded else ""
+                        )
+                    )
+                    continue
+                if result.has_tool_calls:
+                    # Out of retries (or a degenerate stream): still never run a call that may be
+                    # incomplete. The turn ends with whatever text there is, or the length notice.
+                    result.tool_calls = []
+
             if not result.has_tool_calls:
                 # An empty final message is never stored: it renders as a blank
                 # bubble, and it comes back as a content-less assistant turn in
@@ -848,7 +964,8 @@ class AgentLoop:
             for tc in result.tool_calls:
                 tool_call_count += 1
                 tool_executed = False
-                exec_snapshot: dict[str, float] | None = None
+                exec_snapshot: _Snapshot | None = None
+                after_exec: _Snapshot | None = None
                 args_preview = _args_preview(tc.arguments)
                 emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
                 logger.info("Tool call: {}({})", tc.name, args_preview)
@@ -969,7 +1086,9 @@ class AgentLoop:
                                 }
                             )
                         if tc.name == "exec" and self.workspace is not None:
-                            exec_snapshot = _snapshot_workspace(self.workspace)
+                            exec_snapshot = await asyncio.to_thread(
+                                _snapshot_workspace, self.workspace, self.snapshot_max_files
+                            )
                         tool_executed = True
                         tool_result = await self.tools.execute(
                             tc.name, args, progress=_progress, deadline=turn_deadline
@@ -983,14 +1102,22 @@ class AgentLoop:
                             str(args.get("path") or "") if isinstance(args, dict) else "",
                         )
                     elif tc.name == "exec":
-                        after_exec = _snapshot_workspace(self.workspace) if self.workspace else {}
-                        changed = {
-                            path
-                            for path in set(exec_snapshot or {}) | set(after_exec)
-                            if (exec_snapshot or {}).get(path) != after_exec.get(path)
-                        }
-                        for path in changed:
-                            _invalidate_read_cache(successful_tool_results, path)
+                        after_exec = (
+                            await asyncio.to_thread(_snapshot_workspace, self.workspace, self.snapshot_max_files)
+                            if self.workspace
+                            else _Snapshot()
+                        )
+                        if (exec_snapshot is not None and exec_snapshot.truncated) or after_exec.truncated:
+                            # Too many files to tell what the command touched: forget every cached read.
+                            _invalidate_read_cache(successful_tool_results)
+                        else:
+                            changed = {
+                                path
+                                for path in set(exec_snapshot or {}) | set(after_exec)
+                                if (exec_snapshot or {}).get(path) != after_exec.get(path)
+                            }
+                            for path in changed:
+                                _invalidate_read_cache(successful_tool_results, path)
                 from claw.jobs.tool_results import observe
                 await observe(tool_result)
                 if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
@@ -1009,10 +1136,28 @@ class AgentLoop:
                 # Files created/modified by a shell command (e.g. matplotlib
                 # savefig) aren't captured above, so diff the workspace vs the
                 # turn's baseline and surface anything new or freshly changed.
-                elif tc.name == "exec" and self.workspace is not None and not tool_result.startswith("Error"):
-                    for rel, mtime in _snapshot_workspace(self.workspace).items():
-                        if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
-                            written.append(rel)
+                elif (
+                    (tc.name == "exec" or getattr(self.tools.get(tc.name), "writes_workspace", False))
+                    and self.workspace is not None
+                    and not tool_result.startswith("Error")
+                ):
+                    # Reuse the listing taken right after the command when there is one.
+                    current = after_exec
+                    if current is None:
+                        current = await asyncio.to_thread(
+                            _snapshot_workspace, self.workspace, self.snapshot_max_files
+                        )
+                    if baseline.truncated or current.truncated:
+                        if not snapshot_skipped_logged:
+                            snapshot_skipped_logged = True
+                            logger.warning(
+                                "Workspace has more than {} files; not looking for files created by commands this turn",
+                                self.snapshot_max_files,
+                            )
+                    else:
+                        for rel, mtime in current.items():
+                            if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
+                                written.append(rel)
                 # Surface a plan revision to the Execution panel in real time, from
                 # the args the model just sent (already persisted by the tool).
                 elif tc.name == "update_plan" and not tool_result.startswith("Error"):

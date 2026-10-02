@@ -12,12 +12,17 @@ class LLMSettings(BaseModel):
     model: str = "anthropic/claude-sonnet-4-5"
     api_key: str = ""
     api_base: str = ""
-    # Output cap per LLM call. Reasoning models (Qwen3, DeepSeek-R1, …) spend
+    # Output cap per LLM call. Reasoning models (Qwen3, DeepSeek-R1, DeepSeek V4, …) spend
     # this budget on hidden thinking *before* writing any visible answer, so a
     # tight cap makes them return an empty completion (finish_reason="length")
     # rather than a short one — 4096 was low enough to do that on a single
-    # tool-using turn.
-    max_tokens: int = 16384
+    # tool-using turn, and 16384 on a long agentic one. A model's own output limit still
+    # wins when it is lower (the request is clamped to it), so this is safe to raise.
+    max_tokens: int = 32768
+    # When a response is cut off by the cap above (nothing usable written, or a cut-off tool call
+    # that is never run), the agent loop retries up to twice with the cap doubled, never past this
+    # value or the model's own limit. The higher ceiling is only reached after a real truncation.
+    max_recovery_output_tokens: int = 65536
     model_output_limits: dict[str, PositiveInt] = Field(default_factory=dict)
     temperature: float = 0.1
     max_iterations: int = 60
@@ -32,6 +37,12 @@ class LLMSettings(BaseModel):
     artifact_job_max_seconds: float = 1800
     artifact_job_max_tokens: int = 300_000
     artifact_job_max_cost_usd: float = 10.0
+    # A web chat turn that runs out of time or steps while still making progress
+    # (new files, or new successful tool results) is moved into a background
+    # job and continues from its own history under the Background job policy
+    # budget, instead of stopping with "ask me to continue". Each segment must
+    # make progress again or the job stops and reports where it got stuck.
+    auto_continue_turns: bool = True
     # Token budget for the assembled prompt (input side).
     max_context_tokens: int = 60_000
 
@@ -197,6 +208,48 @@ class ConnectorSettings(BaseModel):
     # indefinitely. A config change or explicit invalidate still retries
     # immediately regardless. 0 = retry on every sync (the pre-cooldown behavior).
     error_retry_cooldown_seconds: int = 60
+    # Largest file save_connector_file will copy from a connector into the
+    # workspace (a rendered video, an export). The bytes never pass through the
+    # model; this bounds disk use and how long one tool call can stream.
+    max_download_bytes: int = 100 * 1024 * 1024
+
+
+class WorkspaceSettings(BaseModel):
+    """Per-user workspace storage: size quota, retention and the cleanup sweep.
+
+    The quota/retention fields are the defaults the Control Plane (Preferences >
+    Workspace storage) can override; an override is stored in the database and
+    wins over these, so a change reaches every worker without a restart."""
+
+    # Largest total size of one user's workspace, in MB (0 = unlimited). Checked
+    # before files are written; a command that has already run may overshoot it,
+    # after which further writes are refused until space is freed.
+    quota_mb: int = 2048
+    # Largest number of files in one user's workspace (0 = unlimited).
+    quota_files: int = 50_000
+    # Files under <workspace>/.tmp/ older than this many days are deleted
+    # (0 = never). The agent is told to keep scratch files there.
+    tmp_retention_days: int = 7
+    # User attachments under <workspace>/uploads/ older than this many days are
+    # deleted (0 = never). Generated images (uploads/generated-*) are exempt:
+    # they are chat content and have their own cap (image.max_stored_per_user).
+    uploads_retention_days: int = 7
+    # Master switch for the background cleanup sweep.
+    cleanup_enabled: bool = True
+    # False = observe only: the quota never blocks a write (it logs when it
+    # would have) and the sweep only logs what it would delete. This is the
+    # default so that updating an existing installation never deletes files or
+    # blocks users on its own; `install.sh` writes True into the .env of a
+    # brand-new installation, and an administrator switches it on for an
+    # existing one in the Control Plane once the log looks right.
+    enforce: bool = False
+    # Environment-only knobs (not in the Control Plane):
+    # Time between cleanup sweeps. A sweep only looks at .tmp/ and uploads/.
+    cleanup_interval_minutes: int = 60
+    # Most files the agent loop inspects when it looks for files a command
+    # created. Beyond it that detection is skipped for the turn (the files are
+    # still there) instead of walking an enormous tree after every command.
+    snapshot_max_files: int = 20_000
 
 
 class SchedulerSettings(BaseModel):
@@ -325,6 +378,7 @@ class Settings(BaseSettings):
     connectors: ConnectorSettings = ConnectorSettings()
     image: ImageSettings = ImageSettings()
     tts: TtsSettings = TtsSettings()
+    workspace: WorkspaceSettings = WorkspaceSettings()
 
     @model_validator(mode="after")
     def _default_web_base_url_to_public(self) -> "Settings":
