@@ -236,7 +236,7 @@ docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .
 | `CLAW_SEMANTIC_GUARDRAILS__JEV__MODEL` | `jev-1.13.0` | ชื่อโมเดล |
 | `CLAW_SEMANTIC_GUARDRAILS__LAYA__API_KEY` | ว่าง | key ของ Laya |
 | `CLAW_SEMANTIC_GUARDRAILS__LAYA__ENDPOINT` | `https://genai.softnix.ai/laya/v1/decide` | เงื่อนไขเดียวกับ JEV |
-| `CLAW_SEMANTIC_GUARDRAILS__LAYA__MODEL` | `openthai-systemone` | ชื่อโมเดล |
+| `CLAW_SEMANTIC_GUARDRAILS__LAYA__MODEL` | `iapp/openthai-systemone` | ชื่อโมเดล |
 | `CLAW_SEMANTIC_GUARDRAILS__TIMEOUT_SECONDS` | `5` | เวลารอต่อคำขอ (0–30 วินาที) เกินแล้วปล่อยข้อความผ่าน (fail-open) เพื่อไม่ให้ผู้ใช้ติดค้าง |
 | `CLAW_SEMANTIC_GUARDRAILS__AUTO_FALLBACK` | `true` | ถ้าผู้ให้บริการที่เลือกล้มเหลว (5xx, 429, auth, timeout) และอีกรายมี key อยู่ จะสลับไปใช้อีกรายอัตโนมัติ ตัวที่ล้มเหลวถูกข้ามไป 60 วินาที ตั้ง `false` เพื่อปิด |
 

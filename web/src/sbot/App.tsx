@@ -20,7 +20,7 @@ import { Chat } from "./Chat";
 import { BotGroupEditor, BotGroupHeader, BotGroupNav } from "./BotGroups";
 import { BotEditor } from "./BotEditor";
 import { ErrorText } from "./ErrorText";
-import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
+import { Brand, EleMark, SoftnixLogo, SoftnixMark } from "./Logo";
 import { useBranding, useT } from "../branding";
 import { PasswordField } from "./PasswordField";
 import { botDisplayName } from "./botLabels";
@@ -84,7 +84,11 @@ function SidebarBrand() {
         <span><strong>PrivateClaw</strong><small>Personal AI workspace</small></span>
       </a>
       <a className="claw-mode-menu-item claw-mode-menu-item--active" href="/chat/sbot">
-        <span><strong>SBot</strong><small>Work with your bot team</small></span><span aria-hidden="true">✓</span>
+        <span><strong>SBot</strong><small>Work with your bot team</small></span>
+        <span className="claw-mode-menu-item-trail">
+          <EleMark size={32} />
+          <span aria-hidden="true">✓</span>
+        </span>
       </a>
     </div>
   );

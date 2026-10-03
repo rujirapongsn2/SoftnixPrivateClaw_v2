@@ -37,6 +37,20 @@ export function SoftnixMark({ size = 24 }: { size?: number }) {
   );
 }
 
+
+/** Square Ele mark (blue headphones default) — used on the SBot mode-menu row. */
+export function EleMark({ size = 24 }: { size?: number }) {
+  return (
+    <img
+      src="/ele/mark.png"
+      alt="Ele"
+      width={size}
+      height={size}
+      style={{ width: size, height: size, objectFit: "contain" }}
+    />
+  );
+}
+
 /** Full product lockup shown in the sidebar. */
 export function Brand({ height = 24, name = "PrivateClaw" }: { height?: number; name?: string }) {
   return (

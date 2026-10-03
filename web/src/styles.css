@@ -1292,6 +1292,12 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-mode-menu-item strong { font-size: 14px; }
 .claw-mode-menu-item small { color: var(--color-text-secondary, #777); font-size: 12px; }
 .claw-mode-menu-item--active { background: var(--color-background-section, #f3f1ea); }
+.claw-mode-menu-item-trail {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
 .claw-greeting picture,
 .claw-welcome picture {
   display: block;

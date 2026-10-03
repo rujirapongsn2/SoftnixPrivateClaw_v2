@@ -9,7 +9,7 @@ CLAW_SEMANTIC_GUARDRAILS__JEV__ENDPOINT=https://api.typesafe.ai/v1/systemone
 CLAW_SEMANTIC_GUARDRAILS__JEV__MODEL=jev-1.13.0
 CLAW_SEMANTIC_GUARDRAILS__LAYA__API_KEY=your-key
 CLAW_SEMANTIC_GUARDRAILS__LAYA__ENDPOINT=https://genai.softnix.ai/laya/v1/decide
-CLAW_SEMANTIC_GUARDRAILS__LAYA__MODEL=openthai-systemone
+CLAW_SEMANTIC_GUARDRAILS__LAYA__MODEL=iapp/openthai-systemone
 CLAW_SEMANTIC_GUARDRAILS__TIMEOUT_SECONDS=5
 CLAW_SEMANTIC_GUARDRAILS__AUTO_FALLBACK=true
 CLAW_SEMANTIC_GUARDRAILS__MAX_CHARS=8000
@@ -60,7 +60,7 @@ Internal-access and PII templates judge explicit textual evidence, not actual au
 
 The Guardrails page separates Keyword/Regex and Semantic rules into tabs. Semantic templates and saved rules are shown in group cards. Choose a template to open its editor; select a group when authoring a custom rule. The group is persisted with the rule and is organizational only; it does not change the semantic judgment or enforcement mode. Legacy rules without a group use a matching template name, or Custom rules.
 
-The `laya` provider and `LAYA` environment prefix remain as compatibility identifiers. Its default model is now `openthai-systemone`. An upstream response with `usage.truncated_state: true` is logged as skipped with reason `truncated_state`; no scores or alerts from partial input are accepted.
+The `laya` provider and `LAYA` environment prefix remain as compatibility identifiers. Its default model is now `iapp/openthai-systemone`. An upstream response with `usage.truncated_state: true` is logged as skipped with reason `truncated_state`; no scores or alerts from partial input are accepted.
 
 ## Actions (phase 1)
 
