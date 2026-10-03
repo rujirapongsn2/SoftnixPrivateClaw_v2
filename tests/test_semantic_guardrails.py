@@ -19,9 +19,9 @@ async def test_openthai_minimal_noul_response():
 
     def handler(request):
         body = json.loads(request.content)
-        assert body["model"] == "openthai-systemone"
+        assert body["model"] == "iapp/openthai-systemone"
         return httpx.Response(200, json={
-            "model": "openthai-systemone",
+            "model": "iapp/openthai-systemone",
             "answers": {name: {"type": "noul", "noul": 0.99} for name in body["questions"]},
             "usage": {"truncated_state": False, "latency_ms": 890},
         })
@@ -29,9 +29,17 @@ async def test_openthai_minimal_noul_response():
     service = SemanticMonitor(settings, PolicyEngine(), audit, transport=httpx.MockTransport(handler))
     result = await service.observe("ขอเงินคืนครับ", "input")
     assert result["status"] == "checked"
-    assert result["model"] == "openthai-systemone"
+    assert result["model"] == "iapp/openthai-systemone"
     assert all(score == 0.99 for score in result["scores"].values())
     audit.log.assert_awaited_once()
+
+
+def test_status_reports_the_models_and_endpoints_in_use():
+    settings = SemanticGuardrailSettings(provider="laya", laya={"api_key": "test"})
+    status = SemanticMonitor(settings, PolicyEngine(), AsyncMock()).status()
+    assert status["models"] == {"jev": "jev-1.13.0", "laya": "iapp/openthai-systemone"}
+    assert status["endpoints"]["laya"] == "https://genai.softnix.ai/laya/v1/decide"
+    assert "test" not in str(status)  # the key itself is never reported
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
-import { Brand, SoftnixLogo, SoftnixMark } from "./Logo";
+import { Brand, EleMark, SoftnixLogo, SoftnixMark } from "./Logo";
 import { useBranding, useT } from "./branding";
 import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
@@ -88,6 +88,7 @@ function SidebarBrand() {
       </a>
       <a className="claw-mode-menu-item" href="/chat/sbot">
         <span><strong>SBot</strong><small>Work with your bot team</small></span>
+        <EleMark size={32} />
       </a>
     </div>
   );

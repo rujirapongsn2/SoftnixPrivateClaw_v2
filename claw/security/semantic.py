@@ -41,7 +41,7 @@ class JevConnection(SemanticConnection):
 
 class LayaConnection(SemanticConnection):
     endpoint: str = "https://genai.softnix.ai/laya/v1/decide"
-    model: str = Field(default="openthai-systemone", min_length=1)
+    model: str = Field(default="iapp/openthai-systemone", min_length=1)
 
 
 _FAILOVER_COOLDOWN = 60.0
@@ -128,6 +128,14 @@ class SemanticMonitor:
             "mode": "monitor",
             "status": status,
             "configured": configured,
+            "models": {
+                "jev": self.settings.jev.model,
+                "laya": self.settings.laya.model,
+            },
+            "endpoints": {
+                "jev": self.settings.jev.endpoint,
+                "laya": self.settings.laya.endpoint,
+            },
             "last_error": self.last_error,
             "scopes": ["input", "output"],
             "fallback": fallback,
