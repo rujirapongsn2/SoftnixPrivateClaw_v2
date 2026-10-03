@@ -20,10 +20,10 @@ export function SoftnixLogo({
   return <img src={src} alt="Softnix" height={height} style={{ height, width: "auto" }} />;
 }
 
-/** Icon-only mark (crescent + "S"), cropped from the full wordmark — square,
- * so it fits cleanly in tight slots like the collapsed sidebar rail where the
- * full wordmark would get clipped/squeezed. Uses the admin sidebar logo when
- * set, contained within the square so a non-square upload still fits. */
+/** Icon-only Softnix mark (Ele fluffy default) — square, so it fits cleanly
+ * in tight slots like the collapsed sidebar rail where the full wordmark
+ * would get clipped/squeezed. Uses the admin sidebar logo when set,
+ * contained within the square so a non-square upload still fits. */
 export function SoftnixMark({ size = 24 }: { size?: number }) {
   const src = useLogoSrc("sidebar", "/logo-softnix-mark.png");
   return (
@@ -37,7 +37,20 @@ export function SoftnixMark({ size = 24 }: { size?: number }) {
   );
 }
 
-/** Full product lockup shown in the sidebar. */
+/** Square Ele mark (blue headphones default) — matches SoftnixMark sizing. */
+export function EleMark({ size = 24 }: { size?: number }) {
+  return (
+    <img
+      src="/ele/mark.png"
+      alt="Ele"
+      width={size}
+      height={size}
+      style={{ width: size, height: size, objectFit: "contain" }}
+    />
+  );
+}
+
+/** Full product lockup shown in the sidebar (SBot mode): Softnix + SBot. */
 export function Brand({ height = 24, name = "SBot" }: { height?: number; name?: string }) {
   return (
     <span className="claw-brand">

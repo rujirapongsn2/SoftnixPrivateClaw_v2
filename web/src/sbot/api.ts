@@ -66,7 +66,7 @@ export interface BotInfo {
   tool_allowlist?: string[] | null;
   skill_ids?: string[] | null;
   kind: "chief_of_staff" | "specialist";
-  // `variant` names an illustrated face (see BotAvatar). `color`/`emoji` are
+  // `variant` names an Ele accessory avatar (see BotAvatar). `color`/`emoji` are
   // what bots were given before those existed, and are still what the server
   // writes on create — a bot without a variant is dealt one from its id.
   avatar?: { variant?: string; color?: string; emoji?: string; initial?: string } | null;
