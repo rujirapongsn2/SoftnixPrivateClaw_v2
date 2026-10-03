@@ -4043,6 +4043,8 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 4px;
   min-width: 0;
 }
+.claw-artifact-card--archived { border-style: dashed; }
+.claw-artifact-card.claw-artifact-card--archived:hover { border-color: var(--color-border-subtle, #e8e7e4); box-shadow: none; }
 .claw-artifact-card:hover {
   border-color: var(--color-primary, #2786c2);
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08);
@@ -5039,3 +5041,15 @@ html[data-chat-bg="grid"] .claw-chat {
   .claw-guardrails-tabs { width: 100%; }
   .claw-guardrails-tabs button { flex: 1; padding-inline: 10px; }
 }
+
+.claw-files-backdrop { position: fixed; inset: 0; z-index: 1000; background: #0008; display: grid; place-items: center; padding: 1rem; }
+.claw-files-dialog { box-sizing: border-box; background: var(--surface, #fff); color: var(--text, #17202a); width: min(860px, 100%); max-height: 85vh; overflow: auto; border-radius: 16px; padding: 1.5rem; }
+.claw-files-dialog header, .claw-files-dialog article { display: flex; align-items: center; gap: .75rem; }
+.claw-files-dialog header { justify-content: space-between; }
+.claw-files-dialog nav { display: flex; gap: .5rem; margin-bottom: 1rem; }
+.claw-files-dialog article { border-top: 1px solid #8884; padding: .8rem 0; flex-wrap: wrap; }
+.claw-files-dialog article span { flex: 1; min-width: 180px; overflow-wrap: anywhere; }
+.claw-files-dialog small { display: block; opacity: .7; font-size: .8rem; }
+.claw-files-dialog button { border: 1px solid #8886; background: transparent; color: inherit; border-radius: 8px; padding: .4rem .7rem; cursor: pointer; }
+.claw-files-dialog button:disabled { opacity: .45; cursor: default; }
+.claw-files-zone { display: inline-block; align-self: flex-start; width: fit-content; margin-right: .4rem; padding: 0 .4rem; border-radius: 999px; background: var(--color-accent-muted, #2786c21a); color: var(--color-text-primary, #1c1a18); font-weight: 600; }

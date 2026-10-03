@@ -24,6 +24,10 @@ class WorkspacePolicy(BaseModel):
     quota_files: int = Field(default=50_000, ge=0, le=1_000_000_000)
     tmp_retention_days: int = Field(default=7, ge=0, le=3650)
     uploads_retention_days: int = Field(default=7, ge=0, le=3650)
+    ai_retention_days: int = Field(default=30, ge=0, le=3650)
+    trash_retention_days: int = Field(default=30, ge=1, le=3650)
+    trash_cap_mb: int = Field(default=1024, ge=0, le=100_000_000)
+    permanent_delete_enabled: bool = True
     cleanup_enabled: bool = True
     # False = observe only (see WorkspaceSettings.enforce).
     enforce: bool = False
@@ -47,6 +51,10 @@ class WorkspacePolicyStore:
             quota_files=s.quota_files,
             tmp_retention_days=s.tmp_retention_days,
             uploads_retention_days=s.uploads_retention_days,
+            ai_retention_days=s.ai_retention_days,
+            trash_retention_days=s.trash_retention_days,
+            trash_cap_mb=s.trash_cap_mb,
+            permanent_delete_enabled=s.permanent_delete_enabled,
             cleanup_enabled=s.cleanup_enabled,
             enforce=s.enforce,
         )
@@ -62,8 +70,11 @@ class WorkspacePolicyStore:
             row = await db.get(AppSetting, KEY)
         policy = self.defaults()
         if row is not None and isinstance((row.value or {}).get("policy"), dict):
+            # A saved row predates any field added since; those take the
+            # environment default, and fields since removed are dropped.
+            stored = {k: v for k, v in row.value["policy"].items() if k in WorkspacePolicy.model_fields}
             try:
-                policy = WorkspacePolicy.model_validate(row.value["policy"])
+                policy = WorkspacePolicy.model_validate({**policy.model_dump(), **stored})
             except ValueError:
                 # A bad stored value must not take storage limits down with it.
                 policy = self.defaults()

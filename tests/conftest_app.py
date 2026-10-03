@@ -103,6 +103,9 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         shares=ShareStore(db_factory),
         workspace_policy=WorkspacePolicyStore(db_factory, settings),
     )
+    from claw.api.files import create_files_router
+    from claw.api.deps import current_user, get_state
+    app.include_router(create_files_router(get_state, current_user, "privateclaw"))
     return app
 
 
