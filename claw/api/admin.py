@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 import openpyxl
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
@@ -233,7 +233,7 @@ async def update_user(
 
 @router.delete("/users/{user_id}")
 async def delete_user(
-    user_id: str, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
+    user_id: str, request: Request, admin: User = Depends(require_admin), state: AppState = Depends(get_state)
 ) -> dict:
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="you cannot delete your own account")
@@ -244,6 +244,9 @@ async def delete_user(
     if target.is_admin and await state.users.count_admins() <= 1:
         raise HTTPException(status_code=400, detail="cannot delete the last administrator")
     await state.users.delete(user_id)
+    from claw.workspace.lifecycle import purge_user_files, workspace_roots
+
+    await purge_user_files(workspace_roots(request.app) or [state.settings.workspaces_root], user_id)
     return {"deleted": True}
 
 

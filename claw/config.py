@@ -227,24 +227,33 @@ class WorkspaceSettings(BaseModel):
     quota_mb: int = 2048
     # Largest number of files in one user's workspace (0 = unlimited).
     quota_files: int = 50_000
-    # Files under <workspace>/.tmp/ older than this many days are deleted
-    # (0 = never). The agent is told to keep scratch files there.
+    # Retention per zone, by file modification time (0 = never). An expired
+    # file moves to a recoverable trash; see claw/workspace/lifecycle.py.
+    # Scratch space under <workspace>/.tmp/.
     tmp_retention_days: int = 7
-    # User attachments under <workspace>/uploads/ older than this many days are
-    # deleted (0 = never). Generated images (uploads/generated-*) are exempt:
-    # they are chat content and have their own cap (image.max_stored_per_user).
+    # Files the user attached, under <workspace>/uploads/ (not generated-*).
     uploads_retention_days: int = 7
+    # Everything the agent produced: the workspace root, outputs/, downloads/,
+    # uploads/generated-* and any other folder that is not a system folder.
+    ai_retention_days: int = 30
+    # Days a trashed file stays recoverable before it is purged (at least 1).
+    trash_retention_days: int = Field(default=30, ge=1)
+    # Largest trash per user in MB; the oldest entries are purged first beyond
+    # it (0 = unlimited). Disk per user stays within quota_mb + trash_cap_mb.
+    trash_cap_mb: int = 1024
+    # Whether a user may permanently delete a file from their own trash at once.
+    permanent_delete_enabled: bool = True
     # Master switch for the background cleanup sweep.
     cleanup_enabled: bool = True
     # False = observe only: the quota never blocks a write (it logs when it
-    # would have) and the sweep only logs what it would delete. This is the
+    # would have) and the sweep only logs what it would trash and purge. This is the
     # default so that updating an existing installation never deletes files or
     # blocks users on its own; `install.sh` writes True into the .env of a
     # brand-new installation, and an administrator switches it on for an
     # existing one in the Control Plane once the log looks right.
     enforce: bool = False
     # Environment-only knobs (not in the Control Plane):
-    # Time between cleanup sweeps. A sweep only looks at .tmp/ and uploads/.
+    # Time between cleanup sweeps.
     cleanup_interval_minutes: int = 60
     # Most files the agent loop inspects when it looks for files a command
     # created. Beyond it that detection is skipped for the turn (the files are

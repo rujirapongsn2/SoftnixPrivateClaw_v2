@@ -3,6 +3,9 @@ separate resolvers), provider generate_image extraction (both paths), and the
 one-shot /images endpoint that runs outside the agent loop."""
 
 import base64
+import os
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from claw.core.limits import RateLimiter
@@ -236,6 +239,38 @@ async def test_images_endpoint_generates_and_persists(db_factory, monkeypatch):
         msgs = await c.get(f"/api/sessions/{session.id}/messages", headers=headers)
         assistant = [m for m in msgs.json() if m["role"] == "assistant"]
         assert any(path in (m.get("meta") or {}).get("artifacts", []) for m in assistant)
+
+
+async def test_images_endpoint_keeps_only_newest_generated_images(db_factory, tmp_path):
+    app = build_api_app(db_factory, workspaces_root=tmp_path)
+    app.state.claw.settings.image.max_stored_per_user = 2
+    async with client(app) as c:
+        reg = await c.post("/api/auth/register", json={"email": "cap@x.io", "password": "password123"})
+        uid = reg.json()["user"]["id"]
+        headers = {"Authorization": f"Bearer {reg.json()['access_token']}"}
+        await _add_model(app.state.claw.llm_config, "vendor/pixel-1", "image")
+        session = await app.state.claw.sessions.create(uid, "cap")
+
+        async def fake_generate_image(prompt, model, **kwargs):
+            return [(_PNG, "png")]
+
+        app.state.claw.runtime = SimpleNamespace(provider=SimpleNamespace(generate_image=fake_generate_image))
+
+        paths = []
+        for i in range(4):
+            r = await c.post(
+                f"/api/sessions/{session.id}/images",
+                json={"model": "vendor/pixel-1", "prompt": f"image {i}"},
+                headers=headers,
+            )
+            assert r.status_code == 200, r.text
+            paths.append(r.json()["path"])
+            # Distinct, increasing mtimes so "newest" is unambiguous.
+            stamp = time.time() - 1000 + i
+            os.utime(tmp_path / uid / paths[-1], (stamp, stamp))
+
+        kept = sorted(p.name for p in (tmp_path / uid / "uploads").glob("generated-*"))
+        assert kept == sorted(Path(p).name for p in paths[-2:])
 
 
 async def test_images_endpoint_rejects_chat_model(db_factory):

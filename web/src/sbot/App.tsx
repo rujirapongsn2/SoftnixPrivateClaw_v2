@@ -1,3 +1,5 @@
+import { FileManager } from '../FileManager';
+import { HardDrive } from 'lucide-react';
 import { Button } from "@astryxdesign/core/Button";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
@@ -706,6 +708,7 @@ export default function App() {
     if (!user) return;
     void api.mySettingsAcl().then((r) => setHiddenSettings(r.hidden)).catch(() => setHiddenSettings([]));
   }, [user?.id]);
+  const [filesOpen, setFilesOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
@@ -1092,6 +1095,7 @@ export default function App() {
         footer={
           <div className="claw-sidenav-footer">
             <SideNavItem label={user.display_name || user.email} icon={UserIcon}>
+              <SideNavItem label={t("nav.files")} icon={HardDrive} onClick={() => { setFilesOpen(true); closeDrawer(); }} />
               <SideNavItem
                 label={t("nav.settings")}
                 icon={SettingsIcon}
@@ -1175,6 +1179,7 @@ export default function App() {
         />
       </SideNav>
 
+      {filesOpen && <FileManager mode="sbot" onClose={() => setFilesOpen(false)} />}
       <main className="claw-main">
         {/* Mobile top bar: only shown ≤1024px (CSS), gives a way to open the
             drawer since the sidebar is off-canvas there. */}

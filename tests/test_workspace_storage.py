@@ -12,9 +12,7 @@ from claw.config import Settings, WorkspaceSettings
 from claw.core.loop import _Snapshot, _snapshot_workspace
 from claw.tools.filesystem import WriteFileTool
 from claw.tools.registry import ToolRegistry
-from claw.workspace.cleanup import WorkspaceCleanupService, sweep_workspace
 from claw.workspace.policy import WorkspacePolicy, WorkspacePolicyStore
-from claw.workspace.session_files import candidate_paths, remove_files
 from claw.workspace.usage import WorkspaceAccounts, is_cleanup_command, measure
 from tests.conftest_app import build_api_app, client
 from tests.test_manage import _bearer, _register
@@ -239,6 +237,20 @@ async def test_policy_defaults_come_from_the_environment_and_overrides_persist(d
     assert other.defaults().quota_mb == 10
 
 
+async def test_a_stored_policy_survives_fields_added_and_removed_since(db_factory):
+    from claw.db.models import AppSetting
+
+    stored = {"quota_mb": 77, "enforce": True, "file_lifecycle_enabled": True, "trash_grace_days": 9}
+    async with db_factory() as db:
+        db.add(AppSetting(key="workspace_policy", value={"policy": stored}))
+        await db.commit()
+    settings = Settings(_env_file=None, workspace=WorkspaceSettings(ai_retention_days=12, trash_cap_mb=5))
+    policy = await WorkspacePolicyStore(db_factory, settings, ttl=0).effective()
+    assert (policy.quota_mb, policy.enforce) == (77, True)
+    assert (policy.ai_retention_days, policy.trash_cap_mb, policy.trash_retention_days) == (12, 5, 30)
+    assert policy.permanent_delete_enabled is True
+
+
 async def test_a_corrupt_stored_policy_falls_back_to_defaults(db_factory):
     from claw.db.models import AppSetting
 
@@ -252,160 +264,7 @@ async def test_a_corrupt_stored_policy_falls_back_to_defaults(db_factory):
 # ---------------------------------------------------------------- cleanup
 
 
-def test_sweep_deletes_only_expired_scratch_and_attachments(tmp_path):
-    now = time.time()
-    _write(tmp_path / ".tmp" / "old.txt", 5, days_old=8)
-    _write(tmp_path / ".tmp" / "deep" / "old2.txt", 5, days_old=30)
-    _write(tmp_path / ".tmp" / "fresh.txt", 5, days_old=1)
-    _write(tmp_path / "uploads" / "ab12cd34-report.pdf", 7, days_old=8)
-    _write(tmp_path / "uploads" / "ab12cd35-new.pdf", 7, days_old=2)
-    _write(tmp_path / "uploads" / "generated-1.png", 9, days_old=60)
-    _write(tmp_path / "report.xlsx", 9, days_old=60)
-    _write(tmp_path / "downloads" / "video.mp4", 9, days_old=60)
-    _age(tmp_path / ".tmp" / "deep", 30)
-
-    result = sweep_workspace(tmp_path, now=now, tmp_days=7, uploads_days=7)
-
-    assert (result.files, result.bytes) == (3, 17)
-    assert sorted(result.paths) == [".tmp/deep/old2.txt", ".tmp/old.txt", "uploads/ab12cd34-report.pdf"]
-    survivors = {str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file()}
-    assert survivors == {
-        ".tmp/fresh.txt", "uploads/ab12cd35-new.pdf", "uploads/generated-1.png", "report.xlsx", "downloads/video.mp4",
-    }
-    # The emptied folder goes on a later pass, once it has sat untouched for a while.
-    assert (tmp_path / ".tmp" / "deep").exists()
-    _age(tmp_path / ".tmp" / "deep", 1)
-    sweep_workspace(tmp_path, now=now, tmp_days=7, uploads_days=7)
-    assert not (tmp_path / ".tmp" / "deep").exists()
-    assert (tmp_path / ".tmp").exists()
-
-
-def test_sweep_dry_run_and_disabled_categories(tmp_path):
-    _write(tmp_path / ".tmp" / "old.txt", 5, days_old=30)
-    _write(tmp_path / "uploads" / "old.pdf", 5, days_old=30)
-
-    dry = sweep_workspace(tmp_path, now=time.time(), tmp_days=7, uploads_days=7, dry_run=True)
-    assert dry.files == 2 and (tmp_path / ".tmp" / "old.txt").exists()
-
-    only_tmp = sweep_workspace(tmp_path, now=time.time(), tmp_days=7, uploads_days=0)
-    assert only_tmp.files == 1 and (tmp_path / "uploads" / "old.pdf").exists()
-    assert sweep_workspace(tmp_path, now=time.time(), tmp_days=0, uploads_days=0).files == 0
-
-
-def test_sweep_never_follows_links_out_of_the_workspace(tmp_path):
-    victim = _write(tmp_path / "victim" / "keep.txt", 5, days_old=90)
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    (workspace / ".tmp").symlink_to(victim.parent)  # the scratch folder itself is a link
-    (workspace / "uploads").mkdir()
-    (workspace / "uploads" / "link.pdf").symlink_to(victim)
-    _age(workspace / "uploads" / "link.pdf", 90)
-
-    assert sweep_workspace(workspace, now=time.time(), tmp_days=7, uploads_days=7).files == 0
-    assert victim.exists()
-
-    (workspace / ".tmp").unlink()
-    (workspace / ".tmp").mkdir()
-    (workspace / ".tmp" / "inner-link").symlink_to(victim)
-    _age(workspace / ".tmp" / "inner-link", 90)
-    assert sweep_workspace(workspace, now=time.time(), tmp_days=7, uploads_days=7).files == 0
-    assert victim.exists()
-
-
-async def test_cleanup_service_pass_covers_user_workspaces_only(tmp_path):
-    user = "0123456789abcdef0123456789abcdef"
-    _write(tmp_path / user / ".tmp" / "old.txt", 5, days_old=30)
-    _write(tmp_path / "_browser_broker" / ".tmp" / "old.txt", 5, days_old=30)
-    _write(tmp_path / "not-a-user" / ".tmp" / "old.txt", 5, days_old=30)
-    settings = Settings(_env_file=None)
-    audited = []
-
-    class Audit:
-        async def log(self, kind, payload, **_):
-            audited.append((kind, payload))
-
-    service = WorkspaceCleanupService(tmp_path, FixedPolicies(), settings, Audit())
-
-    result = await service.run_once()
-
-    assert result.files == 1
-    assert not (tmp_path / user / ".tmp" / "old.txt").exists()
-    assert (tmp_path / "_browser_broker" / ".tmp" / "old.txt").exists()
-    assert (tmp_path / "not-a-user" / ".tmp" / "old.txt").exists()
-    assert audited == [
-        ("workspace_cleanup", {"files": 1, "bytes": 5, "workspaces": 1, "paths": [f"{user}/.tmp/old.txt"]})
-    ]
-
-
-async def test_cleanup_service_respects_the_switch_and_dry_run(tmp_path):
-    user = "0123456789abcdef0123456789abcdef"
-    _write(tmp_path / user / ".tmp" / "old.txt", 5, days_old=30)
-
-    off = WorkspaceCleanupService(tmp_path, FixedPolicies(cleanup_enabled=False), Settings(_env_file=None))
-    assert (await off.run_once()).files == 0
-
-    # Observe-only (enforcement not switched on): it reports, it does not delete.
-    dry = WorkspaceCleanupService(tmp_path, FixedPolicies(enforce=False), Settings(_env_file=None))
-    assert (await dry.run_once()).files == 1
-    assert (tmp_path / user / ".tmp" / "old.txt").exists()
-
-
 # ------------------------------------------------- files of a deleted chat
-
-
-def test_candidate_paths_from_a_chat_record():
-    hints = {
-        "meta": [{"artifacts": ["report.xlsx", "uploads/generated-1.png"]}, {"image_model": "x"}],
-        "tool_calls": [
-            [{"function": {"name": "write_file", "arguments": json.dumps({"path": "build.py", "content": "x"})}}],
-            [{"function": {"name": "generate_workbook", "arguments": json.dumps({"output": "out/data.xlsx"})}}],
-            [{"function": {"name": "exec", "arguments": json.dumps({"command": "rm -rf /"})}}],
-            [{"function": {"name": "write_file", "arguments": "{not json"}}],
-        ],
-        "user_text": ["see this\n\n[Attached: ab12cd34-a.pdf, ab12cd35-b b.png]"],
-    }
-    assert candidate_paths(hints) == [
-        "report.xlsx", "uploads/generated-1.png", "build.py", "out/data.xlsx",
-        "uploads/ab12cd34-a.pdf", "uploads/ab12cd35-b b.png",
-    ]
-
-
-def test_a_file_the_chat_only_edited_is_not_its_to_delete():
-    def call(name, **args):
-        return {"function": {"name": name, "arguments": json.dumps(args)}}
-
-    hints = {
-        # Every edited file is also surfaced as a chip, so the chip must not count as proof of creation.
-        "meta": [{"artifacts": ["notes.md", "made.py", "from-shell.png", "rewritten.txt"]}],
-        "tool_calls": [
-            [call("edit_file", path="notes.md", old_text="a", new_text="b")],
-            [call("write_file", path="made.py", content="x"), call("edit_file", path="made.py", old_text="x", new_text="y")],
-            [call("edit_file", path="rewritten.txt", old_text="a", new_text="b"), call("write_file", path="rewritten.txt", content="z")],
-        ],
-    }
-    # notes.md and rewritten.txt were first touched by an edit (they pre-dated the chat);
-    # made.py was created here; from-shell.png has no tool call, so a chip is all there is.
-    assert candidate_paths(hints) == ["made.py", "from-shell.png"]
-
-
-def test_remove_files_is_confined_and_cautious(tmp_path):
-    workspace = tmp_path / "ws"
-    outside = _write(tmp_path / "outside.txt", 5)
-    mine = _write(workspace / "mine.txt", 5, days_old=1)
-    later = _write(workspace / "later.txt", 5)  # touched after the chat ended
-    (workspace / "folder").mkdir()
-    (workspace / "link.txt").symlink_to(outside)
-    (workspace / "dirlink").symlink_to(outside.parent)
-
-    deleted, freed = remove_files(
-        workspace,
-        ["mine.txt", "later.txt", "folder", "link.txt", "dirlink/outside.txt", "../outside.txt", "missing.txt"],
-        not_modified_after=time.time() - 3600,
-    )
-
-    assert (deleted, freed) == (1, 5)
-    assert not mine.exists() and later.exists() and outside.exists() and (workspace / "folder").is_dir()
-    assert (workspace / "link.txt").is_symlink()
 
 
 async def test_deleting_a_chat_removes_its_files_and_keeps_shared_ones(db_factory, tmp_path):
@@ -435,7 +294,7 @@ async def test_deleting_a_chat_removes_its_files_and_keeps_shared_ones(db_factor
 
         assert (await c.delete(f"/api/sessions/{doomed}", headers=_bearer(token))).json() == {"deleted": True}
 
-    assert not mine.exists() and not script.exists() and not attachment.exists()
+    assert mine.exists() and script.exists() and attachment.exists()
     assert shared.exists()  # another chat still shows it
     assert rewritten.exists()  # modified after the chat ended
     assert unrelated.exists()
@@ -472,27 +331,9 @@ async def test_deleting_a_chat_keeps_files_it_only_edited_or_shared_through_tool
 
         await c.delete(f"/api/sessions/{doomed}", headers=_bearer(token))
 
-    assert not created.exists()
+    assert created.exists()
     assert edited.exists()  # this chat only edited it
     assert both.exists()  # another chat still works on it
-
-
-async def test_a_failure_cleaning_files_never_fails_the_delete(db_factory, tmp_path, monkeypatch):
-    app = build_api_app(db_factory, workspaces_root=tmp_path / "w")
-    import claw.workspace.session_files as session_files
-
-    def boom(*_a, **_k):
-        raise OSError("disk on fire")
-
-    monkeypatch.setattr(session_files, "remove_files", boom)
-    async with client(app) as c:
-        token, user = await _register(c, "cleanup-fail@example.com")
-        _write(tmp_path / "w" / user["id"] / "a.txt", 5, days_old=1)
-        sid = (await c.post("/api/sessions", json={"title": "t"}, headers=_bearer(token))).json()["id"]
-        await app.state.claw.messages.append(sid, [{"role": "assistant", "content": "x", "meta": {"artifacts": ["a.txt"]}}])
-        response = await c.delete(f"/api/sessions/{sid}", headers=_bearer(token))
-        assert response.status_code == 200 and response.json() == {"deleted": True}
-        assert (await c.get("/api/sessions", headers=_bearer(token))).json() == []
 
 
 # ------------------------------------------------------------ API surface

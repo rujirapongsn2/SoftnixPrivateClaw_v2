@@ -367,3 +367,45 @@ async def test_project_container_setting_persists(integrated):
     assert value["enabled"] is False
     assert value["public_ingress_enabled"] is True
     assert value["host_bind_ip"] == "192.168.1.24"
+
+
+async def test_sbot_files_survive_chat_deletion_and_keep_mode_boundaries(integrated):
+    app, c, user = integrated
+    sid = (await c.post('/modes/sbot/api/sessions', json={})).json()['id']
+    path = 'รายงาน café.txt'
+    ws = app.state.sbot.settings.workspaces_root / user.id
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / path).write_text('ข้อมูลทีม', encoding='utf-8')
+    await app.state.sbot.messages.append(sid, [{'role': 'assistant', 'content': 'report',
+                                              'meta': {'artifacts': [path]}}])
+    assert (await c.delete('/modes/sbot/api/sessions/' + sid)).status_code == 200
+    assert await app.state.sbot.messages.recent(sid) == []
+    assert (await c.get('/modes/sbot/api/files/download/' + path)).text == 'ข้อมูลทีม'
+    assert (await c.get('/api/files/download/' + path)).status_code == 404
+    entry = (await c.post('/modes/sbot/api/files/trash', json={'path': path})).json()
+    assert entry['rule'] == 'user'
+    assert (await c.post('/api/files/trash/' + entry['id'] + '/restore')).status_code == 404
+    assert (await c.post('/modes/sbot/api/files/trash/' + entry['id'] + '/restore')).status_code == 200
+    assert (ws / path).read_text(encoding='utf-8') == 'ข้อมูลทีม'
+
+
+async def test_deleting_an_account_clears_files_under_both_roots(integrated):
+    from claw.workspace.lifecycle import FileLifecycle, control_root
+
+    app, c, admin = integrated
+    host, mode = app.state.claw, app.state.sbot
+    await host.users.update_flags(admin.id, is_admin=True)
+    leaving = await host.users.get_or_create_by_email("leaving@example.test")
+    for state, name in ((host, "privateclaw"), (mode, "sbot")):
+        ws = state.settings.workspaces_root / leaving.id
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "kept.txt").write_text("x")
+        (ws / "trashed.txt").write_text("y")
+        await FileLifecycle(state, name).trash(leaving.id, "trashed.txt", actor=leaving.id)
+    controls = [control_root(s.settings.workspaces_root, leaving.id) for s in (host, mode)]
+
+    assert (await c.delete(f"/api/admin/users/{leaving.id}")).status_code == 200
+
+    for state in (host, mode):
+        assert not (state.settings.workspaces_root / leaving.id).exists()
+    assert not any(control.exists() for control in controls)

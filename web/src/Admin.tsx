@@ -6314,6 +6314,9 @@ function WorkspacePolicyPanel() {
     ["quota_files", "admin.workspacePolicy.quotaFiles", "admin.workspacePolicy.quotaFilesHint"],
     ["tmp_retention_days", "admin.workspacePolicy.tmpDays", "admin.workspacePolicy.tmpDaysHint"],
     ["uploads_retention_days", "admin.workspacePolicy.uploadsDays", "admin.workspacePolicy.uploadsDaysHint"],
+    ["ai_retention_days", "admin.workspacePolicy.aiDays", "admin.workspacePolicy.aiDaysHint"],
+    ["trash_retention_days", "admin.workspacePolicy.trashDays", "admin.workspacePolicy.trashDaysHint"],
+    ["trash_cap_mb", "admin.workspacePolicy.trashCapMb", "admin.workspacePolicy.trashCapMbHint"],
   ] as const;
   return (
     <Card padding={2} className="claw-team-policy-card">
@@ -6328,8 +6331,11 @@ function WorkspacePolicyPanel() {
       {policy && (
         <form className="claw-team-policy-form" onSubmit={async e => {
           e.preventDefault(); setBusy(true); setError(""); setSaved(false);
+          // The server rejects a trash retention below 1 day.
+          const normalized = {...policy, trash_retention_days: Math.max(1, policy.trash_retention_days || 1)};
+          setPolicy(normalized);
           try {
-            const {defaults: d, ...next} = await api.adminSaveWorkspacePolicy(policy);
+            const {defaults: d, ...next} = await api.adminSaveWorkspacePolicy(normalized);
             setPolicy(next); setDefaults(d); setSaved(true);
           } catch (e) { setError(String(e)); } finally { setBusy(false); }
         }}>
@@ -6342,6 +6348,12 @@ function WorkspacePolicyPanel() {
             />
           </div>
           <div className="claw-team-policy-switch">
+            <CheckboxInput
+              label={t("admin.workspacePolicy.permanentDelete")}
+              description={t("admin.workspacePolicy.permanentDeleteDescription")}
+              value={policy.permanent_delete_enabled}
+              onChange={(permanent_delete_enabled) => { setPolicy({...policy, permanent_delete_enabled}); setSaved(false); }}
+            />
             <CheckboxInput
               label={t("admin.workspacePolicy.cleanup")}
               description={t("admin.workspacePolicy.cleanupDescription")}
@@ -6361,7 +6373,7 @@ function WorkspacePolicyPanel() {
                   <input
                     type="number"
                     required
-                    min={0}
+                    min={key === "trash_retention_days" ? 1 : 0}
                     step={1}
                     value={policy[key]}
                     onChange={e => { setPolicy({...policy, [key]: Math.max(0, Math.trunc(Number(e.target.value)))}); setSaved(false); }}

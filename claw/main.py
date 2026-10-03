@@ -183,7 +183,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     workspace_policy = WorkspacePolicyStore(factory, settings)
     runtime.workspace_accounts = WorkspaceAccounts(settings.workspaces_root, workspace_policy)
-    workspace_cleanup = WorkspaceCleanupService(settings.workspaces_root, workspace_policy, settings, audit)
 
     async def _heartbeat_turn(user_id: str, session_id: str, prompt: str) -> str | None:
         return await runtime.handle_message(user_id, session_id, prompt, channel="heartbeat")
@@ -359,6 +358,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         jobs=jobs,
         workspace_policy=workspace_policy,
     )
+    from claw.workspace.lifecycle import FileLifecycle
+
+    workspace_cleanup = WorkspaceCleanupService(FileLifecycle(app.state.claw, "privateclaw"), workspace_policy, settings)
     app.state.claw.blueprints = blueprints
     from sbot.api.blueprints import router as blueprint_router
     app.include_router(blueprint_router)
@@ -419,6 +421,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(connector_oauth_router)
     app.include_router(knowledge_router)
     app.include_router(project_containers_router)
+    from claw.api.files import create_files_router
+    from claw.api.deps import current_user, get_state
+    app.include_router(create_files_router(get_state, current_user, 'privateclaw'))
     app.include_router(router)
     from claw.jobs.api import router as jobs_router
     app.include_router(jobs_router)

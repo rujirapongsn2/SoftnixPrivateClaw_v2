@@ -296,12 +296,8 @@ async def delete_session(
     state: AppState = Depends(get_state),
 ) -> dict:
     await _owned_session(state, user, session_id)
-    # What the chat says it created, read before the chat is gone.
-    hints = await state.messages.file_hints(session_id)
+    # Files have an independent owner/lifecycle; delete only conversation history.
     await state.sessions.delete(session_id)
-    from claw.workspace.session_files import purge_session_files
-
-    await purge_session_files(state, user.id, hints, _user_workspace(state, user.id))
     return {"deleted": True}
 
 
@@ -348,11 +344,21 @@ async def list_messages(
     # Keep user/assistant messages that have text OR an artifact (e.g. a
     # generated image with no caption) — an artifact-only assistant message
     # would otherwise vanish on reload.
-    return [
+    visible = [
         m
         for m in messages
         if m["role"] in ("user", "assistant") and (m.get("content") or (m.get("meta") or {}).get("artifacts"))
     ]
+    artifacts = [a for m in visible for a in (m.get("meta") or {}).get("artifacts") or [] if isinstance(a, str)]
+    if artifacts:
+        from claw.workspace.lifecycle import FileLifecycle
+
+        archived = await asyncio.to_thread(FileLifecycle(state, "privateclaw").archived, user.id, artifacts)
+        for m in visible if archived else []:
+            mine = {a: archived[a] for a in (m.get("meta") or {}).get("artifacts") or [] if a in archived}
+            if mine:
+                m["meta"] = {**m["meta"], "archived": mine}
+    return visible
 
 
 @router.get("/api/sessions/{session_id}/files/{path:path}")
