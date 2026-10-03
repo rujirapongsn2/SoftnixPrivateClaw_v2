@@ -229,6 +229,13 @@ class LocalWorkspaces:
                               (owner, limit)).fetchall()
         return [dict(r) for r in rows]
 
+    def pending_delivery_sources(self, owner) -> set[str]:
+        """Resolved cloud paths that pending or retryable deliveries still have to read."""
+        with self.db() as db:
+            rows = db.execute("SELECT cloud_path FROM delivery WHERE owner=? "
+                              "AND status IN ('pending','running','failed')", (owner,)).fetchall()
+        return {str(Path(row['cloud_path']).resolve()) for row in rows}
+
     def cancel_delivery(self, owner, did):
         with self.db() as db:
             row = db.execute("DELETE FROM delivery WHERE id=? AND owner=? AND status IN ('pending','failed') RETURNING id",

@@ -66,6 +66,7 @@ import {
   ApiError,
   artifactTypeMeta,
   AttachmentRef,
+  type ChatMessage as StoredMessage,
   ConnectorInfo,
   KnowledgeBase,
   ModelOption,
@@ -82,6 +83,7 @@ import { isSkillEnabledForCurrentUser } from "./skill-access";
 import { HtmlPreview } from "./HtmlPreview";
 import { SoftnixLogo } from "./Logo";
 import { ModeSwitcher } from "./ModeSwitcher";
+import { ArchivedArtifactCard } from "./ArchivedArtifactCard";
 import { TablePreview } from "./TablePreview";
 import { SaveToBlueprintButton } from "./SaveToBlueprintButton";
 import { api as blueprintApi, type BlueprintInfo } from "./shared-api";
@@ -266,11 +268,23 @@ type TranscriptItem =
       role: "user" | "assistant";
       content: string;
       artifacts?: string[];
+      archived?: Record<string, string>;
       visionModel?: string;
     }
   | { kind: "tools"; calls: ToolCallRow[] }
   | { kind: "confirm"; row: ConfirmRow }
   | { kind: "notice"; message: string };
+
+function toTranscriptMessage(m: StoredMessage): TranscriptItem {
+  return {
+    kind: "message",
+    role: m.role,
+    content: m.content,
+    artifacts: m.meta?.artifacts,
+    archived: m.meta?.archived,
+    visionModel: m.meta?.vision_model,
+  };
+}
 
 // The most recent tool call still running, if any — a confirm card can land
 // after the tools group (see the tool_finished handler's comment on why), so
@@ -1032,13 +1046,7 @@ export function Chat({
           if (cancelled) return;
           sentCountRef.current = msgs.length;
           setItems(
-            msgs.map((m) => ({
-              kind: "message",
-              role: m.role,
-              content: m.content,
-              artifacts: m.meta?.artifacts,
-              visionModel: m.meta?.vision_model,
-            })),
+            msgs.map(toTranscriptMessage),
           );
         })
         .catch((e) => {
@@ -1140,13 +1148,7 @@ export function Chat({
         .then((msgs) => {
           sentCountRef.current = msgs.length;
           setItems(
-            msgs.map((m) => ({
-              kind: "message",
-              role: m.role,
-              content: m.content,
-              artifacts: m.meta?.artifacts,
-              visionModel: m.meta?.vision_model,
-            })),
+            msgs.map(toTranscriptMessage),
           );
           setBusy(false);
           setStreaming("");
@@ -1856,8 +1858,7 @@ export function Chat({
               const current = sessionId;
               const rows = await api.listMessages(current);
               if (sessionIdRef.current !== current) return false;
-              setItems(rows.map(m => ({kind: 'message', role: m.role, content: m.content,
-                artifacts: m.meta?.artifacts, visionModel: m.meta?.vision_model})));
+              setItems(rows.map(toTranscriptMessage));
               return true;
             }} />
             {error && <ErrorText>{error}</ErrorText>}
@@ -2530,6 +2531,21 @@ export function Chat({
                       {sessionId && visibleArtifacts(item.artifacts).length > 0 && (
                         <div className="claw-artifacts">
                           {visibleArtifacts(item.artifacts).map((p) => {
+                            const trashId = item.archived?.[p];
+                            if (trashId) {
+                              return (
+                                <ArchivedArtifactCard
+                                  key={p}
+                                  path={p}
+                                  trashId={trashId}
+                                  onRestored={() => setItems((prev) => prev.map((it, j) => {
+                                    if (j !== i || it.kind !== "message" || !it.archived) return it;
+                                    const { [p]: _restored, ...archived } = it.archived;
+                                    return { ...it, archived };
+                                  }))}
+                                />
+                              );
+                            }
                             const href = fileUrl(sessionId, p);
                             // Show images (e.g. a generated chart) inline; keep
                             // everything else as an openable chip.

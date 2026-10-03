@@ -42,7 +42,8 @@ export interface SessionInfo {
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
-  meta?: { artifacts?: string[]; vision_model?: string } | null;
+  /** `archived` maps an artifact path to its trash id once the file sits in trash. */
+  meta?: { artifacts?: string[]; vision_model?: string; archived?: Record<string, string> } | null;
 }
 
 export interface AttachmentRef {
@@ -921,7 +922,11 @@ export interface WorkspacePolicy {
   quota_files: number;
   tmp_retention_days: number;
   uploads_retention_days: number;
+  ai_retention_days: number;
+  trash_retention_days: number;
+  trash_cap_mb: number;
   cleanup_enabled: boolean;
+  permanent_delete_enabled: boolean;
   /** false = observe only: nothing is blocked or deleted, the server log says what would be. */
   enforce: boolean;
 }
@@ -1040,6 +1045,7 @@ export const api = {
   pinSession: (id: string) => request(`/api/sessions/${id}/pin`, { method: "POST" }),
   unpinSession: (id: string) => request(`/api/sessions/${id}/pin`, { method: "DELETE" }),
   listMessages: (sessionId: string) => request<ChatMessage[]>(`/api/sessions/${sessionId}/messages`),
+  restoreTrashedFile: (id: string) => request<unknown>(`/api/files/trash/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   uploadAttachments: async (sessionId: string, files: File[]): Promise<AttachmentRef[]> => {
     const form = new FormData();
     for (const f of files) form.append("files", f);

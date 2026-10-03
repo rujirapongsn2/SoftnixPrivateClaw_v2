@@ -222,6 +222,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         await project_containers.load()
         scheduler.start()
         heartbeat.start()
+        file_cleanup.start()
         local_deliveries.start()
         maintenance = None
         try:
@@ -229,6 +230,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
             maintenance = asyncio.create_task(mission_service.maintenance())
             yield
         finally:
+            await file_cleanup.stop()
             await local_deliveries.stop()
             await heartbeat.stop()
             await scheduler.stop()
@@ -291,6 +293,15 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         project_access=project_access,
         project_containers=project_containers,
     )
+    from claw.api.files import create_files_router
+    from sbot.api.deps import current_user, get_state
+    app.include_router(create_files_router(get_state, current_user, 'sbot'))
+    from claw.workspace.cleanup import WorkspaceCleanupService
+    from claw.workspace.lifecycle import FileLifecycle
+
+    # Sbot settings carry no workspace section; the policy and its knobs are PrivateClaw's.
+    app.state.sbot.workspace_policy = shared.workspace_policy
+    file_cleanup = WorkspaceCleanupService(FileLifecycle(app.state.sbot, "sbot"), shared.workspace_policy, shared.settings)
     app.include_router(router)
     app.include_router(manage_router)
     app.include_router(blueprints_router)
