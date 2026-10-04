@@ -3530,9 +3530,12 @@ function GuardrailTester({ guard }: { guard: (fn: () => Promise<void>) => Promis
   );
 }
 
+const GUARDRAIL_TABS = ["regular", "semantic", "routing"] as const;
+type GuardrailTab = (typeof GUARDRAIL_TABS)[number];
+
 function GuardrailsPanel() {
   const t = useT();
-  const [ruleTab, setRuleTab] = useState<"regular" | "semantic">("regular");
+  const [ruleTab, setRuleTab] = useState<GuardrailTab>("regular");
   const [rules, setRules] = useState<GuardrailRule[]>([]);
   const [semantic, setSemantic] = useState<Awaited<ReturnType<typeof api.adminGuardrails>>["semantic"]>(null);
   const [monitorOnly, setMonitorOnly] = useState(false);
@@ -3565,32 +3568,44 @@ function GuardrailsPanel() {
     void guard(async () => await reload());
   }, [guard, reload]);
 
+  const semanticNotice = semantic && semantic.status !== "ready" && (<Card padding={2}>
+      <div className="claw-row claw-row-between">
+        <Text weight="semibold">Semantic Guardrails</Text>
+        <Text size="sm" color="secondary">Monitor · {semantic.provider === "off" ? "Off" : semantic.provider === "jev" ? "Jev" : "OpenThai SystemOne"}</Text>
+      </div>
+      <Text size="sm" as="p" display="block">{t("admin.guardrails.semanticMissing")}</Text>
+      <Text size="sm" color="secondary" display="block">Jev: {t(semantic.configured.jev ? "admin.guardrails.configured" : "admin.guardrails.notConfigured")} · OpenThai SystemOne: {t(semantic.configured.laya ? "admin.guardrails.configured" : "admin.guardrails.notConfigured")}</Text>
+      {semantic.last_error && <Text size="sm" as="p">{t("admin.guardrails.semanticError")}</Text>}
+      <details><summary>{t("admin.guardrails.semanticConfig")}</summary>
+        <pre className="claw-semantic-env">CLAW_SEMANTIC_GUARDRAILS__PROVIDER=jev{"\n"}CLAW_SEMANTIC_GUARDRAILS__JEV__API_KEY=…{"\n"}CLAW_SEMANTIC_GUARDRAILS__LAYA__API_KEY=…</pre>
+      </details>
+    </Card>);
+
   return (
     <div className="claw-panel">
       <div className="claw-guardrails-tabs" role="tablist" aria-label={t("admin.guardrails.ruleTypes")}>
-        {(["regular", "semantic"] as const).map(tab => <button key={tab} type="button" role="tab" id={`guardrails-tab-${tab}`} aria-selected={ruleTab === tab} aria-controls={`guardrails-panel-${tab}`} tabIndex={ruleTab === tab ? 0 : -1} onClick={() => setRuleTab(tab)} onKeyDown={event => {
+        {GUARDRAIL_TABS.map(tab => <button key={tab} type="button" role="tab" id={`guardrails-tab-${tab}`} aria-selected={ruleTab === tab} aria-controls={`guardrails-panel-${tab}`} tabIndex={ruleTab === tab ? 0 : -1} onClick={() => setRuleTab(tab)} onKeyDown={event => {
           if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
             event.preventDefault();
-            const next = event.key === "Home" ? "regular" : event.key === "End" ? "semantic" : ruleTab === "regular" ? "semantic" : "regular";
+            const at = GUARDRAIL_TABS.indexOf(ruleTab);
+            const last = GUARDRAIL_TABS.length - 1;
+            const next = GUARDRAIL_TABS[event.key === "Home" ? 0 : event.key === "End" ? last : event.key === "ArrowRight" ? (at + 1) % (last + 1) : (at + last) % (last + 1)];
             setRuleTab(next); document.getElementById(`guardrails-tab-${next}`)?.focus();
           }
         }}>{t(`admin.guardrails.${tab}Tab`)}</button>)}
       </div>
       {error && <ErrorText>{error}</ErrorText>}
       <div id="guardrails-panel-semantic" role="tabpanel" aria-labelledby="guardrails-tab-semantic" hidden={ruleTab !== "semantic"} className="claw-guardrails-pane">
-      {semantic && semantic.status !== "ready" && <Card padding={2}>
-        <div className="claw-row claw-row-between">
-          <Text weight="semibold">Semantic Guardrails</Text>
-          <Text size="sm" color="secondary">Monitor · {semantic.provider === "off" ? "Off" : semantic.provider === "jev" ? "Jev" : "OpenThai SystemOne"}</Text>
-        </div>
-        <Text size="sm" as="p" display="block">{t("admin.guardrails.semanticMissing")}</Text>
-        <Text size="sm" color="secondary" display="block">Jev: {t(semantic.configured.jev ? "admin.guardrails.configured" : "admin.guardrails.notConfigured")} · OpenThai SystemOne: {t(semantic.configured.laya ? "admin.guardrails.configured" : "admin.guardrails.notConfigured")}</Text>
-        {semantic.last_error && <Text size="sm" as="p">{t("admin.guardrails.semanticError")}</Text>}
-        <details><summary>{t("admin.guardrails.semanticConfig")}</summary>
-          <pre className="claw-semantic-env">CLAW_SEMANTIC_GUARDRAILS__PROVIDER=jev{"\n"}CLAW_SEMANTIC_GUARDRAILS__JEV__API_KEY=…{"\n"}CLAW_SEMANTIC_GUARDRAILS__LAYA__API_KEY=…</pre>
-        </details>
-      </Card>}
-      <SemanticRulesPanel connected={semantic?.status === "ready"} fallback={semantic?.fallback} usingFallback={semantic?.using_fallback} primaryError={semantic?.primary_error} />
+      {semanticNotice}
+      <SemanticRulesPanel mode="semantic" connected={semantic?.status === "ready"} fallback={semantic?.fallback} usingFallback={semantic?.using_fallback} primaryError={semantic?.primary_error} />
+      </div>
+      <div id="guardrails-panel-routing" role="tabpanel" aria-labelledby="guardrails-tab-routing" hidden={ruleTab !== "routing"} className="claw-guardrails-pane">
+        {ruleTab === "routing" && (
+          <>
+            {semanticNotice}
+            <SemanticRulesPanel mode="routing" connected={semantic?.status === "ready"} fallback={semantic?.fallback} usingFallback={semantic?.using_fallback} primaryError={semantic?.primary_error} />
+          </>
+        )}
       </div>
       <div id="guardrails-panel-regular" role="tabpanel" aria-labelledby="guardrails-tab-regular" hidden={ruleTab !== "regular"} className="claw-guardrails-pane">
       <Card padding={2} variant="muted">

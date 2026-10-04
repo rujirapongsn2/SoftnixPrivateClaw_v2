@@ -20,6 +20,7 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { Lightbox } from "@astryxdesign/core/Lightbox";
 import { Popover } from "@astryxdesign/core/Popover";
 import { Spinner } from "@astryxdesign/core/Spinner";
+import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { Text } from "@astryxdesign/core/Text";
 import { useToast } from "@astryxdesign/core/Toast";
 import {
@@ -45,6 +46,7 @@ import {
   PenLine,
   Plug,
   Plus,
+  Cpu,
   Share2,
   ShieldAlert,
   ShieldCheck,
@@ -69,6 +71,7 @@ import {
   type ChatMessage as StoredMessage,
   ConnectorInfo,
   KnowledgeBase,
+  AnswerInfo,
   ModelOption,
   PREVIEWABLE_HTML_RE,
   PREVIEWABLE_TABLE_RE,
@@ -270,10 +273,27 @@ type TranscriptItem =
       artifacts?: string[];
       archived?: Record<string, string>;
       visionModel?: string;
+      info?: AnswerInfo;
     }
   | { kind: "tools"; calls: ToolCallRow[] }
   | { kind: "confirm"; row: ConfirmRow }
   | { kind: "notice"; message: string };
+
+// Tooltip body for the answer footer. The admin's display name wins over the
+// raw model id when the picker knows the model.
+function answerInfoLines(info: AnswerInfo, models: ModelOption[], t: (key: string) => string): string[] {
+  const name = models.find((m) => m.model_id === info.model)?.label || info.model;
+  const seconds = (info.duration_ms / 1000).toFixed(1);
+  const fmt = (n: number) => n.toLocaleString();
+  return [
+    `${t("chat.msg.modelInfo.model")}: ${info.auto ? `${t("chat.model.auto")} → ${name}` : name}`,
+    `${t("chat.msg.modelInfo.time")}: ${seconds} s`,
+    `${t("chat.msg.modelInfo.tokens")}: ${fmt(info.input_tokens)} / ${fmt(info.output_tokens)}`,
+  ];
+}
+
+// The picker value that asks the server to choose a model per message.
+const AUTO_MODEL = "auto";
 
 function toTranscriptMessage(m: StoredMessage): TranscriptItem {
   return {
@@ -283,6 +303,7 @@ function toTranscriptMessage(m: StoredMessage): TranscriptItem {
     artifacts: m.meta?.artifacts,
     archived: m.meta?.archived,
     visionModel: m.meta?.vision_model,
+    info: m.meta?.info,
   };
 }
 
@@ -436,6 +457,7 @@ export function Chat({
   const [sharing, setSharing] = useState(false);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [defaultModel, setDefaultModel] = useState<string>("");
+  const [autoAvailable, setAutoAvailable] = useState(false);
   const [model, setModel] = useState<string>(initialModel ?? "");
   const availableModelIdsRef = useRef<Set<string> | null>(null);
   const selectedModelRef = useRef(model);
@@ -928,6 +950,7 @@ export function Chat({
                 content: event.content!,
                 artifacts: event.artifacts,
                 visionModel: event.vision_model,
+                info: event.info,
               },
             ];
           });
@@ -1083,6 +1106,9 @@ export function Chat({
       void api.listModels().then((r) => {
         if (!mounted) return;
         const available = new Set(r.models.map((item) => item.model_id));
+        // "auto" is a picker value, not a model: it is selectable only while the server offers it.
+        if (r.auto) available.add(AUTO_MODEL);
+        setAutoAvailable(Boolean(r.auto));
         const selectedUnavailable = Boolean(selectedModelRef.current && !available.has(selectedModelRef.current));
         availableModelIdsRef.current = available;
         setModels(r.models);
@@ -2324,6 +2350,24 @@ export function Chat({
                           </Text>
                         </div>
                         <div className="claw-plus-divider" />
+                        {autoAvailable && (
+                          <button
+                            type="button"
+                            className="claw-model-option"
+                            onClick={() => {
+                              setModel(AUTO_MODEL);
+                              setModelOpen(false);
+                            }}
+                          >
+                            <div className="claw-model-option-main">
+                              <div className="claw-model-option-head">
+                                <span className="claw-model-option-name">{t("chat.model.auto")}</span>
+                              </div>
+                              <span className="claw-model-option-desc">{t("chat.model.autoDesc")}</span>
+                            </div>
+                            {model === AUTO_MODEL && <Icon icon={Check} size="sm" color="secondary" />}
+                          </button>
+                        )}
                         {models.map((m) => (
                           <button
                             key={m.model_id}
@@ -2366,7 +2410,9 @@ export function Chat({
                     <button type="button" className="claw-model-trigger">
                       <Icon icon={Box} size="sm" color="secondary" />
                       <span className="claw-model-trigger-label">
-                        {models.find((m) => m.model_id === model)?.label ?? t("chat.model.select")}
+                        {model === AUTO_MODEL
+                          ? t("chat.model.auto")
+                          : models.find((m) => m.model_id === model)?.label ?? t("chat.model.select")}
                       </span>
                       <Icon icon={ChevronDown} size="xsm" color="secondary" />
                     </button>
@@ -2671,6 +2717,22 @@ export function Chat({
                               size="sm"
                               clickAction={() => rate(i, item.content, "down")}
                             />
+                            {item.info && (
+                              <Tooltip content={
+                                  <>
+                                    {answerInfoLines(item.info, models, t).map((line) => (
+                                      <div key={line}>{line}</div>
+                                    ))}
+                                  </>
+                                } placement="above">
+                                <IconButton
+                                  label={t("chat.msg.modelInfo")}
+                                  icon={<Icon icon={Cpu} size="sm" color="secondary" />}
+                                  variant="ghost"
+                                  size="sm"
+                                />
+                              </Tooltip>
+                            )}
                             {sessionId && (
                               <IconButton
                                 label={t("chat.msg.share")}

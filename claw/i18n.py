@@ -205,6 +205,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "en": "The selected or default model is unavailable. Choose an available model to continue.",
         "th": "โมเดลที่เลือกหรือโมเดลเริ่มต้นไม่พร้อมใช้งาน กรุณาเลือกโมเดลที่พร้อมใช้งานเพื่อดำเนินการต่อ",
     },
+    "error.no_local_model": {
+        "en": "This message contains sensitive data and needs a Local AI model, but none is available. Ask an administrator to add one, or remove the sensitive data and try again.",
+        "th": "ข้อความนี้มีข้อมูลสำคัญที่ต้องใช้โมเดล Local AI แต่ตอนนี้ไม่มีโมเดลที่พร้อมใช้งาน กรุณาแจ้งผู้ดูแลระบบเพิ่มโมเดล หรือนำข้อมูลสำคัญออกแล้วลองใหม่",
+    },
     "reason.timeout": {"en": "connection timed out", "th": "การเชื่อมต่อหมดเวลา"},
     "reason.auth": {"en": "authentication failed", "th": "การยืนยันตัวตนล้มเหลว"},
     "reason.rate_limit": {"en": "rate limit exceeded", "th": "เกินขีดจำกัดการเรียกใช้งาน"},

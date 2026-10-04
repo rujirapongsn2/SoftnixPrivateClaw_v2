@@ -1,4 +1,4 @@
-export type SemanticRuleAction = "monitor" | "warn" | "confirm" | "block";
+export type SemanticRuleAction = "monitor" | "warn" | "confirm" | "block" | "local";
 export type SemanticRuleDraft = {
   name: string; condition: string; exclusions: string;
   scopes: ("input" | "output")[]; enabled: boolean; scale: number;
@@ -39,11 +39,22 @@ export interface SessionInfo {
   pinned?: boolean;
 }
 
+// Footer details of one answer. duration_ms is wall clock from receipt to the
+// finished answer; tokens are summed over every model call the answer needed.
+export interface AnswerInfo {
+  model: string;
+  // The model was picked by the Auto option for this message.
+  auto?: boolean;
+  duration_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   /** `archived` maps an artifact path to its trash id once the file sits in trash. */
-  meta?: { artifacts?: string[]; vision_model?: string; archived?: Record<string, string> } | null;
+  meta?: { artifacts?: string[]; vision_model?: string; archived?: Record<string, string>; info?: AnswerInfo } | null;
 }
 
 export interface AttachmentRef {
@@ -110,6 +121,7 @@ export interface AgentEvent {
   // turn_completed: the vision model that read an attached image, when the chat
   // model couldn't. Empty on every ordinary turn.
   vision_model?: string;
+  info?: AnswerInfo;
   request_id?: string;
   approved?: boolean;
   // tool_progress: live sub-step of a long tool (workflow plan/step/synthesize)
@@ -1395,7 +1407,7 @@ export const api = {
     );
   },
 
-  listModels: () => request<{ models: ModelOption[]; default: string }>("/api/models"),
+  listModels: () => request<{ models: ModelOption[]; default: string; auto?: boolean }>("/api/models"),
 
   // Text-to-image: the composer's "+ Image" picker + one-shot generation
   // (separate from the chat WebSocket / agent loop).

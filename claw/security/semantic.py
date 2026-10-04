@@ -81,6 +81,9 @@ class SemanticGuardrailSettings(BaseModel):
     timeout_seconds: float = Field(default=5, gt=0, le=30)
     max_chars: int = Field(default=8000, ge=100, le=32000)
     max_concurrent: int = Field(default=4, ge=1, le=32)
+    # Auto model routing makes one extra call per Auto message. It has its own slots so a burst
+    # of Auto messages cannot starve the input check (whose slot timeout lets the message through).
+    routing_max_concurrent: int = Field(default=4, ge=1, le=32)
     # If the selected provider fails (5xx, 429, auth, timeout, network) and the other one has a
     # key, use it automatically. A failing primary is then skipped for a short cooldown.
     auto_fallback: bool = True
@@ -106,6 +109,7 @@ class SemanticMonitor:
         self.transport = transport
         self.rule_store = rule_store
         self._slots = asyncio.Semaphore(settings.max_concurrent)
+        self._routing_slots = asyncio.Semaphore(settings.routing_max_concurrent)
         self.last_error = None
         self._primary_down_until = 0.0
         self._primary_error = None
@@ -183,16 +187,16 @@ class SemanticMonitor:
             return code >= 500 or code in _FAILOVER_STATUSES
         return False
 
-    async def _judge_with_failover(self, result, redacted, scope, questions, active_rules):
+    async def _judge_with_failover(self, result, redacted, scope, questions, active_rules, budget=None, slots=None):
         tried_primary_error = None
         order = self._order()
-        deadline = time.monotonic() + self.settings.timeout_seconds * _TOTAL_BUDGET_FACTOR
+        deadline = time.monotonic() + (budget or self.settings.timeout_seconds * _TOTAL_BUDGET_FACTOR)
         for index, name in enumerate(order):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 result.update(status="error", reason="timeout")  # out of budget: not the provider's fault
                 return
-            outcome = await self._judge(name, redacted, scope, questions, active_rules, deadline)
+            outcome = await self._judge(name, redacted, scope, questions, active_rules, deadline, slots or self._slots)
             is_primary = name == self.settings.provider
             if is_primary and outcome["status"] != "error":
                 self._primary_down_until = 0.0
@@ -218,14 +222,14 @@ class SemanticMonitor:
                 result["primary_reason"] = tried_primary_error["reason"] if tried_primary_error else "cooldown"
             return
 
-    async def _judge(self, name, redacted, scope, questions, active_rules, deadline):
+    async def _judge(self, name, redacted, scope, questions, active_rules, deadline, slots):
         """One upstream call. Returns the result fields; never raises for provider problems."""
         connection = getattr(self.settings, name)
         outcome = {"provider": name, "model": connection.model}
         # Waiting for a free slot is our own congestion, not the provider's latency: it is bounded
         # by the overall deadline but never counted against (or blamed on) the upstream call.
         try:
-            await asyncio.wait_for(self._slots.acquire(), timeout=max(0.0, deadline - time.monotonic()))
+            await asyncio.wait_for(slots.acquire(), timeout=max(0.0, deadline - time.monotonic()))
         except TimeoutError:
             outcome.update(status="error", reason="busy")
             return outcome
@@ -257,10 +261,19 @@ class SemanticMonitor:
                         raise TruncatedSemanticState
                     answers = payload["answers"]
                     scores = {}
+                    choices = {}
                     for key in questions:
                         answer = answers[key]
                         if not isinstance(answer, dict):
                             raise ValueError("invalid judgment")
+                        if questions[key].get("type") == "score":
+                            if answer.get("type") != "score" or not isinstance(answer.get("probabilities"), dict):
+                                raise ValueError("invalid judgment")
+                            choices[key] = {
+                                "probabilities": answer["probabilities"],
+                                "confidence": answer.get("confidence"),
+                            }
+                            continue
                         score = answer["noul"]
                         if (
                             answer.get("type") != "noul"
@@ -276,6 +289,8 @@ class SemanticMonitor:
                     scale_by_id = {rule["id"]: float(rule.get("scale", 0)) for rule in active_rules}
                     alerts = {key: should_alert(score, scale_by_id.get(key, 0.0)) for key, score in scores.items()}
                     outcome.update(status="checked", scores=scores, alerts=alerts, scales=scale_by_id)
+                    if choices:
+                        outcome["choices"] = choices
                     self.last_error = None
         except httpx.HTTPStatusError as exc:
             outcome.update(status="error", reason="upstream_http_error", http_status=exc.response.status_code)
@@ -288,7 +303,7 @@ class SemanticMonitor:
         except (ValueError, KeyError, TypeError):
             outcome.update(status="error", reason="invalid_response")
         finally:
-            self._slots.release()
+            slots.release()
         return outcome
 
     async def evaluate(self, text, scope, *, user_id=None, session_id=None, background=None):
@@ -299,6 +314,8 @@ class SemanticMonitor:
         rule for this scope and the caller waits for it. Anything that goes wrong returns an
         empty verdict (fail-open), recorded in the audit log by observe().
         """
+        from claw.security.semantic_rules import is_routing
+
         verdict = SemanticVerdict()
         try:
             if self.status()["status"] != "ready":
@@ -311,7 +328,7 @@ class SemanticMonitor:
                 else:
                     await check
                 return verdict
-            rules = [rule for rule in await self.rule_store.enabled() if scope in rule["scopes"]]
+            rules = [rule for rule in await self.rule_store.enabled() if scope in rule["scopes"] and not is_routing(rule)]
             if not rules:
                 return verdict
             acting = [rule for rule in rules if rule.get("action", "monitor") != "monitor"]
@@ -359,6 +376,28 @@ class SemanticMonitor:
             return SemanticVerdict()
         return verdict
 
+    def matches_sensitive(self, text):
+        """True when a secret or PII mask matches. Decided locally, so it holds even when the
+        provider is down."""
+        from claw.security.policy import _BUILTINS
+
+        return any(rule.enabled and rule.compiled().search(text) for rule in [*_BUILTINS, *self.policy.rules])
+
+    async def ask(self, text, questions, rules, *, scope="input", budget=None):
+        """One bounded upstream call for callers that are not the rule check (Auto routing).
+
+        Masks and windows the text exactly as observe() does, then returns the result fields
+        (status, scores, choices). Provider problems come back as `status="error"`, not raised.
+        """
+        result = {"provider": self.settings.provider, "scope": scope, "status": "ready"}
+        if len(text) > self.settings.max_chars:
+            half = self.settings.max_chars // 2
+            text = text[:half] + _WINDOW_MARK + text[-half:]
+        await self._judge_with_failover(
+            result, self._redact(text), scope, questions, rules, budget=budget, slots=self._routing_slots
+        )
+        return result
+
     async def observe(self, text, scope, *, user_id=None, session_id=None, force_log=False, test_rule=None, rules=None):
         status = self.status()
         result = {
@@ -371,7 +410,7 @@ class SemanticMonitor:
         questions = QUESTIONS
         active_rules = []
         if result["status"] == "ready" and (self.rule_store is not None or test_rule or rules is not None):
-            from claw.security.semantic_rules import MAX_ENABLED_PER_SCOPE, normalize_rule, questions_for_rules
+            from claw.security.semantic_rules import MAX_ENABLED_PER_SCOPE, is_routing, normalize_rule, questions_for_rules
 
             try:
                 active_rules = (
@@ -382,7 +421,7 @@ class SemanticMonitor:
                     else [
                         rule
                         for rule in await self.rule_store.enabled()
-                        if scope in rule["scopes"]
+                        if scope in rule["scopes"] and not is_routing(rule)
                     ]
                 )
                 questions = questions_for_rules(active_rules)

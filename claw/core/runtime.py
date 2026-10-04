@@ -72,6 +72,7 @@ from claw.i18n import (
 from claw.providers.base import LLMProvider, ProviderError
 from claw.providers.registry import estimated_cost_usd, supports_vision as model_supports_vision
 from claw.sandbox.ephemeral import EphemeralSandbox
+from claw.core.auto_model import AUTO_MODEL, UNAVAILABLE, route_auto
 from claw.security.policy import PolicyEngine
 from claw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from claw.tools.registry import ToolRegistry
@@ -1213,6 +1214,26 @@ class AgentRuntime:
         )
         return text
 
+    async def _start_auto_route(self, model, content, user_id, session_id, plan, semantic, artifact_job, has_media):
+        """Begin the Auto routing, concurrent with the input guardrail check.
+
+        Returns None unless this turn is on Auto and can be routed. The turn awaits the task
+        only where it picks its model, so the lookups and the check overlap the guardrail wait.
+        """
+        if artifact_job is not None or self.llm_config is None or semantic is None:
+            return None
+        requested = model
+        if requested is None:
+            session = await self.sessions.get(session_id)
+            requested = session.model if session else None
+        if requested != AUTO_MODEL or semantic.status()["status"] != "ready":
+            return None
+        return asyncio.create_task(
+            route_auto(
+                self.llm_config, semantic, content, plan["max_chat_cost"] if plan else None, has_media=has_media
+            )
+        )
+
     async def _process_turn(
         self,
         user_id: str,
@@ -1231,6 +1252,9 @@ class AgentRuntime:
         Returns the final assistant content (for non-streaming callers/tests).
         """
         turn_id = str(artifact_job.get("turn_id")) if artifact_job else uuid.uuid4().hex[:12]
+        # Wall clock from receipt, so the answer footer shows the wait the user
+        # actually felt (guardrail check and queueing included), not just LLM time.
+        turn_started = time.monotonic()
 
         # Resolve the caller's usage-tier plan once (None = no plan / unlimited).
         # It governs the per-minute cap, the daily message quota, and the chat
@@ -1266,6 +1290,9 @@ class AgentRuntime:
         # messages in the same conversation. (A resumed background job was checked when it started.)
         announced = False
         semantic = getattr(self.policy, "semantic", None) if self.policy is not None else None
+        route_task = await self._start_auto_route(
+            model, content, user_id, session_id, plan, semantic, artifact_job, bool(media)
+        )
         if semantic is not None and semantic.status()["status"] == "ready" and artifact_job is None:
             # Show "working" while the check (or the user's confirmation) is pending. Only when no
             # other turn is running here: a second turn_started would wipe that turn's live text.
@@ -1290,6 +1317,8 @@ class AgentRuntime:
                 else:
                     self._semantic_pending.pop(session_id, None)
             if stopped is not None:
+                if route_task is not None:
+                    route_task.cancel()
                 return stopped
 
         async with self._session_lock(session_id):
@@ -1321,10 +1350,25 @@ class AgentRuntime:
                 fallback_base: str | None = None
                 fallback_window: int | None = None
                 requested_unavailable = False
+                auto_route = None
                 if self.llm_config is not None:
                     requested = model or (session.model if session else None)
+                    if requested == AUTO_MODEL:
+                        auto_route = await route_task if route_task is not None else UNAVAILABLE
+                        await self.audit.log(
+                            "auto_model_route", auto_route.audit_payload(), user_id=user_id, session_id=session_id
+                        )
+                        if auto_route.error:
+                            msg = auto_route.message(locale)
+                            self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg, code=auto_route.error))
+                            return msg
+                        requested = auto_route.model_id
                     if requested:
-                        resolved = await self.llm_config.resolve(requested, user_id, max_cost=plan_chat_cost)
+                        # Auto only ever picks admin-provisioned models, so resolve them in
+                        # the global scope: a same-named model of the user's must not win.
+                        resolved = await self.llm_config.resolve(
+                            requested, None if auto_route else user_id, max_cost=plan_chat_cost
+                        )
                         if resolved is not None:
                             effective_model = resolved["model_id"]
                             model_pk = resolved.get("id")
@@ -2324,6 +2368,16 @@ class AgentRuntime:
                 )
                 if rewrite_final and anchor is not None:
                     anchor["content"] = final
+                answer_info: dict = {}
+                if anchor is not None and anchor.get("content"):
+                    answer_info = {
+                        "model": model_used,
+                        "auto": bool(auto_route and auto_route.model_id),
+                        "duration_ms": int((time.monotonic() - turn_started) * 1000),
+                        "input_tokens": int(outcome.usage.get("prompt_tokens", 0)),
+                        "output_tokens": int(outcome.usage.get("completion_tokens", 0)),
+                    }
+                    anchor["meta"] = {**(anchor.get("meta") or {}), "info": answer_info}
                 # Attach artifacts to the final assistant message so they survive a
                 # reload (rendered as openable file chips in the UI).
                 if outcome.artifacts:
@@ -2386,6 +2440,7 @@ class AgentRuntime:
                         usage=outcome.usage,
                         artifacts=outcome.artifacts,
                         vision_model=vision_delegate or "",
+                        info=answer_info,
                     ),
                 )
             except Exception as exc:
