@@ -545,6 +545,10 @@ class LLMModel(Base):
     # Shown in the chat model picker: cost tier + a one-line description.
     cost: Mapped[str] = mapped_column(String(16), default="medium")  # low|medium|high|very_high
     description: Mapped[str] = mapped_column(Text, default="")
+    # Display-only labels (no routing effect): what the model is best at, and
+    # whether prompts stay on infrastructure the operator controls.
+    purposes: Mapped[list] = mapped_column(JSON, default=lambda: ["general"], server_default=text("'[\"general\"]'"))
+    data_locality: Mapped[str] = mapped_column(String(16), default="external", server_default="external")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     health_status: Mapped[str] = mapped_column(String(24), default="unchecked")
     health_reason: Mapped[str] = mapped_column(String(40), default="")

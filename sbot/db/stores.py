@@ -3768,6 +3768,8 @@ class LLMConfigStore:
         kind: str = "chat",
         owner_id: str | None = None,
         context_window: int | None = None,
+        purposes: list[str] | None = None,
+        data_locality: str = "external",
     ) -> LLMModel | None:
         async with self.factory() as db:
             # The model inherits its provider's scope; only add it if the caller
@@ -3782,6 +3784,8 @@ class LLMConfigStore:
                 cost=cost or "medium",
                 description=description or "",
                 kind=kind or "chat",
+                purposes=list(purposes or ["general"]),
+                data_locality=data_locality or "external",
                 context_window=context_window or None,
             )
             db.add(row)
@@ -3795,7 +3799,7 @@ class LLMConfigStore:
             row = await db.get(LLMModel, model_id_pk)
             if row is None or not await self._owns_provider(db, row.provider_id, owner_id):
                 return None
-            for key in ("model_id", "label", "enabled", "cost", "description", "kind"):
+            for key in ("model_id", "label", "enabled", "cost", "description", "kind", "purposes", "data_locality"):
                 if key in fields and fields[key] is not None:
                     setattr(row, key, fields[key])
             if fields.get("enabled") is not None or "model_id" in fields:
