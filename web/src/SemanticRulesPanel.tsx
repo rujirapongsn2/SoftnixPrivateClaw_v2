@@ -39,22 +39,15 @@ const actLevel = (rule: { scale?: number; act_threshold?: number; action?: Seman
 
 type Row = SemanticRule & { unsaved?: boolean };
 
-const blank = (): SemanticRuleDraft => ({
-  name: "", condition: "", exclusions: "", scopes: ["input", "output"], enabled: false, scale: 0.5, group: "custom",
-  action: "monitor", act_threshold: 0.9, dry_run: true, message: "",
+// A routing rule only ever reads chat input and only ever means "use a Local AI model".
+const blank = (routing: boolean): SemanticRuleDraft => ({
+  name: "", condition: "", exclusions: "", scopes: routing ? ["input"] : ["input", "output"], enabled: false, scale: 0.5,
+  group: routing ? "routing" : "custom", action: routing ? "local" : "monitor", act_threshold: 0.9, dry_run: true, message: "",
 });
 const draftOf = ({ name, condition, exclusions, scopes, enabled, scale, group, template_id, action, act_threshold, dry_run, message }: Row): SemanticRuleDraft => ({
   name, condition, exclusions, scopes, enabled, scale: typeof scale === "number" ? scale : 0.5, group: group ?? "custom", template_id: template_id ?? null,
   action: action ?? "monitor", act_threshold: act_threshold ?? 0.9, dry_run: dry_run ?? true, message: message ?? "",
 });
-
-// Routing rules only ever read chat input and only ever mean "use a Local AI model".
-// Moving a rule in or out of the group keeps those two fields consistent.
-function withGroup(draft: SemanticRuleDraft, group: SemanticRuleGroup): SemanticRuleDraft {
-  if (group === "routing") return { ...draft, group, action: "local", scopes: ["input"] };
-  if (draft.group === "routing") return { ...draft, group, action: "monitor", scopes: ["input", "output"] };
-  return { ...draft, group };
-}
 
 const PROVIDER_NAME: Record<string, string> = { jev: "Jev", laya: "OpenThai SystemOne" };
 
@@ -68,15 +61,19 @@ function Hint({ summary, children }: { summary: string; children: string }) {
   );
 }
 
-export function SemanticRulesPanel({ connected, fallback, usingFallback, primaryError }: {
-  connected: boolean; fallback?: string | null; usingFallback?: boolean; primaryError?: string | null;
+// The same panel serves two tabs: Semantic rules (everything but routing rules) and Model
+// routing (only routing rules). They share the editor, the rows and the API.
+export function SemanticRulesPanel({ mode, connected, fallback, usingFallback, primaryError }: {
+  mode: "semantic" | "routing"; connected: boolean; fallback?: string | null; usingFallback?: boolean; primaryError?: string | null;
 }) {
   const t = useT();
+  const routing = mode === "routing";
+  const k = (key: string) => (routing ? `admin.routing.${key}` : `admin.semantic.${key}`);
   const editor = useRef<HTMLDivElement>(null);
   const [stored, setStored] = useState<SemanticRule[]>([]);
   const [templates, setTemplates] = useState<SemanticRule[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
-  const [draft, setDraft] = useState<SemanticRuleDraft>(blank);
+  const [draft, setDraft] = useState<SemanticRuleDraft>(() => blank(routing));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [testing, setTesting] = useState<string | null>(null);
@@ -111,12 +108,13 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
     const tplOf = (rule: SemanticRule) => rule.template_id ?? byName.get(rule.name) ?? null;
     const taken = new Set(stored.map(tplOf).filter(Boolean) as string[]);
     const unsaved: Row[] = templates.filter((item) => !taken.has(item.id)).map((item) => ({ ...item, id: TPL + item.id, template_id: item.id, enabled: false, unsaved: true }));
-    const all: Row[] = [...stored.map((rule) => ({ ...rule, template_id: tplOf(rule) })), ...unsaved];
+    const all: Row[] = [...stored.map((rule) => ({ ...rule, template_id: tplOf(rule) })), ...unsaved]
+      .filter((row) => (row.group === "routing") === routing);
     const rank = (row: Row) => (row.template_id && order.has(row.template_id) ? order.get(row.template_id)! : 1000);
     return all.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
-  }, [stored, templates]);
+  }, [stored, templates, routing]);
 
-  const reset = () => { setEditing(null); setDraft(blank()); };
+  const reset = () => { setEditing(null); setDraft(blank(routing)); };
   // Explain a failed check in plain words. Upstream bodies are never returned by the API,
   // only a reason code (and HTTP status), so nothing sensitive can surface here.
   const failure = (r: NonNullable<typeof result>) => {
@@ -146,14 +144,14 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
     <Card padding={2} variant={editing === "new" ? "default" : "muted"}>
       <div className="claw-panel" ref={editor}>
         <TextInput label={t("admin.guardrails.ruleName")} value={draft.name} onChange={(name) => setDraft({ ...draft, name })} />
-        <div className="claw-row" style={{ flexWrap: "wrap" }}>
+        {!routing && <div className="claw-row" style={{ flexWrap: "wrap" }}>
           <Text size="sm" color="secondary">{t("admin.semantic.group")}</Text>
-          {groups.map((g) => (
+          {groups.filter((g) => g.id !== "routing").map((g) => (
             <Button key={g.id} label={t(`admin.semantic.group.${g.id}`)} size="sm" isDisabled={busy}
               variant={(draft.group ?? "custom") === g.id ? "primary" : "secondary"}
-              clickAction={() => setDraft(withGroup(draft, g.id as SemanticRuleGroup))} />
+              clickAction={() => setDraft({ ...draft, group: g.id as SemanticRuleGroup })} />
           ))}
-        </div>
+        </div>}
         <TextArea label={t("admin.semantic.condition")} placeholder={t("admin.semantic.condition.placeholder")} value={draft.condition} onChange={(condition) => setDraft({ ...draft, condition })} rows={5} />
         <Hint summary={t("admin.semantic.hintToggle")}>{t("admin.semantic.condition.hint")}</Hint>
         <TextArea label={t("admin.semantic.exclusions")} placeholder={t("admin.semantic.exclusions.placeholder")} value={draft.exclusions} onChange={(exclusions) => setDraft({ ...draft, exclusions })} rows={3} />
@@ -243,10 +241,10 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
       <Card padding={2} variant="muted">
         <div className="claw-row claw-row-between">
           <div>
-            <Text weight="semibold" display="block">{t("admin.semantic.title")}</Text>
-            <Text size="sm" color="secondary" as="p" display="block">{t("admin.semantic.monitor")}</Text>
+            <Text weight="semibold" display="block">{t(k("title"))}</Text>
+            <Text size="sm" color="secondary" as="p" display="block">{t(k("monitor"))}</Text>
           </div>
-          <Badge variant="neutral" label={t("admin.guardrails.actionMonitor")} />
+          {!routing && <Badge variant="neutral" label={t("admin.guardrails.actionMonitor")} />}
         </div>
         {fallback && (
           <Text size="sm" color="secondary" as="p" display="block">
@@ -258,15 +256,15 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
       </Card>
 
       <div className="claw-row claw-row-between">
-        <Text color="secondary">{t("admin.semantic.intro")}</Text>
+        <Text color="secondary">{t(k("intro"))}</Text>
         {editing !== "new" && (
-          <Button label={t("admin.semantic.addCustom")} icon={<Icon icon={Plus} size="sm" />} size="sm" isDisabled={busy}
+          <Button label={t(k("addCustom"))} icon={<Icon icon={Plus} size="sm" />} size="sm" isDisabled={busy}
             clickAction={() => { reset(); setEditing("new"); setTesting(null); }} />
         )}
       </div>
       {error && <ErrorText>{error}</ErrorText>}
       {editing === "new" && form}
-      {rows.length > 0 && !rows.some((rule) => rule.enabled) && <Text size="sm" color="secondary" as="p" display="block">{t("admin.semantic.noActive")}</Text>}
+      {rows.length > 0 && !rows.some((rule) => rule.enabled) && <Text size="sm" color="secondary" as="p" display="block">{t(k("noActive"))}</Text>}
 
       <div className="claw-semantic-groups">
         {groups.filter((g) => rows.some((rule) => (rule.group ?? "custom") === g.id)).map((g) => {
@@ -278,33 +276,20 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
                 <h3 id={`semantic-group-${g.id}`}>{t(`admin.semantic.group.${g.id}`)}</h3>
                 <span className="claw-semantic-count" title={t("admin.semantic.enabledCount")}>{items.filter((rule) => rule.enabled).length}/{items.length}</span>
               </div>
+              <div className="claw-semantic-cards">
               {items.map((rule) => (
-                <Card key={rule.id} padding={2} variant={rule.enabled ? "default" : "muted"}>
-                  <div className="claw-semantic-rule-head">
-                    <div className="claw-row" style={{ flexWrap: "wrap" }}>
-                      <Text weight="semibold">{rule.name}</Text>
-                      <Badge variant="neutral" label={scopeLabel(rule)} />
-                      <Badge variant="neutral" label={`${t("admin.semantic.scale")} ${(rule.scale ?? 0).toFixed(2)}`} />
-                      <Badge variant={ACTION_VARIANT[rule.action ?? "monitor"]} label={t(`admin.semantic.action.${rule.action ?? "monitor"}`)} />
-                      {(rule.action ?? "monitor") !== "monitor" && (rule.dry_run ?? true) && <Badge variant="neutral" label={t("admin.semantic.dryRun")} />}
-                    </div>
-                    <div className="claw-row claw-semantic-rule-actions">
-                      <Switch value={rule.enabled} label={t("admin.semantic.enable", { name: rule.name })} isLabelHidden isDisabled={busy}
+                <Card key={rule.id} padding={2} variant={rule.enabled ? "default" : "muted"}
+                  className={`claw-semantic-card${editing === rule.id || testing === rule.id ? " is-wide" : ""}`}>
+                  <div className="claw-semantic-card-top">
+                    <Text weight="semibold">{rule.name}</Text>
+                    <Switch value={rule.enabled} label={t("admin.semantic.enable", { name: rule.name })} isLabelHidden isDisabled={busy}
                         changeAction={(enabled) => run(async () => { await persist(rule, { ...draftOf(rule), enabled }); await reload(); })} />
-                      <Button label={t("admin.common.edit")} icon={<Icon icon={Pencil} size="sm" />} size="sm" variant="ghost" isDisabled={busy}
-                        clickAction={() => { setEditing(editing === rule.id ? null : rule.id); setDraft(draftOf(rule)); setTesting(null); }} />
-                      <Button label={t("admin.guardrails.runTest")} size="sm" variant="ghost" isDisabled={busy || !connected}
-                        clickAction={() => { setTesting(testing === rule.id ? null : rule.id); setSample(""); setScope(rule.scopes[0]); setResult(null); setEditing(null); }} />
-                      {(!rule.unsaved || !rule.template_id) && (
-                        <Button label={rule.template_id ? t("admin.semantic.resetDefault") : t("admin.common.delete")}
-                          icon={<Icon icon={rule.template_id ? RotateCcw : Trash2} size="sm" />} size="sm" variant="ghost" isDisabled={busy}
-                          clickAction={() => {
-                            if (window.confirm(t(rule.template_id ? "admin.semantic.confirmReset" : "admin.semantic.confirmDelete", { name: rule.name }))) {
-                              void run(async () => { await api.adminDeleteSemanticRule(rule.id); if (editing === rule.id) reset(); if (testing === rule.id) setTesting(null); await reload(); });
-                            }
-                          }} />
-                      )}
-                    </div>
+                  </div>
+                  <div className="claw-row" style={{ flexWrap: "wrap" }}>
+                    <Badge variant="neutral" label={scopeLabel(rule)} />
+                    <Badge variant="neutral" label={`${t("admin.semantic.scale")} ${(rule.scale ?? 0).toFixed(2)}`} />
+                    {!routing && <Badge variant={ACTION_VARIANT[rule.action ?? "monitor"]} label={t(`admin.semantic.action.${rule.action ?? "monitor"}`)} />}
+                    {(rule.action ?? "monitor") !== "monitor" && (rule.dry_run ?? true) && <Badge variant="neutral" label={t("admin.semantic.dryRun")} />}
                   </div>
                   <Text size="sm" color="secondary" as="p" display="block"
                     className={`claw-semantic-desc${expanded.has(rule.id) ? " is-open" : ""}`}
@@ -316,6 +301,21 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
                       <strong>{t("admin.semantic.exclusionsShort")}:</strong> {rule.exclusions}
                     </Text>
                   )}
+                  <div className="claw-row claw-semantic-rule-actions">
+                    <Button label={t("admin.common.edit")} icon={<Icon icon={Pencil} size="sm" />} size="sm" variant="ghost" isDisabled={busy}
+                      clickAction={() => { setEditing(editing === rule.id ? null : rule.id); setDraft(draftOf(rule)); setTesting(null); }} />
+                    <Button label={t("admin.guardrails.runTest")} size="sm" variant="ghost" isDisabled={busy || !connected}
+                      clickAction={() => { setTesting(testing === rule.id ? null : rule.id); setSample(""); setScope(rule.scopes[0]); setResult(null); setEditing(null); }} />
+                    {(!rule.unsaved || !rule.template_id) && (
+                    <Button label={rule.template_id ? t("admin.semantic.resetDefault") : t("admin.common.delete")}
+                        icon={<Icon icon={rule.template_id ? RotateCcw : Trash2} size="sm" />} size="sm" variant="ghost" isDisabled={busy}
+                        clickAction={() => {
+                          if (window.confirm(t(rule.template_id ? "admin.semantic.confirmReset" : "admin.semantic.confirmDelete", { name: rule.name }))) {
+                            void run(async () => { await api.adminDeleteSemanticRule(rule.id); if (editing === rule.id) reset(); if (testing === rule.id) setTesting(null); await reload(); });
+                          }
+                        }} />
+                    )}
+                  </div>
                   {editing === rule.id && form}
                   {testing === rule.id && (
                     <Card padding={2} variant="muted">
@@ -350,6 +350,7 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
                   )}
                 </Card>
               ))}
+              </div>
             </section>
           );
         })}

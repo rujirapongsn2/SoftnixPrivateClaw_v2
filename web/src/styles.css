@@ -5060,6 +5060,12 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-semantic-group-header svg { flex-shrink: 0; color: var(--color-text-secondary); }
 .claw-semantic-group-header h3 { margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 .claw-semantic-count { border-radius: 12px; padding: 2px 8px; font-size: 12px; background: var(--color-surface-2); color: var(--color-text-secondary); }
+.claw-semantic-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; min-width: 0; }
+.claw-semantic-card { min-width: 0; }
+.claw-semantic-card .claw-semantic-rule-actions { margin-top: 8px; }
+.claw-semantic-card.is-wide { grid-column: 1 / -1; }
+.claw-semantic-card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.claw-semantic-card-top > :first-child { min-width: 0; overflow-wrap: anywhere; }
 .claw-semantic-rule-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
 .claw-semantic-rule-head > .claw-row:first-child { min-width: 0; flex: 1 1 280px; }
 .claw-semantic-rule-actions { flex: 0 0 auto; flex-wrap: wrap; }
@@ -5074,6 +5080,9 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-settings-group > h3 { margin: 0; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
 .claw-settings-group + .claw-settings-group { margin-top: 12px; padding-top: 28px; border-top: 1px solid var(--color-border-subtle, #e5e5e5); }
 .claw-semantic-range { flex: 1 1 140px; min-width: 120px; max-width: 260px; }
+@media (max-width: 900px) {
+  .claw-semantic-cards { grid-template-columns: minmax(0, 1fr); }
+}
 @media (max-width: 800px) {
   .claw-guardrails-tabs { width: 100%; }
   .claw-guardrails-tabs button { flex: 1; padding-inline: 10px; }
