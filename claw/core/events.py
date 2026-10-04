@@ -131,6 +131,9 @@ class TurnCompleted(AgentEvent):
     # Set when an attached image was read by a separate vision model because the
     # chat model couldn't; "" on every ordinary turn.
     vision_model: str = ""
+    # {model, duration_ms, input_tokens, output_tokens} for the answer footer;
+    # empty on turns that produced no answer text.
+    info: dict[str, Any] = field(default_factory=dict)
     type: str = field(default="turn_completed", init=False)
 
 

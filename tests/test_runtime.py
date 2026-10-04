@@ -114,6 +114,35 @@ async def test_handle_message_streams_and_persists(stores, tmp_path):
     assert history[0]["content"] == "สวัสดี"
 
 
+async def test_answer_carries_model_time_and_tokens_for_the_footer(stores, tmp_path):
+    runtime = make_runtime(stores, FakeProvider([text_turn("คำตอบ")]), tmp_path)
+    user = await stores["users"].get_or_create_by_email("u@x.y")
+    session = await stores["sessions"].create(user.id)
+
+    received = []
+
+    async def listen():
+        async with runtime.bus.subscribe(session.id) as queue:
+            while True:
+                event = await queue.get()
+                received.append(event.to_dict())
+                if event.to_dict()["type"] in ("turn_completed", "turn_error"):
+                    return
+
+    listener = asyncio.create_task(listen())
+    await asyncio.sleep(0)
+    await runtime.handle_message(user.id, session.id, "สวัสดี")
+    await asyncio.wait_for(listener, 2)
+
+    completed = next(e for e in received if e["type"] == "turn_completed")
+    info = completed["info"]
+    assert (info["input_tokens"], info["output_tokens"]) == (10, 5)
+    assert info["model"]
+    assert info["duration_ms"] >= 0
+    assistant = [m for m in await stores["messages"].recent(session.id) if m["role"] == "assistant"][-1]
+    assert assistant["meta"]["info"] == info
+
+
 async def test_provider_error_does_not_poison_history(stores, tmp_path):
     class ExplodingProvider(FakeProvider):
         async def stream_chat(self, *args, **kwargs):

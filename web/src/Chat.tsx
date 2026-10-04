@@ -20,6 +20,7 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { Lightbox } from "@astryxdesign/core/Lightbox";
 import { Popover } from "@astryxdesign/core/Popover";
 import { Spinner } from "@astryxdesign/core/Spinner";
+import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { Text } from "@astryxdesign/core/Text";
 import { useToast } from "@astryxdesign/core/Toast";
 import {
@@ -45,6 +46,7 @@ import {
   PenLine,
   Plug,
   Plus,
+  Cpu,
   Share2,
   ShieldAlert,
   ShieldCheck,
@@ -69,6 +71,7 @@ import {
   type ChatMessage as StoredMessage,
   ConnectorInfo,
   KnowledgeBase,
+  AnswerInfo,
   ModelOption,
   PREVIEWABLE_HTML_RE,
   PREVIEWABLE_TABLE_RE,
@@ -270,10 +273,24 @@ type TranscriptItem =
       artifacts?: string[];
       archived?: Record<string, string>;
       visionModel?: string;
+      info?: AnswerInfo;
     }
   | { kind: "tools"; calls: ToolCallRow[] }
   | { kind: "confirm"; row: ConfirmRow }
   | { kind: "notice"; message: string };
+
+// Tooltip body for the answer footer. The admin's display name wins over the
+// raw model id when the picker knows the model.
+function answerInfoLines(info: AnswerInfo, models: ModelOption[], t: (key: string) => string): string[] {
+  const name = models.find((m) => m.model_id === info.model)?.label || info.model;
+  const seconds = (info.duration_ms / 1000).toFixed(1);
+  const fmt = (n: number) => n.toLocaleString();
+  return [
+    `${t("chat.msg.modelInfo.model")}: ${name}`,
+    `${t("chat.msg.modelInfo.time")}: ${seconds} s`,
+    `${t("chat.msg.modelInfo.tokens")}: ${fmt(info.input_tokens)} / ${fmt(info.output_tokens)}`,
+  ];
+}
 
 function toTranscriptMessage(m: StoredMessage): TranscriptItem {
   return {
@@ -283,6 +300,7 @@ function toTranscriptMessage(m: StoredMessage): TranscriptItem {
     artifacts: m.meta?.artifacts,
     archived: m.meta?.archived,
     visionModel: m.meta?.vision_model,
+    info: m.meta?.info,
   };
 }
 
@@ -928,6 +946,7 @@ export function Chat({
                 content: event.content!,
                 artifacts: event.artifacts,
                 visionModel: event.vision_model,
+                info: event.info,
               },
             ];
           });
@@ -2671,6 +2690,22 @@ export function Chat({
                               size="sm"
                               clickAction={() => rate(i, item.content, "down")}
                             />
+                            {item.info && (
+                              <Tooltip content={
+                                  <>
+                                    {answerInfoLines(item.info, models, t).map((line) => (
+                                      <div key={line}>{line}</div>
+                                    ))}
+                                  </>
+                                } placement="above">
+                                <IconButton
+                                  label={t("chat.msg.modelInfo")}
+                                  icon={<Icon icon={Cpu} size="sm" color="secondary" />}
+                                  variant="ghost"
+                                  size="sm"
+                                />
+                              </Tooltip>
+                            )}
                             {sessionId && (
                               <IconButton
                                 label={t("chat.msg.share")}

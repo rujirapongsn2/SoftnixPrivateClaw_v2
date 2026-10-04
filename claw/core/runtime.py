@@ -1231,6 +1231,9 @@ class AgentRuntime:
         Returns the final assistant content (for non-streaming callers/tests).
         """
         turn_id = str(artifact_job.get("turn_id")) if artifact_job else uuid.uuid4().hex[:12]
+        # Wall clock from receipt, so the answer footer shows the wait the user
+        # actually felt (guardrail check and queueing included), not just LLM time.
+        turn_started = time.monotonic()
 
         # Resolve the caller's usage-tier plan once (None = no plan / unlimited).
         # It governs the per-minute cap, the daily message quota, and the chat
@@ -2324,6 +2327,15 @@ class AgentRuntime:
                 )
                 if rewrite_final and anchor is not None:
                     anchor["content"] = final
+                answer_info: dict = {}
+                if anchor is not None and anchor.get("content"):
+                    answer_info = {
+                        "model": model_used,
+                        "duration_ms": int((time.monotonic() - turn_started) * 1000),
+                        "input_tokens": int(outcome.usage.get("prompt_tokens", 0)),
+                        "output_tokens": int(outcome.usage.get("completion_tokens", 0)),
+                    }
+                    anchor["meta"] = {**(anchor.get("meta") or {}), "info": answer_info}
                 # Attach artifacts to the final assistant message so they survive a
                 # reload (rendered as openable file chips in the UI).
                 if outcome.artifacts:
@@ -2386,6 +2398,7 @@ class AgentRuntime:
                         usage=outcome.usage,
                         artifacts=outcome.artifacts,
                         vision_model=vision_delegate or "",
+                        info=answer_info,
                     ),
                 )
             except Exception as exc:

@@ -351,6 +351,10 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.msg.readAloud": "Read aloud",
     "chat.msg.good": "Good response",
     "chat.msg.bad": "Bad response",
+    "chat.msg.modelInfo": "Answer details",
+    "chat.msg.modelInfo.model": "Model",
+    "chat.msg.modelInfo.time": "Total time",
+    "chat.msg.modelInfo.tokens": "Tokens in / out",
     "chat.msg.share": "Share answer",
     "chat.msg.visionRead": "Image read by {model}",
     "chat.msg.visionReadHint":
@@ -1901,6 +1905,10 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.msg.readAloud": "อ่านออกเสียง",
     "chat.msg.good": "คำตอบดี",
     "chat.msg.bad": "คำตอบไม่ดี",
+    "chat.msg.modelInfo": "รายละเอียดคำตอบ",
+    "chat.msg.modelInfo.model": "โมเดล",
+    "chat.msg.modelInfo.time": "เวลารวม",
+    "chat.msg.modelInfo.tokens": "โทเคน เข้า / ออก",
     "chat.msg.share": "แชร์คำตอบ",
     "chat.msg.visionRead": "อ่านรูปด้วย {model}",
     "chat.msg.visionReadHint":
