@@ -81,6 +81,9 @@ class SemanticGuardrailSettings(BaseModel):
     timeout_seconds: float = Field(default=5, gt=0, le=30)
     max_chars: int = Field(default=8000, ge=100, le=32000)
     max_concurrent: int = Field(default=4, ge=1, le=32)
+    # Auto model routing makes one extra call per Auto message. It has its own slots so a burst
+    # of Auto messages cannot starve the input check (whose slot timeout lets the message through).
+    routing_max_concurrent: int = Field(default=4, ge=1, le=32)
     # If the selected provider fails (5xx, 429, auth, timeout, network) and the other one has a
     # key, use it automatically. A failing primary is then skipped for a short cooldown.
     auto_fallback: bool = True
@@ -106,6 +109,7 @@ class SemanticMonitor:
         self.transport = transport
         self.rule_store = rule_store
         self._slots = asyncio.Semaphore(settings.max_concurrent)
+        self._routing_slots = asyncio.Semaphore(settings.routing_max_concurrent)
         self.last_error = None
         self._primary_down_until = 0.0
         self._primary_error = None
@@ -183,7 +187,7 @@ class SemanticMonitor:
             return code >= 500 or code in _FAILOVER_STATUSES
         return False
 
-    async def _judge_with_failover(self, result, redacted, scope, questions, active_rules, budget=None):
+    async def _judge_with_failover(self, result, redacted, scope, questions, active_rules, budget=None, slots=None):
         tried_primary_error = None
         order = self._order()
         deadline = time.monotonic() + (budget or self.settings.timeout_seconds * _TOTAL_BUDGET_FACTOR)
@@ -192,7 +196,7 @@ class SemanticMonitor:
             if remaining <= 0:
                 result.update(status="error", reason="timeout")  # out of budget: not the provider's fault
                 return
-            outcome = await self._judge(name, redacted, scope, questions, active_rules, deadline)
+            outcome = await self._judge(name, redacted, scope, questions, active_rules, deadline, slots or self._slots)
             is_primary = name == self.settings.provider
             if is_primary and outcome["status"] != "error":
                 self._primary_down_until = 0.0
@@ -218,14 +222,14 @@ class SemanticMonitor:
                 result["primary_reason"] = tried_primary_error["reason"] if tried_primary_error else "cooldown"
             return
 
-    async def _judge(self, name, redacted, scope, questions, active_rules, deadline):
+    async def _judge(self, name, redacted, scope, questions, active_rules, deadline, slots):
         """One upstream call. Returns the result fields; never raises for provider problems."""
         connection = getattr(self.settings, name)
         outcome = {"provider": name, "model": connection.model}
         # Waiting for a free slot is our own congestion, not the provider's latency: it is bounded
         # by the overall deadline but never counted against (or blamed on) the upstream call.
         try:
-            await asyncio.wait_for(self._slots.acquire(), timeout=max(0.0, deadline - time.monotonic()))
+            await asyncio.wait_for(slots.acquire(), timeout=max(0.0, deadline - time.monotonic()))
         except TimeoutError:
             outcome.update(status="error", reason="busy")
             return outcome
@@ -299,7 +303,7 @@ class SemanticMonitor:
         except (ValueError, KeyError, TypeError):
             outcome.update(status="error", reason="invalid_response")
         finally:
-            self._slots.release()
+            slots.release()
         return outcome
 
     async def evaluate(self, text, scope, *, user_id=None, session_id=None, background=None):
@@ -389,7 +393,9 @@ class SemanticMonitor:
         if len(text) > self.settings.max_chars:
             half = self.settings.max_chars // 2
             text = text[:half] + _WINDOW_MARK + text[-half:]
-        await self._judge_with_failover(result, self._redact(text), scope, questions, rules, budget=budget)
+        await self._judge_with_failover(
+            result, self._redact(text), scope, questions, rules, budget=budget, slots=self._routing_slots
+        )
         return result
 
     async def observe(self, text, scope, *, user_id=None, session_id=None, force_log=False, test_rule=None, rules=None):

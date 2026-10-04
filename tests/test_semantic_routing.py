@@ -1,6 +1,7 @@
 """Auto routing: the purpose score question, Local AI routing rules, and the guarantee that
 routing rules never leak into the block/confirm check."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -118,3 +119,22 @@ def test_routing_templates_are_valid_and_start_in_dry_run():
         body = SemanticRuleBody(**{k: v for k, v in t.items() if k != "id"})
         assert body.action == "local" and body.dry_run and not body.enabled
     assert routing_rules([rule(), rule(id="r2", scopes=["output"])]) == [rule()]
+
+
+async def test_routing_has_its_own_slots_so_it_cannot_starve_the_input_check(monkeypatch):
+    monitor, _ = service([rule(group="custom", action="block", scopes=["input"])], noul=0.99)
+    monitor._slots = asyncio.Semaphore(1)
+    monitor._routing_slots = asyncio.Semaphore(1)
+    await monitor._routing_slots.acquire()  # routing is saturated
+    monkeypatch.setattr("claw.security.semantic_routing.ROUTING_BUDGET_SECONDS", 0.05)
+    routed = await route_message(monitor, "hello")
+    assert not routed.checked and routed.reason == "busy"
+    verdict = await monitor.evaluate("hello", "input")
+    assert verdict.action == "block"  # the input check still got a slot
+
+
+async def test_the_input_check_does_not_use_up_routing_slots():
+    monitor, _ = service([])
+    monitor._slots = asyncio.Semaphore(1)
+    await monitor._slots.acquire()  # the input check is saturated
+    assert (await route_message(monitor, "hello")).checked

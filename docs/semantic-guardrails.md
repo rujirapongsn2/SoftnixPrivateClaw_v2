@@ -14,6 +14,7 @@ CLAW_SEMANTIC_GUARDRAILS__TIMEOUT_SECONDS=5
 CLAW_SEMANTIC_GUARDRAILS__AUTO_FALLBACK=true
 CLAW_SEMANTIC_GUARDRAILS__MAX_CHARS=8000
 CLAW_SEMANTIC_GUARDRAILS__MAX_CONCURRENT=4
+CLAW_SEMANTIC_GUARDRAILS__ROUTING_MAX_CONCURRENT=4
 ```
 
 Set `PROVIDER=laya` to use OpenThai SystemOne through the existing Laya adapter, or `off` to stop all semantic calls. Restart with `bash scripts/claw restart` after editing `.env`. The integrated Sbot mode shares the parent connection. These settings do not contain client-side secrets.
@@ -95,7 +96,7 @@ Each rule has an **action**, chosen with the same buttons as the keyword/regex r
 
 The chat model picker offers **Auto** when the semantic provider is ready, a fallback chat model is set, and at least two admin models are enabled. Auto chooses a model per message, so a coding question can go to a coding model and a short summary to a cheap one. A user's own (My Models) models are never chosen by Auto.
 
-For each Auto message the guardrail model answers one `score` question over the six model purposes, plus one question per enabled routing rule. `claw/core/model_router.py` then picks the model whose **Purposes** match best, among the models the user's plan allows. Equal scores go to the cheaper model, then the admin default. If the judgment is weak (top probability under 0.5), missing, or the check fails, the admin default is used, then the fallback model. An attached image counts as a multimodal task. The check runs in parallel with the input guardrail check, has its own 1.5 second budget, and every decision is written to the audit log as one `auto_model_route` event with the chosen model, the reason and the check result.
+For each Auto message the guardrail model answers one `score` question over the six model purposes, plus one question per enabled routing rule. `claw/core/model_router.py` then picks the model whose **Purposes** match best, among the models the user's plan allows. Equal scores go to the cheaper model, then the admin default. If the judgment is weak (top probability under 0.5), missing, or the check fails, the admin default is used, then the fallback model. An attached image counts as a multimodal task. The check runs in parallel with the input guardrail check, has its own 1.5 second budget and its own concurrency slots (`ROUTING_MAX_CONCURRENT`), so Auto traffic cannot starve the input check, and every decision is written to the audit log as one `auto_model_route` event with the chosen model, the reason and the check result.
 
 **Model routing** is a rule group in Guardrails > Semantic rules. A routing rule has the action **Use Local AI**: when it matches, Auto only considers models marked **Local AI**. Five templates ship, all off and in dry run: personal data, confidential business data, internal material, credentials and private code, health data. A secret or PII mask match also forces Local AI, decided locally without the provider. When a routing rule is live and the check fails, times out or errors, or the rule list cannot be read, Auto fails safe to Local AI. If no Local AI model is available the message is not sent, and the user is told why. Routing rules affect Auto only, never a model the user picked.
 

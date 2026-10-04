@@ -260,7 +260,8 @@ docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .
 | `CLAW_SEMANTIC_GUARDRAILS__AUTO_FALLBACK` | `true` | ถ้าผู้ให้บริการที่เลือกล้มเหลว (5xx, 429, auth, timeout) และอีกรายมี key อยู่ จะสลับไปใช้อีกรายอัตโนมัติ ตัวที่ล้มเหลวถูกข้ามไป 60 วินาที ตั้ง `false` เพื่อปิด |
 
 ตัวแปรเพิ่มเติมที่ไม่อยู่ใน `.env.example`: `CLAW_SEMANTIC_GUARDRAILS__MAX_CHARS` (ความยาวข้อความสูงสุดที่ส่งตรวจ ค่าเริ่มต้น `8000`)
-และ `CLAW_SEMANTIC_GUARDRAILS__MAX_CONCURRENT` (จำนวนคำขอตรวจพร้อมกัน ค่าเริ่มต้น `4`)
+`CLAW_SEMANTIC_GUARDRAILS__MAX_CONCURRENT` (จำนวนคำขอตรวจพร้อมกัน ค่าเริ่มต้น `4`)
+และ `CLAW_SEMANTIC_GUARDRAILS__ROUTING_MAX_CONCURRENT` (จำนวนคำขอเลือกโมเดลของ Auto พร้อมกัน ค่าเริ่มต้น `4` แยกจากช่องตรวจข้อความ เพื่อให้ข้อความ Auto จำนวนมากไม่แย่งช่องของการตรวจ input)
 
 ---
 
