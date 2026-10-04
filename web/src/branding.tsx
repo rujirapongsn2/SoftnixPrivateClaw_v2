@@ -295,6 +295,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.mic.dictate": "Dictate with your voice",
 
     "chat.model.selectImage": "Select image model",
+    "chat.model.auto": "Auto",
+    "chat.model.autoDesc": "Picks a model for each message by its task. Sensitive data goes to Local AI only.",
     "chat.model.select": "Select model",
     "chat.model.private": "Private",
     "chat.model.fallback": "Model",
@@ -1852,6 +1854,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "chat.mic.dictate": "พูดเพื่อพิมพ์ข้อความ",
 
     "chat.model.selectImage": "เลือกโมเดลสร้างภาพ",
+    "chat.model.auto": "Auto",
+    "chat.model.autoDesc": "เลือกโมเดลให้ตามลักษณะงานของแต่ละข้อความ ข้อมูลสำคัญจะใช้ Local AI เท่านั้น",
     "chat.model.select": "เลือกโมเดล",
     "chat.model.private": "ส่วนตัว",
     "chat.model.fallback": "โมเดล",

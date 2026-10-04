@@ -723,6 +723,10 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
     models = await state.llm_config.enabled_models(user.id, max_cost=chat_cost)
     default = await state.llm_config.default_model_for(chat_cost)
     configured_global = await state.llm_config.has_configured_global_chat_models()
+    from claw.core.auto_model import auto_available
+
+    # Offered as the "Auto" entry in the picker; the server decides per message.
+    auto = await auto_available(state.llm_config, getattr(state.policy, "semantic", None), chat_cost)
     if not models:
         # A configured but unavailable lineup must not reappear as the env
         # default in the picker: runtime rejects that route as well.
@@ -747,7 +751,7 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
         }
     if not default and not configured_global:
         default = models[0]["model_id"]
-    return {"models": models, "default": default}
+    return {"models": models, "default": default, "auto": auto}
 
 
 @router.get("/image-models")

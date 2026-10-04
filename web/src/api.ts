@@ -43,6 +43,8 @@ export interface SessionInfo {
 // finished answer; tokens are summed over every model call the answer needed.
 export interface AnswerInfo {
   model: string;
+  // The model was picked by the Auto option for this message.
+  auto?: boolean;
   duration_ms: number;
   input_tokens: number;
   output_tokens: number;
@@ -1405,7 +1407,7 @@ export const api = {
     );
   },
 
-  listModels: () => request<{ models: ModelOption[]; default: string }>("/api/models"),
+  listModels: () => request<{ models: ModelOption[]; default: string; auto?: boolean }>("/api/models"),
 
   // Text-to-image: the composer's "+ Image" picker + one-shot generation
   // (separate from the chat WebSocket / agent loop).

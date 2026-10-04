@@ -2603,6 +2603,8 @@ class LLMConfigStore:
                 "is_default": m.is_default,
                 "cost": m.cost or "medium",
                 "description": m.description or "",
+                "purposes": list(m.purposes or ["general"]),
+                "data_locality": m.data_locality or "external",
                 "scope": "private" if p.owner_id else "global",
             }
             for m, p in rows

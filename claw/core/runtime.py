@@ -72,6 +72,7 @@ from claw.i18n import (
 from claw.providers.base import LLMProvider, ProviderError
 from claw.providers.registry import estimated_cost_usd, supports_vision as model_supports_vision
 from claw.sandbox.ephemeral import EphemeralSandbox
+from claw.core.auto_model import AUTO_MODEL, auto_available, log_choice, resolve_auto
 from claw.security.policy import PolicyEngine
 from claw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from claw.tools.registry import ToolRegistry
@@ -1213,6 +1214,24 @@ class AgentRuntime:
         )
         return text
 
+    async def _start_auto_route(self, model, content, user_id, session_id, plan, semantic, artifact_job):
+        """Begin the Auto routing check, concurrent with the input guardrail check.
+
+        Returns None unless this turn is on Auto and a routing check can run. The turn awaits
+        the task only where it picks its model, so the check overlaps the guardrail wait.
+        """
+        if artifact_job is not None or self.llm_config is None or semantic is None:
+            return None
+        requested = model
+        if requested is None:
+            session = await self.sessions.get(session_id)
+            requested = session.model if session else None
+        if requested != AUTO_MODEL:
+            return None
+        if not await auto_available(self.llm_config, semantic, plan["max_chat_cost"] if plan else None):
+            return None
+        return asyncio.create_task(semantic.route(content, user_id=user_id, session_id=session_id))
+
     async def _process_turn(
         self,
         user_id: str,
@@ -1269,6 +1288,7 @@ class AgentRuntime:
         # messages in the same conversation. (A resumed background job was checked when it started.)
         announced = False
         semantic = getattr(self.policy, "semantic", None) if self.policy is not None else None
+        route_task = await self._start_auto_route(model, content, user_id, session_id, plan, semantic, artifact_job)
         if semantic is not None and semantic.status()["status"] == "ready" and artifact_job is None:
             # Show "working" while the check (or the user's confirmation) is pending. Only when no
             # other turn is running here: a second turn_started would wipe that turn's live text.
@@ -1293,6 +1313,8 @@ class AgentRuntime:
                 else:
                     self._semantic_pending.pop(session_id, None)
             if stopped is not None:
+                if route_task is not None:
+                    route_task.cancel()
                 return stopped
 
         async with self._session_lock(session_id):
@@ -1324,10 +1346,29 @@ class AgentRuntime:
                 fallback_base: str | None = None
                 fallback_window: int | None = None
                 requested_unavailable = False
+                auto_route = None
                 if self.llm_config is not None:
                     requested = model or (session.model if session else None)
+                    if requested == AUTO_MODEL:
+                        decision = await route_task if route_task is not None else None
+                        auto_route, choice = await resolve_auto(
+                            self.llm_config, decision, plan_chat_cost, has_media=bool(media)
+                        )
+                        await self.audit.log(
+                            "auto_model_route", log_choice(auto_route, choice, decision),
+                            user_id=user_id, session_id=session_id,
+                        )
+                        if auto_route.error:
+                            msg = t(f"error.{auto_route.error}", locale)
+                            self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg, code=auto_route.error))
+                            return msg
+                        requested = auto_route.model_id
                     if requested:
-                        resolved = await self.llm_config.resolve(requested, user_id, max_cost=plan_chat_cost)
+                        # Auto only ever picks admin-provisioned models, so resolve them in
+                        # the global scope: a same-named model of the user's must not win.
+                        resolved = await self.llm_config.resolve(
+                            requested, None if auto_route else user_id, max_cost=plan_chat_cost
+                        )
                         if resolved is not None:
                             effective_model = resolved["model_id"]
                             model_pk = resolved.get("id")
@@ -2331,6 +2372,7 @@ class AgentRuntime:
                 if anchor is not None and anchor.get("content"):
                     answer_info = {
                         "model": model_used,
+                        "auto": bool(auto_route and auto_route.model_id),
                         "duration_ms": int((time.monotonic() - turn_started) * 1000),
                         "input_tokens": int(outcome.usage.get("prompt_tokens", 0)),
                         "output_tokens": int(outcome.usage.get("completion_tokens", 0)),

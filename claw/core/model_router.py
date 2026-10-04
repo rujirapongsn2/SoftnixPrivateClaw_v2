@@ -102,5 +102,6 @@ def choose(
     if best <= 0:
         return default_or_fallback("low_confidence")
     top = [c for c in pool if score(c) == best]
-    pick = min(top, key=lambda c: (c.cost_rank, c.model_id))
+    # Equal scores: cheapest first, then the admin's default, then name for a stable order.
+    pick = min(top, key=lambda c: (c.cost_rank, not c.is_default, c.model_id))
     return Choice(pick.model_id, "purpose", round(best, 4))

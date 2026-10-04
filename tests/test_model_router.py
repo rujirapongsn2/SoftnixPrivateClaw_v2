@@ -66,3 +66,8 @@ def test_probabilities_map_by_position_and_reject_malformed_payloads():
     assert probabilities_by_purpose({"0": 1.0}) is None
     assert probabilities_by_purpose({str(i): 2.0 for i in range(6)}) is None
     assert probabilities_by_purpose("nope") is None
+
+
+def test_equal_score_and_cost_prefers_the_default_model():
+    pool = [cand("a-first", ["general"]), cand("z-default", ["general"], default=True)]
+    assert choose(pool, judged(general=0.9), require_local=False).model_id == "z-default"

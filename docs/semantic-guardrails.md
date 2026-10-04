@@ -90,3 +90,13 @@ Each rule has an **action**, chosen with the same buttons as the keyword/regex r
 * **Time budget.** The whole check (primary, then fallback if needed) shares one deadline of 1.5 × `timeout_seconds`.
   Waiting for a free slot is not blamed on the provider; if the budget runs out the message is let through.
 * **Admin test button** is limited to 20 calls per minute per admin because it calls the paid provider.
+
+## Auto model and Model routing
+
+The chat model picker offers **Auto** when the semantic provider is ready, a fallback chat model is set, and at least two admin models are enabled. Auto chooses a model per message, so a coding question can go to a coding model and a short summary to a cheap one. A user's own (My Models) models are never chosen by Auto.
+
+For each Auto message the guardrail model answers one `score` question over the six model purposes, plus one question per enabled routing rule. `claw/core/model_router.py` then picks the model whose **Purposes** match best, among the models the user's plan allows. Equal scores go to the cheaper model, then the admin default. If the judgment is weak (top probability under 0.5), missing, or the check fails, the admin default is used, then the fallback model. An attached image counts as a multimodal task. The check runs in parallel with the input guardrail check, has its own 1.5 second budget, and every decision is written to the audit log as `auto_model_route` (and `semantic_routing` for the check itself).
+
+**Model routing** is a rule group in Guardrails > Semantic rules. A routing rule has the action **Use Local AI**: when it matches, Auto only considers models marked **Local AI**. Five templates ship, all off and in dry run: personal data, confidential business data, internal material, credentials and private code, health data. A secret or PII mask match also forces Local AI, decided locally without the provider. When a routing rule is live and the check fails or times out, Auto fails safe to Local AI. If no Local AI model is available the message is not sent, and the user is told why. Routing rules affect Auto only, never a model the user picked.
+
+Measured on 48 labelled messages (`scripts/eval_auto_routing.py`, 2026-10-04): Jev 45/48 correct, latency p50 367 ms and p95 505 ms. OpenThai SystemOne 43/48 correct, p50 139 ms, one 3.6 second outlier. The set is small and written by the developers, so check it against your own traffic before relying on Auto.

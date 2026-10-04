@@ -286,11 +286,14 @@ function answerInfoLines(info: AnswerInfo, models: ModelOption[], t: (key: strin
   const seconds = (info.duration_ms / 1000).toFixed(1);
   const fmt = (n: number) => n.toLocaleString();
   return [
-    `${t("chat.msg.modelInfo.model")}: ${name}`,
+    `${t("chat.msg.modelInfo.model")}: ${info.auto ? `${t("chat.model.auto")} → ${name}` : name}`,
     `${t("chat.msg.modelInfo.time")}: ${seconds} s`,
     `${t("chat.msg.modelInfo.tokens")}: ${fmt(info.input_tokens)} / ${fmt(info.output_tokens)}`,
   ];
 }
+
+// The picker value that asks the server to choose a model per message.
+const AUTO_MODEL = "auto";
 
 function toTranscriptMessage(m: StoredMessage): TranscriptItem {
   return {
@@ -454,6 +457,7 @@ export function Chat({
   const [sharing, setSharing] = useState(false);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [defaultModel, setDefaultModel] = useState<string>("");
+  const [autoAvailable, setAutoAvailable] = useState(false);
   const [model, setModel] = useState<string>(initialModel ?? "");
   const availableModelIdsRef = useRef<Set<string> | null>(null);
   const selectedModelRef = useRef(model);
@@ -1102,6 +1106,9 @@ export function Chat({
       void api.listModels().then((r) => {
         if (!mounted) return;
         const available = new Set(r.models.map((item) => item.model_id));
+        // "auto" is a picker value, not a model: it is selectable only while the server offers it.
+        if (r.auto) available.add(AUTO_MODEL);
+        setAutoAvailable(Boolean(r.auto));
         const selectedUnavailable = Boolean(selectedModelRef.current && !available.has(selectedModelRef.current));
         availableModelIdsRef.current = available;
         setModels(r.models);
@@ -2343,6 +2350,24 @@ export function Chat({
                           </Text>
                         </div>
                         <div className="claw-plus-divider" />
+                        {autoAvailable && (
+                          <button
+                            type="button"
+                            className="claw-model-option"
+                            onClick={() => {
+                              setModel(AUTO_MODEL);
+                              setModelOpen(false);
+                            }}
+                          >
+                            <div className="claw-model-option-main">
+                              <div className="claw-model-option-head">
+                                <span className="claw-model-option-name">{t("chat.model.auto")}</span>
+                              </div>
+                              <span className="claw-model-option-desc">{t("chat.model.autoDesc")}</span>
+                            </div>
+                            {model === AUTO_MODEL && <Icon icon={Check} size="sm" color="secondary" />}
+                          </button>
+                        )}
                         {models.map((m) => (
                           <button
                             key={m.model_id}
@@ -2385,7 +2410,9 @@ export function Chat({
                     <button type="button" className="claw-model-trigger">
                       <Icon icon={Box} size="sm" color="secondary" />
                       <span className="claw-model-trigger-label">
-                        {models.find((m) => m.model_id === model)?.label ?? t("chat.model.select")}
+                        {model === AUTO_MODEL
+                          ? t("chat.model.auto")
+                          : models.find((m) => m.model_id === model)?.label ?? t("chat.model.select")}
                       </span>
                       <Icon icon={ChevronDown} size="xsm" color="secondary" />
                     </button>
