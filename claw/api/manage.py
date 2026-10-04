@@ -726,7 +726,7 @@ async def list_models(user: User = Depends(current_user), state: AppState = Depe
     from claw.core.auto_model import auto_available
 
     # Offered as the "Auto" entry in the picker; the server decides per message.
-    auto = await auto_available(state.llm_config, getattr(state.policy, "semantic", None), chat_cost)
+    auto = await auto_available(state.llm_config, getattr(getattr(state, "policy", None), "semantic", None), chat_cost)
     if not models:
         # A configured but unavailable lineup must not reappear as the env
         # default in the picker: runtime rejects that route as well.
