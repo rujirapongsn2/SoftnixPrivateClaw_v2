@@ -1,5 +1,5 @@
-export type SemanticRuleGroup = "technical" | "personal" | "internal" | "compliance" | "custom";
-export type SemanticRuleAction = "monitor" | "warn" | "confirm" | "block";
+export type SemanticRuleGroup = "technical" | "personal" | "internal" | "compliance" | "routing" | "custom";
+export type SemanticRuleAction = "monitor" | "warn" | "confirm" | "block" | "local";
 export type SemanticRuleDraft = {
   name: string; condition: string; exclusions: string;
   scopes: ("input" | "output")[]; enabled: boolean; scale: number;

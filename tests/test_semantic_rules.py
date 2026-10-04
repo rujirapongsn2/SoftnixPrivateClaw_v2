@@ -25,7 +25,7 @@ async def test_rule_crud_off_by_default_and_admin_only(db_factory):
         assert listed["rules"] == []
         assert len(listed["templates"]) >= 2
         assert all(not template["enabled"] for template in listed["templates"])
-        assert {template["group"] for template in listed["templates"]} == {"technical", "personal", "internal", "compliance"}
+        assert {template["group"] for template in listed["templates"]} == {"technical", "personal", "internal", "compliance", "routing"}
         body = {k: v for k, v in listed["templates"][0].items() if k != "id"} | {"enabled": True, "scale": 0.75}
         created = await c.post(path, headers=headers, json=body)
         assert created.status_code == 200
