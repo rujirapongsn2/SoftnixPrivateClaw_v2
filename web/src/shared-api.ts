@@ -791,6 +791,10 @@ export type ModelCost = "low" | "medium" | "high" | "very_high";
 
 export type ModelKind = "chat" | "image" | "vision";
 
+// Display-only labels on a model, set by the admin. They do not gate routing.
+export type ModelPurpose = "general" | "fast" | "reasoning" | "coding" | "long_context" | "multimodal";
+export type ModelLocality = "local" | "external";
+
 export interface LLMModelCfg {
   id: string;
   model_id: string;
@@ -804,6 +808,8 @@ export interface LLMModelCfg {
   is_fallback: boolean;
   cost: ModelCost;
   description: string;
+  purposes: ModelPurpose[];
+  data_locality: ModelLocality;
   // "chat" = agent chat picker; "image" = text-to-image only.
   kind: ModelKind;
   // Admin's input-token window override; null = look it up from LiteLLM's table.
@@ -1027,6 +1033,8 @@ export interface LlmModelCreate {
   enabled?: boolean;
   cost?: ModelCost;
   description?: string;
+  purposes?: ModelPurpose[];
+  data_locality?: ModelLocality;
   kind?: ModelKind;
   context_window?: number | null;
 }
@@ -1038,6 +1046,8 @@ export interface LlmModelPatch {
   is_fallback?: boolean;
   cost?: ModelCost;
   description?: string;
+  purposes?: ModelPurpose[];
+  data_locality?: ModelLocality;
   kind?: ModelKind;
   // 0 clears the override back to automatic lookup.
   context_window?: number | null;

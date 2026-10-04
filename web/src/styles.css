@@ -3039,6 +3039,43 @@ html[data-chat-bg="grid"] .claw-chat {
   background: #fdeaf1;
 }
 
+.claw-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.claw-chip {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border, #cfccc4);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-secondary, #6b6760);
+  cursor: pointer;
+}
+.claw-chip.is-active {
+  background: var(--color-text-primary, #1c1a18);
+  border-color: var(--color-text-primary, #1c1a18);
+  color: var(--color-background-base, #fff);
+}
+.claw-locality {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.claw-locality-local {
+  color: #1a7f52;
+  background: #e6f6ee;
+}
+.claw-locality-external {
+  color: #6b6760;
+  background: #efeee9;
+}
+
 /* ---- Usage-tier plans (Control Plane → Plans + Overview → Plans) ---- */
 /* Read-only spec line under a plan card's name — cost ceilings + quotas as
    small muted text, wrapping on narrow widths. */
