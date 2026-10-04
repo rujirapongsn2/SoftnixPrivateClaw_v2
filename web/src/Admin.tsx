@@ -96,6 +96,8 @@ import {
   LLMModelCfg,
   LLMProviderCfg,
   ModelCost,
+  ModelLocality,
+  ModelPurpose,
   ModelKind,
   ModelUsagePoint,
   OAuthAppsInfo,
@@ -1227,6 +1229,20 @@ function ProviderBrandTile({
 
 const COSTS: ModelCost[] = ["low", "medium", "high", "very_high"];
 
+const PURPOSES: ModelPurpose[] = ["general", "fast", "reasoning", "coding", "long_context", "multimodal"];
+const PURPOSE_LABEL: Record<ModelPurpose, string> = {
+  general: "admin.providers.purpose.general",
+  fast: "admin.providers.purpose.fast",
+  reasoning: "admin.providers.purpose.reasoning",
+  coding: "admin.providers.purpose.coding",
+  long_context: "admin.providers.purpose.longContext",
+  multimodal: "admin.providers.purpose.multimodal",
+};
+const LOCALITY_LABEL: Record<ModelLocality, string> = {
+  local: "admin.providers.locality.local",
+  external: "admin.providers.locality.external",
+};
+
 // LiteLLM routes by the model id's leading prefix. A model id without a known
 // prefix (e.g. a raw "qwen/qwen3.6-27b" slug) makes LiteLLM reject the call
 // with "LLM Provider NOT provided" — so warn before it's saved.
@@ -1275,6 +1291,39 @@ function CostSegmented({ value, onChange }: { value: ModelCost; onChange: (c: Mo
           onClick={() => onChange(c)}
         >
           {t(COST_LABEL[c])}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Purpose is a multi-select over six values, so toggle chips that wrap;
+// locality is a binary, so it stays segmented.
+function PurposeChips({ value, onChange }: { value: ModelPurpose[]; onChange: (p: ModelPurpose[]) => void }) {
+  const t = useT();
+  // At least one purpose stays selected: an empty list is rejected server side.
+  const toggle = (p: ModelPurpose) => {
+    if (!value.includes(p)) return onChange(PURPOSES.filter((x) => x === p || value.includes(x)));
+    if (value.length > 1) onChange(value.filter((x) => x !== p));
+  };
+  return (
+    <div className="claw-chip-group" role="group" aria-label={t("admin.providers.purposeAria")}>
+      {PURPOSES.map((p) => (
+        <button key={p} type="button" className={`claw-chip${value.includes(p) ? " is-active" : ""}`} aria-pressed={value.includes(p)} onClick={() => toggle(p)}>
+          {t(PURPOSE_LABEL[p])}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function LocalitySegmented({ value, onChange }: { value: ModelLocality; onChange: (l: ModelLocality) => void }) {
+  const t = useT();
+  return (
+    <div className="claw-segmented" role="group" aria-label={t("admin.providers.localityAria")}>
+      {(["local", "external"] as ModelLocality[]).map((l) => (
+        <button key={l} type="button" className={value === l ? "is-active" : ""} aria-pressed={value === l} onClick={() => onChange(l)}>
+          {t(LOCALITY_LABEL[l])}
         </button>
       ))}
     </div>
@@ -1904,6 +1953,8 @@ function ModelRow({
   );
   const [label, setLabel] = useState(model.label);
   const [cost, setCost] = useState<ModelCost>(model.cost);
+  const [purposes, setPurposes] = useState<ModelPurpose[]>(model.purposes);
+  const [locality, setLocality] = useState<ModelLocality>(model.data_locality);
   const [description, setDescription] = useState(model.description);
   const [kind, setKind] = useState<ModelKind>(model.kind);
   const [contextWindow, setContextWindow] = useState(String(model.context_window ?? ""));
@@ -1969,6 +2020,23 @@ function ModelRow({
             </Text>
             <CostSegmented value={cost} onChange={setCost} />
           </div>
+          {kind === "chat" && (
+            <div className="claw-row">
+              <Text size="sm" color="secondary">
+                {t("admin.providers.purposeLabel")}
+              </Text>
+              <PurposeChips value={purposes} onChange={setPurposes} />
+            </div>
+          )}
+          <div className="claw-row">
+            <Text size="sm" color="secondary">
+              {t("admin.providers.localityLabel")}
+            </Text>
+            <LocalitySegmented value={locality} onChange={setLocality} />
+          </div>
+          <Text size="2xs" color="secondary">
+            {t("admin.providers.localityHint")}
+          </Text>
           <div className="claw-row">
             <Button
               label={t("admin.common.saveChanges")}
@@ -1982,6 +2050,8 @@ function ModelRow({
                     model_id: prefixApplies ? composeModelId(modelPrefix, modelId) : modelId.trim(),
                     label: label.trim(),
                     cost,
+                    purposes,
+                    data_locality: locality,
                     description: description.trim(),
                     kind,
                     // 0 clears the override; the backend stores it as NULL. Only
@@ -2004,6 +2074,8 @@ function ModelRow({
                 setModelId(prefixApplies ? stripKnownPrefix(modelPrefix, model.model_id) : model.model_id);
                 setLabel(model.label);
                 setCost(model.cost);
+                setPurposes(model.purposes);
+                setLocality(model.data_locality);
                 setDescription(model.description);
                 setKind(model.kind);
                 setContextWindow(String(model.context_window ?? ""));
@@ -2054,6 +2126,9 @@ function ModelRow({
       <div className="claw-model-cost-cell">
         {model.kind !== "chat" && <Badge variant="neutral" label={t(KIND_LABEL[model.kind])} />}
         <span className={`claw-cost claw-cost-${model.cost}`}>{t(COST_LABEL[model.cost])}</span>
+        {model.kind === "chat" &&
+          model.purposes.map((p) => <Badge key={p} variant="neutral" label={t(PURPOSE_LABEL[p])} />)}
+        <span className={`claw-locality claw-locality-${model.data_locality}`}>{t(LOCALITY_LABEL[model.data_locality])}</span>
       </div>
       <label className="claw-toggle-inline claw-model-status-cell">
         <Text size="sm" color="secondary">{model.enabled ? t("admin.providers.on") : t("admin.providers.off")}</Text>
@@ -2125,6 +2200,8 @@ function AddModelForm({
   const [modelId, setModelId] = useState("");
   const [label, setLabel] = useState("");
   const [cost, setCost] = useState<ModelCost>("medium");
+  const [purposes, setPurposes] = useState<ModelPurpose[]>(["general"]);
+  const [locality, setLocality] = useState<ModelLocality>("external");
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState<ModelKind>("chat");
   const [contextWindow, setContextWindow] = useState("");
@@ -2190,6 +2267,23 @@ function AddModelForm({
           </Text>
           <CostSegmented value={cost} onChange={setCost} />
         </div>
+        {kind === "chat" && (
+          <div className="claw-row">
+            <Text size="sm" color="secondary">
+              {t("admin.providers.purposeLabel")}
+            </Text>
+            <PurposeChips value={purposes} onChange={setPurposes} />
+          </div>
+        )}
+        <div className="claw-row">
+          <Text size="sm" color="secondary">
+            {t("admin.providers.localityLabel")}
+          </Text>
+          <LocalitySegmented value={locality} onChange={setLocality} />
+        </div>
+        <Text size="2xs" color="secondary">
+          {t("admin.providers.localityHint")}
+        </Text>
         <div className="claw-row">
           <Button
             label={t("admin.providers.addModel")}
@@ -2203,6 +2297,8 @@ function AddModelForm({
                   model_id: hasPrefix ? composeModelId(modelPrefix, modelId) : modelId.trim(),
                   label: label.trim(),
                   cost,
+                  purposes,
+                  data_locality: locality,
                   description: description.trim(),
                   kind,
                   context_window: kind === "chat" ? Number(contextWindow || 0) : 0,

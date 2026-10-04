@@ -8,14 +8,22 @@ routes (claw/api/manage.py) call them with the caller's id. This keeps provider
 management single-sourced — a fix here applies to both scopes at once.
 """
 
+from typing import Annotated, Literal
+
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from sbot.api.deps import AppState
 
 _PREFIX_RE = r"^[a-z0-9_]*$"
 _COST_RE = r"^(low|medium|high|very_high)$"
 _KIND_RE = r"^(chat|image|vision)$"
+Purpose = Literal["general", "fast", "reasoning", "coding", "long_context", "multimodal"]
+# One or more purposes; duplicates collapse, first-seen order is kept.
+Purposes = Annotated[
+    list[Purpose], AfterValidator(lambda v: list(dict.fromkeys(v))), Field(min_length=1, max_length=len(Purpose.__args__))
+]
+_LOCALITY_RE = r"^(local|external)$"
 # Sanity bound on the manual context-window override: far above any real model,
 # low enough that a typo can't hand the agent loop an absurd compaction ceiling.
 _MAX_CONTEXT_WINDOW = 20_000_000
@@ -47,6 +55,8 @@ class ModelBody(BaseModel):
     enabled: bool = True
     cost: str = Field(default="medium", pattern=_COST_RE)
     description: str = ""
+    purposes: Purposes = Field(default_factory=lambda: ["general"])
+    data_locality: str = Field(default="external", pattern=_LOCALITY_RE)
     # "chat" = agent chat picker; "image" = text-to-image only (kept out of
     # the chat picker, offered via the separate image-generation path);
     # "vision" = the reader a chat turn delegates an attached image to when the
@@ -64,6 +74,8 @@ class ModelPatch(BaseModel):
     is_fallback: bool | None = None  # admin-global only; ignored on user scope
     cost: str | None = Field(default=None, pattern=_COST_RE)
     description: str | None = None
+    purposes: Purposes | None = None
+    data_locality: str | None = Field(default=None, pattern=_LOCALITY_RE)
     kind: str | None = Field(default=None, pattern=_KIND_RE)
     context_window: int | None = Field(default=None, ge=0, le=_MAX_CONTEXT_WINDOW)
 
@@ -98,6 +110,8 @@ def model_row(m) -> dict:
         "is_fallback": m.is_fallback,
         "cost": m.cost or "medium",
         "description": m.description or "",
+        "purposes": m.purposes or ["general"],
+        "data_locality": m.data_locality or "external",
         "kind": m.kind or "chat",
         "context_window": m.context_window,
     }
@@ -154,6 +168,8 @@ async def create_model(state: AppState, provider_id: str, body: ModelBody, owner
         kind=body.kind,
         owner_id=owner_id,
         context_window=body.context_window,
+        purposes=body.purposes,
+        data_locality=body.data_locality,
     )
     if m is None:
         raise HTTPException(status_code=404, detail="provider not found")
