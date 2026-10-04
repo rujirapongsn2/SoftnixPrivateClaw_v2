@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from claw.security.policy import PolicyEngine
 from claw.security.semantic import SemanticGuardrailSettings, SemanticMonitor
+from claw.security.semantic_routing import route_message
 from claw.security.semantic_rules import TEMPLATES, SemanticRuleBody, routing_rules
 
 
@@ -55,7 +56,7 @@ def service(rules, *, noul=0.0, answer=None, status=200):
 
 async def test_purpose_judgment_comes_back_by_name():
     monitor, seen = service([])
-    decision = await monitor.route("write me a sort function")
+    decision = await route_message(monitor, "write me a sort function")
     assert decision.checked and decision.judgment["coding"] == 1.0
     assert seen[0]["questions"]["purpose"]["type"] == "score"
     assert len(seen[0]["questions"]["purpose"]["criteria"]) == 6
@@ -64,31 +65,31 @@ async def test_purpose_judgment_comes_back_by_name():
 
 async def test_a_firing_routing_rule_requires_local():
     monitor, _ = service([rule()], noul=0.9)
-    decision = await monitor.route("my customer is ...")
+    decision = await route_message(monitor, "my customer is ...")
     assert decision.local_required and decision.local_reasons == ["PII"]
 
 
 async def test_a_dry_run_rule_is_recorded_but_does_not_force_local():
     monitor, _ = service([rule(dry_run=True)], noul=0.9)
-    decision = await monitor.route("my customer is ...")
+    decision = await route_message(monitor, "my customer is ...")
     assert not decision.local_required and decision.rule_scores == {"PII": 0.9}
 
 
 async def test_failed_check_with_live_routing_rules_fails_safe_to_local():
     monitor, _ = service([rule()], status=500)
-    decision = await monitor.route("anything")
+    decision = await route_message(monitor, "anything")
     assert not decision.checked and decision.local_required and "check_failed" in decision.local_reasons
 
 
 async def test_failed_check_without_routing_rules_just_has_no_judgment():
     monitor, _ = service([], status=500)
-    decision = await monitor.route("anything")
+    decision = await route_message(monitor, "anything")
     assert not decision.checked and not decision.local_required and decision.judgment is None
 
 
 async def test_a_secret_pattern_forces_local_even_when_the_provider_is_down():
     monitor, _ = service([], status=500)
-    decision = await monitor.route("my key is sk-abcdefghijklmnopqrstuvwxyz0123456789")
+    decision = await route_message(monitor, "my key is sk-abcdefghijklmnopqrstuvwxyz0123456789")
     assert decision.local_required and "sensitive_pattern" in decision.local_reasons
 
 

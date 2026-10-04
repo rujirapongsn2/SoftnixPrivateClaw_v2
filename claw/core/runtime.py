@@ -72,7 +72,7 @@ from claw.i18n import (
 from claw.providers.base import LLMProvider, ProviderError
 from claw.providers.registry import estimated_cost_usd, supports_vision as model_supports_vision
 from claw.sandbox.ephemeral import EphemeralSandbox
-from claw.core.auto_model import AUTO_MODEL, auto_available, log_choice, resolve_auto
+from claw.core.auto_model import AUTO_MODEL, UNAVAILABLE, route_auto
 from claw.security.policy import PolicyEngine
 from claw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from claw.tools.registry import ToolRegistry
@@ -1214,11 +1214,11 @@ class AgentRuntime:
         )
         return text
 
-    async def _start_auto_route(self, model, content, user_id, session_id, plan, semantic, artifact_job):
-        """Begin the Auto routing check, concurrent with the input guardrail check.
+    async def _start_auto_route(self, model, content, user_id, session_id, plan, semantic, artifact_job, has_media):
+        """Begin the Auto routing, concurrent with the input guardrail check.
 
-        Returns None unless this turn is on Auto and a routing check can run. The turn awaits
-        the task only where it picks its model, so the check overlaps the guardrail wait.
+        Returns None unless this turn is on Auto and can be routed. The turn awaits the task
+        only where it picks its model, so the lookups and the check overlap the guardrail wait.
         """
         if artifact_job is not None or self.llm_config is None or semantic is None:
             return None
@@ -1226,11 +1226,13 @@ class AgentRuntime:
         if requested is None:
             session = await self.sessions.get(session_id)
             requested = session.model if session else None
-        if requested != AUTO_MODEL:
+        if requested != AUTO_MODEL or semantic.status()["status"] != "ready":
             return None
-        if not await auto_available(self.llm_config, semantic, plan["max_chat_cost"] if plan else None):
-            return None
-        return asyncio.create_task(semantic.route(content, user_id=user_id, session_id=session_id))
+        return asyncio.create_task(
+            route_auto(
+                self.llm_config, semantic, content, plan["max_chat_cost"] if plan else None, has_media=has_media
+            )
+        )
 
     async def _process_turn(
         self,
@@ -1288,7 +1290,9 @@ class AgentRuntime:
         # messages in the same conversation. (A resumed background job was checked when it started.)
         announced = False
         semantic = getattr(self.policy, "semantic", None) if self.policy is not None else None
-        route_task = await self._start_auto_route(model, content, user_id, session_id, plan, semantic, artifact_job)
+        route_task = await self._start_auto_route(
+            model, content, user_id, session_id, plan, semantic, artifact_job, bool(media)
+        )
         if semantic is not None and semantic.status()["status"] == "ready" and artifact_job is None:
             # Show "working" while the check (or the user's confirmation) is pending. Only when no
             # other turn is running here: a second turn_started would wipe that turn's live text.
@@ -1350,16 +1354,12 @@ class AgentRuntime:
                 if self.llm_config is not None:
                     requested = model or (session.model if session else None)
                     if requested == AUTO_MODEL:
-                        decision = await route_task if route_task is not None else None
-                        auto_route, choice = await resolve_auto(
-                            self.llm_config, decision, plan_chat_cost, has_media=bool(media)
-                        )
+                        auto_route = await route_task if route_task is not None else UNAVAILABLE
                         await self.audit.log(
-                            "auto_model_route", log_choice(auto_route, choice, decision),
-                            user_id=user_id, session_id=session_id,
+                            "auto_model_route", auto_route.audit_payload(), user_id=user_id, session_id=session_id
                         )
                         if auto_route.error:
-                            msg = t(f"error.{auto_route.error}", locale)
+                            msg = auto_route.message(locale)
                             self.bus.publish(session_id, TurnError(turn_id=turn_id, message=msg, code=auto_route.error))
                             return msg
                         requested = auto_route.model_id

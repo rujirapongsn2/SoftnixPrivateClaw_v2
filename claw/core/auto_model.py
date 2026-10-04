@@ -3,23 +3,48 @@
 Kept out of runtime.py so the agent loop only asks "which model?" and gets an answer.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
-from loguru import logger
-
-from claw.core.model_router import PURPOSES, Candidate, Choice, choose
+from claw.core.model_router import PURPOSES, Candidate, choose
 from claw.core.plans import cost_rank
+from claw.i18n import t
+from claw.security.semantic_routing import route_message
 
 AUTO_MODEL = "auto"
+
+AutoError = Literal["", "no_local_model", "model_selection_required"]
+_ERROR_KEY: dict[str, str] = {
+    "no_local_model": "error.no_local_model",
+    "model_selection_required": "error.model_selection_required",
+}
 
 
 @dataclass(frozen=True, slots=True)
 class AutoRoute:
+    """The outcome of Auto for one message: a model, or a reason the turn must stop."""
+
     model_id: str | None
     reason: str
-    # "" when a model was chosen (or Auto fell back to the normal default route);
-    # otherwise the i18n error code for the turn.
-    error: str = ""
+    error: AutoError = ""
+    score: float = 0.0
+    checked: bool = False
+    local_required: bool = False
+    local_reasons: tuple[str, ...] = ()
+    rule_scores: dict[str, float | None] = field(default_factory=dict)
+
+    def message(self, locale: str) -> str:
+        return t(_ERROR_KEY[self.error], locale)
+
+    def audit_payload(self) -> dict:
+        return {
+            "model": self.model_id, "reason": self.reason, "score": self.score, "checked": self.checked,
+            "local_required": self.local_required, "local_reasons": list(self.local_reasons),
+            "rule_scores": self.rule_scores,
+        }
+
+
+UNAVAILABLE = AutoRoute(None, "unavailable")
 
 
 async def candidates_for(llm_config, plan_chat_cost: str | None) -> list[Candidate]:
@@ -40,38 +65,32 @@ async def candidates_for(llm_config, plan_chat_cost: str | None) -> list[Candida
     ]
 
 
+def _usable(candidates: list[Candidate]) -> bool:
+    """Auto needs something to choose between and a fallback to land on."""
+    return len(candidates) >= 2 and any(c.is_fallback for c in candidates)
+
+
 async def auto_available(llm_config, semantic, plan_chat_cost: str | None) -> bool:
-    """Auto needs a ready guardrail model, a fallback model, and something to choose between."""
     if llm_config is None or semantic is None or semantic.status()["status"] != "ready":
         return False
-    if await llm_config.fallback_model_for(plan_chat_cost) is None:
-        return False
-    return len(await llm_config.enabled_models(None, max_cost=plan_chat_cost)) >= 2
+    return _usable(await candidates_for(llm_config, plan_chat_cost))
 
 
-async def resolve_auto(llm_config, decision, plan_chat_cost, *, has_media: bool) -> tuple[AutoRoute, Choice | None]:
-    """Turn a routing decision into a model. `decision` is None when no check ran."""
-    if decision is None:
-        return AutoRoute(None, "unavailable"), None
+async def route_auto(llm_config, semantic, text: str, plan_chat_cost: str | None, *, has_media: bool) -> AutoRoute:
+    """Decide the model for one Auto message. Run as a task alongside the input guardrail check."""
+    candidates = await candidates_for(llm_config, plan_chat_cost)
+    if not _usable(candidates):
+        return UNAVAILABLE
+    decision = await route_message(semantic, text)
     judgment = decision.judgment
     if has_media:
         # The check reads text only. An attached image is a vision task whatever the words say.
         judgment = {name: 0.0 for name in PURPOSES} | {"multimodal": 1.0}
-    choice = choose(await candidates_for(llm_config, plan_chat_cost), judgment, require_local=decision.local_required)
+    choice = choose(candidates, judgment, require_local=decision.local_required)
+    error: AutoError = ""
     if choice.model_id is None:
         error = "no_local_model" if choice.reason == "no_local_model" else "model_selection_required"
-        return AutoRoute(None, choice.reason, error), choice
-    return AutoRoute(choice.model_id, choice.reason), choice
-
-
-def log_choice(route: AutoRoute, choice: Choice | None, decision) -> dict:
-    """The audit payload for one Auto decision."""
-    payload = {
-        "model": route.model_id,
-        "reason": route.reason,
-        "score": choice.score if choice else 0.0,
-        "local_required": bool(decision and decision.local_required),
-        "local_reasons": list(decision.local_reasons) if decision else [],
-    }
-    logger.info("Auto model route model={} reason={} local_required={}", route.model_id, route.reason, payload["local_required"])
-    return payload
+    return AutoRoute(
+        choice.model_id, choice.reason, error, choice.score, decision.checked, decision.local_required,
+        tuple(decision.local_reasons), decision.rule_scores,
+    )

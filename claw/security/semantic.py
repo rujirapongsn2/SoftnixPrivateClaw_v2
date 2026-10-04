@@ -66,26 +66,6 @@ class SemanticVerdict:
     message: str = ""
 
 
-# Auto routing sits in front of every answer, so it gets a much smaller budget than a
-# rule that can block. Past it the turn goes to the default model.
-ROUTING_BUDGET_SECONDS = 1.5
-
-
-@dataclass
-class RoutingDecision:
-    """What `SemanticMonitor.route` learned about one message."""
-
-    checked: bool = False
-    reason: str = ""
-    judgment: dict[str, float] | None = None  # purpose name -> probability
-    confidence: float | None = None
-    local_required: bool = False
-    local_reasons: list[str] = field(default_factory=list)
-    rule_scores: dict[str, float | None] = field(default_factory=dict)
-    provider: str = ""
-    model: str = ""
-
-
 class _RedactionFailed(Exception):
     """A configured mask could not be applied; nothing is sent upstream."""
 
@@ -392,83 +372,25 @@ class SemanticMonitor:
             return SemanticVerdict()
         return verdict
 
-    def _sensitive_match(self, text):
+    def matches_sensitive(self, text):
         """True when a secret or PII mask matches. Decided locally, so it holds even when the
         provider is down."""
         from claw.security.policy import _BUILTINS
 
         return any(rule.enabled and rule.compiled().search(text) for rule in [*_BUILTINS, *self.policy.rules])
 
-    async def route(self, text, *, user_id=None, session_id=None):
-        """Judge what kind of task `text` is and whether it must stay on a Local AI model.
+    async def ask(self, text, questions, rules, *, scope="input", budget=None):
+        """One bounded upstream call for callers that are not the rule check (Auto routing).
 
-        One bounded request carries the purpose question plus every enabled routing rule. It
-        never raises. A failed check reports `checked=False`; with routing rules enabled that
-        also sets `local_required`, because letting data leave on a guess is the unsafe side.
+        Masks and windows the text exactly as observe() does, then returns the result fields
+        (status, scores, choices). Provider problems come back as `status="error"`, not raised.
         """
-        from claw.core.model_router import PURPOSE_CRITERIA, probabilities_by_purpose
-        from claw.security.semantic_rules import questions_for_rules, routing_rules, should_alert
-
-        decision = RoutingDecision()
-        try:
-            if self.status()["status"] != "ready":
-                return decision
-            rules = routing_rules(await self.rule_store.enabled()) if self.rule_store is not None else []
-            live = [rule for rule in rules if not rule.get("dry_run", True)]
-            if self._sensitive_match(text):
-                decision.local_required = True
-                decision.local_reasons.append("sensitive_pattern")
-            questions = {
-                "purpose": {
-                    "type": "score",
-                    "instructions": "Which description best fits the task that `text` asks for?",
-                    "criteria": list(PURPOSE_CRITERIA),
-                },
-                **questions_for_rules(rules),
-            }
-            if len(text) > self.settings.max_chars:
-                half = self.settings.max_chars // 2
-                text = text[:half] + _WINDOW_MARK + text[-half:]
-            result = {"provider": self.settings.provider, "scope": "routing", "status": "ready"}
-            await self._judge_with_failover(
-                result, self._redact(text), "input", questions, rules, budget=ROUTING_BUDGET_SECONDS
-            )
-            decision.provider, decision.model = result.get("provider", ""), result.get("model", "")
-            if result.get("status") == "checked":
-                decision.checked = True
-                decision.judgment = probabilities_by_purpose(
-                    (result.get("choices", {}).get("purpose") or {}).get("probabilities")
-                )
-                decision.confidence = (result.get("choices", {}).get("purpose") or {}).get("confidence")
-                scores = result.get("scores", {})
-                for rule in rules:
-                    score = scores.get(rule["id"])
-                    fired = score is not None and should_alert(score, float(rule.get("scale", 0)))
-                    decision.rule_scores[rule["name"]] = round(score, 3) if score is not None else None
-                    if fired and not rule.get("dry_run", True):
-                        decision.local_required = True
-                        decision.local_reasons.append(rule["name"])
-            else:
-                decision.reason = result.get("reason", "error")
-                if live:
-                    decision.local_required = True
-                    decision.local_reasons.append("check_failed")
-            try:
-                await self.audit.log(
-                    "semantic_routing",
-                    {
-                        "checked": decision.checked, "reason": decision.reason, "provider": decision.provider,
-                        "local_required": decision.local_required, "local_reasons": decision.local_reasons,
-                        "judgment": decision.judgment, "rule_scores": decision.rule_scores,
-                    },
-                    user_id=user_id, session_id=session_id,
-                )
-            except Exception:
-                logger.error("Semantic routing audit write failed")
-        except Exception:
-            logger.exception("Semantic routing failed; using the default model")
-            return RoutingDecision(reason="error", local_required=decision.local_required, local_reasons=decision.local_reasons)
-        return decision
+        result = {"provider": self.settings.provider, "scope": scope, "status": "ready"}
+        if len(text) > self.settings.max_chars:
+            half = self.settings.max_chars // 2
+            text = text[:half] + _WINDOW_MARK + text[-half:]
+        await self._judge_with_failover(result, self._redact(text), scope, questions, rules, budget=budget)
+        return result
 
     async def observe(self, text, scope, *, user_id=None, session_id=None, force_log=False, test_rule=None, rules=None):
         status = self.status()
