@@ -20,19 +20,28 @@ class SemanticRuleBody(BaseModel):
     scopes: list[str] = Field(default_factory=lambda: ["input", "output"], min_length=1, max_length=2)
     enabled: bool = False
     scale: float = Field(default=0.5, ge=0, le=1)
-    group: Literal["technical", "personal", "internal", "compliance", "custom"] = "custom"
+    group: Literal["technical", "personal", "internal", "compliance", "routing", "custom"] = "custom"
     # Set when the rule was created from a built-in template, so the UI can show each
     # template once (as the customized rule) and offer "reset to default" on delete.
     template_id: str | None = Field(default=None, max_length=64)
     # What happens when the rule fires. "monitor" only records an alert. The others act on
     # the message when the probability reaches max(1 - scale, act_threshold), so a rule can
     # alert broadly (scale) yet only act when the judgment is confident (act_threshold).
-    action: Literal["monitor", "warn", "confirm", "block"] = "monitor"
+    # "local" belongs to the routing group only: a match makes Auto choose a Local AI model.
+    action: Literal["monitor", "warn", "confirm", "block", "local"] = "monitor"
     act_threshold: float = Field(default=0.9, ge=0.5, le=1)
     # Dry run: record what the action WOULD have done, but let the message through.
     dry_run: bool = True
     # Optional text shown to the user for warn/confirm/block (else a localized default).
     message: str = Field(default="", max_length=300)
+
+    @model_validator(mode="after")
+    def routing_rules_are_input_only(self):
+        if (self.action == "local") != (self.group == "routing"):
+            raise ValueError("The local action and the routing group go together")
+        if self.action == "local" and self.scopes != ["input"]:
+            raise ValueError("Routing rules check chat input only")
+        return self
 
     @model_validator(mode="after")
     def confirm_needs_input(self):
@@ -174,8 +183,79 @@ TEMPLATES = [
         "enabled": False,
         "scale": 0.5,
     },
+    # Group 5 — Model routing: a match sends the message to a Local AI model (Auto only).
+    {
+        "id": "route_personal_data",
+        "group": "routing",
+        "name": "Personal data to Local AI",
+        "condition": "Does `text` contain personal data about an identifiable person, such as a national ID number, full name with contact details, home address, date of birth or bank account?",
+        "exclusions": "Generic examples, fictional or obviously fake data, and discussion of privacy rules without real data.",
+        "scopes": ["input"],
+        "enabled": False,
+        "scale": 0.5,
+        "action": "local",
+        "dry_run": True,
+    },
+    {
+        "id": "route_confidential_business",
+        "group": "routing",
+        "name": "Confidential business data to Local AI",
+        "condition": "Does `text` contain confidential business information, such as contract terms, pricing or financial figures, customer lists, or documents marked confidential?",
+        "exclusions": "Public information, published prices, and general discussion of business topics.",
+        "scopes": ["input"],
+        "enabled": False,
+        "scale": 0.5,
+        "action": "local",
+        "dry_run": True,
+    },
+    {
+        "id": "route_internal_material",
+        "group": "routing",
+        "name": "Internal material to Local AI",
+        "condition": "Does `text` contain internal company material such as non-public plans, internal policies, meeting minutes, or internal system details?",
+        "exclusions": "Public documentation and generic examples.",
+        "scopes": ["input"],
+        "enabled": False,
+        "scale": 0.5,
+        "action": "local",
+        "dry_run": True,
+    },
+    {
+        "id": "route_credentials_and_code",
+        "group": "routing",
+        "name": "Credentials and private code to Local AI",
+        "condition": "Does `text` contain passwords, API keys, tokens, private keys, or proprietary source code from an internal repository?",
+        "exclusions": "Placeholders such as YOUR_API_KEY, short public snippets, and open-source code.",
+        "scopes": ["input"],
+        "enabled": False,
+        "scale": 0.5,
+        "action": "local",
+        "dry_run": True,
+    },
+    {
+        "id": "route_health_data",
+        "group": "routing",
+        "name": "Health data to Local AI",
+        "condition": "Does `text` contain health information about an identifiable person, such as diagnoses, prescriptions, test results or medical records?",
+        "exclusions": "General health education and anonymous or hypothetical cases.",
+        "scopes": ["input"],
+        "enabled": False,
+        "scale": 0.5,
+        "action": "local",
+        "dry_run": True,
+    },
 ]
 
+
+
+def is_routing(rule: dict) -> bool:
+    return rule.get("action") == "local"
+
+
+def routing_rules(rules: list[dict]) -> list[dict]:
+    """The enabled rules that decide Local AI routing. They run in their own check, never in
+    the block/confirm check, which has no meaning for them."""
+    return [rule for rule in rules if is_routing(rule) and "input" in rule["scopes"]]
 
 
 def default_scale() -> float:
@@ -194,7 +274,7 @@ def normalize_rule(rule: dict) -> dict:
     out["scale"] = 0.0 if scale < 0 else 1.0 if scale > 1 else scale
     out["enabled"] = enabled
     # Rules stored before actions existed are monitor-only.
-    if out.get("action") not in ("monitor", "warn", "confirm", "block"):
+    if out.get("action") not in ("monitor", "warn", "confirm", "block", "local"):
         out["action"] = "monitor"
     try:
         out["act_threshold"] = min(1.0, max(0.5, float(out.get("act_threshold", 0.9))))

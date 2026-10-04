@@ -10,7 +10,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { api, type SemanticRule, type SemanticRuleAction, type SemanticRuleDraft, type SemanticRuleGroup } from "./shared-api";
 import { useT } from "./branding";
 import { ErrorText } from "./ErrorText";
-import { ShieldAlert, HeartHandshake, Building2, ScanSearch, Layers, Plus, Pencil, Trash2, RotateCcw } from "lucide-react";
+import { ShieldAlert, HeartHandshake, Building2, ScanSearch, Route, Layers, Plus, Pencil, Trash2, RotateCcw } from "lucide-react";
 
 // Same page anatomy as the keyword/regex tab (intro + "Add rule", then one Card per
 // rule with badges, a switch, Edit and Delete). What differs is the vocabulary of a
@@ -23,16 +23,19 @@ import { ShieldAlert, HeartHandshake, Building2, ScanSearch, Layers, Plus, Penci
 // deleting that stored copy resets the template to its default.
 const groups = [
   { id: "technical", icon: ShieldAlert }, { id: "personal", icon: HeartHandshake },
-  { id: "internal", icon: Building2 }, { id: "compliance", icon: ScanSearch }, { id: "custom", icon: Layers },
+  { id: "internal", icon: Building2 }, { id: "compliance", icon: ScanSearch }, { id: "routing", icon: Route }, { id: "custom", icon: Layers },
 ] as const;
 const SENSITIVITY = [{ key: "low", value: 0.25 }, { key: "medium", value: 0.5 }, { key: "high", value: 0.75 }] as const;
 const TPL = "tpl:";
+// "local" belongs to the routing group and is set by choosing that group, not picked here.
 const ACTIONS: SemanticRuleAction[] = ["monitor", "warn", "confirm", "block"];
-const ACTION_VARIANT: Record<SemanticRuleAction, "neutral" | "warning" | "error"> = { monitor: "neutral", warn: "warning", confirm: "warning", block: "error" };
+const ACTION_VARIANT: Record<SemanticRuleAction, "neutral" | "warning" | "error"> = { monitor: "neutral", warn: "warning", confirm: "warning", block: "error", local: "neutral" };
 const ACT_LEVELS = [{ key: "80", value: 0.8 }, { key: "90", value: 0.9 }, { key: "95", value: 0.95 }] as const;
 // The probability at which a rule acts: its alert level (1 - sensitivity) or its own action
-// threshold, whichever is stricter. Mirrors SemanticMonitor.evaluate on the server.
-const actLevel = (rule: { scale?: number; act_threshold?: number }) => Math.max(1 - (rule.scale ?? 0), rule.act_threshold ?? 0.9);
+// threshold, whichever is stricter. Mirrors SemanticMonitor.evaluate on the server. A routing
+// rule has no action threshold: it fires at its alert level, as SemanticMonitor.route does.
+const actLevel = (rule: { scale?: number; act_threshold?: number; action?: SemanticRuleAction }) =>
+  rule.action === "local" ? 1 - (rule.scale ?? 0) : Math.max(1 - (rule.scale ?? 0), rule.act_threshold ?? 0.9);
 
 type Row = SemanticRule & { unsaved?: boolean };
 
@@ -44,6 +47,14 @@ const draftOf = ({ name, condition, exclusions, scopes, enabled, scale, group, t
   name, condition, exclusions, scopes, enabled, scale: typeof scale === "number" ? scale : 0.5, group: group ?? "custom", template_id: template_id ?? null,
   action: action ?? "monitor", act_threshold: act_threshold ?? 0.9, dry_run: dry_run ?? true, message: message ?? "",
 });
+
+// Routing rules only ever read chat input and only ever mean "use a Local AI model".
+// Moving a rule in or out of the group keeps those two fields consistent.
+function withGroup(draft: SemanticRuleDraft, group: SemanticRuleGroup): SemanticRuleDraft {
+  if (group === "routing") return { ...draft, group, action: "local", scopes: ["input"] };
+  if (draft.group === "routing") return { ...draft, group, action: "monitor", scopes: ["input", "output"] };
+  return { ...draft, group };
+}
 
 const PROVIDER_NAME: Record<string, string> = { jev: "Jev", laya: "OpenThai SystemOne" };
 
@@ -140,13 +151,14 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
           {groups.map((g) => (
             <Button key={g.id} label={t(`admin.semantic.group.${g.id}`)} size="sm" isDisabled={busy}
               variant={(draft.group ?? "custom") === g.id ? "primary" : "secondary"}
-              clickAction={() => setDraft({ ...draft, group: g.id as SemanticRuleGroup })} />
+              clickAction={() => setDraft(withGroup(draft, g.id as SemanticRuleGroup))} />
           ))}
         </div>
         <TextArea label={t("admin.semantic.condition")} placeholder={t("admin.semantic.condition.placeholder")} value={draft.condition} onChange={(condition) => setDraft({ ...draft, condition })} rows={5} />
         <Hint summary={t("admin.semantic.hintToggle")}>{t("admin.semantic.condition.hint")}</Hint>
         <TextArea label={t("admin.semantic.exclusions")} placeholder={t("admin.semantic.exclusions.placeholder")} value={draft.exclusions} onChange={(exclusions) => setDraft({ ...draft, exclusions })} rows={3} />
         <Hint summary={t("admin.semantic.hintToggle")}>{t("admin.semantic.exclusions.hint")}</Hint>
+        {draft.group !== "routing" && (
         <div className="claw-row">
           <Text size="sm" color="secondary">{t("admin.semantic.scope")}</Text>
           {(["input", "output"] as const).map((item) => (
@@ -159,6 +171,7 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
               }} />
           ))}
         </div>
+        )}
         <div className="claw-row" style={{ flexWrap: "wrap" }}>
           <Text size="sm" color="secondary">{t("admin.semantic.scale")}</Text>
           {SENSITIVITY.map((s) => (
@@ -172,6 +185,7 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
           <Text size="sm" color="secondary">{draft.scale.toFixed(2)}</Text>
         </div>
         <Text size="sm" color="secondary" as="p" display="block">{t("admin.semantic.scaleHint")}{editing === "new" ? ` · ${t("admin.semantic.savedOff")}` : ""}</Text>
+        {draft.group !== "routing" && (
         <div className="claw-row" style={{ flexWrap: "wrap" }}>
           <Text size="sm" color="secondary">{t("admin.semantic.action")}</Text>
           {ACTIONS.map((a) => (
@@ -181,9 +195,11 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
               clickAction={() => setDraft({ ...draft, action: a })} />
           ))}
         </div>
+        )}
         <Hint summary={t("admin.semantic.hintToggle")}>{t(`admin.semantic.action.${draft.action ?? "monitor"}.hint`)}</Hint>
         {(draft.action ?? "monitor") !== "monitor" && (
           <>
+            {draft.action !== "local" && (<>
             <div className="claw-row" style={{ flexWrap: "wrap" }}>
               <Text size="sm" color="secondary">{t("admin.semantic.actAt")}</Text>
               {ACT_LEVELS.map((l) => (
@@ -197,6 +213,7 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
               <Text size="sm" color="secondary">≥ {(actLevel(draft) * 100).toFixed(0)}%</Text>
             </div>
             <Text size="sm" color="secondary" as="p" display="block">{t("admin.semantic.actAtHint")}</Text>
+            </>)}
             <div className="claw-row claw-row-between">
               <div>
                 <Text size="sm" weight="semibold" display="block">{t("admin.semantic.dryRun")}</Text>
@@ -205,8 +222,10 @@ export function SemanticRulesPanel({ connected, fallback, usingFallback, primary
               <Switch value={draft.dry_run ?? true} label={t("admin.semantic.dryRun")} isLabelHidden isDisabled={busy}
                 changeAction={(dry_run) => setDraft({ ...draft, dry_run })} />
             </div>
-            <TextInput label={t("admin.semantic.message")} placeholder={t(`policy.semantic.${draft.action}`)}
-              value={draft.message ?? ""} onChange={(message) => setDraft({ ...draft, message })} />
+            {draft.action !== "local" && (
+              <TextInput label={t("admin.semantic.message")} placeholder={t(`policy.semantic.${draft.action}`)}
+                value={draft.message ?? ""} onChange={(message) => setDraft({ ...draft, message })} />
+            )}
           </>
         )}
         <div className="claw-row">

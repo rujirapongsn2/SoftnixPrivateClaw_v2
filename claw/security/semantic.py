@@ -66,6 +66,26 @@ class SemanticVerdict:
     message: str = ""
 
 
+# Auto routing sits in front of every answer, so it gets a much smaller budget than a
+# rule that can block. Past it the turn goes to the default model.
+ROUTING_BUDGET_SECONDS = 1.5
+
+
+@dataclass
+class RoutingDecision:
+    """What `SemanticMonitor.route` learned about one message."""
+
+    checked: bool = False
+    reason: str = ""
+    judgment: dict[str, float] | None = None  # purpose name -> probability
+    confidence: float | None = None
+    local_required: bool = False
+    local_reasons: list[str] = field(default_factory=list)
+    rule_scores: dict[str, float | None] = field(default_factory=dict)
+    provider: str = ""
+    model: str = ""
+
+
 class _RedactionFailed(Exception):
     """A configured mask could not be applied; nothing is sent upstream."""
 
@@ -183,10 +203,10 @@ class SemanticMonitor:
             return code >= 500 or code in _FAILOVER_STATUSES
         return False
 
-    async def _judge_with_failover(self, result, redacted, scope, questions, active_rules):
+    async def _judge_with_failover(self, result, redacted, scope, questions, active_rules, budget=None):
         tried_primary_error = None
         order = self._order()
-        deadline = time.monotonic() + self.settings.timeout_seconds * _TOTAL_BUDGET_FACTOR
+        deadline = time.monotonic() + (budget or self.settings.timeout_seconds * _TOTAL_BUDGET_FACTOR)
         for index, name in enumerate(order):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -257,10 +277,19 @@ class SemanticMonitor:
                         raise TruncatedSemanticState
                     answers = payload["answers"]
                     scores = {}
+                    choices = {}
                     for key in questions:
                         answer = answers[key]
                         if not isinstance(answer, dict):
                             raise ValueError("invalid judgment")
+                        if questions[key].get("type") == "score":
+                            if answer.get("type") != "score" or not isinstance(answer.get("probabilities"), dict):
+                                raise ValueError("invalid judgment")
+                            choices[key] = {
+                                "probabilities": answer["probabilities"],
+                                "confidence": answer.get("confidence"),
+                            }
+                            continue
                         score = answer["noul"]
                         if (
                             answer.get("type") != "noul"
@@ -276,6 +305,8 @@ class SemanticMonitor:
                     scale_by_id = {rule["id"]: float(rule.get("scale", 0)) for rule in active_rules}
                     alerts = {key: should_alert(score, scale_by_id.get(key, 0.0)) for key, score in scores.items()}
                     outcome.update(status="checked", scores=scores, alerts=alerts, scales=scale_by_id)
+                    if choices:
+                        outcome["choices"] = choices
                     self.last_error = None
         except httpx.HTTPStatusError as exc:
             outcome.update(status="error", reason="upstream_http_error", http_status=exc.response.status_code)
@@ -299,6 +330,8 @@ class SemanticMonitor:
         rule for this scope and the caller waits for it. Anything that goes wrong returns an
         empty verdict (fail-open), recorded in the audit log by observe().
         """
+        from claw.security.semantic_rules import is_routing
+
         verdict = SemanticVerdict()
         try:
             if self.status()["status"] != "ready":
@@ -311,7 +344,7 @@ class SemanticMonitor:
                 else:
                     await check
                 return verdict
-            rules = [rule for rule in await self.rule_store.enabled() if scope in rule["scopes"]]
+            rules = [rule for rule in await self.rule_store.enabled() if scope in rule["scopes"] and not is_routing(rule)]
             if not rules:
                 return verdict
             acting = [rule for rule in rules if rule.get("action", "monitor") != "monitor"]
@@ -359,6 +392,84 @@ class SemanticMonitor:
             return SemanticVerdict()
         return verdict
 
+    def _sensitive_match(self, text):
+        """True when a secret or PII mask matches. Decided locally, so it holds even when the
+        provider is down."""
+        from claw.security.policy import _BUILTINS
+
+        return any(rule.enabled and rule.compiled().search(text) for rule in [*_BUILTINS, *self.policy.rules])
+
+    async def route(self, text, *, user_id=None, session_id=None):
+        """Judge what kind of task `text` is and whether it must stay on a Local AI model.
+
+        One bounded request carries the purpose question plus every enabled routing rule. It
+        never raises. A failed check reports `checked=False`; with routing rules enabled that
+        also sets `local_required`, because letting data leave on a guess is the unsafe side.
+        """
+        from claw.core.model_router import PURPOSE_CRITERIA, probabilities_by_purpose
+        from claw.security.semantic_rules import questions_for_rules, routing_rules, should_alert
+
+        decision = RoutingDecision()
+        try:
+            if self.status()["status"] != "ready":
+                return decision
+            rules = routing_rules(await self.rule_store.enabled()) if self.rule_store is not None else []
+            live = [rule for rule in rules if not rule.get("dry_run", True)]
+            if self._sensitive_match(text):
+                decision.local_required = True
+                decision.local_reasons.append("sensitive_pattern")
+            questions = {
+                "purpose": {
+                    "type": "score",
+                    "instructions": "Which description best fits the task that `text` asks for?",
+                    "criteria": list(PURPOSE_CRITERIA),
+                },
+                **questions_for_rules(rules),
+            }
+            if len(text) > self.settings.max_chars:
+                half = self.settings.max_chars // 2
+                text = text[:half] + _WINDOW_MARK + text[-half:]
+            result = {"provider": self.settings.provider, "scope": "routing", "status": "ready"}
+            await self._judge_with_failover(
+                result, self._redact(text), "input", questions, rules, budget=ROUTING_BUDGET_SECONDS
+            )
+            decision.provider, decision.model = result.get("provider", ""), result.get("model", "")
+            if result.get("status") == "checked":
+                decision.checked = True
+                decision.judgment = probabilities_by_purpose(
+                    (result.get("choices", {}).get("purpose") or {}).get("probabilities")
+                )
+                decision.confidence = (result.get("choices", {}).get("purpose") or {}).get("confidence")
+                scores = result.get("scores", {})
+                for rule in rules:
+                    score = scores.get(rule["id"])
+                    fired = score is not None and should_alert(score, float(rule.get("scale", 0)))
+                    decision.rule_scores[rule["name"]] = round(score, 3) if score is not None else None
+                    if fired and not rule.get("dry_run", True):
+                        decision.local_required = True
+                        decision.local_reasons.append(rule["name"])
+            else:
+                decision.reason = result.get("reason", "error")
+                if live:
+                    decision.local_required = True
+                    decision.local_reasons.append("check_failed")
+            try:
+                await self.audit.log(
+                    "semantic_routing",
+                    {
+                        "checked": decision.checked, "reason": decision.reason, "provider": decision.provider,
+                        "local_required": decision.local_required, "local_reasons": decision.local_reasons,
+                        "judgment": decision.judgment, "rule_scores": decision.rule_scores,
+                    },
+                    user_id=user_id, session_id=session_id,
+                )
+            except Exception:
+                logger.error("Semantic routing audit write failed")
+        except Exception:
+            logger.exception("Semantic routing failed; using the default model")
+            return RoutingDecision(reason="error", local_required=decision.local_required, local_reasons=decision.local_reasons)
+        return decision
+
     async def observe(self, text, scope, *, user_id=None, session_id=None, force_log=False, test_rule=None, rules=None):
         status = self.status()
         result = {
@@ -371,7 +482,7 @@ class SemanticMonitor:
         questions = QUESTIONS
         active_rules = []
         if result["status"] == "ready" and (self.rule_store is not None or test_rule or rules is not None):
-            from claw.security.semantic_rules import MAX_ENABLED_PER_SCOPE, normalize_rule, questions_for_rules
+            from claw.security.semantic_rules import MAX_ENABLED_PER_SCOPE, is_routing, normalize_rule, questions_for_rules
 
             try:
                 active_rules = (
@@ -382,7 +493,7 @@ class SemanticMonitor:
                     else [
                         rule
                         for rule in await self.rule_store.enabled()
-                        if scope in rule["scopes"]
+                        if scope in rule["scopes"] and not is_routing(rule)
                     ]
                 )
                 questions = questions_for_rules(active_rules)

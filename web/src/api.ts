@@ -1,4 +1,4 @@
-export type SemanticRuleAction = "monitor" | "warn" | "confirm" | "block";
+export type SemanticRuleAction = "monitor" | "warn" | "confirm" | "block" | "local";
 export type SemanticRuleDraft = {
   name: string; condition: string; exclusions: string;
   scopes: ("input" | "output")[]; enabled: boolean; scale: number;
