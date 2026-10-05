@@ -1,4 +1,4 @@
-# Semantic Guardrails (Monitor)
+# Semantic Guardrails
 
 Jev and OpenThai SystemOne use separate server-side connections. Configure both credentials if needed, but select one active provider. Regex enforcement remains independent; semantic judgments never block a chat request in this release.
 
@@ -42,18 +42,18 @@ Each rule stores a `scale` float from 0 to 1 (persisted with the rule in `app_se
 - `scale = 1` — most sensitive; alert when score `> 0`
 - `0 < scale < 1` — alert when score `>= 1 - scale`
 
-Alerts are recorded on the observe result as `alerts` / `scales` alongside `scores`. Chat flow stays Monitor only; scale does not block or mask.
+Alerts are recorded on the observe result as `alerts` / `scales` alongside `scores`. Scale only sets when an alert is raised. Whether a rule also warns, asks for confirmation or blocks is its action (see below).
 
 ### Built-in template groups
 
-Templates ship `enabled: false` and are only starting points. Evaluate on your own data before enabling. All enabled rules remain Monitor only.
+Templates ship `enabled: false` and are only starting points. Evaluate on your own data before enabling. A rule's action defaults to Monitor and starts in dry run.
 
 1. **Technical security** — `instruction_override`, `secret_disclosure`, `prompt_injection` (injected or obfuscated prompts / exfiltration tricks).
 2. **Personal safety** — `targeted_harassment`, `hate_speech`, `self_harm`.
 3. **Internal operations** — `data_leakage` (customer/salary/confidential export), `cross_team_access`, `privilege_escalation` (explicit permission-bypass requests).
 4. **Compliance / anomalous** — `pii_processing`, `anomalous_time` (explicit monitoring-evasion requests using hours or sources), `attack_probing` (reconnaissance / malware-or-exploit questions).
 
-Rules are persisted in `app_settings` separately from regex policies and loaded at each primary chat boundary, so changes take effect without restarting. If no applicable rules are enabled, no semantic request is made. The previous fixed judgments are available as templates rather than running implicitly. Conditions are yes/no judgments; the displayed percentage is the probability that the condition applies, not its severity. All enabled rules still operate in Monitor only.
+Rules are persisted in `app_settings` separately from regex policies and loaded at each primary chat boundary, so changes take effect without restarting. If no applicable rules are enabled, no semantic request is made. The previous fixed judgments are available as templates rather than running implicitly. Conditions are yes/no judgments; the displayed percentage is the probability that the condition applies, not its severity. Each rule's action decides what it does (Monitor, Warn, Confirm or Block); only Monitor never delays a message.
 
 Changes are audited under `semantic_rule_change`. Check logs include rule IDs and definition hashes so an in-flight decision can be associated with the evaluated version. Template instructions are starting points; evaluate on your own data before enabling. This release does not supply authorization context to a condition, so avoid rules that assume the model can infer a user's permissions.
 
