@@ -1384,8 +1384,7 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 20px;
 }
 .claw-settings-panel-header,
-.claw-settings-panel > .claw-panel,
-.claw-control-plane-tabs {
+.claw-settings-panel > .claw-panel {
   width: 100%;
   max-width: 720px;
 }
@@ -1395,8 +1394,7 @@ html[data-chat-bg="grid"] .claw-chat {
    Higher specificity than the rule above (extra class) so it wins regardless
    of source order. */
 .claw-settings-panel > .claw-panel.claw-panel-wide,
-.claw-settings-panel-header.claw-panel-wide,
-.claw-control-plane-tabs.claw-panel-wide {
+.claw-settings-panel-header.claw-panel-wide {
   max-width: 1080px;
 }
 .claw-settings-panel-header {
@@ -1404,51 +1402,41 @@ html[data-chat-bg="grid"] .claw-chat {
   align-items: center;
   gap: 12px;
 }
-.claw-control-plane-tabs {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  padding: 8px 0;
-  background: var(--color-background, #fff);
+/* Control Plane: a grouped side menu on the left, the page on the right. Every page is
+   visible at once, instead of a tab strip that scrolls out of view. */
+.claw-settings-panel-header.claw-cp-header,
+.claw-cp-layout {
+  width: 100%;
+  max-width: 1240px;
 }
-.claw-control-plane-tabs nav {
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.claw-control-plane-tabs nav::-webkit-scrollbar {
-  display: none;
-}
-.claw-control-plane-tabs nav > * {
-  flex: 0 0 auto;
-}
-.claw-connectors-tabs {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  padding: 8px 0;
-  background: var(--color-background, #fff);
-}
-.claw-connectors-tabs nav {
-  flex-wrap: wrap;
-  row-gap: 4px;
-}
-.claw-overview-layout {
+.claw-cp-layout {
   display: grid;
-  grid-template-columns: minmax(128px, 144px) minmax(0, 1fr);
+  grid-template-columns: 216px minmax(0, 1fr);
   align-items: start;
-  gap: 18px;
+  gap: 24px;
   min-width: 0;
 }
-.claw-overview-tabs {
+.claw-cp-nav {
+  position: sticky;
+  top: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 16px;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
   padding-right: 16px;
-  background: var(--color-background, #fff);
   border-right: 1px solid var(--color-border, #e5e7eb);
 }
-.claw-overview-tabs button {
+.claw-cp-group { display: flex; flex-direction: column; gap: 3px; }
+.claw-cp-group-title {
+  padding: 0 9px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary, #687080);
+}
+.claw-cp-nav button {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1464,9 +1452,23 @@ html[data-chat-bg="grid"] .claw-chat {
   text-align: left;
   cursor: pointer;
 }
-.claw-overview-tabs button:hover { background: var(--color-surface-hover, rgba(0, 0, 0, .05)); color: var(--color-text-primary, #1f2937); }
-.claw-overview-tabs button.is-selected { background: var(--color-accent-muted, rgba(75, 107, 251, .12)); color: var(--color-text-primary, #1f2937); font-weight: 600; }
-.claw-overview-tabs button:focus-visible { outline: 2px solid var(--color-accent, #4b6bfb); outline-offset: 2px; }
+.claw-cp-nav button:hover { background: var(--color-surface-hover, rgba(0, 0, 0, .05)); color: var(--color-text-primary, #1f2937); }
+.claw-cp-nav button.is-selected { background: var(--color-accent-muted, rgba(75, 107, 251, .12)); color: var(--color-text-primary, #1f2937); font-weight: 600; }
+.claw-cp-nav button:focus-visible { outline: 2px solid var(--color-accent, #4b6bfb); outline-offset: 2px; }
+.claw-cp-content { min-width: 0; max-width: 720px; }
+.claw-cp-content.claw-panel-wide { max-width: none; }
+.claw-connectors-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 8px 0;
+  background: var(--color-background, #fff);
+}
+.claw-connectors-tabs nav {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.claw-overview-layout { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .claw-overview-content { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .claw-panel {
   display: flex;
@@ -1591,9 +1593,11 @@ html[data-chat-bg="grid"] .claw-chat {
   .claw-team-policy-actions .astryx-button { width: 100%; }
 }
 @media (max-width: 700px) {
-  .claw-overview-layout { grid-template-columns: 1fr; gap: 16px; }
-  .claw-overview-tabs { position: static; flex-direction: row; overflow-x: auto; padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--color-border, #e5e7eb); }
-  .claw-overview-tabs button { width: auto; flex: 0 0 auto; white-space: nowrap; }
+  .claw-cp-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .claw-cp-nav { position: static; max-height: none; flex-direction: row; flex-wrap: wrap; gap: 4px; padding: 0 0 12px; border-right: 0; border-bottom: 1px solid var(--color-border, #e5e7eb); }
+  .claw-cp-group { flex-direction: row; flex-wrap: wrap; }
+  .claw-cp-group-title { display: none; }
+  .claw-cp-nav button { width: auto; }
 }
 .claw-row {
   display: flex;
@@ -3838,22 +3842,15 @@ html[data-chat-bg="grid"] .claw-chat {
   }
   .claw-settings-panel-header,
   .claw-settings-panel > .claw-panel,
-  .claw-control-plane-tabs {
+  .claw-cp-layout {
     max-width: 100%;
   }
+  .claw-cp-content { overflow-x: auto; }
   .claw-settings-panel > .claw-panel {
-    overflow-x: auto;
-  }
-  .claw-control-plane-tabs {
     overflow-x: auto;
   }
   .claw-connectors-tabs {
     overflow-x: auto;
-  }
-  .claw-control-plane-tabs nav {
-    flex-wrap: nowrap;
-    width: max-content;
-    min-width: 100%;
   }
   .claw-connectors-tabs nav {
     flex-wrap: nowrap;
