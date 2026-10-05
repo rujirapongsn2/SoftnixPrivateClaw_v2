@@ -220,7 +220,7 @@ export function AdminPanel({
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
         {section === "email" && <EmailConfigPanel />}
-        {section === "preferences" && <><TeamPolicyPanel /><WorkspacePolicyPanel /><PreferencesPanel /></>}
+        {section === "preferences" && <PreferencesSection />}
         {section === "audit" && <AuditPanel />}
         {section === "users" && <UsersPanel selfId={selfId} />}
         </div>
@@ -4391,6 +4391,31 @@ function LogoUploadRow({
         </div>
       </div>
     </Card>
+  );
+}
+
+const PREFERENCE_TABS = [
+  { key: "general", labelKey: "admin.preferences.tab.general", icon: Palette },
+  { key: "jobs", labelKey: "admin.preferences.tab.jobs", icon: Gauge },
+  { key: "storage", labelKey: "admin.preferences.tab.storage", icon: Server },
+] as const;
+
+// Three independent settings pages that used to be stacked. Only the open tab is mounted,
+// so each page loads its own settings when it is opened.
+function PreferencesSection() {
+  const t = useT();
+  const [tab, setTab] = useState<(typeof PREFERENCE_TABS)[number]["key"]>("general");
+  return (
+    <div className="claw-overview-layout">
+      <TabList value={tab} onChange={(value) => setTab(value as typeof tab)} hasDivider aria-label={t("admin.nav.preferences")}>
+        {PREFERENCE_TABS.map((item) => (
+          <Tab key={item.key} value={item.key} label={t(item.labelKey)} icon={<Icon icon={item.icon} size="sm" />} />
+        ))}
+      </TabList>
+      {tab === "general" && <PreferencesPanel />}
+      {tab === "jobs" && <TeamPolicyPanel />}
+      {tab === "storage" && <WorkspacePolicyPanel />}
+    </div>
   );
 }
 
