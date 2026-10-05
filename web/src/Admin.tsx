@@ -147,21 +147,27 @@ export const COST_LABEL: Record<ModelCost, string> = {
 // `labelKey` (not a pre-resolved label) because this array is built at module
 // scope, before any component (and its `useT()`) exists — consumers call
 // `t(s.labelKey)` at render time so the label follows the current language.
-export const ADMIN_SECTIONS: { key: AdminSection; labelKey: string; icon: IconType | IconName }[] = [
-  { key: "overview", labelKey: "admin.nav.overview", icon: LayoutDashboard },
-  { key: "providers", labelKey: "admin.nav.providers", icon: Cpu },
-  { key: "connectors", labelKey: "admin.nav.connectors", icon: Plug },
-  { key: "guardrails", labelKey: "admin.nav.guardrails", icon: ShieldCheck },
-  { key: "projects", labelKey: "admin.nav.projects", icon: Server },
-  { key: "oauth", labelKey: "admin.nav.oauth", icon: KeyRound },
-  { key: "telegram", labelKey: "admin.nav.telegram", icon: Send },
-  { key: "email", labelKey: "admin.nav.email", icon: Mail },
-  { key: "users", labelKey: "admin.nav.users", icon: Users },
-  { key: "plans", labelKey: "admin.nav.plans", icon: Gauge },
-  { key: "acl", labelKey: "admin.nav.acl", icon: ListChecks },
-  { key: "preferences", labelKey: "admin.nav.preferences", icon: Palette },
-  { key: "audit", labelKey: "admin.nav.audit", icon: ScrollText },
+export type AdminGroup = "monitor" | "ai" | "integrations" | "people" | "system";
+
+// Order here is the order of the side menu, group by group. Groups exist so thirteen
+// pages scan as five small lists instead of one long one.
+export const ADMIN_SECTIONS: { key: AdminSection; group: AdminGroup; labelKey: string; icon: IconType | IconName }[] = [
+  { key: "overview", group: "monitor", labelKey: "admin.nav.overview", icon: LayoutDashboard },
+  { key: "audit", group: "monitor", labelKey: "admin.nav.audit", icon: ScrollText },
+  { key: "providers", group: "ai", labelKey: "admin.nav.providers", icon: Cpu },
+  { key: "guardrails", group: "ai", labelKey: "admin.nav.guardrails", icon: ShieldCheck },
+  { key: "plans", group: "ai", labelKey: "admin.nav.plans", icon: Gauge },
+  { key: "connectors", group: "integrations", labelKey: "admin.nav.connectors", icon: Plug },
+  { key: "telegram", group: "integrations", labelKey: "admin.nav.telegram", icon: Send },
+  { key: "email", group: "integrations", labelKey: "admin.nav.email", icon: Mail },
+  { key: "oauth", group: "integrations", labelKey: "admin.nav.oauth", icon: KeyRound },
+  { key: "projects", group: "integrations", labelKey: "admin.nav.projects", icon: Server },
+  { key: "users", group: "people", labelKey: "admin.nav.users", icon: Users },
+  { key: "acl", group: "people", labelKey: "admin.nav.acl", icon: ListChecks },
+  { key: "preferences", group: "system", labelKey: "admin.nav.preferences", icon: Palette },
 ];
+
+const ADMIN_GROUPS: AdminGroup[] = ["monitor", "ai", "integrations", "people", "system"];
 
 export function AdminPanel({
   section,
@@ -182,18 +188,28 @@ export function AdminPanel({
   const isWide = section === "providers" || section === "overview" || section === "plans" || section === "projects";
   return (
     <div className="claw-settings-panel">
-      <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
+      <div className="claw-settings-panel-header claw-cp-header">
         <Icon icon={Shield} size="lg" color="secondary" />
         <Text type="display-3">{t("nav.controlPlane")}</Text>
       </div>
-      <div className={`claw-control-plane-tabs${isWide ? " claw-panel-wide" : ""}`}>
-        <TabList value={section} onChange={(value) => onSectionChange(value as AdminSection)} hasDivider aria-label={t("nav.controlPlane")}>
-          {ADMIN_SECTIONS.map((item) => (
-            <Tab key={item.key} value={item.key} label={t(item.labelKey)} icon={<Icon icon={item.icon} size="sm" />} />
+      <div className="claw-cp-layout">
+        <nav className="claw-cp-nav" aria-label={t("nav.controlPlane")}>
+          {ADMIN_GROUPS.map((group) => (
+            <div className="claw-cp-group" key={group}>
+              <div className="claw-cp-group-title">{t(`admin.navGroup.${group}`)}</div>
+              {ADMIN_SECTIONS.filter((item) => item.group === group).map((item) => (
+                <button key={item.key} type="button"
+                  className={section === item.key ? "is-selected" : undefined}
+                  aria-current={section === item.key ? "page" : undefined}
+                  onClick={() => onSectionChange(item.key)}>
+                  <Icon icon={item.icon} size="sm" />
+                  <span>{t(item.labelKey)}</span>
+                </button>
+              ))}
+            </div>
           ))}
-        </TabList>
-      </div>
-      <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
+        </nav>
+        <div className={`claw-panel claw-cp-content${isWide ? " claw-panel-wide" : ""}`}>
         {section === "overview" && <OverviewPanel />}
         {section === "providers" && <ProvidersPanel llmApi={ADMIN_LLM_API} scope="admin" />}
         {section === "connectors" && <PrebuiltConnectorsPanel />}
@@ -204,9 +220,10 @@ export function AdminPanel({
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
         {section === "email" && <EmailConfigPanel />}
-        {section === "preferences" && <><TeamPolicyPanel /><WorkspacePolicyPanel /><PreferencesPanel /></>}
+        {section === "preferences" && <PreferencesSection />}
         {section === "audit" && <AuditPanel />}
         {section === "users" && <UsersPanel selfId={selfId} />}
+        </div>
       </div>
     </div>
   );
@@ -382,17 +399,11 @@ function OverviewPanel() {
 
   return (
     <div className="claw-overview-layout">
-      <nav className="claw-overview-tabs" aria-label={t("admin.overview.sectionsAria")}>
+      <TabList value={tab} onChange={(value) => setTab(String(value))} hasDivider aria-label={t("admin.overview.sectionsAria")}>
         {OVERVIEW_TABS.map((tabItem) => (
-          <button key={tabItem.key} type="button"
-            className={tab === tabItem.key ? "is-selected" : undefined}
-            aria-current={tab === tabItem.key ? "page" : undefined}
-            onClick={() => setTab(tabItem.key)}>
-            <Icon icon={tabItem.icon} size="sm" />
-            <span>{t(tabItem.labelKey)}</span>
-          </button>
+          <Tab key={tabItem.key} value={tabItem.key} label={t(tabItem.labelKey)} icon={<Icon icon={tabItem.icon} size="sm" />} />
         ))}
-      </nav>
+      </TabList>
       <div className="claw-overview-content">
         {error ? <ErrorText>{error}</ErrorText>
           : !data ? <Text color="secondary">{t("admin.common.loading")}</Text>
@@ -4380,6 +4391,31 @@ function LogoUploadRow({
         </div>
       </div>
     </Card>
+  );
+}
+
+const PREFERENCE_TABS = [
+  { key: "general", labelKey: "admin.preferences.tab.general", icon: Palette },
+  { key: "jobs", labelKey: "admin.preferences.tab.jobs", icon: Gauge },
+  { key: "storage", labelKey: "admin.preferences.tab.storage", icon: Server },
+] as const;
+
+// Three independent settings pages that used to be stacked. Only the open tab is mounted,
+// so each page loads its own settings when it is opened.
+function PreferencesSection() {
+  const t = useT();
+  const [tab, setTab] = useState<(typeof PREFERENCE_TABS)[number]["key"]>("general");
+  return (
+    <div className="claw-overview-layout">
+      <TabList value={tab} onChange={(value) => setTab(value as typeof tab)} hasDivider aria-label={t("admin.nav.preferences")}>
+        {PREFERENCE_TABS.map((item) => (
+          <Tab key={item.key} value={item.key} label={t(item.labelKey)} icon={<Icon icon={item.icon} size="sm" />} />
+        ))}
+      </TabList>
+      {tab === "general" && <PreferencesPanel />}
+      {tab === "jobs" && <TeamPolicyPanel />}
+      {tab === "storage" && <WorkspacePolicyPanel />}
+    </div>
   );
 }
 
