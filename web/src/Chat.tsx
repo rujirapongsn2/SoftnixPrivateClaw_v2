@@ -287,7 +287,7 @@ function answerInfoLines(info: AnswerInfo, models: ModelOption[], t: (key: strin
   const fmt = (n: number) => n.toLocaleString();
   return [
     `${t("chat.msg.modelInfo.model")}: ${info.auto ? `${t("chat.model.auto")} → ${name}` : name}`,
-    `${t("chat.msg.modelInfo.time")}: ${seconds} s`,
+    `${t("chat.msg.modelInfo.time")}: ${seconds} ${t("chat.msg.modelInfo.seconds")}`,
     `${t("chat.msg.modelInfo.tokens")}: ${fmt(info.input_tokens)} / ${fmt(info.output_tokens)}`,
   ];
 }
