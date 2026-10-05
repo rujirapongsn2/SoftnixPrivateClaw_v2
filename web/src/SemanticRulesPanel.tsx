@@ -114,6 +114,8 @@ export function SemanticRulesPanel({ mode, connected, fallback, usingFallback, p
     return all.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
   }, [stored, templates, routing]);
 
+  // Rules that really act on a message: enabled, not just recording, and out of dry run.
+  const enforcing = rows.filter((row) => row.enabled && row.action !== "monitor" && row.action !== "local" && !(row.dry_run ?? true)).length;
   const reset = () => { setEditing(null); setDraft(blank(routing)); };
   // Explain a failed check in plain words. Upstream bodies are never returned by the API,
   // only a reason code (and HTTP status), so nothing sensitive can surface here.
@@ -242,9 +244,11 @@ export function SemanticRulesPanel({ mode, connected, fallback, usingFallback, p
         <div className="claw-row claw-row-between">
           <div>
             <Text weight="semibold" display="block">{t(k("title"))}</Text>
-            <Text size="sm" color="secondary" as="p" display="block">{t(k("monitor"))}</Text>
+            <Text size="sm" color="secondary" as="p" display="block">{t(k("subtitle"))}</Text>
           </div>
-          {!routing && <Badge variant="neutral" label={t("admin.guardrails.actionMonitor")} />}
+          {!routing && (enforcing > 0
+            ? <Badge variant="warning" label={t("admin.semantic.enforcing", { count: String(enforcing) })} />
+            : <Badge variant="neutral" label={t("admin.semantic.observingOnly")} />)}
         </div>
         {fallback && (
           <Text size="sm" color="secondary" as="p" display="block">

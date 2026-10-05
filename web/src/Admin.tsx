@@ -3582,7 +3582,7 @@ function GuardrailsPanel() {
   const semanticNotice = semantic && semantic.status !== "ready" && (<Card padding={2}>
       <div className="claw-row claw-row-between">
         <Text weight="semibold">Semantic Guardrails</Text>
-        <Text size="sm" color="secondary">Monitor · {semantic.provider === "off" ? "Off" : semantic.provider === "jev" ? "Jev" : "OpenThai SystemOne"}</Text>
+        <Text size="sm" color="secondary">{semantic.provider === "off" ? "Off" : semantic.provider === "jev" ? "Jev" : "OpenThai SystemOne"}</Text>
       </div>
       <Text size="sm" as="p" display="block">{t("admin.guardrails.semanticMissing")}</Text>
       <Text size="sm" color="secondary" display="block">Jev: {t(semantic.configured.jev ? "admin.guardrails.configured" : "admin.guardrails.notConfigured")} · OpenThai SystemOne: {t(semantic.configured.laya ? "admin.guardrails.configured" : "admin.guardrails.notConfigured")}</Text>
