@@ -96,6 +96,10 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name) if self._is_allowed(name) else None
 
+    def get_registered(self, name: str) -> Tool | None:
+        """Return the occupied object regardless of call permissions."""
+        return self._tools.get(name)
+
     def has(self, name: str) -> bool:
         """Can the current bot call `name` this turn? Allowlist-aware."""
         return name in self._tools and self._is_allowed(name)
@@ -142,6 +146,12 @@ class ToolRegistry:
             return f"Error: tool '{name}' not found. Available: {', '.join(self.tool_names)}"
         errors = tool.validate_params(params)
         if errors:
+            on_validation_error = getattr(tool, "on_validation_error", None)
+            if callable(on_validation_error):
+                try:
+                    on_validation_error()
+                except Exception:
+                    logger.warning("Tool {} validation refresh hook failed", name)
             result = f"Error: invalid parameters for '{name}': " + "; ".join(errors) + _RETRY_HINT
             self._audit(name, params, result)
             return result

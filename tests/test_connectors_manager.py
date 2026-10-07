@@ -418,7 +418,7 @@ async def test_query_env_preserves_duplicate_keys_and_clears_on_empty_string(db_
         return FakeReadWriteContext()
 
     class FakeSession:
-        def __init__(self, read, write):
+        def __init__(self, read, write, **kwargs):
             pass
 
         async def __aenter__(self):
@@ -1594,7 +1594,7 @@ async def test_global_api_tool_already_in_a_registry_follows_the_edited_row(db_f
     )
     await mgr.sync_global()
 
-    assert registry.get("api_globalapi_ping") is tool
+    assert registry.get("api_globalapi_ping") is not tool
     assert tool._connector_ref().url == "https://new.example.com"
     assert tool._connector_ref().env["HEADER_X-Api-Key"] == "NEWKEY"
 
@@ -1709,7 +1709,7 @@ async def test_global_http_connector_may_dial_internal_infrastructure(db_factory
         return FakeReadWriteContext()
 
     class FakeSession:
-        def __init__(self, read, write):
+        def __init__(self, read, write, **kwargs):
             pass
 
         async def __aenter__(self):

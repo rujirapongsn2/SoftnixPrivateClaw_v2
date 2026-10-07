@@ -25,6 +25,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable
+from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -59,6 +60,8 @@ _QUERY_ENV_PREFIX = "QUERY_"
 # exception (bad auth, connection refused, ...) already surfaces in seconds
 # via the try/except below; this timeout only bounds the hang case.
 _CONNECT_TIMEOUT_SECONDS = 20
+_TOOL_REFRESH_SECONDS = 3600
+_TOOL_REFRESH_RETRY_SECONDS = 60
 
 # Per-tool-call budget, same rationale as _CONNECT_TIMEOUT_SECONDS but for an
 # already-connected session: a remote MCP server that hangs instead of
@@ -411,6 +414,28 @@ def _redact_secrets(text: str, connector) -> str:
     return text
 
 
+def _catalog_error(message: str, code: int | None = None) -> bool:
+    if code == -32602:
+        return True
+    return bool(re.search(
+        r"\b(unknown tool|tool not found|no such tool|invalid tool arguments|"
+        r"input schema validation failed|tool arguments validation failed)\b",
+        message.lower(),
+    ))
+
+
+@dataclass
+class _CatalogWorker:
+    session: Any
+    wake: asyncio.Event
+    task: asyncio.Task | None = None
+
+    async def stop(self) -> None:
+        if self.task is not None:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
+
+
 def _register_scoped(registry: ToolRegistry, state, tool: Tool, connector_name: str) -> bool:
     """Register `tool` unless its name is already taken in this registry.
 
@@ -428,16 +453,6 @@ def _register_scoped(registry: ToolRegistry, state, tool: Tool, connector_name: 
     state.tool_names.append(tool.name)
     state.tools.append(tool)
     return True
-
-
-def _populate(registry: ToolRegistry, state) -> None:
-    """Register cached connector proxies in another bot's registry."""
-    if registry in state.registries:
-        return
-    for tool in state.tools:
-        if not registry.has(tool.name):
-            registry.register(tool)
-    state.registries.add(registry)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -479,6 +494,7 @@ class McpToolProxy(Tool):
         tool_call_timeout_seconds: float = _TOOL_CALL_TIMEOUT_SECONDS,
         session_ref: Callable[[], Any] | None = None,
         on_auth_error: Callable[[], None] | None = None,
+        on_catalog_error: Callable[[], None] | None = None,
     ):
         # `session_ref`, when given, is looked up fresh on every call instead
         # of using the captured `session` — used only for global-connector
@@ -493,12 +509,17 @@ class McpToolProxy(Tool):
         self._session = session
         self._session_ref = session_ref
         self._on_auth_error = on_auth_error
+        self._on_catalog_error = on_catalog_error
         self._remote_name = tool_name
         self._connector_name = connector
         self._tool_call_timeout_seconds = tool_call_timeout_seconds
         self.name = f"mcp_{connector}_{tool_name}"
         self.description = f"[{connector}] {_clip(description or tool_name, _MAX_TOOL_DESCRIPTION_CHARS)}"
         self.parameters = _slim_schema(schema) if schema else {"type": "object", "properties": {}}
+
+    def on_validation_error(self) -> None:
+        if self._on_catalog_error is not None:
+            self._on_catalog_error()
 
     async def execute(self, **kwargs: Any) -> str:
         from claw.jobs.connectors import authorize, unavailable, uncertain, rendered
@@ -514,6 +535,8 @@ class McpToolProxy(Tool):
                 read_timeout_seconds=timedelta(seconds=self._tool_call_timeout_seconds),
             )
         except McpError as exc:
+            if _catalog_error(str(exc), exc.error.code) and self._on_catalog_error is not None:
+                self._on_catalog_error()
             if _requires_oauth_reauthorization(str(exc)) and self._on_auth_error is not None:
                 self._on_auth_error()
             await uncertain(self._connector_name)
@@ -533,6 +556,8 @@ class McpToolProxy(Tool):
                 parts.append(text)
         if getattr(result, "isError", False):
             message = "\n".join(parts) or "MCP tool call failed"
+            if _catalog_error(message) and self._on_catalog_error is not None:
+                self._on_catalog_error()
             if _requires_oauth_reauthorization(message) and self._on_auth_error is not None:
                 self._on_auth_error()
             await uncertain(self._connector_name)
@@ -547,6 +572,9 @@ class _UserConnections:
     tool_names: list[str] = field(default_factory=list)
     tools: list[Tool] = field(default_factory=list)
     registries: "weakref.WeakSet[ToolRegistry]" = field(default_factory=weakref.WeakSet)
+    catalogs: dict[str, list[Tool]] = field(default_factory=dict)
+    own_names: set[str] = field(default_factory=set)
+    workers: dict[str, _CatalogWorker] = field(default_factory=dict)
     statuses: dict[str, dict] = field(default_factory=dict)
     # time.monotonic() of the most recent sync that left at least one connector
     # in "error"; drives the retry cooldown in sync_tools. Monotonic (not
@@ -592,6 +620,7 @@ class _GlobalConnections:
     # up a rotated credential or a repointed base url — see GenericApiTool.
     rows: dict[str, Any] = field(default_factory=dict)
     proxies: dict[str, list["Tool"]] = field(default_factory=dict)
+    workers: dict[str, _CatalogWorker] = field(default_factory=dict)
     statuses: dict[str, dict] = field(default_factory=dict)
     errored_monotonic: dict[str, float] = field(default_factory=dict)
     # Per-connector version of _UserConnections.error_streak.
@@ -626,6 +655,7 @@ class _GlobalConnections:
         """
         return (
             self.stacks.keys()
+            | self.workers.keys()
             | self.sessions.keys()
             | self.rows.keys()
             | self.proxies.keys()
@@ -659,6 +689,8 @@ def _apply_global_shadowing(state: _GlobalConnections) -> None:
     for name in sorted(state.statuses):
         status = state.statuses[name]
         if status.get("status") != "connected":
+            status.update(tools=0, tool_names=[])
+            status.pop("shadowed_tools", None)
             continue
         owned: list[str] = []
         shadowed: list[str] = []
@@ -696,6 +728,127 @@ class ConnectorManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._global = _GlobalConnections()
         self._global_lock = asyncio.Lock()
+        self.tool_refresh_seconds = _TOOL_REFRESH_SECONDS
+        self._session_wakes: dict[int, asyncio.Event] = {}
+
+    def _reconcile_user(self, state: _UserConnections) -> None:
+        global_tools = []
+        for name in sorted(self._global.statuses):
+            if (name in state.own_names
+                    or self._global.statuses[name].get("status") != "connected"):
+                continue
+            owned = set(self._global.statuses[name].get("tool_names", []))
+            global_tools.extend(t for t in self._global.proxies.get(name, []) if t.name in owned)
+        desired = global_tools + [t for tools in state.catalogs.values() for t in tools]
+        for registry in state.registries:
+            for tool in state.tools:
+                if registry.get_registered(tool.name) is tool:
+                    registry.unregister(tool.name)
+            for tool in desired:
+                if registry.get_registered(tool.name) is None:
+                    registry.register(tool)
+        state.tools = desired
+        state.tool_names = list(dict.fromkeys(t.name for t in desired))
+        claimed = {t.name for t in global_tools}
+        managed_ids = {id(tool) for tool in desired}
+        for tool in desired:
+            for registry in state.registries:
+                occupied = registry.get_registered(tool.name)
+                if occupied is not None and id(occupied) not in managed_ids:
+                    claimed.add(tool.name)
+        for name, tools in state.catalogs.items():
+            status = state.statuses.get(name)
+            if status is None:
+                continue
+            owned, shadowed = [], []
+            for tool in tools:
+                (shadowed if tool.name in claimed else owned).append(tool.name)
+                claimed.add(tool.name)
+            status.update(tools=len(owned), tool_names=owned)
+            if shadowed:
+                status["shadowed_tools"] = shadowed
+            else:
+                status.pop("shadowed_tools", None)
+
+    async def _list_catalog(self, session: Any) -> Any:
+        tools, cursor, seen = [], None, set()
+        while True:
+            page = await session.list_tools() if cursor is None else await session.list_tools(cursor=cursor)
+            tools.extend(page.tools)
+            cursor = getattr(page, "nextCursor", None)
+            if not cursor:
+                return SimpleNamespace(tools=tools)
+            if cursor in seen:
+                raise ValueError("tools/list repeated a pagination cursor")
+            seen.add(cursor)
+
+    def _start_catalog_worker(self, connector: Any, session: Any, state: Any,
+                              *, user_id: str | None = None) -> _CatalogWorker:
+        worker = _CatalogWorker(session, self._session_wakes.get(id(session), asyncio.Event()))
+        state.workers[connector.name] = worker
+
+        async def run() -> None:
+            delay = self.tool_refresh_seconds
+            while True:
+                try:
+                    await asyncio.wait_for(worker.wake.wait(), timeout=delay)
+                except TimeoutError:
+                    pass
+                worker.wake.clear()
+                try:
+                    listed = await asyncio.wait_for(
+                        self._list_catalog(session),
+                        timeout=self._effective_timeout_seconds(connector, self.connect_timeout_seconds),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if state.workers.get(connector.name) is not worker:
+                        return
+                    state.statuses.get(connector.name, {})["refresh_error"] = (
+                        "Tool discovery failed; retained previous catalog. Retrying in 60 seconds."
+                    )
+                    logger.warning("MCP connector {} tool discovery failed ({}); retained catalog; retrying",
+                                   connector.name, type(exc).__name__)
+                    # Notifications cannot bypass the failure cooldown.
+                    await asyncio.sleep(_TOOL_REFRESH_RETRY_SECONDS)
+                    worker.wake.set()
+                    delay = self.tool_refresh_seconds
+                    continue
+                if state.workers.get(connector.name) is not worker:
+                    return
+                if user_id is not None and self._users.get(user_id) is not state:
+                    return
+                proxies = [McpToolProxy(
+                    session, connector.name, tool.name, tool.description or "", tool.inputSchema or {},
+                    tool_call_timeout_seconds=self._effective_timeout_seconds(connector, self.tool_call_timeout_seconds),
+                    session_ref=(lambda: self._global.sessions.get(connector.name)) if user_id is None else None,
+                    on_auth_error=(lambda: state.statuses.get(connector.name, {}).update(
+                        status="reauthorization_required", error="Authorization expired or was revoked. Reconnect this account."
+                    )),
+                    on_catalog_error=worker.wake.set,
+                ) for tool in listed.tools]
+                state.statuses.get(connector.name, {}).pop("refresh_error", None)
+                if user_id is None:
+                    state.proxies[connector.name] = proxies
+                    _apply_global_shadowing(state)
+                    for user_state in self._users.values():
+                        self._reconcile_user(user_state)
+                else:
+                    state.catalogs[connector.name] = proxies
+                    self._reconcile_user(state)
+                delay = self.tool_refresh_seconds
+
+        worker.task = asyncio.create_task(run(), name=f"mcp-catalog-{connector.name}")
+        return worker
+
+    async def shutdown(self) -> None:
+        for user_id in list(self._users):
+            await self.disconnect_user(user_id)
+        async with self._global_lock:
+            for name in list(self._global.tracked_names()):
+                await self._close_one_global(self._global, name)
+        self._session_wakes.clear()
 
     def _lock(self, user_id: str) -> asyncio.Lock:
         lock = self._locks.get(user_id)
@@ -840,7 +993,8 @@ class ConnectorManager:
                 and state.signature == signature
                 and (not had_error or within_error_cooldown)
             ):
-                _populate(registry, state)
+                state.registries.add(registry)
+                self._reconcile_user(state)
                 return
             # The state object below is replaced wholesale, so the streak has to
             # be carried by hand or the backoff resets to zero on every sync. A
@@ -848,6 +1002,7 @@ class ConnectorManager:
             # that as "I fixed it" and start the backoff over.
             previous_streak = state.error_streak if state is not None and state.signature == signature else 0
 
+            previous_registries = set(state.registries) if state is not None else set()
             await self._close_user(user_id, registry)
             # _close_user can genuinely await real I/O (tearing down MCP
             # sessions), which yields to the event loop — a concurrent
@@ -870,8 +1025,10 @@ class ConnectorManager:
             )
             signature = (signature[0], global_state.signature, effective_global)
             state = _UserConnections(
-                signature=signature, stack=AsyncExitStack(), error_streak=previous_streak
+                signature=signature, stack=AsyncExitStack(), error_streak=previous_streak,
+                own_names=own_names
             )
+            state.registries.update(previous_registries)
             state.registries.add(registry)
             self._users[user_id] = state
 
@@ -889,6 +1046,7 @@ class ConnectorManager:
                         _register_scoped(registry, state, proxy, name)
 
             if not connectors:
+                self._reconcile_user(state)
                 return
 
             # api-kind connectors need no session/handshake at all — build
@@ -900,6 +1058,7 @@ class ConnectorManager:
             for connector in api_connectors:
                 try:
                     tools = self._build_api_tools(connector)
+                    state.catalogs[connector.name] = tools
                 except Exception as exc:  # malformed stored `operations`
                     state.statuses[connector.name] = {"status": "error", "error": str(exc)}
                     logger.warning("API connector {} failed to build tools: {}", connector.name, exc)
@@ -932,6 +1091,8 @@ class ConnectorManager:
                     state.statuses[connector.name] = error
                     logger.warning("MCP connector {} {}", connector.name, error["error"])
                     continue
+                state.catalogs[connector.name] = []
+                worker = self._start_catalog_worker(connector, session, state, user_id=user_id)
                 registered_names: list[str] = []
                 shadowed_names: list[str] = []
                 for tool in listed.tools:
@@ -953,7 +1114,9 @@ class ConnectorManager:
                             connector, self.tool_call_timeout_seconds
                         ),
                         on_auth_error=mark_reauthorization_required,
+                        on_catalog_error=worker.wake.set,
                     )
+                    state.catalogs[connector.name].append(proxy)
                     if _register_scoped(registry, state, proxy, connector.name):
                         registered_names.append(proxy.name)
                     else:
@@ -975,6 +1138,7 @@ class ConnectorManager:
                 if shadowed_names:
                     state.statuses[connector.name]["shadowed_tools"] = shadowed_names
                 logger.info("MCP connector {} connected with {} tools", connector.name, len(registered_names))
+            self._reconcile_user(state)
             # Stamp the failure time so the next sync holds off retrying the
             # whole set until the cooldown elapses (see sync_tools docstring).
             if any(s.get("status") == "error" for s in state.statuses.values()):
@@ -1044,7 +1208,7 @@ class ConnectorManager:
 
     async def _connect_and_list(self, stack: AsyncExitStack, connector) -> tuple[Any, Any]:
         session = await self._connect(stack, connector)
-        listed = await session.list_tools()
+        listed = await self._list_catalog(session)
         return session, listed
 
     async def _connect(self, stack: AsyncExitStack, connector) -> Any:
@@ -1116,7 +1280,16 @@ class ConnectorManager:
             )
             read, write = await stack.enter_async_context(stdio_client(params))
 
-        session = await stack.enter_async_context(ClientSession(read, write))
+        wake = asyncio.Event()
+
+        async def message_handler(message: Any) -> None:
+            root = getattr(message, "root", message)
+            if getattr(root, "method", None) == "notifications/tools/list_changed":
+                wake.set()
+
+        session = await stack.enter_async_context(ClientSession(read, write, message_handler=message_handler))
+        self._session_wakes[id(session)] = wake
+        stack.callback(self._session_wakes.pop, id(session), None)
         await session.initialize()
         return session
 
@@ -1124,12 +1297,14 @@ class ConnectorManager:
         state = self._users.pop(user_id, None)
         if state is None:
             return
+        await asyncio.gather(*(w.stop() for w in state.workers.values()))
         targets = set(state.registries)
         if registry is not None:
             targets.add(registry)
         for target in targets:
-            for name in state.tool_names:
-                target.unregister(name)
+            for tool in state.tools:
+                if target.get_registered(tool.name) is tool:
+                    target.unregister(tool.name)
         if state.stack is not None:
             try:
                 await state.stack.aclose()
@@ -1300,6 +1475,7 @@ class ConnectorManager:
                         continue
                     state.errored_monotonic.pop(connector.name, None)
                     state.error_streaks.pop(connector.name, None)
+                    worker = self._start_catalog_worker(connector, session, state)
                     proxies = [
                         McpToolProxy(
                             session,
@@ -1316,6 +1492,7 @@ class ConnectorManager:
                             # connector's session if it's later torn down and
                             # rebuilt, instead of erroring against a dead one.
                             session_ref=(lambda name=connector.name: state.sessions.get(name)),
+                            on_catalog_error=worker.wake.set,
                         )
                         for tool in listed.tools
                     ]
@@ -1334,18 +1511,17 @@ class ConnectorManager:
             # (handled above, before the diff) frees tool names that a
             # still-running one may now own.
             _apply_global_shadowing(state)
+            for user_state in self._users.values():
+                self._reconcile_user(user_state)
 
             state.signature = tuple(sorted((c.id, c.updated_at.isoformat()) for c in connectors))
             state.synced_once = True
 
     async def _close_one_global(self, state: "_GlobalConnections", name: str) -> None:
-        """Tear down exactly ONE global connector's own session/stack and
-        clear its bookkeeping — never touches any other connector's stack,
-        session, or status. Does NOT touch any user's registry/tool_names;
-        those are unregistered when each user's own sync_tools next runs and
-        notices the aggregate global signature changed (see sync_tools),
-        same as how a per-user connector's removal is only reflected in the
-        registry on that user's next sync."""
+        """Close one global session and reconcile its tools in user registries."""
+        worker = state.workers.pop(name, None)
+        if worker is not None:
+            await worker.stop()
         stack = state.stacks.pop(name, None)
         state.sessions.pop(name, None)
         # Dropped BEFORE any await below, so an api tool still registered in
@@ -1356,6 +1532,9 @@ class ConnectorManager:
         state.statuses.pop(name, None)
         state.signatures.pop(name, None)
         state.errored_monotonic.pop(name, None)
+        _apply_global_shadowing(state)
+        for user_state in self._users.values():
+            self._reconcile_user(user_state)
         if stack is None:
             return
         try:

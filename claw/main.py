@@ -306,6 +306,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await knowledge_service.stop()
         await telegram_mgr.stop()
         await runtime.drain()
+        await connectors_mgr.shutdown()
         if browser_mgr is not None:
             await browser_mgr.close()
         await engine.dispose()

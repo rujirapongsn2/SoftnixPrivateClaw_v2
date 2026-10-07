@@ -240,6 +240,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
             await mission_service.stop()
             await project_containers.close()
             await runtime.drain()
+            await connectors_mgr.shutdown()
             if browser_mgr is not None:
                 await browser_mgr.close()
 
