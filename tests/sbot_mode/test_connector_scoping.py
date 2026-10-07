@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from sbot.core.connectors import ConnectorManager, _populate, _register_scoped, _UserConnections
+from sbot.core.connectors import ConnectorManager, _register_scoped, _UserConnections
 from sbot.tools.base import Tool
 from sbot.tools.registry import ToolRegistry
 
@@ -51,13 +51,17 @@ def test_the_second_bot_of_a_user_gets_the_tools_the_first_bot_connected():
     bot arrives with everything connected and nothing registered where it can
     see it. It used to be handed an empty registry and report the connector
     unreachable while the UI showed it connected."""
+    manager = ConnectorManager(store=None)
     first_bot = ToolRegistry()
     second_bot = ToolRegistry()
     state = _UserConnections()
     tool = _StubTool("mcp_gmail_send", "proxy")
     _register_scoped(first_bot, state, tool, "gmail")
+    state.catalogs["gmail"] = [tool]
+    state.registries.add(first_bot)
+    state.registries.add(second_bot)
 
-    _populate(second_bot, state)
+    manager._reconcile_user(state)
 
     assert second_bot.has("mcp_gmail_send")
     # Mirroring is not a second registration: the names are the same names.
@@ -65,13 +69,15 @@ def test_the_second_bot_of_a_user_gets_the_tools_the_first_bot_connected():
 
 
 def test_mirroring_does_not_overwrite_a_name_the_target_registry_already_holds():
+    manager = ConnectorManager(store=None)
     state = _UserConnections()
-    _register_scoped(ToolRegistry(), state, _StubTool("read_file", "connector"), "files")
+    state.catalogs["files"] = [_StubTool("read_file", "connector")]
     builtin = _StubTool("read_file", "builtin")
     target = ToolRegistry()
     target.register(builtin)
+    state.registries.add(target)
 
-    _populate(target, state)
+    manager._reconcile_user(state)
 
     assert target.get("read_file") is builtin
 
@@ -85,8 +91,12 @@ async def test_closing_a_users_connectors_reaches_every_bot_that_held_them():
     chatting_bot = ToolRegistry()
     other_bot = ToolRegistry()
     state = _UserConnections()
-    _register_scoped(chatting_bot, state, _StubTool("mcp_gmail_send", "proxy"), "gmail")
-    _populate(other_bot, state)
+    tool = _StubTool("mcp_gmail_send", "proxy")
+    _register_scoped(chatting_bot, state, tool, "gmail")
+    state.catalogs["gmail"] = [tool]
+    state.registries.add(chatting_bot)
+    state.registries.add(other_bot)
+    manager._reconcile_user(state)
     manager._users["u1"] = state
 
     await manager._close_user("u1", chatting_bot)
