@@ -1,3 +1,4 @@
+import { messageKey } from "./feedbackKey";
 import { DurableJobs } from "./DurableJobs";
 import {
   ChatComposer,
@@ -452,7 +453,24 @@ export function Chat({
   const [error, setError] = useState("");
   const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [feedback, setFeedback] = useState<Record<number, "up" | "down">>({});
+  const [feedback, setFeedback] = useState<Record<string, "up" | "down">>({});
+  const feedbackRef = useRef(feedback);
+  feedbackRef.current = feedback;
+  // Ratings are keyed by reply content, so they survive reloads and paging;
+  // fetch the session's saved ones whenever it opens.
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    void api
+      .sessionFeedback(sessionId)
+      .then((saved) => {
+        if (!cancelled) setFeedback(saved);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
   const [copied, setCopied] = useState<Record<number, boolean>>({});
   const [sharing, setSharing] = useState(false);
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -1676,12 +1694,23 @@ export function Chat({
     }
   }, [sessionId, runGeneratedImage]);
 
+  // One rating per reply: clicking the active thumb again clears it. The UI
+  // updates optimistically and rolls back if the server rejects the change.
   const rate = useCallback(
-    (index: number, content: string, signal: "up" | "down") => {
-      setFeedback((prev) => ({ ...prev, [index]: signal }));
+    (content: string, signal: "up" | "down") => {
+      if (!sessionId) return;
+      const key = messageKey(content);
+      const previous = feedbackRef.current[key];
+      const next = previous === signal ? "none" : signal;
+      const apply = (value: "up" | "down" | undefined) =>
+        setFeedback((prev) => {
+          const { [key]: _drop, ...rest } = prev;
+          return value ? { ...rest, [key]: value } : rest;
+        });
+      apply(next === "none" ? undefined : next);
       void api
-        .submitFeedback(signal, { session_id: sessionId ?? undefined, message_preview: content.slice(0, 400) })
-        .catch(() => undefined);
+        .submitFeedback(next, { session_id: sessionId, message_key: key, message_preview: content.slice(0, 400) })
+        .catch(() => apply(previous));
     },
     [sessionId],
   );
@@ -2702,20 +2731,20 @@ export function Chat({
                             <IconButton
                               label={t("chat.msg.good")}
                               icon={
-                                <Icon icon={ThumbsUp} size="sm" color={feedback[i] === "up" ? "success" : "secondary"} />
+                                <Icon icon={ThumbsUp} size="sm" color={feedback[messageKey(item.content)] === "up" ? "success" : "secondary"} />
                               }
                               variant="ghost"
                               size="sm"
-                              clickAction={() => rate(i, item.content, "up")}
+                              clickAction={() => rate(item.content, "up")}
                             />
                             <IconButton
                               label={t("chat.msg.bad")}
                               icon={
-                                <Icon icon={ThumbsDown} size="sm" color={feedback[i] === "down" ? "error" : "secondary"} />
+                                <Icon icon={ThumbsDown} size="sm" color={feedback[messageKey(item.content)] === "down" ? "error" : "secondary"} />
                               }
                               variant="ghost"
                               size="sm"
-                              clickAction={() => rate(i, item.content, "down")}
+                              clickAction={() => rate(item.content, "down")}
                             />
                             {item.info && (
                               <Tooltip content={

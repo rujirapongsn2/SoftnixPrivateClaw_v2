@@ -1049,6 +1049,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.kindChat": "Chat",
     "admin.providers.kindImage": "Image",
     "admin.providers.kindVision": "Vision",
+    "admin.providers.kindImageHint": "Requires verified image output. Vision input alone cannot generate images.",
+    "admin.providers.saveDisabledImage": "Save disabled draft",
     "admin.providers.kindVisionHint":
       "Reads images for chat models that can't. When a user attaches an image to a text-only model, this model describes it and the chat model answers from that description. Billed, but not counted as a turn.",
     "admin.providers.modelPrefixWarning": "Start the model id with a provider prefix — e.g. openrouter/, openai/, anthropic/, gemini/. Without it the model can't be reached.",
@@ -2618,6 +2620,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.providers.kindChat": "แชท",
     "admin.providers.kindImage": "รูปภาพ",
     "admin.providers.kindVision": "อ่านรูป",
+    "admin.providers.kindImageHint": "ต้องยืนยันว่าโมเดลสร้างภาพได้ โมเดลที่อ่านภาพได้อย่างเดียวใช้ไม่ได้",
+    "admin.providers.saveDisabledImage": "บันทึกแบบปิดใช้งาน",
     "admin.providers.kindVisionHint":
       "ใช้อ่านรูปแทนโมเดลแชทที่ดูรูปไม่ได้ เมื่อผู้ใช้แนบรูปมากับโมเดลที่รับได้แต่ข้อความ โมเดลนี้จะบรรยายรูปให้ แล้วโมเดลแชทตอบจากคำบรรยายนั้น คิดค่าโทเคนแต่ไม่นับเป็นเทิร์น",
     "admin.providers.modelPrefixWarning": "ใส่คำนำหน้าผู้ให้บริการที่ id โมเดล — เช่น openrouter/, openai/, anthropic/, gemini/ หากไม่ใส่จะไม่สามารถเรียกใช้โมเดลได้",

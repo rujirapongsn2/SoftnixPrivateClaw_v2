@@ -3411,19 +3411,88 @@ class FeedbackStore:
         self.factory = factory
 
     async def record(
-        self, user_id: str, session_id: str | None, signal: str, note: str, message_preview: str
+        self,
+        user_id: str,
+        session_id: str | None,
+        signal: str,
+        note: str,
+        message_preview: str,
+        message_key: str | None = None,
+    ) -> None:
+        """Rate a reply. With a `message_key` this is an upsert (one row per reply)
+        and signal "none" clears the rating; without one it appends (legacy)."""
+        if message_key is None:
+            async with self.factory() as db:
+                db.add(
+                    Feedback(
+                        user_id=user_id,
+                        session_id=session_id,
+                        signal=signal,
+                        note=note[:2000],
+                        message_preview=message_preview[:500],
+                    )
+                )
+                await db.commit()
+            return
+        # The unique index is the backstop for two concurrent first ratings: the
+        # loser's insert fails, and the retry finds the winner's row and updates it.
+        for attempt in (0, 1):
+            try:
+                await self._upsert(user_id, session_id, signal, note, message_preview, message_key)
+                return
+            except IntegrityError:
+                if attempt:
+                    raise
+
+    async def _upsert(
+        self, user_id, session_id, signal, note, message_preview, message_key
     ) -> None:
         async with self.factory() as db:
-            db.add(
-                Feedback(
-                    user_id=user_id,
-                    session_id=session_id,
-                    signal=signal,
-                    note=note[:2000],
-                    message_preview=message_preview[:500],
+            row = (
+                await db.execute(
+                    select(Feedback).where(
+                        Feedback.user_id == user_id,
+                        Feedback.session_id == session_id,
+                        Feedback.message_key == message_key,
+                    )
                 )
-            )
+            ).scalar_one_or_none()
+            if signal == "none":
+                if row is not None:
+                    await db.delete(row)
+            elif row is None:
+                db.add(
+                    Feedback(
+                        user_id=user_id,
+                        session_id=session_id,
+                        signal=signal,
+                        message_key=message_key,
+                        note=note[:2000],
+                        message_preview=message_preview[:500],
+                    )
+                )
+            else:
+                row.signal = signal
+                row.note = note[:2000]
+                row.message_preview = message_preview[:500]
+                row.created_at = datetime.now(timezone.utc)
             await db.commit()
+
+    async def for_session(self, user_id: str, session_id: str, limit: int = 2000) -> dict[str, str]:
+        """{message_key: signal} for one session, bounded; legacy keyless rows skipped."""
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(Feedback.message_key, Feedback.signal)
+                    .where(
+                        Feedback.user_id == user_id,
+                        Feedback.session_id == session_id,
+                        Feedback.message_key.is_not(None),
+                    )
+                    .limit(limit)
+                )
+            ).all()
+        return {key: sig for key, sig in rows}
 
     @staticmethod
     def _counts_query(user_id: str | None):

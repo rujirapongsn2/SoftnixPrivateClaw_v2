@@ -3305,6 +3305,30 @@ html[data-chat-bg="grid"] .claw-chat {
   gap: 10px;
   align-items: start;
 }
+@media (max-width: 640px) {
+  .claw-model-add .claw-row-2col,
+  .claw-model-row-edit .claw-row-2col {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .claw-model-add .claw-row-2col > *,
+  .claw-model-row-edit .claw-row-2col > *,
+  .claw-model-add .claw-segmented,
+  .claw-model-row-edit .claw-segmented {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .claw-model-add .claw-segmented,
+  .claw-model-row-edit .claw-segmented {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+  .claw-model-add .claw-segmented button,
+  .claw-model-row-edit .claw-segmented button {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: normal;
+  }
+}
 .claw-toggle-inline {
   display: inline-flex;
   align-items: center;
