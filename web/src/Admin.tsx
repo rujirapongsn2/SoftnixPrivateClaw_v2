@@ -22,6 +22,7 @@ import {
   ChevronDown,
   ChevronRight,
   Cloud,
+  Copy,
   CloudCog,
   Coins,
   Cpu,
@@ -100,6 +101,9 @@ import {
   ModelPurpose,
   ModelKind,
   ModelUsagePoint,
+  type McpOAuthAuthMethod,
+  type McpOAuthClient,
+  type McpOAuthClients,
   OAuthAppsInfo,
   type ProjectContainerAdminStatus,
   type PlanCreate,
@@ -4000,7 +4004,217 @@ function OAuthAppsPanel() {
         guard={guard}
         withTenant
       />
+      <McpOAuthClientsCard />
     </div>
+  );
+}
+
+const MCP_AUTH_METHOD_LABEL: Record<McpOAuthAuthMethod, string> = {
+  client_secret_basic: "admin.mcpOAuth.method.basic",
+  client_secret_post: "admin.mcpOAuth.method.post",
+  none: "admin.mcpOAuth.method.none",
+};
+
+interface McpOAuthClientDraft {
+  issuer: string;
+  client_id: string;
+  // Write-only: "" keeps the stored secret of an existing client.
+  client_secret: string;
+  token_endpoint_auth_method: McpOAuthAuthMethod;
+}
+
+function isHttpsIssuer(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+/** Admin-registered OAuth clients for the authorization servers behind
+ * users' remote MCP connectors, one per issuer. Every write answers with the
+ * full list, so the card fetches once and never refetches after a save. */
+function McpOAuthClientsCard() {
+  const t = useT();
+  const toast = useToast();
+  const [data, setData] = useState<McpOAuthClients | null>(null);
+  // `existing` is the row being edited; null while adding a new issuer.
+  const [form, setForm] = useState<{ draft: McpOAuthClientDraft; existing: McpOAuthClient | null } | null>(null);
+  const { error, guard } = useAsyncError();
+
+  useEffect(() => {
+    void guard(async () => setData(await api.adminListMcpOAuthClients()));
+  }, [guard]);
+
+  const updateDraft = (patch: Partial<McpOAuthClientDraft>) =>
+    setForm((prev) => (prev ? { ...prev, draft: { ...prev.draft, ...patch } } : prev));
+
+  const copyRedirect = async (uri: string) => {
+    try {
+      await navigator.clipboard.writeText(uri);
+      toast({ body: t("admin.mcpOAuth.copied"), type: "info", autoHideDuration: 2000 });
+    } catch {
+      toast({ body: t("admin.mcpOAuth.copyFailed"), type: "error" });
+    }
+  };
+
+  const save = () =>
+    guard(async () => {
+      if (!form) return;
+      const draft = { ...form.draft, issuer: form.draft.issuer.trim(), client_id: form.draft.client_id.trim() };
+      if (!isHttpsIssuer(draft.issuer)) throw new Error(t("admin.mcpOAuth.issuerInvalid"));
+      if (!draft.client_id) throw new Error(t("admin.mcpOAuth.clientIdRequired"));
+      const needsSecret = draft.token_endpoint_auth_method !== "none" && !form.existing?.has_client_secret;
+      if (needsSecret && !draft.client_secret.trim()) throw new Error(t("admin.mcpOAuth.secretRequired"));
+      setData(await api.adminPutMcpOAuthClient(draft));
+      setForm(null);
+      toast({ body: t("admin.mcpOAuth.savedToast", { issuer: draft.issuer }), type: "info", autoHideDuration: 2500 });
+    });
+
+  const remove = (client: McpOAuthClient) =>
+    guard(async () => {
+      if (!window.confirm(t("admin.mcpOAuth.deleteConfirm", { issuer: client.issuer }))) return;
+      setData(await api.adminDeleteMcpOAuthClient(client.id));
+      setForm((prev) => (prev?.existing?.id === client.id ? null : prev));
+    });
+
+  return (
+    <Card padding={2}>
+      <div className="claw-panel">
+        <div className="claw-row claw-row-between">
+          <Text weight="semibold">{t("admin.mcpOAuth.title")}</Text>
+          {!form && (
+            <Button
+              label={t("admin.mcpOAuth.add")}
+              icon={<Icon icon={Plus} size="sm" />}
+              size="sm"
+              variant="secondary"
+              clickAction={() =>
+                setForm({
+                  draft: { issuer: "", client_id: "", client_secret: "", token_endpoint_auth_method: "client_secret_basic" },
+                  existing: null,
+                })
+              }
+            />
+          )}
+        </div>
+        <Text size="sm" color="secondary" as="p">
+          {t("admin.mcpOAuth.intro")}
+        </Text>
+        {data && (
+          <div className="claw-setup-field">
+            <Text size="sm" color="secondary" as="p">
+              {t("admin.mcpOAuth.redirectDesc")}
+            </Text>
+            <div className="claw-row">
+              <Text type="code">{data.redirect_uri}</Text>
+              <IconButton
+                icon={<Icon icon={Copy} size="sm" />}
+                label={t("admin.mcpOAuth.copyRedirect")}
+                size="sm"
+                variant="ghost"
+                clickAction={() => void copyRedirect(data.redirect_uri)}
+              />
+            </div>
+          </div>
+        )}
+        {error && <ErrorText>{error}</ErrorText>}
+        {form && (
+          <div className="claw-panel">
+            <TextInput
+              label={t("admin.mcpOAuth.issuer")}
+              placeholder="https://auth.example.com"
+              value={form.draft.issuer}
+              onChange={(issuer) => updateDraft({ issuer })}
+              isDisabled={form.existing !== null}
+            />
+            <TextInput
+              label={t("admin.oauth.clientId")}
+              value={form.draft.client_id}
+              onChange={(client_id) => updateDraft({ client_id })}
+            />
+            <SegmentedControl
+              value={form.draft.token_endpoint_auth_method}
+              onChange={(v) => updateDraft({ token_endpoint_auth_method: v as McpOAuthAuthMethod })}
+              label={t("admin.mcpOAuth.authMethod")}
+              size="sm"
+            >
+              {Object.entries(MCP_AUTH_METHOD_LABEL).map(([value, labelKey]) => (
+                <SegmentedControlItem key={value} value={value} label={t(labelKey)} />
+              ))}
+            </SegmentedControl>
+            {form.draft.token_endpoint_auth_method !== "none" && (
+              <TextInput
+                label={
+                  form.existing?.has_client_secret
+                    ? t("admin.oauth.clientSecretKeepCurrent")
+                    : t("admin.oauth.clientSecret")
+                }
+                type="password"
+                value={form.draft.client_secret}
+                onChange={(client_secret) => updateDraft({ client_secret })}
+              />
+            )}
+            <div className="claw-row">
+              <Button
+                label={t("admin.oauth.save")}
+                variant="primary"
+                icon={<Icon icon="check" size="sm" />}
+                clickAction={save}
+              />
+              <Button label={t("admin.common.cancel")} variant="ghost" clickAction={() => setForm(null)} />
+            </div>
+          </div>
+        )}
+        {data &&
+          (data.clients.length === 0 ? (
+            <Text size="sm" color="secondary" as="p">
+              {t("admin.mcpOAuth.empty")}
+            </Text>
+          ) : (
+            data.clients.map((client) => (
+              <div key={client.id} className="claw-row claw-row-between">
+                <div>
+                  <div className="claw-row">
+                    <Text weight="semibold">{client.issuer}</Text>
+                    <Badge variant="neutral" label={t(MCP_AUTH_METHOD_LABEL[client.token_endpoint_auth_method])} />
+                  </div>
+                  <Text size="sm" color="secondary" as="p">
+                    {t("admin.mcpOAuth.clientIdLine", { clientId: client.client_id })}
+                  </Text>
+                </div>
+                <div className="claw-row">
+                  <Button
+                    label={t("admin.common.edit")}
+                    icon={<Icon icon={Pencil} size="sm" />}
+                    size="sm"
+                    variant="ghost"
+                    clickAction={() =>
+                      setForm({
+                        draft: {
+                          issuer: client.issuer,
+                          client_id: client.client_id,
+                          client_secret: "",
+                          token_endpoint_auth_method: client.token_endpoint_auth_method,
+                        },
+                        existing: client,
+                      })
+                    }
+                  />
+                  <Button
+                    label={t("admin.common.delete")}
+                    icon={<Icon icon={Trash2} size="sm" />}
+                    size="sm"
+                    variant="destructive"
+                    clickAction={() => remove(client)}
+                  />
+                </div>
+              </div>
+            ))
+          ))}
+      </div>
+    </Card>
   );
 }
 
