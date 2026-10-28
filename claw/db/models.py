@@ -7,7 +7,19 @@ JSON columns use the portable JSON type (JSONB on Postgres via dialect).
 import uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, func, text, true
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    UniqueConstraint,
+    func,
+    text,
+    true,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Aliased so every column below is NUL-stripping by construction — see
@@ -331,6 +343,9 @@ class McpConnector(Base):
             unique=True,
             postgresql_where=text("owner_id IS NULL"),
         ),
+        # Trivially satisfied (id is the PK); exists only so McpConnectorAuth's
+        # composite FK can reference (id, owner_id).
+        UniqueConstraint("id", "owner_id", name="uq_connectors_id_owner"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
@@ -359,6 +374,66 @@ class McpConnector(Base):
     # applied on top of whatever value is stored here.
     timeout_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class McpConnectorAuth(Base):
+    """OAuth state for one per-user http MCP connector. No row = never started.
+
+    The composite FK with a NOT NULL ``owner_id`` makes an auth row on an
+    admin-global connector (``owner_id`` NULL) unrepresentable: NULL never
+    equals a non-null parent column. Tokens live only inside ``grant_enc``.
+    Writes here never touch ``mcp_connectors.updated_at``, so a token refresh
+    does not trip ConnectorManager's signature-based reconnect.
+
+    ``version`` and the ``refresh_lease_*`` pair serialize token refresh across
+    processes (see claw/auth/mcp_oauth.py); ``pending_*`` hold one in-flight
+    authorization flow, keyed by the hash of its ``state``.
+    """
+
+    __tablename__ = "mcp_connector_auth"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["connector_id", "owner_id"],
+            ["mcp_connectors.id", "mcp_connectors.owner_id"],
+            ondelete="CASCADE",
+            name="fk_connector_auth_connector_owner",
+        ),
+        Index("ix_connector_auth_owner", "owner_id"),
+        Index("ix_connector_auth_pending_state", "pending_state_hash", unique=True),
+    )
+
+    connector_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    grant_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    refresh_lease_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    refresh_lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pending_state_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pending_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pending_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class McpOAuthClient(Base):
+    """Our client identity at one authorization server. ``source`` is "admin"
+    for a Control-Plane registered client or "dcr" for an RFC 7591 registration
+    cached for every user. A Client ID Metadata Document client needs no row."""
+
+    __tablename__ = "mcp_oauth_clients"
+    __table_args__ = (UniqueConstraint("issuer", "source", "redirect_uri", name="uq_mcp_oauth_client"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    issuer: Mapped[str] = mapped_column(String(500), nullable=False)
+    source: Mapped[str] = mapped_column(String(8), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    client_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_endpoint_auth_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(String(500), nullable=False)
+    registration_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
