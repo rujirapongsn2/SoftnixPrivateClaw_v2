@@ -26,7 +26,9 @@ const root = sbotShare ? <SbotSharedView token={decodeURIComponent(sbotShare[1])
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <Theme theme={clawTheme}>
+    {/* Light-only palette (styles.css): following an OS dark preference flips
+        components like Toast to dark-mode text on our still-dark surfaces. */}
+    <Theme theme={clawTheme} mode="light">
       <LayerProvider>
         <BrandingProvider><Suspense fallback={<div role="status">Loading…</div>}>{root}</Suspense></BrandingProvider>
       </LayerProvider>
