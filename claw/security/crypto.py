@@ -13,6 +13,10 @@ from cryptography.fernet import Fernet, InvalidToken
 _PREFIX = "enc::"
 
 
+class UndecryptableSecret(ValueError):
+    pass
+
+
 class SecretBox:
     def __init__(self, secret_key: str):
         # Fernet needs a 32-byte urlsafe-base64 key; derive one deterministically.
@@ -33,6 +37,18 @@ class SecretBox:
             return self._fernet.decrypt(value[len(_PREFIX):].encode("ascii")).decode("utf-8")
         except InvalidToken:
             return value
+
+    def decrypt_strict(self, value: str) -> str:
+        """Decrypt or raise. For a value that is only ever written encrypted
+        (an OAuth grant blob), a missing prefix or a failed MAC means the row
+        was tampered with or the secret_key rotated; passing the ciphertext
+        through as if it were plaintext would hand garbage to a JSON parser."""
+        if not value.startswith(_PREFIX):
+            raise UndecryptableSecret("value is not encrypted")
+        try:
+            return self._fernet.decrypt(value[len(_PREFIX) :].encode("ascii")).decode("utf-8")
+        except InvalidToken as exc:
+            raise UndecryptableSecret("value cannot be decrypted with this secret_key") from exc
 
     def encrypt_map(self, data: dict[str, str]) -> dict[str, str]:
         return {k: self.encrypt(str(v)) for k, v in (data or {}).items()}
