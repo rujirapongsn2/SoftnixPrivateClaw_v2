@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -4246,6 +4247,12 @@ class LoadedAuth:
 
 
 @dataclass(frozen=True)
+class RegisteredClient:
+    row_id: str
+    secret_expires_at: datetime | None
+
+
+@dataclass(frozen=True)
 class Lease:
     connector_id: str
     owner: str
@@ -4530,6 +4537,80 @@ class McpAuthStore:
             )
             await db.commit()
             return result.rowcount == 1
+
+    async def registered_client(self, issuer: str, redirect_uri: str) -> RegisteredClient | None:
+        async with self.factory() as db:
+            row = await db.scalar(self._dcr_row(issuer, redirect_uri))
+        if row is None:
+            return None
+        return RegisteredClient(row_id=row.id, secret_expires_at=self._secret_expiry(row))
+
+    async def add_registered_client(
+        self,
+        *,
+        issuer: str,
+        redirect_uri: str,
+        client_id: str,
+        client_secret: str | None,
+        auth_method: str,
+        registration: dict[str, Any],
+    ) -> str:
+        """Cache a Dynamic Client Registration for every user of `issuer` and
+        return its row id. `registration` is the RFC 7591 response, kept
+        encrypted for its client_secret_expires_at. Two registrations racing for the same issuer
+        converge on whichever row committed first: the loser's client is
+        dropped (left orphaned at the authorization server) and the winner's
+        id returned, so concurrent flows always share one client."""
+        row = McpOAuthClient(
+            issuer=issuer,
+            source="dcr",
+            redirect_uri=redirect_uri,
+            client_id=client_id,
+            client_secret_enc=self.secret_box.encrypt(client_secret) if client_secret else None,
+            token_endpoint_auth_method=auth_method,
+            registration_enc=self.secret_box.encrypt(json.dumps(registration)),
+        )
+        async with self.factory() as db:
+            db.add(row)
+            try:
+                await db.commit()
+                return row.id
+            except IntegrityError:
+                await db.rollback()
+            winner = await db.scalar(self._dcr_row(issuer, redirect_uri, McpOAuthClient.id))
+        if winner is None:
+            raise LookupError("registered client vanished during a concurrent registration")
+        return winner
+
+    async def delete_registered_client(self, row_id: str) -> bool:
+        """Drop a cached registration the authorization server stopped
+        accepting. Scoped to source='dcr': an admin's client is never removed
+        by anything but an admin."""
+        async with self.factory() as db:
+            result = await db.execute(
+                sa_delete(McpOAuthClient).where(McpOAuthClient.id == row_id, McpOAuthClient.source == "dcr")
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    @staticmethod
+    def _dcr_row(issuer: str, redirect_uri: str, column: Any = McpOAuthClient):
+        return select(column).where(
+            McpOAuthClient.issuer == issuer,
+            McpOAuthClient.source == "dcr",
+            McpOAuthClient.redirect_uri == redirect_uri,
+        )
+
+    def _secret_expiry(self, row: McpOAuthClient) -> datetime | None:
+        try:
+            registration = json.loads(self.secret_box.decrypt_strict(row.registration_enc or ""))
+            expires = int(registration.get("client_secret_expires_at") or 0)
+            # RFC 7591 §3.2.1: 0 means the secret never expires.
+            return datetime.fromtimestamp(expires, timezone.utc) if expires else None
+        except (UndecryptableSecret, ValueError, TypeError, AttributeError, OverflowError, OSError):
+            # Unreadable bookkeeping: report it as already expired so the
+            # caller re-registers instead of trusting a row it cannot inspect.
+            return datetime.min.replace(tzinfo=timezone.utc)
 
     async def client_credentials(self, row_id: str) -> ClientCredentials | None:
         async with self.factory() as db:
