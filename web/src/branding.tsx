@@ -723,6 +723,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.commandAdminOnly":
       "Only an administrator can set a custom local command — ask them to change this.",
     "settings.connectors.urlLabel": "Server URL (e.g. https://mcp.example.com/mcp)",
+    "settings.connectors.urlOAuthHint":
+      "Servers that sign in with OAuth need only the URL. Leave headers and env empty, save, then click Connect to authorize. Use HEADER_ entries only for servers that take an API key.",
     "settings.connectors.envLabel":
       "Environment variables (KEY=value, or Header-Name: value for an HTTP header, or QUERY_name=value for a URL query param — one per line)",
     "settings.connectors.timeoutLabel": "Timeout (ms)",
@@ -2337,6 +2339,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.commandAdminOnly":
       "มีเพียงผู้ดูแลระบบเท่านั้นที่ตั้งค่าคำสั่งภายในเครื่องแบบกำหนดเองได้ — ขอให้ผู้ดูแลระบบเปลี่ยนค่านี้",
     "settings.connectors.urlLabel": "URL เซิร์ฟเวอร์ (เช่น https://mcp.example.com/mcp)",
+    "settings.connectors.urlOAuthHint":
+      "เซิร์ฟเวอร์ที่ล็อกอินด้วย OAuth ใส่แค่ URL ก็พอ ไม่ต้องใส่ header หรือ env บันทึกแล้วกด Connect เพื่ออนุญาต ใส่ HEADER_ เฉพาะเซิร์ฟเวอร์ที่ใช้ API key",
     "settings.connectors.envLabel":
       "ตัวแปรสภาพแวดล้อม (KEY=value หรือ Header-Name: value สำหรับ HTTP header หรือ QUERY_name=value สำหรับพารามิเตอร์ใน URL — บรรทัดละหนึ่งรายการ)",
     "settings.connectors.timeoutLabel": "ระยะเวลาหมดเวลา (ms)",

@@ -3043,6 +3043,7 @@ function ConnectorsPanel() {
             ) : (
               <TextInput
                 label={t("settings.connectors.urlLabel")}
+                description={isAdmin ? undefined : t("settings.connectors.urlOAuthHint")}
                 value={editing.url ?? ""}
                 onChange={(v) => setEditing({ ...editing, url: v })}
               />
