@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.exc import IntegrityError
 
-from sbot.api import connector_shared as connectors
+from claw.api import connector_shared as connectors
 from sbot.api import llm_shared as llm
 from sbot.api.auth import _is_pending_imported_account, _send_activation_email
 from sbot.api.branding_shared import ChatBackground, ColorTheme, FontSize, Language
