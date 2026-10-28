@@ -758,7 +758,7 @@ async def test_literal_credential_in_a_stored_body_template_is_redacted(monkeypa
 
 
 async def test_empty_path_param_does_not_collapse_to_the_collection_endpoint(monkeypatch):
-    """"" passes Tool._validate (present, and a string), but substituting it
+    """"" passes Tool.validate_params (present, and a string), but substituting it
     turns "read one user" into "list every user" — with the connector's
     credentials attached, and on DELETE into something far worse."""
     seen = []
