@@ -28,10 +28,13 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     {/* Light-only palette (styles.css): following an OS dark preference flips
         components like Toast to dark-mode text on our still-dark surfaces. */}
-    <Theme theme={clawTheme} mode="light">
-      <LayerProvider>
-        <BrandingProvider><Suspense fallback={<div role="status">Loading…</div>}>{root}</Suspense></BrandingProvider>
-      </LayerProvider>
-    </Theme>
+    {/* Outermost so toasts, which render in LayerProvider's tree, can translate. */}
+    <BrandingProvider>
+      <Theme theme={clawTheme} mode="light">
+        <LayerProvider>
+          <Suspense fallback={<div role="status">Loading…</div>}>{root}</Suspense>
+        </LayerProvider>
+      </Theme>
+    </BrandingProvider>
   </React.StrictMode>,
 );

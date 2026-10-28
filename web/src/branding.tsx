@@ -622,6 +622,17 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.memory.historyEmpty":
       "Nothing consolidated yet — history entries appear as conversations grow.",
 
+    "connectorCallback.preset.connected": "{name} connected",
+    "connectorCallback.preset.nameConflict": "You already have your own connector named \"{name}\". Rename it first, then connect.",
+    "connectorCallback.failed": "Couldn't connect. Please try again.",
+    "connectorCallback.mcp.connected": "Connector authorized. Its tools are ready to use.",
+    "connectorCallback.mcp.denied": "Access wasn't granted, so the connector is still not connected.",
+    "connectorCallback.mcp.expired": "That sign-in link expired or was already used. Please connect again.",
+    "connectorCallback.mcp.browserMismatch":
+      "Sign-in has to finish in the same browser it started in. Please connect again from this browser.",
+    "connectorCallback.mcp.tokenFailed":
+      "The service didn't issue a sign-in token. Try again, or ask your administrator to check its OAuth client.",
+
     "settings.connectors.authHint.oauth": "1-click sign-in",
     "settings.connectors.authHint.apiKey": "API key",
     "settings.connectors.connected": "Connected",
@@ -2203,6 +2214,17 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.memory.dropped": "มีบางบรรทัดถูกตัดออกก่อนบันทึก:",
     "settings.memory.historyTitle": "ประวัติการรวบรวมล่าสุด",
     "settings.memory.historyEmpty": "ยังไม่มีการรวบรวม — รายการประวัติจะปรากฏเมื่อบทสนทนาสะสมมากขึ้น",
+
+    "connectorCallback.preset.connected": "เชื่อมต่อ {name} แล้ว",
+    "connectorCallback.preset.nameConflict": "คุณมีตัวเชื่อมต่อของตัวเองชื่อ \"{name}\" อยู่แล้ว กรุณาเปลี่ยนชื่อก่อน แล้วจึงเชื่อมต่อ",
+    "connectorCallback.failed": "เชื่อมต่อไม่สำเร็จ กรุณาลองใหม่อีกครั้ง",
+    "connectorCallback.mcp.connected": "อนุญาตตัวเชื่อมต่อแล้ว พร้อมใช้งานเครื่องมือได้ทันที",
+    "connectorCallback.mcp.denied": "ไม่ได้รับอนุญาตให้เข้าถึง ตัวเชื่อมต่อจึงยังไม่ได้เชื่อมต่อ",
+    "connectorCallback.mcp.expired": "ลิงก์ลงชื่อเข้าใช้หมดอายุหรือถูกใช้ไปแล้ว กรุณาเชื่อมต่ออีกครั้ง",
+    "connectorCallback.mcp.browserMismatch":
+      "ต้องลงชื่อเข้าใช้ให้เสร็จในเบราว์เซอร์เดียวกับที่เริ่มต้น กรุณาเชื่อมต่ออีกครั้งจากเบราว์เซอร์นี้",
+    "connectorCallback.mcp.tokenFailed":
+      "บริการไม่ได้ออกโทเค็นสำหรับลงชื่อเข้าใช้ กรุณาลองอีกครั้ง หรือขอให้ผู้ดูแลระบบตรวจสอบ OAuth client ของบริการนั้น",
 
     "settings.connectors.authHint.oauth": "เข้าสู่ระบบคลิกเดียว",
     "settings.connectors.authHint.apiKey": "คีย์ API",
