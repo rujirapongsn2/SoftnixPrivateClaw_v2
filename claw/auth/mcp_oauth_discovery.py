@@ -26,6 +26,10 @@ TOKEN_TIMEOUT_S = 15.0
 LEASE_TTL = timedelta(seconds=30)
 assert TOKEN_TIMEOUT_S < LEASE_TTL.total_seconds(), "a refresh must finish inside its lease"
 MAX_TOKEN_RESPONSE_BYTES = 64 * 1024
+# Matched by claw/core/connectors.py's _OAUTH_REAUTH_MARKERS, so a failure
+# raised through a live tool call flips the connector's status the same way a
+# preset connector's "invalid_grant" does, with no agent-loop change.
+REAUTH_MARKER = "mcp_oauth_reauthorization_required"
 
 _DEFAULT_PORTS = {"https": 443, "http": 80}
 
