@@ -392,3 +392,25 @@ async def test_a_non_bearer_token_response_is_a_transient_failure(world):
         await world["oauth"].access_token(world["connector"])
     loaded = await world["store"].load(world["connector"].id)
     assert loaded.grant.access_token == "at-1" and loaded.failure is None
+
+
+async def test_a_rejection_of_a_token_a_peer_has_since_replaced_does_not_fail_the_grant(world):
+    await _seed(world)
+    store, connector_id = world["store"], world["connector"].id
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("Authorization") == "Bearer at-2":
+            # Another process refreshes while this rejection is in flight.
+            loaded = await store.load(connector_id)
+            lease = await store.try_lease(connector_id, loaded.version, NOW)
+            await store.commit_under_lease(lease, _grant(access_token="at-3", refresh_token="rt-3"))
+        return httpx.Response(401, headers={"WWW-Authenticate": 'Bearer error="invalid_token"'})
+
+    auth = world["oauth"].http_auth(world["connector"])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), auth=auth) as client:
+        with pytest.raises(McpReauthorizationRequired):
+            await client.post(world["connector"].url, json={})
+
+    loaded = await store.load(connector_id)
+    assert loaded.grant.access_token == "at-3"
+    assert loaded.failure is None

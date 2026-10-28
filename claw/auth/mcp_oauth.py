@@ -465,6 +465,16 @@ class McpOAuth:
             return grant.access_token
         return await self._refresh(connector.id, stale)
 
+    async def mark_rejected(self, connector: Any, reason: FailureReason, *, token: str) -> None:
+        """Fail the grant because `connector`'s server refused `token`, but
+        only while `token` is still the grant's access token: a refusal of a
+        token another session has since replaced says nothing about the new
+        one."""
+        loaded = await self._store.load(connector.id)
+        if loaded is None or loaded.grant is None or loaded.grant.access_token != token:
+            return
+        await self._store.mark_failed(connector.id, loaded.version, reason)
+
     async def _refresh(self, connector_id: str, stale: str | None) -> str:
         lock = self._locks.get(connector_id)
         if lock is None:
@@ -630,16 +640,15 @@ class McpBearerAuth(httpx.Auth):
         if token is None:
             self.outcome = McpAuthorizationNeeded(challenge)
             return
-        loaded = await self._oauth._store.load(self._connector.id)
         if challenge.error == "insufficient_scope":
-            await self._fail(loaded, FailureReason.INSUFFICIENT_SCOPE)
+            await self._reject(token, FailureReason.INSUFFICIENT_SCOPE)
         fresh = await self._token(stale=token)
         if fresh is None:
             return
         request.headers["Authorization"] = f"Bearer {fresh}"
         response = yield request
         if response.status_code == 401:
-            await self._fail(await self._oauth._store.load(self._connector.id), FailureReason.REJECTED_TOKEN)
+            await self._reject(fresh, FailureReason.REJECTED_TOKEN)
 
     async def _token(self, *, stale: str | None = None) -> str | None:
         try:
@@ -648,8 +657,7 @@ class McpBearerAuth(httpx.Auth):
             self.outcome = exc
             raise
 
-    async def _fail(self, loaded: Any, reason: FailureReason) -> None:
-        if loaded is not None:
-            await self._oauth._store.mark_failed(self._connector.id, loaded.version, reason)
+    async def _reject(self, token: str, reason: FailureReason) -> None:
+        await self._oauth.mark_rejected(self._connector, reason, token=token)
         self.outcome = McpReauthorizationRequired(reason)
         raise self.outcome
