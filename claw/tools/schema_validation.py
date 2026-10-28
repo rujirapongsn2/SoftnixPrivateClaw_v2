@@ -60,8 +60,9 @@ _MAX_QUOTE_CHARS = 120
 
 _TYPE_CHECKS = {
     "string": lambda v: isinstance(v, str),
-    "integer": lambda v: (isinstance(v, int) and not isinstance(v, bool))
-    or (isinstance(v, float) and v.is_integer()),
+    "integer": lambda v: (
+        (isinstance(v, int) and not isinstance(v, bool)) or (isinstance(v, float) and v.is_integer())
+    ),
     "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
     "boolean": lambda v: isinstance(v, bool),
     "array": lambda v: isinstance(v, list),
@@ -209,7 +210,9 @@ class _Walker:
                 errors.append(f"missing required {(path + '.' + key) if path else key}")
         for key, item in val.items():
             if key in props:
-                errors.extend(self.walk(item, props[key], f"{path}.{key}" if path else key, depth + 1, frozenset()))
+                errors.extend(
+                    self.walk(item, props[key], f"{path}.{key}" if path else key, depth + 1, frozenset())
+                )
         return errors
 
     def check_array(self, val: list, schema: dict, path: str, depth: int) -> list[str]:
@@ -226,7 +229,9 @@ class _Walker:
         for i, item in enumerate(val):
             item_schema = positional[i] if i < len(positional) else items
             if item_schema is not None:
-                errors.extend(self.walk(item, item_schema, f"{path or 'parameter'}[{i}]", depth + 1, frozenset()))
+                errors.extend(
+                    self.walk(item, item_schema, f"{path or 'parameter'}[{i}]", depth + 1, frozenset())
+                )
         return errors
 
     def branches(self, branches: Any, keyword: str, path: str) -> list:

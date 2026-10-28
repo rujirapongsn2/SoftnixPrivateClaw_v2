@@ -263,7 +263,10 @@ LINEAR_LIST_ISSUES = {
             "type": "object",
             "properties": {
                 "priority": {"anyOf": [{"type": "integer", "enum": [0, 1, 2, 3, 4]}, {"type": "null"}]},
-                "createdAt": {"type": "object", "properties": {"gte": {"type": "string", "format": "date-time"}}},
+                "createdAt": {
+                    "type": "object",
+                    "properties": {"gte": {"type": "string", "format": "date-time"}},
+                },
             },
             "additionalProperties": False,
         },
