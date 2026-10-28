@@ -180,6 +180,7 @@ class McpOAuth:
                 found = await discover(http, url)
         except DiscoveryError as exc:
             raise McpOAuthStartError("discovery_failed", str(exc)) from exc
+        scope = await self._scope_to_request(connector_id, found)
 
         admin_row = await self._store.admin_client_id(found.issuer, self.redirect_uri)
         strategy = choose_client_strategy(
@@ -197,7 +198,7 @@ class McpOAuth:
             case ClientStrategy.METADATA_DOCUMENT:
                 client = MetadataDocClientRef(client_id=self.client_metadata_url)
             case ClientStrategy.REGISTRATION:
-                client = await self._registered_client(found)
+                client = await self._registered_client(found, scope)
             case None:
                 raise McpOAuthStartError(
                     "no_client",
@@ -223,7 +224,7 @@ class McpOAuth:
             revocation_endpoint=found.revocation_endpoint,
             client=client,
             redirect_uri=self.redirect_uri,
-            scope=found.scope,
+            scope=scope,
             return_to=return_to,
         )
         await self._store.put_pending(
@@ -238,10 +239,20 @@ class McpOAuth:
             "state": state,
             "resource": found.resource,
         }
-        if found.scope:
-            params["scope"] = found.scope
+        if scope:
+            params["scope"] = scope
         authorize_url = httpx.URL(found.authorization_endpoint).copy_merge_params(params)
         return Started(authorize_url=str(authorize_url), browser_nonce=nonce)
+
+    async def _scope_to_request(self, connector_id: str, found: Discovered) -> str | None:
+        """The discovered scope, widened by what the connector's grant at this
+        same server holds and what a step-up challenge asked for, so a
+        Reconnect never comes back with less than the server demanded."""
+        loaded = await self._store.load(connector_id)
+        grant = loaded.grant if loaded is not None else None
+        if grant is None or grant.issuer != found.issuer or grant.resource != found.resource:
+            return found.scope
+        return _union_scopes(found.scope, grant.scope, grant.required_scope)
 
     def client_metadata_document(self) -> dict:
         """The Client ID Metadata Document served at `client_metadata_url`."""
@@ -259,7 +270,7 @@ class McpOAuth:
             "token_endpoint_auth_method": auth_method,
         }
 
-    async def _registered_client(self, found: Discovered) -> RegisteredClientRef:
+    async def _registered_client(self, found: Discovered, scope: str | None) -> RegisteredClientRef:
         """The cached Dynamic Client Registration for `found.issuer`,
         registering (RFC 7591) when there is none or its secret expired. Only
         begin() reaches this, so registrations are bounded by users clicking
@@ -278,8 +289,8 @@ class McpOAuth:
         if urlsplit(endpoint).scheme.lower() != "https":
             raise McpOAuthStartError("registration_failed", f"The registration endpoint {host} is not HTTPS.")
         body = self._client_metadata(auth_method)
-        if found.scope:
-            body["scope"] = found.scope
+        if scope:
+            body["scope"] = scope
         try:
             async with self._http() as http:
                 async with http.stream(
@@ -465,15 +476,19 @@ class McpOAuth:
             return grant.access_token
         return await self._refresh(connector.id, stale)
 
-    async def mark_rejected(self, connector: Any, reason: FailureReason, *, token: str) -> None:
+    async def mark_rejected(
+        self, connector: Any, reason: FailureReason, *, token: str, scope: str | None = None
+    ) -> None:
         """Fail the grant because `connector`'s server refused `token`, but
         only while `token` is still the grant's access token: a refusal of a
         token another session has since replaced says nothing about the new
-        one."""
+        one. `scope` is what a step-up challenge asked for; the next begin()
+        requests it."""
         loaded = await self._store.load(connector.id)
         if loaded is None or loaded.grant is None or loaded.grant.access_token != token:
             return
-        await self._store.mark_failed(connector.id, loaded.version, reason)
+        grant = replace(loaded.grant, required_scope=scope) if scope else None
+        await self._store.mark_failed(connector.id, loaded.version, reason, grant=grant)
 
     async def _refresh(self, connector_id: str, stale: str | None) -> str:
         lock = self._locks.get(connector_id)
@@ -575,6 +590,11 @@ class McpOAuth:
             raise McpTokenRefreshFailed("token endpoint returned an unusable token response") from exc
 
 
+def _union_scopes(*scopes: str | None) -> str | None:
+    merged = dict.fromkeys(item for scope in scopes if scope for item in scope.split())
+    return " ".join(merged) or None
+
+
 def _client_auth(
     form: dict[str, str], credentials: ClientCredentials
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -632,16 +652,18 @@ class McpBearerAuth(httpx.Auth):
         if token is not None:
             request.headers["Authorization"] = f"Bearer {token}"
         response = yield request
-        if response.status_code != 401:
-            return
         challenge = parse_bearer_challenge(response)
         if challenge is None:
+            return
+        step_up = challenge.error == "insufficient_scope"
+        if response.status_code == 403 and not step_up:
             return
         if token is None:
             self.outcome = McpAuthorizationNeeded(challenge)
             return
-        if challenge.error == "insufficient_scope":
-            await self._reject(token, FailureReason.INSUFFICIENT_SCOPE)
+        if step_up:
+            # A refresh cannot widen a grant's scope; only a new consent can.
+            await self._reject(token, FailureReason.INSUFFICIENT_SCOPE, scope=challenge.scope)
         fresh = await self._token(stale=token)
         if fresh is None:
             return
@@ -657,7 +679,7 @@ class McpBearerAuth(httpx.Auth):
             self.outcome = exc
             raise
 
-    async def _reject(self, token: str, reason: FailureReason) -> None:
-        await self._oauth.mark_rejected(self._connector, reason, token=token)
+    async def _reject(self, token: str, reason: FailureReason, *, scope: str | None = None) -> None:
+        await self._oauth.mark_rejected(self._connector, reason, token=token, scope=scope)
         self.outcome = McpReauthorizationRequired(reason)
         raise self.outcome

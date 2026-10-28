@@ -229,6 +229,9 @@ class Grant:
     token_endpoint: str
     revocation_endpoint: str | None
     client: ClientRef
+    # What a step-up challenge asked for that this grant lacks; the next
+    # consent flow requests it on top of `scope`.
+    required_scope: str | None = None
 
     def is_fresh(self, now: datetime) -> bool:
         return self.expires_at is None or self.expires_at - EXPIRY_SKEW > now
@@ -272,6 +275,7 @@ def encode_grant(grant: Grant) -> str:
             "token_endpoint": grant.token_endpoint,
             "revocation_endpoint": grant.revocation_endpoint,
             "client": _encode_client(grant.client),
+            "required_scope": grant.required_scope,
         }
     )
 
@@ -292,6 +296,7 @@ def decode_grant(raw: str) -> Grant:
             token_endpoint=str(data["token_endpoint"]),
             revocation_endpoint=data["revocation_endpoint"],
             client=_decode_client(data["client"]),
+            required_scope=data.get("required_scope"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("malformed grant") from exc

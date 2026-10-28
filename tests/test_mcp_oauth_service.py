@@ -394,6 +394,50 @@ async def test_a_non_bearer_token_response_is_a_transient_failure(world):
     assert loaded.grant.access_token == "at-1" and loaded.failure is None
 
 
+def _step_up_server(status: int, challenge: str):
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("Authorization"))
+        return httpx.Response(status, headers={"WWW-Authenticate": challenge})
+
+    return handler, seen
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_insufficient_scope_fails_the_grant_without_a_refresh_and_keeps_the_scope(world, status):
+    await _seed(world)
+    handler, seen = _step_up_server(status, 'Bearer error="insufficient_scope", scope="mcp:read files:write"')
+    auth = world["oauth"].http_auth(world["connector"])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), auth=auth) as client:
+        with pytest.raises(McpReauthorizationRequired) as raised:
+            await client.post(world["connector"].url, json={})
+
+    assert raised.value.reason is FailureReason.INSUFFICIENT_SCOPE
+    assert auth.outcome is raised.value
+    assert seen == ["Bearer at-1"]
+    assert world["endpoint"].requests == []
+    loaded = await world["store"].load(world["connector"].id)
+    assert loaded.failure is FailureReason.INSUFFICIENT_SCOPE
+    assert loaded.grant.required_scope == "mcp:read files:write"
+
+
+async def test_a_403_that_is_not_a_step_up_passes_through(world):
+    await _seed(world)
+    handler, seen = _step_up_server(403, 'Bearer error="invalid_request"')
+    auth = world["oauth"].http_auth(world["connector"])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), auth=auth) as client:
+        response = await client.post(world["connector"].url, json={})
+
+    assert response.status_code == 403
+    assert seen == ["Bearer at-1"]
+    assert auth.outcome is None
+    assert world["endpoint"].requests == []
+    assert (await world["store"].load(world["connector"].id)).failure is None
+
+
 async def test_a_rejection_of_a_token_a_peer_has_since_replaced_does_not_fail_the_grant(world):
     await _seed(world)
     store, connector_id = world["store"], world["connector"].id

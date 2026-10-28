@@ -223,6 +223,35 @@ async def test_prm_scopes_are_used_when_the_challenge_has_none(env):
     assert _query(started.json()["authorize_url"])["scope"] == "mcp:read"
 
 
+async def test_reconnect_after_a_step_up_asks_for_every_scope_needed(env):
+    env["world"].token["scope"] = "mcp:tools offline"
+    await _authorized(env)
+    oauth = env["app"].state.claw.mcp_oauth
+    await oauth.mark_rejected(
+        env["connector"], FailureReason.INSUFFICIENT_SCOPE, token="AT-SECRET", scope="mcp:tools files:write"
+    )
+
+    started = await _start(env)
+
+    assert _query(started.json()["authorize_url"])["scope"] == "mcp:tools offline files:write"
+
+
+async def test_a_grant_from_another_server_does_not_widen_the_scope(env):
+    env["world"].token["scope"] = "mcp:tools offline"
+    await _authorized(env)
+    await env["connectors"].upsert(
+        env["alice"].id, "remote", kind="mcp", transport="http", url="https://mcp.example.com/other"
+    )
+    env["world"].prm["resource"] = "https://mcp.example.com/other"
+    env["world"].routes[("mcp.example.com", "POST", "/other")] = env["world"].routes[
+        ("mcp.example.com", "POST", "/mcp")
+    ]
+
+    started = await _start(env)
+
+    assert _query(started.json()["authorize_url"])["scope"] == "mcp:tools"
+
+
 async def test_well_known_prm_is_found_without_a_resource_metadata_hint(env):
     env["world"].routes[("mcp.example.com", "POST", "/mcp")] = lambda: httpx.Response(
         401, headers={"WWW-Authenticate": "Bearer"}

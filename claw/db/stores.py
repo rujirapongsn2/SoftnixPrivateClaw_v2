@@ -4469,9 +4469,15 @@ class McpAuthStore:
             )
             await db.commit()
 
-    async def mark_failed(self, connector_id: str, version: int, reason: FailureReason) -> bool:
+    async def mark_failed(
+        self, connector_id: str, version: int, reason: FailureReason, *, grant: Grant | None = None
+    ) -> bool:
         """Fail the grant at `version` only: a 401 observed on an old token
-        must not condemn a grant someone else has since refreshed."""
+        must not condemn a grant someone else has since refreshed. `grant`,
+        when given, replaces the stored one in the same write."""
+        values: dict[str, Any] = {"failure": reason.value, "version": McpConnectorAuth.version + 1}
+        if grant is not None:
+            values["grant_enc"] = self.secret_box.encrypt(encode_grant(grant))
         async with self.factory() as db:
             result = await db.execute(
                 update(McpConnectorAuth)
@@ -4480,7 +4486,7 @@ class McpAuthStore:
                     McpConnectorAuth.version == version,
                     McpConnectorAuth.failure.is_(None),
                 )
-                .values(failure=reason.value, version=McpConnectorAuth.version + 1)
+                .values(**values)
             )
             await db.commit()
             return result.rowcount == 1
