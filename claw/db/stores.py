@@ -4250,6 +4250,9 @@ class LoadedAuth:
 class RegisteredClient:
     row_id: str
     secret_expires_at: datetime | None
+    # False when the stored client secret no longer decrypts (a rotated
+    # secret_key): the registration is then useless to everyone.
+    secret_readable: bool
 
 
 @dataclass(frozen=True)
@@ -4549,7 +4552,9 @@ class McpAuthStore:
             row = await db.scalar(self._dcr_row(issuer, redirect_uri))
         if row is None:
             return None
-        return RegisteredClient(row_id=row.id, secret_expires_at=self._secret_expiry(row))
+        return RegisteredClient(
+            row_id=row.id, secret_expires_at=self._secret_expiry(row), secret_readable=self.secret_readable(row)
+        )
 
     async def add_registered_client(
         self,
@@ -4588,13 +4593,20 @@ class McpAuthStore:
             raise LookupError("registered client vanished during a concurrent registration")
         return winner
 
-    async def delete_registered_client(self, row_id: str) -> bool:
-        """Drop a cached registration the authorization server stopped
-        accepting. Scoped to source='dcr': an admin's client is never removed
-        by anything but an admin."""
+    async def retire_registered_client(self, row_id: str) -> bool:
+        """Stop offering a cached registration to new flows, so the next
+        Connect registers afresh. The row stays: grants already issued to
+        this client keep refreshing with it until their own server says no.
+        Scoped to source='dcr': an admin's client is the admin's to change."""
         async with self.factory() as db:
             result = await db.execute(
-                sa_delete(McpOAuthClient).where(McpOAuthClient.id == row_id, McpOAuthClient.source == "dcr")
+                update(McpOAuthClient)
+                .where(
+                    McpOAuthClient.id == row_id,
+                    McpOAuthClient.source == "dcr",
+                    McpOAuthClient.retired_at.is_(None),
+                )
+                .values(retired_at=datetime.now(timezone.utc))
             )
             await db.commit()
             return result.rowcount == 1
@@ -4605,7 +4617,17 @@ class McpAuthStore:
             McpOAuthClient.issuer == issuer,
             McpOAuthClient.source == "dcr",
             McpOAuthClient.redirect_uri == redirect_uri,
+            McpOAuthClient.retired_at.is_(None),
         )
+
+    def secret_readable(self, row: McpOAuthClient) -> bool:
+        if row.client_secret_enc is None:
+            return True
+        try:
+            self.secret_box.decrypt_strict(row.client_secret_enc)
+        except UndecryptableSecret:
+            return False
+        return True
 
     def _secret_expiry(self, row: McpOAuthClient) -> datetime | None:
         try:
@@ -4619,11 +4641,14 @@ class McpAuthStore:
             return datetime.min.replace(tzinfo=timezone.utc)
 
     async def client_credentials(self, row_id: str) -> ClientCredentials | None:
+        """None when the row is gone. Raises UndecryptableSecret when its
+        secret no longer decrypts, which must never go on the wire as if it
+        were the secret."""
         async with self.factory() as db:
             row = await db.get(McpOAuthClient, row_id)
         if row is None:
             return None
-        secret = self.secret_box.decrypt(row.client_secret_enc) if row.client_secret_enc else None
+        secret = self.secret_box.decrypt_strict(row.client_secret_enc) if row.client_secret_enc else None
         return ClientCredentials(
             client_id=row.client_id, client_secret=secret, auth_method=row.token_endpoint_auth_method
         )

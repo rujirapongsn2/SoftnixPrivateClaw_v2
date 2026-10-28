@@ -43,10 +43,20 @@ def upgrade() -> None:
         sa.Column("token_endpoint_auth_method", sa.String(length=32), nullable=False),
         sa.Column("redirect_uri", sa.String(length=500), nullable=False),
         sa.Column("registration_enc", sa.Text(), nullable=True),
+        sa.Column("retired_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("issuer", "source", "redirect_uri", name="uq_mcp_oauth_client"),
+    )
+    # Partial: a retired registration keeps its row for the grants issued to
+    # it, while a fresh one takes the issuer's slot.
+    op.create_index(
+        "uq_mcp_oauth_client",
+        "mcp_oauth_clients",
+        ["issuer", "source", "redirect_uri"],
+        unique=True,
+        postgresql_where=sa.text("retired_at IS NULL"),
+        sqlite_where=sa.text("retired_at IS NULL"),
     )
     op.create_table(
         "mcp_connector_auth",
@@ -80,6 +90,7 @@ def downgrade() -> None:
     op.drop_index("ix_connector_auth_pending_state", table_name="mcp_connector_auth")
     op.drop_index("ix_connector_auth_owner", table_name="mcp_connector_auth")
     op.drop_table("mcp_connector_auth")
+    op.drop_index("uq_mcp_oauth_client", table_name="mcp_oauth_clients")
     op.drop_table("mcp_oauth_clients")
     with op.batch_alter_table("mcp_connectors") as batch:
         batch.drop_constraint("uq_connectors_id_owner", type_="unique")

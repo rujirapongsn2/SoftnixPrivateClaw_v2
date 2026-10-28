@@ -109,6 +109,24 @@ def test_upgrade_binds_auth_rows_to_the_owning_user_and_downgrade_restores(engin
         assert conn.execute(sa.text("SELECT id FROM mcp_connectors")).scalars().all() == ["global"]
 
 
+_CLIENT_INSERT = (
+    "INSERT INTO mcp_oauth_clients (id, issuer, source, client_id, token_endpoint_auth_method, "
+    "redirect_uri, retired_at, created_at, updated_at) VALUES (:id, 'https://as.example.com', 'dcr', "
+    ":id, 'none', 'https://claw.example.com/cb', :retired_at, '2026-01-01', '2026-01-01')"
+)
+
+
+def test_one_live_registration_per_issuer_beside_any_number_retired(engine):
+    with engine.begin() as conn:
+        _upgrade(conn)
+        conn.execute(sa.text(_CLIENT_INSERT), {"id": "old-1", "retired_at": "2026-01-02"})
+        conn.execute(sa.text(_CLIENT_INSERT), {"id": "old-2", "retired_at": "2026-01-03"})
+        conn.execute(sa.text(_CLIENT_INSERT), {"id": "live", "retired_at": None})
+    with engine.begin() as conn:
+        with pytest.raises(sa.exc.IntegrityError):
+            conn.execute(sa.text(_CLIENT_INSERT), {"id": "second-live", "retired_at": None})
+
+
 def test_migration_matches_the_orm_schema(engine):
     """The test suite and a fresh install's fallback build the schema with
     create_all, so the migration must not drift from the models."""

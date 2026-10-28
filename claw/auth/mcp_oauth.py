@@ -74,6 +74,7 @@ from claw.auth.mcp_oauth_discovery import (
     registration_auth_method,
 )
 from claw.db.stores import Lease, LoadedAuth, McpAuthStore
+from claw.security.crypto import UndecryptableSecret
 from claw.security.ssrf import ResponseTooLarge, UnsafeUrlError, pinned_client, read_bounded
 
 _LEASE_POLL_SECONDS = 0.1
@@ -220,6 +221,12 @@ class McpOAuth:
         try:
             credentials = await self._credentials(client)
         except McpReauthorizationRequired as exc:
+            if exc.reason is FailureReason.UNDECRYPTABLE:
+                raise McpOAuthStartError(
+                    "client_unreadable",
+                    f"The OAuth client registered for {found.issuer} can no longer be read. "
+                    "Ask your administrator to enter its client secret again.",
+                ) from exc
             raise McpOAuthStartError(
                 "no_client", "The OAuth client for this server was just removed."
             ) from exc
@@ -284,14 +291,16 @@ class McpOAuth:
 
     async def _registered_client(self, found: Discovered, scope: str | None) -> RegisteredClientRef:
         """The cached Dynamic Client Registration for `found.issuer`,
-        registering (RFC 7591) when there is none or its secret expired. Only
-        begin() reaches this, so registrations are bounded by users clicking
-        Connect; a refresh or a Bearer challenge never registers."""
+        registering (RFC 7591) when there is none or its secret expired or no
+        longer decrypts. Only begin() reaches this, so registrations are
+        bounded by users clicking Connect; a refresh or a Bearer challenge
+        never registers."""
         cached = await self._store.registered_client(found.issuer, self.redirect_uri)
         if cached is not None:
-            if cached.secret_expires_at is None or cached.secret_expires_at > self._now():
+            expired = cached.secret_expires_at is not None and cached.secret_expires_at <= self._now()
+            if cached.secret_readable and not expired:
                 return RegisteredClientRef(row_id=cached.row_id)
-            await self._store.delete_registered_client(cached.row_id)
+            await self._store.retire_registered_client(cached.row_id)
 
         endpoint = found.registration_endpoint
         auth_method = registration_auth_method(found.token_auth_methods)
@@ -377,7 +386,7 @@ class McpOAuth:
             )
         except _TokenEndpointRejected as exc:
             logger.warning("MCP OAuth code exchange rejected for connector {}: {}", connector_id, exc.code)
-            await self._forget_rejected_client(pending.client, exc.code)
+            await self._retire_rejected_client(pending.client, exc.code)
             return done(CallbackOutcome.TOKEN_FAILED)
         except (McpTokenRefreshFailed, McpReauthorizationRequired, httpx.HTTPError, UnsafeUrlError) as exc:
             logger.warning(
@@ -572,7 +581,7 @@ class McpOAuth:
                 await self._store.release_lease(lease)
                 raise McpTokenRefreshFailed(f"token endpoint rejected the refresh ({exc.code})") from exc
             await self._store.fail_under_lease(lease, reason)
-            await self._forget_rejected_client(grant.client, exc.code)
+            await self._retire_rejected_client(grant.client, exc.code)
             raise McpReauthorizationRequired(reason) from exc
         except BaseException:
             await self._store.release_lease(lease)
@@ -592,18 +601,23 @@ class McpOAuth:
             raise McpReauthorizationRequired(FailureReason.REJECTED_TOKEN)
         return refreshed.access_token
 
-    async def _forget_rejected_client(self, client: ClientRef, error_code: str) -> None:
-        """Drop a cached registration the server answered invalid_client for,
-        so the next Connect registers afresh instead of reusing a dead client.
-        Admin clients are the administrator's to fix."""
+    async def _retire_rejected_client(self, client: ClientRef, error_code: str) -> None:
+        """Stop offering a shared registration the server answered
+        invalid_client for, so the next Connect registers afresh. One
+        rejection may be one flow's fault, so other users' grants on that
+        client are left to find out at their own refresh. Admin clients are
+        the administrator's to fix."""
         if error_code == "invalid_client" and isinstance(client, RegisteredClientRef):
-            await self._store.delete_registered_client(client.row_id)
+            await self._store.retire_registered_client(client.row_id)
 
     async def _credentials(self, ref: ClientRef) -> ClientCredentials:
         if isinstance(ref, MetadataDocClientRef):
             return ClientCredentials(client_id=ref.client_id, client_secret=None, auth_method="none")
         assert isinstance(ref, (AdminClientRef, RegisteredClientRef))
-        credentials = await self._store.client_credentials(ref.row_id)
+        try:
+            credentials = await self._store.client_credentials(ref.row_id)
+        except UndecryptableSecret as exc:
+            raise McpReauthorizationRequired(FailureReason.UNDECRYPTABLE) from exc
         if credentials is None:
             raise McpReauthorizationRequired(FailureReason.CLIENT_GONE)
         return credentials

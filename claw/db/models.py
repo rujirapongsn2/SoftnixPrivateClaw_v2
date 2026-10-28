@@ -421,10 +421,24 @@ class McpConnectorAuth(Base):
 class McpOAuthClient(Base):
     """Our client identity at one authorization server. ``source`` is "admin"
     for a Control-Plane registered client or "dcr" for an RFC 7591 registration
-    cached for every user. A Client ID Metadata Document client needs no row."""
+    cached for every user. A Client ID Metadata Document client needs no row.
+
+    A registration the authorization server stopped accepting is retired, not
+    deleted: new flows register afresh, while grants issued to the old client
+    keep using it until their own refresh fails. Only live rows are unique."""
 
     __tablename__ = "mcp_oauth_clients"
-    __table_args__ = (UniqueConstraint("issuer", "source", "redirect_uri", name="uq_mcp_oauth_client"),)
+    __table_args__ = (
+        Index(
+            "uq_mcp_oauth_client",
+            "issuer",
+            "source",
+            "redirect_uri",
+            unique=True,
+            postgresql_where=text("retired_at IS NULL"),
+            sqlite_where=text("retired_at IS NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     issuer: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -434,6 +448,7 @@ class McpOAuthClient(Base):
     token_endpoint_auth_method: Mapped[str] = mapped_column(String(32), nullable=False)
     redirect_uri: Mapped[str] = mapped_column(String(500), nullable=False)
     registration_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

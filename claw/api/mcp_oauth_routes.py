@@ -30,6 +30,8 @@ from claw.auth.mcp_oauth_discovery import (
     ReturnTo,
 )
 from claw.db.models import User
+from claw.db.stores import McpAuthStore
+from claw.security.crypto import UndecryptableSecret
 
 NONCE_COOKIE = "claw_mcp_oauth_nonce"
 # Where each app's frontend lives under web_base_url.
@@ -139,20 +141,22 @@ class McpOAuthClientBody(BaseModel):
     )
 
 
-def _client_row(row: Any) -> dict:
+def _client_row(store: McpAuthStore, row: Any) -> dict:
     return {
         "id": row.id,
         "issuer": row.issuer,
         "client_id": row.client_id,
         "token_endpoint_auth_method": row.token_endpoint_auth_method,
-        "has_client_secret": row.client_secret_enc is not None,
+        # A secret that no longer decrypts is as good as none.
+        "has_client_secret": row.client_secret_enc is not None and store.secret_readable(row),
         "redirect_uri": row.redirect_uri,
     }
 
 
 async def _clients(state: AppState) -> dict:
-    rows = await state.mcp_oauth.store.list_admin_clients()
-    return {"redirect_uri": state.mcp_oauth.redirect_uri, "clients": [_client_row(r) for r in rows]}
+    store = state.mcp_oauth.store
+    rows = await store.list_admin_clients()
+    return {"redirect_uri": state.mcp_oauth.redirect_uri, "clients": [_client_row(store, r) for r in rows]}
 
 
 @admin_router.get("")
@@ -174,7 +178,11 @@ async def put_client(
     secret = body.client_secret.strip()
     if body.token_endpoint_auth_method != "none" and not secret:
         existing = await store.admin_client_id(issuer, redirect_uri)
-        if existing is None or (await store.client_credentials(existing)).client_secret is None:
+        try:
+            stored = await store.client_credentials(existing) if existing is not None else None
+        except UndecryptableSecret:
+            stored = None
+        if stored is None or stored.client_secret is None:
             raise HTTPException(status_code=422, detail="client_secret is required for this auth method")
     await store.upsert_admin_client(
         issuer=issuer,

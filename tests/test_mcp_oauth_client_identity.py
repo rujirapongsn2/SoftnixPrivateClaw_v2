@@ -280,13 +280,13 @@ async def test_an_expired_registration_is_replaced(ienv):
     second = await _connect(ienv)
 
     assert (first["client_id"], second["client_id"]) == ("dcr-1", "dcr-2")
-    (row,) = await _dcr_rows(ienv)
-    assert row.client_id == "dcr-2"
+    rows = await _dcr_rows(ienv)
+    assert {(row.client_id, row.retired_at is None) for row in rows} == {("dcr-1", False), ("dcr-2", True)}
     third = await _connect(ienv)
     assert third["client_id"] == "dcr-2" and len(ienv["world"].registrations) == 2
 
 
-async def test_invalid_client_on_refresh_purges_the_registration(ienv):
+async def test_invalid_client_on_refresh_retires_the_registration(ienv):
     _enable_dcr(ienv)
     await _connect(ienv)
     ienv["world"].routes[("as.example.com", "POST", "/token")] = lambda: httpx.Response(
@@ -295,7 +295,8 @@ async def test_invalid_client_on_refresh_purges_the_registration(ienv):
     with pytest.raises(McpReauthorizationRequired):
         await ienv["oauth"].access_token(ienv["connector"], stale="AT-SECRET")
 
-    assert await _dcr_rows(ienv) == []
+    (retired,) = await _dcr_rows(ienv)
+    assert retired.retired_at is not None
     loaded = await ienv["store"].load(ienv["connector"].id)
     assert loaded.failure is FailureReason.INVALID_CLIENT
     (row,) = (await ienv["c"].get("/api/connectors", headers=ALICE)).json()
@@ -306,6 +307,121 @@ async def test_invalid_client_on_refresh_purges_the_registration(ienv):
         200, json=ienv["world"].token
     )
     assert (await _connect(ienv))["client_id"] == "dcr-2"
+
+
+class ScriptedToken:
+    """A token endpoint that answers each call with the next scripted
+    response, the last one repeating, and records which client called."""
+
+    def __init__(self, world: AuthWorld, *responses: httpx.Response) -> None:
+        self.responses = list(responses)
+        self.world = world
+        world.routes[("as.example.com", "POST", "/token")] = self
+
+    def __call__(self) -> httpx.Response:
+        return self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
+
+    def client_ids(self) -> list[str]:
+        return [form["client_id"] for _, _, _, form, _ in self.world.hits("/token")]
+
+
+async def _bob_connector(env):
+    bob = await env["app"].state.claw.users.get_by_email("bob@x.io")
+    return await env["connectors"].upsert(
+        bob.id, "remote-bob", kind="mcp", transport="http", url=env["connector"].url
+    )
+
+
+async def test_invalid_client_for_one_user_leaves_the_shared_registration_to_the_others(ienv):
+    _enable_dcr(ienv)
+    bob_connector = await _bob_connector(ienv)
+    await _connect(ienv)
+    await _connect(ienv, headers=BOB, connector_id=bob_connector.id)
+    token = ScriptedToken(
+        ienv["world"],
+        httpx.Response(400, json={"error": "invalid_client"}),
+        httpx.Response(200, json={**ienv["world"].token, "access_token": "AT-BOB-2"}),
+    )
+
+    with pytest.raises(McpReauthorizationRequired):
+        await ienv["oauth"].access_token(ienv["connector"], stale="AT-SECRET")
+    assert await ienv["oauth"].access_token(bob_connector, stale="AT-SECRET") == "AT-BOB-2"
+
+    assert (await ienv["store"].load(ienv["connector"].id)).failure is FailureReason.INVALID_CLIENT
+    assert (await ienv["store"].load(bob_connector.id)).failure is None
+    assert token.client_ids()[-2:] == ["dcr-1", "dcr-1"]
+    # Alice's Reconnect registers afresh instead of reusing the refused client.
+    assert (await _connect(ienv))["client_id"] == "dcr-2"
+    assert len(await _dcr_rows(ienv)) == 2
+
+
+async def test_invalid_client_on_one_code_exchange_leaves_other_grants_working(ienv):
+    _enable_dcr(ienv)
+    bob_connector = await _bob_connector(ienv)
+    await _connect(ienv)
+    ScriptedToken(
+        ienv["world"],
+        httpx.Response(401, json={"error": "invalid_client"}),
+        httpx.Response(200, json={**ienv["world"].token, "access_token": "AT-ALICE-2"}),
+    )
+    started = await _start(ienv, headers=BOB, connector_id=bob_connector.id)
+    done = await _callback(ienv, state=_query(started.json()["authorize_url"])["state"], code="CODE-B")
+    assert _query(done.headers["location"])["connector_status"] == "token_failed"
+
+    assert await ienv["oauth"].access_token(ienv["connector"], stale="AT-SECRET") == "AT-ALICE-2"
+    assert (await ienv["store"].load(ienv["connector"].id)).failure is None
+
+
+async def _corrupt_secret(env, row_id: str) -> None:
+    async with env["store"].factory() as db:
+        row = await db.get(McpOAuthClient, row_id)
+        row.client_secret_enc = "enc::not-a-fernet-token"
+        await db.commit()
+
+
+async def test_an_unreadable_registration_secret_is_replaced_on_connect(ienv):
+    _enable_dcr(ienv)
+    await _connect(ienv)
+    (row,) = await _dcr_rows(ienv)
+    await _corrupt_secret(ienv, row.id)
+
+    assert (await _connect(ienv))["client_id"] == "dcr-2"
+    ((_, _, _, form, _),) = ienv["world"].hits("/token")[-1:]
+    assert form["client_secret"] == "DCR-SECRET-2"
+
+
+async def test_an_unreadable_client_secret_never_goes_on_the_wire(env):
+    await _connect(env)
+    await _corrupt_secret(env, env["admin_client_id"])
+    token_calls = len(env["world"].hits("/token"))
+
+    with pytest.raises(McpReauthorizationRequired) as raised:
+        await env["app"].state.claw.mcp_oauth.access_token(env["connector"], stale="AT-SECRET")
+
+    assert raised.value.reason is FailureReason.UNDECRYPTABLE
+    assert len(env["world"].hits("/token")) == token_calls
+
+
+async def test_an_unreadable_admin_client_is_a_clear_start_error(env):
+    await _corrupt_secret(env, env["admin_client_id"])
+
+    started = await _start(env)
+
+    assert started.status_code == 400
+    assert started.json()["detail"]["code"] == "client_unreadable"
+    assert "administrator" in started.json()["detail"]["message"]
+
+
+async def test_an_unreadable_admin_secret_does_not_count_as_stored(admin_env):
+    await _corrupt_secret(admin_env, admin_env["admin_client_id"])
+    body = {"issuer": ISSUER, "client_id": "claw-client", "token_endpoint_auth_method": "client_secret_basic"}
+
+    put = await admin_env["c"].put("/api/admin/mcp-oauth-clients", json=body, headers=ADMIN)
+    listed = await admin_env["c"].get("/api/admin/mcp-oauth-clients", headers=ADMIN)
+
+    assert put.status_code == 422
+    (row,) = listed.json()["clients"]
+    assert row["has_client_secret"] is False
 
 
 async def test_invalid_client_never_deletes_an_admin_client(env):
