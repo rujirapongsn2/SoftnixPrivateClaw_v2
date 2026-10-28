@@ -425,6 +425,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(workspace_admin_router)
     app.include_router(browser_ext_router)
     app.include_router(connector_oauth_router)
+    from claw.api import mcp_oauth_routes
+    from claw.api.deps import current_user as claw_current_user, get_state as claw_get_state
+    from claw.auth.mcp_oauth_discovery import ReturnTo
+
+    app.include_router(mcp_oauth_routes.build_user_router(claw_get_state, claw_current_user, ReturnTo.CLAW))
+    app.include_router(mcp_oauth_routes.callback_router)
+    # Mounted in both modes: it depends only on the host's state, which sbot's
+    # replacement admin router shares.
+    app.include_router(mcp_oauth_routes.admin_router)
     app.include_router(knowledge_router)
     app.include_router(project_containers_router)
     from claw.api.files import create_files_router

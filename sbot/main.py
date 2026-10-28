@@ -306,6 +306,10 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
     file_cleanup = WorkspaceCleanupService(FileLifecycle(app.state.sbot, "sbot"), shared.workspace_policy, shared.settings)
     app.include_router(router)
     app.include_router(manage_router)
+    from claw.api.mcp_oauth_routes import build_user_router
+    from claw.auth.mcp_oauth_discovery import ReturnTo
+
+    app.include_router(build_user_router(get_state, current_user, ReturnTo.SBOT))
     app.include_router(blueprints_router)
     app.include_router(bot_groups_router)
     from sbot.api.local_workspaces import router as local_workspaces_router
