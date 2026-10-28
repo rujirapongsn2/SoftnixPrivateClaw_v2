@@ -3306,11 +3306,11 @@ function ConnectorsPanel() {
                     <Badge variant="neutral" label={c.kind === "api" ? "api" : c.transport} />
                     <ConnectorStatusBadge runtime={c.runtime} />
                   </div>
-                  <Text size="sm" color="secondary" as="p">
+                  <Text size="sm" color="secondary" as="p" display="block">
                     {c.kind === "api" ? c.url : c.transport === "stdio" ? c.command : c.url}
                   </Text>
                   {authActions.length > 0 && c.oauth_grant?.issuer && (
-                    <Text size="sm" color="secondary" as="p">
+                    <Text size="sm" color="secondary" as="p" display="block">
                       {t("settings.connectors.mcpAuth.issuer", { issuer: c.oauth_grant.issuer })}
                     </Text>
                   )}
@@ -3321,7 +3321,7 @@ function ConnectorsPanel() {
                     <ConnectorShadowedTools names={c.runtime.shadowed_tools!} />
                   )}
                   {c.runtime.error && (
-                    <Text size="sm" color="secondary" as="p">
+                    <Text size="sm" color="secondary" as="p" display="block">
                       {c.runtime.error}
                     </Text>
                   )}

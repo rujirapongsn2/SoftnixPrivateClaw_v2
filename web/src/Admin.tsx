@@ -4134,6 +4134,9 @@ function McpOAuthClientsCard() {
               value={form.draft.client_id}
               onChange={(client_id) => updateDraft({ client_id })}
             />
+            <Text size="sm" color="secondary">
+              {t("admin.mcpOAuth.authMethod")}
+            </Text>
             <SegmentedControl
               value={form.draft.token_endpoint_auth_method}
               onChange={(v) => updateDraft({ token_endpoint_auth_method: v as McpOAuthAuthMethod })}
