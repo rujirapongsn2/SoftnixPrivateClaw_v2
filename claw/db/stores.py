@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -30,6 +31,15 @@ from claw.db import memberships as gm
 from claw.db.models import UserGroupMember, _uuid as _new_id
 
 from claw.core.plans import cost_allowed, cost_rank
+from claw.auth.mcp_oauth_discovery import (
+    ClientCredentials,
+    FailureReason,
+    Grant,
+    LEASE_TTL,
+    decode_grant,
+    encode_grant,
+)
+from claw.security.crypto import UndecryptableSecret
 from claw.db.models import (
     AppSetting,
     AuditEvent,
@@ -43,6 +53,8 @@ from claw.db.models import (
     LLMModel,
     LLMProvider,
     McpConnector,
+    McpConnectorAuth,
+    McpOAuthClient,
     Memory,
     Message,
     PolicyPlan,
@@ -4217,3 +4229,204 @@ class ShareStore:
             share.revoked = True
             await db.commit()
             return True
+
+
+@dataclass(frozen=True)
+class LoadedAuth:
+    """One auth row as the service sees it. `grant` is None when the row holds
+    none or when it cannot be decrypted; the latter also sets `failure`."""
+
+    owner_id: str
+    grant: Grant | None
+    failure: FailureReason | None
+    version: int
+
+
+@dataclass(frozen=True)
+class Lease:
+    connector_id: str
+    owner: str
+
+
+class McpAuthStore:
+    """The only reader and writer of mcp_connector_auth and mcp_oauth_clients.
+
+    Grants are Fernet-encrypted whole; no method returns a token except inside
+    a decoded Grant. Per-user-only is enforced here (put_grant checks the
+    connector's ownership in the same transaction) and by the composite FK.
+    Refresh serialization: `try_lease` is a compare-and-set on `version`, and
+    every write under a lease is conditioned on still holding it."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], secret_box: Any):
+        self.factory = factory
+        self.secret_box = secret_box
+
+    def _decode(self, row: McpConnectorAuth) -> LoadedAuth:
+        failure = FailureReason(row.failure) if row.failure else None
+        grant: Grant | None = None
+        if row.grant_enc:
+            try:
+                grant = decode_grant(self.secret_box.decrypt_strict(row.grant_enc))
+            except (UndecryptableSecret, ValueError):
+                failure = FailureReason.UNDECRYPTABLE
+        return LoadedAuth(owner_id=row.owner_id, grant=grant, failure=failure, version=row.version)
+
+    async def load(self, connector_id: str) -> LoadedAuth | None:
+        async with self.factory() as db:
+            row = await db.get(McpConnectorAuth, connector_id)
+        return None if row is None else self._decode(row)
+
+    async def put_grant(self, connector_id: str, owner_id: str, grant: Grant) -> None:
+        """Store a freshly issued grant, clearing any failure and lease.
+
+        Raises LookupError unless `connector_id` is an http MCP connector owned
+        by `owner_id`: an admin-global connector (owner NULL) can never gain an
+        auth row through this store, whatever the caller passes."""
+        async with self.factory() as db:
+            owned = await db.scalar(
+                select(McpConnector.id).where(
+                    McpConnector.id == connector_id,
+                    McpConnector.owner_id == owner_id,
+                    McpConnector.owner_id.is_not(None),
+                    McpConnector.kind == "mcp",
+                    McpConnector.transport == "http",
+                )
+            )
+            if owned is None:
+                raise LookupError("not an http MCP connector owned by this user")
+            row = await db.get(McpConnectorAuth, connector_id)
+            if row is None:
+                db.add(McpConnectorAuth(connector_id=connector_id, owner_id=owner_id, version=1))
+                row = await db.get(McpConnectorAuth, connector_id)
+            else:
+                row.version += 1
+            row.grant_enc = self.secret_box.encrypt(encode_grant(grant))
+            row.failure = None
+            row.refresh_lease_owner = None
+            row.refresh_lease_until = None
+            await db.commit()
+
+    async def try_lease(self, connector_id: str, version: int, now: datetime) -> Lease | None:
+        """Take the refresh lease, but only against the exact grant version the
+        caller just read, so a lease is never granted for a refresh token that
+        has already been rotated away."""
+        lease = Lease(connector_id=connector_id, owner=_new_id())
+        async with self.factory() as db:
+            result = await db.execute(
+                update(McpConnectorAuth)
+                .where(
+                    McpConnectorAuth.connector_id == connector_id,
+                    McpConnectorAuth.version == version,
+                    McpConnectorAuth.failure.is_(None),
+                    McpConnectorAuth.grant_enc.is_not(None),
+                    or_(
+                        McpConnectorAuth.refresh_lease_until.is_(None),
+                        McpConnectorAuth.refresh_lease_until < now,
+                    ),
+                )
+                .values(refresh_lease_owner=lease.owner, refresh_lease_until=now + LEASE_TTL)
+            )
+            await db.commit()
+            return lease if result.rowcount == 1 else None
+
+    async def commit_under_lease(self, lease: Lease, grant: Grant) -> bool:
+        async with self.factory() as db:
+            result = await db.execute(
+                update(McpConnectorAuth)
+                .where(
+                    McpConnectorAuth.connector_id == lease.connector_id,
+                    McpConnectorAuth.refresh_lease_owner == lease.owner,
+                )
+                .values(
+                    grant_enc=self.secret_box.encrypt(encode_grant(grant)),
+                    failure=None,
+                    version=McpConnectorAuth.version + 1,
+                    refresh_lease_owner=None,
+                    refresh_lease_until=None,
+                )
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def release_lease(self, lease: Lease) -> None:
+        async with self.factory() as db:
+            await db.execute(
+                update(McpConnectorAuth)
+                .where(
+                    McpConnectorAuth.connector_id == lease.connector_id,
+                    McpConnectorAuth.refresh_lease_owner == lease.owner,
+                )
+                .values(refresh_lease_owner=None, refresh_lease_until=None)
+            )
+            await db.commit()
+
+    async def fail_under_lease(self, lease: Lease, reason: FailureReason) -> None:
+        async with self.factory() as db:
+            await db.execute(
+                update(McpConnectorAuth)
+                .where(
+                    McpConnectorAuth.connector_id == lease.connector_id,
+                    McpConnectorAuth.refresh_lease_owner == lease.owner,
+                )
+                .values(
+                    failure=reason.value,
+                    version=McpConnectorAuth.version + 1,
+                    refresh_lease_owner=None,
+                    refresh_lease_until=None,
+                )
+            )
+            await db.commit()
+
+    async def mark_failed(self, connector_id: str, version: int, reason: FailureReason) -> bool:
+        """Fail the grant at `version` only: a 401 observed on an old token
+        must not condemn a grant someone else has since refreshed."""
+        async with self.factory() as db:
+            result = await db.execute(
+                update(McpConnectorAuth)
+                .where(
+                    McpConnectorAuth.connector_id == connector_id,
+                    McpConnectorAuth.version == version,
+                    McpConnectorAuth.failure.is_(None),
+                )
+                .values(failure=reason.value, version=McpConnectorAuth.version + 1)
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def upsert_admin_client(
+        self,
+        *,
+        issuer: str,
+        client_id: str,
+        client_secret: str | None,
+        auth_method: str,
+        redirect_uri: str,
+    ) -> str:
+        """Returns the row id. An empty secret keeps the stored one."""
+        async with self.factory() as db:
+            row = await db.scalar(
+                select(McpOAuthClient).where(
+                    McpOAuthClient.issuer == issuer,
+                    McpOAuthClient.source == "admin",
+                    McpOAuthClient.redirect_uri == redirect_uri,
+                )
+            )
+            if row is None:
+                row = McpOAuthClient(issuer=issuer, source="admin", redirect_uri=redirect_uri)
+                db.add(row)
+            row.client_id = client_id
+            row.token_endpoint_auth_method = auth_method
+            if client_secret:
+                row.client_secret_enc = self.secret_box.encrypt(client_secret)
+            await db.commit()
+            return row.id
+
+    async def client_credentials(self, row_id: str) -> ClientCredentials | None:
+        async with self.factory() as db:
+            row = await db.get(McpOAuthClient, row_id)
+        if row is None:
+            return None
+        secret = self.secret_box.decrypt(row.client_secret_enc) if row.client_secret_enc else None
+        return ClientCredentials(
+            client_id=row.client_id, client_secret=secret, auth_method=row.token_endpoint_auth_method
+        )
