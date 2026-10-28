@@ -35,6 +35,7 @@ import {
   LineChart,
   Link as LinkIcon,
   Lock,
+  LogOut,
   Maximize2,
   Pencil,
   Play,
@@ -47,11 +48,12 @@ import {
   Sparkles,
   Square,
   Trash2,
+  Unlink,
   Upload,
   User as UserIcon,
   Users,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ProvidersPanel } from "./Admin";
 import { useBranding, useT } from "./branding";
 import { ErrorText } from "./ErrorText";
@@ -66,6 +68,8 @@ import {
   BrandingColorTheme,
   BrandingFontSize,
   BrandingLanguage,
+  ApiError,
+  ConnectorAuthState,
   ConnectorGlobalSummary,
   ConnectorInfo,
   ConnectorPreset,
@@ -2780,6 +2784,80 @@ export function ApiOperationsEditor({
   );
 }
 
+type ConnectorStatus = "connected" | "needs_authorization" | "reauthorization_required" | "error" | "not_connected";
+
+// The server already lets a persisted reauthorization_required win over a
+// stale live status, so runtime.status alone is the source of truth here.
+function connectorStatus(runtime: { status: string }): ConnectorStatus {
+  switch (runtime.status) {
+    case "connected":
+    case "needs_authorization":
+    case "reauthorization_required":
+    case "error":
+      return runtime.status;
+    default:
+      return "not_connected";
+  }
+}
+
+function ConnectorStatusBadge({ runtime }: { runtime: ConnectorInfo["runtime"] }): ReactNode {
+  const t = useT();
+  const status = connectorStatus(runtime);
+  switch (status) {
+    case "connected":
+      return (
+        <Badge
+          variant="success"
+          icon={<Icon icon="check" size="xsm" />}
+          label={t("settings.connectors.toolsCount", { count: String(runtime.tools ?? 0) })}
+        />
+      );
+    case "needs_authorization":
+      return <Badge variant="warning" label={t("settings.connectors.mcpAuth.needsAuthorization")} />;
+    case "reauthorization_required":
+      return <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.reconnectRequired")} />;
+    case "error":
+      return <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.error")} />;
+    case "not_connected":
+      return <Badge variant="neutral" label={t("settings.connectors.notConnected")} />;
+    default:
+      return status satisfies never;
+  }
+}
+
+type ConnectorAuthAction = "connect" | "reconnect" | "disconnect" | "revoke";
+
+const CONNECTOR_AUTH_ACTIONS: Record<ConnectorAuthState, ConnectorAuthAction[]> = {
+  needs_authorization: ["connect"],
+  reauthorization_required: ["reconnect", "disconnect"],
+  connected: ["disconnect", "revoke"],
+};
+
+// Only a personal remote MCP server authorizes this way: stdio and REST
+// connectors never do, and an OAuth preset has its own provider flow.
+function connectorAuthActions(c: ConnectorInfo): ConnectorAuthAction[] {
+  if (c.kind !== "mcp" || c.transport !== "http" || c.oauth) return [];
+  const status = c.runtime.status;
+  const state =
+    status === "needs_authorization" || status === "reauthorization_required" ? status : c.oauth_grant?.state;
+  if (!state) return [];
+  const grant = c.oauth_grant;
+  return CONNECTOR_AUTH_ACTIONS[state].filter((action) =>
+    action === "revoke" ? grant?.can_revoke === true : action === "disconnect" ? grant !== null : true,
+  );
+}
+
+async function startConnectorAuthorization(connectorId: string, fallbackMessage: string): Promise<void> {
+  let authorizeUrl: string;
+  try {
+    ({ authorize_url: authorizeUrl } = await api.startConnectorAuthorization(connectorId));
+  } catch (e) {
+    const detail = e instanceof ApiError && e.status === 400 ? (e.body as { detail?: { message?: string } })?.detail : undefined;
+    throw new Error(detail?.message || fallbackMessage);
+  }
+  window.location.assign(authorizeUrl);
+}
+
 function ConnectorsPanel() {
   const t = useT();
   const [tab, setTab] = useState<"catalog" | "yours" | "organization">("catalog");
@@ -2789,6 +2867,8 @@ function ConnectorsPanel() {
   const [editing, setEditing] = useState<Partial<ConnectorInfo> | null>(null);
   const [setupPreset, setSetupPreset] = useState<ConnectorPreset | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  // Held until the page navigates away to the authorization server.
+  const [redirectingId, setRedirectingId] = useState<string | null>(null);
   const { error, guard } = useAsyncError();
   // Timeout field keeps its own raw text so a keystroke that doesn't parse
   // (e.g. a stray non-digit, or a value mid-edit) doesn't silently stop
@@ -3207,6 +3287,16 @@ function ConnectorsPanel() {
           ) : connectors.map((c) => {
             const candidate = oauthPresetByName.get(c.name.toLowerCase());
             const oauthPreset = candidate && isInstalledOAuthPreset(c, candidate) ? candidate : undefined;
+            const authActions = connectorAuthActions(c);
+            const authorizeAction = authActions.find((a) => a === "connect" || a === "reconnect");
+            const forgetActions = authActions.filter((a) => a === "disconnect" || a === "revoke");
+            const forget = (revoke: boolean) =>
+              guard(async () => {
+                const confirmKey = revoke ? "settings.connectors.mcpAuth.revokeConfirm" : "settings.connectors.mcpAuth.disconnectConfirm";
+                if (!window.confirm(t(confirmKey, { name: c.name }))) return;
+                await api.disconnectConnectorAuthorization(c.id, revoke);
+                await reload();
+              });
             return (
               <Card key={c.id} padding={2}>
               <div className="claw-row claw-row-between">
@@ -3214,23 +3304,16 @@ function ConnectorsPanel() {
                   <div className="claw-row">
                     <Text weight="semibold">{c.name}</Text>
                     <Badge variant="neutral" label={c.kind === "api" ? "api" : c.transport} />
-                    {c.runtime.status === "connected" && (
-                      <Badge
-                        variant="success"
-                        icon={<Icon icon="check" size="xsm" />}
-                        label={t("settings.connectors.toolsCount", { count: String(c.runtime.tools) })}
-                      />
-                    )}
-                    {c.runtime.status === "error" && (
-                      <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.error")} />
-                    )}
-                    {c.runtime.status === "reauthorization_required" && (
-                      <Badge variant="error" icon={<Icon icon="error" size="xsm" />} label={t("settings.connectors.reconnectRequired")} />
-                    )}
+                    <ConnectorStatusBadge runtime={c.runtime} />
                   </div>
                   <Text size="sm" color="secondary" as="p">
                     {c.kind === "api" ? c.url : c.transport === "stdio" ? c.command : c.url}
                   </Text>
+                  {authActions.length > 0 && c.oauth_grant?.issuer && (
+                    <Text size="sm" color="secondary" as="p">
+                      {t("settings.connectors.mcpAuth.issuer", { issuer: c.oauth_grant.issuer })}
+                    </Text>
+                  )}
                   {(c.runtime.tool_names?.length ?? 0) > 0 && (
                     <ConnectorToolNames names={c.runtime.tool_names!} />
                   )}
@@ -3244,6 +3327,41 @@ function ConnectorsPanel() {
                   )}
                 </div>
                 <div className="claw-row">
+                  {authorizeAction && (
+                    <Button
+                      label={
+                        redirectingId === c.id
+                          ? t("settings.connectors.redirecting")
+                          : t(authorizeAction === "connect" ? "settings.connectors.connect" : "settings.connectors.reconnect")
+                      }
+                      icon={<Icon icon={LinkIcon} size="sm" />}
+                      size="sm"
+                      variant="primary"
+                      isDisabled={redirectingId === c.id}
+                      clickAction={() =>
+                        guard(async () => {
+                          setRedirectingId(c.id);
+                          try {
+                            await startConnectorAuthorization(c.id, t("settings.connectors.oauthStartFailed"));
+                          } catch (e) {
+                            setRedirectingId(null);
+                            throw e;
+                          }
+                        })
+                      }
+                    />
+                  )}
+                  {forgetActions.length > 0 && (
+                    <MoreMenu
+                      label={t("settings.connectors.mcpAuth.menuFor", { name: c.name })}
+                      size="sm"
+                      items={forgetActions.map((action) =>
+                        action === "revoke"
+                          ? { label: t("settings.connectors.mcpAuth.revoke"), icon: Unlink, onClick: () => forget(true) }
+                          : { label: t("settings.connectors.mcpAuth.disconnect"), icon: LogOut, onClick: () => forget(false) },
+                      )}
+                    />
+                  )}
                   {!oauthPreset && (
                     <Switch
                       value={c.enabled}

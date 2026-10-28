@@ -729,6 +729,16 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.connectedTools": "Connected · {count} tools",
     "settings.connectors.error": "Error",
     "settings.connectors.reconnectRequired": "Reconnect required",
+    "settings.connectors.notConnected": "Not connected",
+    "settings.connectors.mcpAuth.needsAuthorization": "Needs authorization",
+    "settings.connectors.mcpAuth.issuer": "Authorized by {issuer}",
+    "settings.connectors.mcpAuth.menuFor": "Authorization options for {name}",
+    "settings.connectors.mcpAuth.disconnect": "Disconnect account",
+    "settings.connectors.mcpAuth.revoke": "Revoke access",
+    "settings.connectors.mcpAuth.disconnectConfirm":
+      "Disconnect {name}? Its saved sign-in is removed from this server and its tools stop until you connect again.",
+    "settings.connectors.mcpAuth.revokeConfirm":
+      "Revoke access for {name}? The service is asked to cancel the sign-in, it is removed from this server, and its tools stop until you connect again.",
     "settings.connectors.add": "Add",
     "settings.connectors.yourConnectors": "Your connectors",
     "settings.connectors.yourEmptyTitle": "No personal connectors",
@@ -2301,6 +2311,16 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.connectedTools": "เชื่อมต่อแล้ว · {count} เครื่องมือ",
     "settings.connectors.error": "ข้อผิดพลาด",
     "settings.connectors.reconnectRequired": "ต้องเชื่อมต่อใหม่",
+    "settings.connectors.notConnected": "ยังไม่เชื่อมต่อ",
+    "settings.connectors.mcpAuth.needsAuthorization": "ต้องอนุญาตการเข้าถึง",
+    "settings.connectors.mcpAuth.issuer": "อนุญาตผ่าน {issuer}",
+    "settings.connectors.mcpAuth.menuFor": "ตัวเลือกการอนุญาตของ {name}",
+    "settings.connectors.mcpAuth.disconnect": "ยกเลิกการเชื่อมต่อบัญชี",
+    "settings.connectors.mcpAuth.revoke": "เพิกถอนสิทธิ์การเข้าถึง",
+    "settings.connectors.mcpAuth.disconnectConfirm":
+      "ยกเลิกการเชื่อมต่อ {name} หรือไม่? ข้อมูลการลงชื่อเข้าใช้ที่บันทึกไว้จะถูกลบออกจากเซิร์ฟเวอร์นี้ และเครื่องมือของตัวเชื่อมต่อนี้จะหยุดทำงานจนกว่าคุณจะเชื่อมต่ออีกครั้ง",
+    "settings.connectors.mcpAuth.revokeConfirm":
+      "เพิกถอนสิทธิ์การเข้าถึงของ {name} หรือไม่? ระบบจะแจ้งให้บริการปลายทางยกเลิกการลงชื่อเข้าใช้ ลบข้อมูลออกจากเซิร์ฟเวอร์นี้ และเครื่องมือจะหยุดทำงานจนกว่าคุณจะเชื่อมต่ออีกครั้ง",
     "settings.connectors.add": "เพิ่ม",
     "settings.connectors.yourConnectors": "ตัวเชื่อมต่อของคุณ",
     "settings.connectors.yourEmptyTitle": "ยังไม่มีตัวเชื่อมต่อส่วนตัว",
