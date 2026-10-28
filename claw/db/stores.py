@@ -36,8 +36,11 @@ from claw.auth.mcp_oauth_discovery import (
     FailureReason,
     Grant,
     LEASE_TTL,
+    PendingFlow,
     decode_grant,
+    decode_pending,
     encode_grant,
+    encode_pending,
 )
 from claw.security.crypto import UndecryptableSecret
 from claw.db.models import (
@@ -4276,6 +4279,97 @@ class McpAuthStore:
             row = await db.get(McpConnectorAuth, connector_id)
         return None if row is None else self._decode(row)
 
+    async def load_many(self, owner_id: str, connector_ids: Sequence[str]) -> dict[str, LoadedAuth]:
+        if not connector_ids:
+            return {}
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(McpConnectorAuth).where(
+                    McpConnectorAuth.owner_id == owner_id,
+                    McpConnectorAuth.connector_id.in_(list(connector_ids)),
+                )
+            )
+            return {row.connector_id: self._decode(row) for row in rows}
+
+    async def oauth_connector_url(self, owner_id: str, connector_id: str) -> str | None:
+        """The URL of an http MCP connector `owner_id` owns, else None. The
+        one eligibility check every user-facing OAuth entry point shares; an
+        admin-global connector never qualifies."""
+        async with self.factory() as db:
+            return await db.scalar(self._owned_http_mcp(owner_id, connector_id, McpConnector.url))
+
+    @staticmethod
+    def _owned_http_mcp(owner_id: str, connector_id: str, column: Any):
+        return select(column).where(
+            McpConnector.id == connector_id,
+            McpConnector.owner_id == owner_id,
+            McpConnector.owner_id.is_not(None),
+            McpConnector.kind == "mcp",
+            McpConnector.transport == "http",
+        )
+
+    async def put_pending(
+        self, connector_id: str, owner_id: str, state_hash: str, expires_at: datetime, pending: PendingFlow
+    ) -> None:
+        """Record the one in-flight consent flow for a connector, replacing any
+        older one (the last Connect click wins). An existing grant is left
+        alone, so live tools keep working while a Reconnect is in progress."""
+        async with self.factory() as db:
+            if await db.scalar(self._owned_http_mcp(owner_id, connector_id, McpConnector.id)) is None:
+                raise LookupError("not an http MCP connector owned by this user")
+            row = await db.get(McpConnectorAuth, connector_id)
+            if row is None:
+                row = McpConnectorAuth(connector_id=connector_id, owner_id=owner_id, version=0)
+                db.add(row)
+            row.pending_state_hash = state_hash
+            row.pending_expires_at = expires_at
+            row.pending_enc = self.secret_box.encrypt(encode_pending(pending))
+            await db.commit()
+
+    async def consume_pending(self, state_hash: str, now: datetime) -> tuple[str, str, PendingFlow] | None:
+        """Take the pending flow for `state_hash` exactly once: (connector_id,
+        owner_id, flow), or None when it is unknown, expired, already used,
+        or undecryptable. The conditional UPDATE is what makes it single-use
+        under concurrent callbacks."""
+        async with self.factory() as db:
+            row = await db.scalar(
+                select(McpConnectorAuth).where(McpConnectorAuth.pending_state_hash == state_hash)
+            )
+            if row is None:
+                return None
+            connector_id, owner_id, pending_enc = row.connector_id, row.owner_id, row.pending_enc
+            result = await db.execute(
+                update(McpConnectorAuth)
+                .where(
+                    McpConnectorAuth.connector_id == connector_id,
+                    McpConnectorAuth.pending_state_hash == state_hash,
+                    McpConnectorAuth.pending_expires_at > now,
+                )
+                .values(pending_state_hash=None, pending_expires_at=None, pending_enc=None)
+                # The row was loaded above; evaluating this WHERE in Python
+                # against it would compare naive and aware datetimes on SQLite.
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+        if result.rowcount != 1 or not pending_enc:
+            return None
+        try:
+            return connector_id, owner_id, decode_pending(self.secret_box.decrypt_strict(pending_enc))
+        except (UndecryptableSecret, ValueError):
+            return None
+
+    async def take_grant(self, owner_id: str, connector_id: str) -> Grant | None:
+        """Delete the connector's auth row, returning the grant it held (if it
+        could still be read) so the caller can revoke it."""
+        async with self.factory() as db:
+            row = await db.get(McpConnectorAuth, connector_id)
+            if row is None or row.owner_id != owner_id:
+                return None
+            loaded = self._decode(row)
+            await db.delete(row)
+            await db.commit()
+        return loaded.grant
+
     async def put_grant(self, connector_id: str, owner_id: str, grant: Grant) -> None:
         """Store a freshly issued grant, clearing any failure and lease.
 
@@ -4283,16 +4377,7 @@ class McpAuthStore:
         by `owner_id`: an admin-global connector (owner NULL) can never gain an
         auth row through this store, whatever the caller passes."""
         async with self.factory() as db:
-            owned = await db.scalar(
-                select(McpConnector.id).where(
-                    McpConnector.id == connector_id,
-                    McpConnector.owner_id == owner_id,
-                    McpConnector.owner_id.is_not(None),
-                    McpConnector.kind == "mcp",
-                    McpConnector.transport == "http",
-                )
-            )
-            if owned is None:
+            if await db.scalar(self._owned_http_mcp(owner_id, connector_id, McpConnector.id)) is None:
                 raise LookupError("not an http MCP connector owned by this user")
             row = await db.get(McpConnectorAuth, connector_id)
             if row is None:
@@ -4420,6 +4505,31 @@ class McpAuthStore:
                 row.client_secret_enc = self.secret_box.encrypt(client_secret)
             await db.commit()
             return row.id
+
+    async def admin_client_id(self, issuer: str, redirect_uri: str) -> str | None:
+        async with self.factory() as db:
+            return await db.scalar(
+                select(McpOAuthClient.id).where(
+                    McpOAuthClient.issuer == issuer,
+                    McpOAuthClient.source == "admin",
+                    McpOAuthClient.redirect_uri == redirect_uri,
+                )
+            )
+
+    async def list_admin_clients(self) -> list[McpOAuthClient]:
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(McpOAuthClient).where(McpOAuthClient.source == "admin").order_by(McpOAuthClient.issuer)
+            )
+            return list(rows)
+
+    async def delete_admin_client(self, row_id: str) -> bool:
+        async with self.factory() as db:
+            result = await db.execute(
+                sa_delete(McpOAuthClient).where(McpOAuthClient.id == row_id, McpOAuthClient.source == "admin")
+            )
+            await db.commit()
+            return result.rowcount == 1
 
     async def client_credentials(self, row_id: str) -> ClientCredentials | None:
         async with self.factory() as db:
