@@ -557,6 +557,19 @@ async def admin_env(env, db_factory):
     return env
 
 
+async def test_the_admin_connector_listing_never_asks_for_grants(admin_env, monkeypatch):
+    await admin_env["connectors"].upsert(None, "shared", kind="mcp", transport="http", url=SERVER)
+
+    async def describe(owner_id, urls):
+        raise AssertionError("OAuth is per-user only; a global listing has no grants to describe")
+
+    monkeypatch.setattr(admin_env["app"].state.claw.mcp_oauth, "describe", describe)
+    listing = await admin_env["c"].get("/api/admin/connectors", headers=ADMIN)
+
+    assert listing.status_code == 200, listing.text
+    assert [row["oauth_grant"] for row in listing.json()] == [None]
+
+
 async def test_admin_client_secret_is_write_only_and_kept_on_empty_put(admin_env):
     c = admin_env["c"]
     put = await c.put(
