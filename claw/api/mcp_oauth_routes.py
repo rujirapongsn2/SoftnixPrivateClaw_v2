@@ -89,7 +89,7 @@ def build_user_router(
             raise HTTPException(status_code=404, detail="connector not found") from None
         # Close the live session now rather than at the next sync: it would
         # otherwise keep serving tools until then on the grant just dropped.
-        await state.connectors_mgr.disconnect_user(user.id)
+        await state.connectors_mgr.close_deauthorized(user.id, connector_id)
         return {"disconnected": True, "revoked": revoked}
 
     return router

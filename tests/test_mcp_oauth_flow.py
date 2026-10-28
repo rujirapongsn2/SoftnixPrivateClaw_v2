@@ -503,6 +503,26 @@ async def test_disconnect_without_revoke_never_calls_the_server(env):
     assert (await env["store"].load(env["connector"].id)) is None
 
 
+async def test_disconnect_closes_only_that_connectors_session(env, monkeypatch):
+    mgr = env["app"].state.claw.connectors_mgr
+    closed: list[tuple[str, str]] = []
+
+    async def close_deauthorized(user_id, connector_id):
+        closed.append((user_id, connector_id))
+
+    async def disconnect_user(user_id):
+        raise AssertionError("would close every session the user has")
+
+    monkeypatch.setattr(mgr, "close_deauthorized", close_deauthorized, raising=False)
+    monkeypatch.setattr(mgr, "disconnect_user", disconnect_user)
+    await _authorized(env)
+
+    gone = await env["c"].delete(f"/api/connectors/{env['connector'].id}/authorization", headers=ALICE)
+
+    assert gone.status_code == 200
+    assert closed == [(env["alice"].id, env["connector"].id)]
+
+
 async def test_persisted_failure_beats_a_stale_connected_runtime_status(env):
     await _authorized(env)
     state = env["app"].state.claw

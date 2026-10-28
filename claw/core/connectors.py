@@ -605,6 +605,9 @@ class _UserConnections:
     own_names: set[str] = field(default_factory=set)
     workers: dict[str, _CatalogWorker] = field(default_factory=dict)
     statuses: dict[str, dict] = field(default_factory=dict)
+    # connector id -> (name, the stack its session lives in), nested inside
+    # `stack` so one connector can be closed without the rest.
+    connector_stacks: dict[str, tuple[str, AsyncExitStack]] = field(default_factory=dict)
     # time.monotonic() of the most recent sync that left at least one connector
     # in "error"; drives the retry cooldown in sync_tools. Monotonic (not
     # wall-clock) so an NTP/clock adjustment can't skew the cooldown window.
@@ -1112,11 +1115,16 @@ class ConnectorManager:
             # with one broken connector never got the error-retry cooldown —
             # see sync_global's equivalent stamp, which isn't gated this way).
             await state.stack.__aenter__()
+            for connector in mcp_connectors:
+                own = await state.stack.enter_async_context(AsyncExitStack())
+                state.connector_stacks[connector.id] = (connector.name, own)
             # Connect all of a user's connectors concurrently, not one at a
             # time — otherwise N broken/hanging connectors cost N times the
             # per-connector timeout instead of one timeout period total,
             # while this method holds the per-user lock throughout.
-            results = await asyncio.gather(*(self._connect_one(state.stack, c) for c in mcp_connectors))
+            results = await asyncio.gather(
+                *(self._connect_one(state.connector_stacks[c.id][1], c) for c in mcp_connectors)
+            )
             for connector, session, listed, error in results:
                 if error is not None:
                     state.statuses[connector.name] = error
@@ -1403,6 +1411,34 @@ class ConnectorManager:
         state = self._users.get(user_id)
         if state is not None:
             state.signature = ()
+
+    async def close_deauthorized(self, user_id: str, connector_id: str) -> None:
+        """Close the live session of one connector whose OAuth grant was just
+        dropped and unregister its tools, leaving the user's other sessions,
+        and any turn using them, alone. It reports needs_authorization until a
+        new grant's sync reconnects it."""
+        async with self._lock(user_id):
+            state = self._users.get(user_id)
+            entry = state.connector_stacks.pop(connector_id, None) if state is not None else None
+            if entry is None:
+                return
+            name, stack = entry
+            worker = state.workers.pop(name, None)
+            if worker is not None:
+                await worker.stop()
+            state.catalogs.pop(name, None)
+            state.statuses[name] = dict(_AUTH_STATUSES[McpAuthorizationNeeded.status])
+            self._reconcile_user(state)
+            try:
+                await stack.aclose()
+            except asyncio.CancelledError:
+                # The cross-task anyio hazard _close_user describes.
+                task = asyncio.current_task()
+                if task is not None:
+                    task.uncancel()
+                logger.debug("MCP stack close for {} cancelled across tasks; ignored", name)
+            except Exception:
+                logger.debug("MCP stack close for {} raised; ignored", name)
 
     async def disconnect_user(self, user_id: str) -> None:
         """Immediately close live sessions and remove their tool proxies."""

@@ -214,6 +214,43 @@ async def test_a_connect_timeout_after_a_challenge_is_reported_as_a_timeout(db_f
     assert asyncio.current_task().cancelling() == 0
 
 
+async def test_dropping_one_connectors_grant_closes_only_that_session(db_factory, monkeypatch):
+    users = UserStore(db_factory)
+    user = await users.create(email="two@x.io", password_hash="h")
+    connectors = ConnectorStore(db_factory)
+    remote = await connectors.upsert(user.id, "remote", transport="http", url=URL, enabled=True)
+    await connectors.upsert(user.id, "other", transport="http", url="https://other.example.com/mcp", enabled=True)
+    closed: list[str] = []
+
+    class Session:
+        async def list_tools(self):
+            return SimpleNamespace(tools=[SimpleNamespace(name="t", description="", inputSchema={})])
+
+    async def connect_and_list(self, stack, connector):
+        stack.callback(closed.append, connector.name)
+        session = Session()
+        return session, await session.list_tools()
+
+    monkeypatch.setattr(ConnectorManager, "_connect_and_list", connect_and_list)
+    mgr = ConnectorManager(connectors)
+    registry = ToolRegistry()
+    await mgr.sync_tools(user.id, registry)
+
+    await mgr.close_deauthorized(user.id, remote.id)
+
+    assert closed == ["remote"]
+    assert registry.get("mcp_remote_t") is None
+    assert registry.get("mcp_other_t") is not None
+    statuses = await mgr.status(user.id)
+    assert statuses["remote"]["status"] == "needs_authorization"
+    assert statuses["other"]["status"] == "connected"
+
+    await mgr.sync_tools(user.id, registry)
+    assert closed == ["remote"]
+    await mgr.disconnect_user(user.id)
+    assert sorted(closed) == ["other", "remote"]
+
+
 def test_reauth_marker_is_recognised_by_the_tool_call_path():
     assert _requires_oauth_reauthorization("McpError: mcp_oauth_reauthorization_required: invalid_grant")
 
