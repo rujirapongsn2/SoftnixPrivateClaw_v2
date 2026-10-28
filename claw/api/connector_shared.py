@@ -16,10 +16,12 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from claw.api.deps import AppState
+from claw.auth.mcp_oauth_discovery import AuthState, AuthView
 from claw.core.connector_presets import is_allowed_stdio_command, oauth_preset_for_connector
 from claw.db.stores import ConnectorKindMismatch
 from claw.security.ssrf import assert_public_url
 
+_REAUTH_MESSAGE = "Authorization expired or was revoked. Reconnect this account."
 _PATH_PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 # Kept in sync with claw/tools/api.py and claw/core/connectors.py, which read
@@ -120,8 +122,12 @@ class ConnectorBody(BaseModel):
         return env
 
 
-def connector_row(c, status: dict | None = None) -> dict:
+def connector_row(c, status: dict | None = None, auth: AuthView | None = None) -> dict:
     oauth_preset = oauth_preset_for_connector(c)
+    if auth is not None and auth.state is AuthState.REAUTHORIZATION_REQUIRED:
+        # The persisted failure is authoritative: the MCP SDK can swallow the
+        # exception McpBearerAuth raised, leaving a stale in-memory "connected".
+        status = {"status": AuthState.REAUTHORIZATION_REQUIRED.value, "error": _REAUTH_MESSAGE}
     return {
         "id": c.id,
         "name": c.name,
@@ -140,6 +146,18 @@ def connector_row(c, status: dict | None = None) -> dict:
                 "has_refresh_token": bool((c.env or {}).get(f"{oauth_preset.env_prefix}_REFRESH_TOKEN")),
             }
             if oauth_preset is not None
+            else None
+        ),
+        # OAuth for a per-user remote MCP server; None until a flow is started.
+        "oauth_grant": (
+            {
+                "state": auth.state.value,
+                "issuer": auth.issuer,
+                "scope": auth.scope,
+                "can_revoke": auth.can_revoke,
+                "failure": auth.failure.value if auth.failure else None,
+            }
+            if auth is not None
             else None
         ),
         "operations": c.operations or [],
@@ -178,6 +196,10 @@ async def list_connectors(state: AppState, owner_id: str | None) -> list:
             await state.runtime.warm_connectors(owner_id)
         rows = await state.connectors.list_for_user(owner_id)
         statuses = await state.connectors_mgr.status(owner_id)
+        if state.mcp_oauth is not None:
+            urls = {c.id: c.url for c in rows if c.kind == "mcp" and c.transport == "http" and c.url}
+            views = await state.mcp_oauth.describe(owner_id, urls)
+            return [connector_row(c, statuses.get(c.name), views.get(c.id)) for c in rows]
     return [connector_row(c, statuses.get(c.name)) for c in rows]
 
 
