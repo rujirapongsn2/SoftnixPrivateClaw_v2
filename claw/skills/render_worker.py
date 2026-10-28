@@ -19,10 +19,10 @@ def _limits() -> None:
         (resource.RLIMIT_CPU, 25, 30),
         (resource.RLIMIT_FSIZE, 25 * 1024 * 1024, 25 * 1024 * 1024),
         (resource.RLIMIT_NOFILE, 256, 256),
-        (resource.RLIMIT_RSS, 1024**3, 1024**3),
     )
-    if sys.platform.startswith("linux"):
-        limits += ((resource.RLIMIT_AS, 4 * 1024**3, 4 * 1024**3),)
+    # Memory is bounded by the parent's process-tree RSS guard (render.py), not
+    # here: Chromium dies with SIGTRAP under RLIMIT_AS because it reserves far
+    # more address space than it uses, and Linux ignores RLIMIT_RSS entirely.
     for kind, soft, hard in limits:
         try:
             resource.setrlimit(kind, (soft, hard))

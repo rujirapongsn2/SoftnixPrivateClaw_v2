@@ -1,6 +1,7 @@
 """Bounded diagram rendering through a disposable worker process."""
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -18,7 +19,13 @@ _CACHE_PREFIX = "diagram-render-"
 _CACHE_MAX_FILES = 20
 _CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 _WORKER_TIMEOUT_SECONDS = 30
+# Resident memory budget for the worker *and every Chromium process it spawns*,
+# enforced by _memory_guard. Not RLIMIT_AS: Chromium reserves ~1.4 TiB of
+# virtual address space per renderer (V8 sandbox) while touching a few hundred
+# MiB, so any practical address-space cap kills it at launch with SIGTRAP.
 _WORKER_MEMORY_BYTES = 1024 * 1024 * 1024
+_WORKER_ARGS: tuple[str, ...] = ("-m", "claw.skills.render_worker")
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 # Worker exit status for a diagram it refused (message on stdout as JSON).
 REJECTED_EXIT_CODE = 2
 
@@ -64,41 +71,74 @@ def _cleanup_cache(root: Path, keep: Path) -> None:
             kept += 1
 
 
-def _linux_process_group_rss(group_id: int) -> int:
-    """Return resident bytes for the disposable worker's whole process group."""
-    total_kib = 0
+def _proc_stat(pid: int) -> list[str] | None:
+    """Fields of /proc/<pid>/stat after the command name (index 0 = field 3)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    return stat[stat.rfind(")") + 2 :].split()
+
+
+def _linux_process_tree(root_pid: int) -> dict[int, tuple[int, int]]:
+    """Map pid -> (start time, resident bytes) for root_pid and its descendants.
+
+    Follows parent links, not the process group: Playwright launches Chromium
+    detached, in a process group of its own, so a group-based view misses it."""
     proc_root = Path("/proc")
     if not proc_root.is_dir():
-        return 0
+        return {}
+    children: dict[int, list[int]] = {}
+    info: dict[int, tuple[int, int]] = {}
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
+        fields = _proc_stat(int(entry.name))
         try:
-            stat = (entry / "stat").read_text()
-            fields = stat[stat.rfind(")") + 2 :].split()
-            if int(fields[2]) != group_id:  # field 5: process group id
+            if fields is None or fields[0] == "Z":
                 continue
-            status = (entry / "status").read_text()
-            match = next((line for line in status.splitlines() if line.startswith("VmRSS:")), "")
-            total_kib += int(match.split()[1]) if match else 0
+            # fields[1] ppid, fields[19] start time, fields[21] RSS pages.
+            pid = int(entry.name)
+            children.setdefault(int(fields[1]), []).append(pid)
+            info[pid] = (int(fields[19]), int(fields[21]) * _PAGE_SIZE)
+        except (ValueError, IndexError):
+            continue
+    tree: dict[int, tuple[int, int]] = {}
+    frontier = [root_pid] if root_pid in info else []
+    while frontier:
+        pid = frontier.pop()
+        tree[pid] = info[pid]
+        frontier.extend(child for child in children.get(pid, ()) if child in info and child not in tree)
+    return tree
+
+
+def _kill_tracked(worker_pid: int, seen: dict[int, int]) -> None:
+    """SIGKILL the worker's group and every descendant seen while it ran.
+
+    A pid is signalled only while its start time still matches, so a recycled
+    pid that now belongs to an unrelated process is never touched."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(worker_pid, signal.SIGKILL)
+    for pid, started in seen.items():
+        fields = _proc_stat(pid)
+        try:
+            if fields is not None and int(fields[19]) == started:
+                os.kill(pid, signal.SIGKILL)
         except (OSError, ValueError, IndexError):
             continue
-    return total_kib * 1024
 
 
-async def _memory_guard(process_group: int, exceeded: asyncio.Event) -> None:
+async def _memory_guard(worker_pid: int, exceeded: asyncio.Event, seen: dict[int, int]) -> None:
     if not sys.platform.startswith("linux"):
         return
     while True:
-        await asyncio.sleep(0.1)
-        rss = await asyncio.to_thread(_linux_process_group_rss, process_group)
-        if rss > _WORKER_MEMORY_BYTES:
+        tree = await asyncio.to_thread(_linux_process_tree, worker_pid)
+        seen.update({pid: started for pid, (started, _) in tree.items()})
+        if sum(rss for _, rss in tree.values()) > _WORKER_MEMORY_BYTES:
             exceeded.set()
-            try:
-                os.killpg(process_group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            await asyncio.to_thread(_kill_tracked, worker_pid, seen)
             return
+        await asyncio.sleep(0.1)
 
 
 async def render_diagram(
@@ -134,8 +174,7 @@ async def render_diagram(
         async with _RENDER_SLOTS:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
-                "-m",
-                "claw.skills.render_worker",
+                *_WORKER_ARGS,
                 str(root),
                 str(source),
                 str(temporary),
@@ -146,20 +185,21 @@ async def render_diagram(
                 start_new_session=True,
             )
             memory_exceeded = asyncio.Event()
-            memory_guard = asyncio.create_task(_memory_guard(proc.pid, memory_exceeded))
+            seen: dict[int, int] = {}
+            memory_guard = asyncio.create_task(_memory_guard(proc.pid, memory_exceeded, seen))
             try:
                 stdout, stderr = await proc.communicate()
             except BaseException:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                # Timeout or cancellation: nothing from this render may outlive it.
+                _kill_tracked(proc.pid, seen)
                 await proc.wait()
                 temporary.unlink(missing_ok=True)
                 raise
             finally:
                 memory_guard.cancel()
                 await asyncio.gather(memory_guard, return_exceptions=True)
+                # Also covers a worker that died (e.g. CPU limit) with Chromium still up.
+                _kill_tracked(proc.pid, seen)
     if memory_exceeded.is_set():
         temporary.unlink(missing_ok=True)
         raise RenderRejected("Diagram needs more than 1 GB to render; simplify it or use a smaller canvas")
