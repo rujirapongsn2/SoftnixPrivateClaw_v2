@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, WebSocket
 
+from claw.auth.mcp_oauth import McpOAuth
 from claw.core.model_health import ModelHealthService
 
 from sbot.browser.broker import BrowserBrokerStore
@@ -90,6 +91,8 @@ class AppState:
     tts_rate_limiter: RateLimiter = None  # type: ignore[assignment]
     telegram: "TelegramChannel | None" = None
     model_health: ModelHealthService | None = None
+    # Shared with the host app: one grant store serves both mounts.
+    mcp_oauth: McpOAuth | None = None
 
 
 def get_state(request: Request) -> AppState:

@@ -293,6 +293,7 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
         shares=shares,
         project_access=project_access,
         project_containers=project_containers,
+        mcp_oauth=shared.mcp_oauth,
     )
     from claw.api.files import create_files_router
     from sbot.api.deps import current_user, get_state

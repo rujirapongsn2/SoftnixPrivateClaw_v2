@@ -45,6 +45,7 @@ from claw.db.stores import (
     GuardrailStore,
     KnowledgeStore,
     LLMConfigStore,
+    McpAuthStore,
     MemoryStore,
     MessageStore,
     OAuthAppStore,
@@ -63,6 +64,7 @@ from claw.knowledge.service import KnowledgeService
 from claw.logging_setup import configure_logging
 from claw.providers.litellm_provider import LiteLLMProvider
 from claw.providers.registry import context_window
+from claw.auth.mcp_oauth import McpOAuth
 from claw.security.crypto import SecretBox
 
 
@@ -96,11 +98,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     secret_box = SecretBox(settings.secret_key)
     connectors = ConnectorStore(factory, secret_box=secret_box)
     schedules = ScheduleStore(factory)
+    mcp_oauth = McpOAuth(McpAuthStore(factory, secret_box))
     connectors_mgr = ConnectorManager(
         connectors,
         connect_timeout_seconds=settings.connectors.connect_timeout_seconds,
         tool_call_timeout_seconds=settings.connectors.tool_call_timeout_seconds,
         error_retry_cooldown_seconds=settings.connectors.error_retry_cooldown_seconds,
+        mcp_oauth=mcp_oauth,
     )
     guardrails = GuardrailStore(factory)
     llm_config = LLMConfigStore(factory, secret_box=secret_box)
@@ -358,6 +362,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project_containers=None,
         jobs=jobs,
         workspace_policy=workspace_policy,
+        mcp_oauth=mcp_oauth,
     )
     from claw.workspace.lifecycle import FileLifecycle
 

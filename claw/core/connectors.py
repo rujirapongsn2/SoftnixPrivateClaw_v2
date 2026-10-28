@@ -33,6 +33,8 @@ from loguru import logger
 from mcp.shared.exceptions import McpError
 
 from claw.db.stores import ConnectorStore
+from claw.auth.mcp_oauth import McpAuthorizationNeeded, McpOAuth, McpReauthorizationRequired
+from claw.auth.mcp_oauth_discovery import REAUTH_MARKER
 from claw.security.ssrf import resolve_public_ips
 from claw.tools.base import Tool
 from claw.tools.registry import ToolRegistry
@@ -110,6 +112,29 @@ _OAUTH_REAUTH_MARKERS = (
     "invalid_rapt",
     "expired or revoked",
     "token has been expired",
+    REAUTH_MARKER,
+)
+# Status rows for a per-user http MCP connector whose server wants OAuth; the
+# same shape sync_tools's mark_reauthorization_required writes for presets.
+_AUTH_STATUSES = {
+    McpAuthorizationNeeded.status: {
+        "status": McpAuthorizationNeeded.status,
+        "error": "This server requires authorization. Connect this account.",
+    },
+    McpReauthorizationRequired.status: {
+        "status": McpReauthorizationRequired.status,
+        "error": "Authorization expired or was revoked. Reconnect this account.",
+    },
+}
+# OAuth material that can appear in an httpx/mcp error message regardless of
+# what connector.env holds: a Bearer header, token-ish form/query parameters,
+# and the same names as JSON members. `code` is only scrubbed after ? or &
+# so "status code=401" prose survives.
+_GENERIC_SECRET_PATTERNS = (
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9\-._~+/]+=*"),
+    re.compile(r"(?i)([?&]|^|\s)(access_token|refresh_token|id_token|code_verifier|client_secret)=[^&\s\"'<>]+"),
+    re.compile(r"(?i)([?&])(code)=[^&\s\"'<>]+"),
+    re.compile(r'(?i)"(access_token|refresh_token|id_token|code_verifier|client_secret)"\s*:\s*"[^"]*"'),
 )
 
 
@@ -411,6 +436,10 @@ def _redact_secrets(text: str, connector) -> str:
         text = text.replace(value, "***")
     for value in _body_secrets(connector):
         text = text.replace(value, "***")
+    text = _GENERIC_SECRET_PATTERNS[0].sub("Bearer ***", text)
+    text = _GENERIC_SECRET_PATTERNS[1].sub(r"\1\2=***", text)
+    text = _GENERIC_SECRET_PATTERNS[2].sub(r"\1\2=***", text)
+    text = _GENERIC_SECRET_PATTERNS[3].sub(r'"\1": "***"', text)
     return text
 
 
@@ -717,8 +746,10 @@ class ConnectorManager:
         connect_timeout_seconds: float = _CONNECT_TIMEOUT_SECONDS,
         tool_call_timeout_seconds: float = _TOOL_CALL_TIMEOUT_SECONDS,
         error_retry_cooldown_seconds: float = _ERROR_RETRY_COOLDOWN_SECONDS,
+        mcp_oauth: McpOAuth | None = None,
     ):
         self.store = store
+        self._mcp_oauth = mcp_oauth
         self.connect_timeout_seconds = connect_timeout_seconds
         self.tool_call_timeout_seconds = tool_call_timeout_seconds
         self.error_retry_cooldown_seconds = error_retry_cooldown_seconds
@@ -1181,6 +1212,11 @@ class ConnectorManager:
         except TimeoutError:
             message = f"timed out after {timeout}s connecting/listing tools"
             return connector, None, None, {"status": "error", "error": message}
+        except (McpAuthorizationNeeded, McpReauthorizationRequired) as exc:
+            # Not a failure of the connector but of its authorization; a
+            # distinct status (never "error") so sync_tools does not enter the
+            # error backoff and the UI can offer Connect/Reconnect.
+            return connector, None, None, dict(_AUTH_STATUSES[exc.status])
         except asyncio.CancelledError:
             # A broken connector's handshake fails deep inside the MCP SDK's
             # anyio internals (e.g. a DNS error becomes "Attempted to exit
@@ -1207,11 +1243,33 @@ class ConnectorManager:
             return connector, None, None, {"status": "error", "error": message}
 
     async def _connect_and_list(self, stack: AsyncExitStack, connector) -> tuple[Any, Any]:
-        session = await self._connect(stack, connector)
-        listed = await self._list_catalog(session)
+        auth = self._bearer_auth(connector)
+        try:
+            session = await self._connect(stack, connector, auth)
+            listed = await self._list_catalog(session)
+        except BaseException as exc:
+            # The SDK surfaces a 401 during the handshake as whatever its task
+            # group happened to die of (an HTTPStatusError, a cancel-scope
+            # CancelledError, a closed stream), so the auth object, which saw
+            # the challenge itself, is the authority on what happened.
+            if auth is not None and auth.outcome is not None:
+                raise auth.outcome from exc
+            raise
         return session, listed
 
-    async def _connect(self, stack: AsyncExitStack, connector) -> Any:
+    def _bearer_auth(self, connector):
+        """The OAuth auth for a per-user http MCP connector, or None. Never for
+        an admin-global connector: OAuth here is per-user only."""
+        if (
+            self._mcp_oauth is None
+            or connector.owner_id is None
+            or connector.kind != "mcp"
+            or connector.transport != "http"
+        ):
+            return None
+        return self._mcp_oauth.http_auth(connector)
+
+    async def _connect(self, stack: AsyncExitStack, connector, auth=None) -> Any:
         from mcp import ClientSession
 
         if connector.transport == "http":
@@ -1261,7 +1319,7 @@ class ConnectorManager:
             if connector.owner_id is not None:
                 await resolve_public_ips(url)
             read, write, _ = await stack.enter_async_context(
-                streamablehttp_client(url, headers=headers or None)
+                streamablehttp_client(url, headers=headers or None, auth=auth)
             )
         else:
             from mcp import StdioServerParameters
