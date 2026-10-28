@@ -11,6 +11,7 @@ None of these paths can be captured by the preset flow's
 /api/connectors/oauth/{provider}/callback.
 """
 
+import hashlib
 from collections.abc import Callable
 from typing import Any, Literal
 from urllib.parse import urlencode, urlsplit
@@ -33,9 +34,15 @@ from claw.db.models import User
 from claw.db.stores import McpAuthStore
 from claw.security.crypto import UndecryptableSecret
 
-NONCE_COOKIE = "claw_mcp_oauth_nonce"
+NONCE_COOKIE_PREFIX = "claw_mcp_oauth_nonce_"
 # Where each app's frontend lives under web_base_url.
 _WEB_ROOTS = {ReturnTo.CLAW: "/", ReturnTo.SBOT: "/chat/sbot"}
+
+
+def nonce_cookie(state: str) -> str:
+    """One cookie per flow, so starting a second Connect (another connector,
+    another tab) cannot overwrite the nonce a pending callback needs."""
+    return NONCE_COOKIE_PREFIX + hashlib.sha256(state.encode()).hexdigest()[:16]
 
 
 def build_user_router(
@@ -57,7 +64,7 @@ def build_user_router(
         except McpOAuthStartError as exc:
             raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from None
         response.set_cookie(
-            NONCE_COOKIE,
+            nonce_cookie(started.state),
             started.browser_nonce,
             max_age=int(PENDING_TTL.total_seconds()),
             path=CALLBACK_PATH,
@@ -97,12 +104,13 @@ async def callback(request: Request, state: AppState = Depends(get_state)) -> Re
     unexpected exception, is a redirect back into the app with a status the
     frontend can render."""
     params = request.query_params
+    cookie = nonce_cookie(params.get("state", ""))
     try:
         completed = await state.mcp_oauth.complete(
             state=params.get("state", ""),
             code=params.get("code"),
             error=params.get("error"),
-            browser_nonce=request.cookies.get(NONCE_COOKIE),
+            browser_nonce=request.cookies.get(cookie),
         )
         outcome, connector_id, return_to = completed.outcome, completed.connector_id, completed.return_to
         if completed.owner_id is not None and outcome is CallbackOutcome.CONNECTED:
@@ -115,10 +123,7 @@ async def callback(request: Request, state: AppState = Depends(get_state)) -> Re
         query = {"connector_id": connector_id, **query}
     web = state.settings.web_base_url.rstrip("/")
     response = RedirectResponse(f"{web}{_WEB_ROOTS[return_to]}?{urlencode(query)}", status_code=303)
-    if outcome is not CallbackOutcome.EXPIRED:
-        # An unknown state consumed nothing; the cookie may belong to a newer
-        # flow started in another tab, so it is left to its max-age.
-        response.delete_cookie(NONCE_COOKIE, path=CALLBACK_PATH)
+    response.delete_cookie(cookie, path=CALLBACK_PATH)
     return response
 
 

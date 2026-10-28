@@ -29,7 +29,7 @@ PUBLIC = "https://claw.example.com"
 SERVER = "https://mcp.example.com/mcp"
 ISSUER = "https://as.example.com"
 PRM_URL = "https://mcp.example.com/.well-known/oauth-protected-resource/mcp"
-NONCE_COOKIE = "claw_mcp_oauth_nonce"
+NONCE_COOKIE_PREFIX = "claw_mcp_oauth_nonce_"
 DNS = {
     "mcp.example.com": "93.184.216.34",
     "as.example.com": "93.184.216.35",
@@ -96,6 +96,10 @@ class AuthWorld:
 
     def hits(self, path: str) -> list[tuple[str, str, str, dict, httpx.Headers]]:
         return [r for r in self.requests if r[2] == path]
+
+
+def _nonce_cookie(state: str) -> str:
+    return NONCE_COOKIE_PREFIX + hashlib.sha256(state.encode()).hexdigest()[:16]
 
 
 def _headers(email: str) -> dict:
@@ -175,7 +179,7 @@ async def test_full_flow_connects_and_the_listing_shows_it(env):
     assert params["scope"] == "mcp:tools"  # the challenge's scope wins over PRM's
     assert len(params["state"]) >= 43
     cookie = started.headers["set-cookie"]
-    assert f"{NONCE_COOKIE}=" in cookie and "HttpOnly" in cookie and "Secure" in cookie
+    assert f"{_nonce_cookie(params['state'])}=" in cookie and "HttpOnly" in cookie and "Secure" in cookie
     assert "Path=/api/mcp-oauth/callback" in cookie and "SameSite=lax" in cookie
 
     done = await _callback(env, state=params["state"], code="CODE-1")
@@ -184,7 +188,7 @@ async def test_full_flow_connects_and_the_listing_shows_it(env):
     assert done.headers["location"] == (
         f"{PUBLIC}/?connector_id={env['connector'].id}&connector_status=connected"
     )
-    assert f'{NONCE_COOKIE}=""' in done.headers["set-cookie"]
+    assert f'{_nonce_cookie(params["state"])}=""' in done.headers["set-cookie"]
     ((_, _, _, form, headers),) = env["world"].hits("/token")
     assert form["grant_type"] == "authorization_code"
     assert form["code"] == "CODE-1"
@@ -378,7 +382,7 @@ async def test_a_callback_from_another_browser_is_refused_and_burns_the_flow(env
     started = await _start(env)
     state = _query(started.json()["authorize_url"])["state"]
     env["c"].cookies.clear()
-    env["c"].cookies.set(NONCE_COOKIE, "attacker-nonce", path="/api/mcp-oauth/callback")
+    env["c"].cookies.set(_nonce_cookie(state), "attacker-nonce", path="/api/mcp-oauth/callback")
     done = await _callback(env, state=state, code="CODE-1")
     assert _query(done.headers["location"])["connector_status"] == "browser_mismatch"
     assert env["world"].hits("/token") == []
@@ -403,6 +407,22 @@ async def test_token_endpoint_error_is_token_failed(env):
     _, done = await _authorized(env)
     assert _query(done.headers["location"])["connector_status"] == "token_failed"
     assert (await env["store"].load(env["connector"].id)).grant is None
+
+
+async def test_two_flows_in_one_browser_both_complete(env):
+    second = await env["connectors"].upsert(
+        env["alice"].id, "remote-2", kind="mcp", transport="http", url=SERVER
+    )
+    first_state = _query((await _start(env)).json()["authorize_url"])["state"]
+    second_state = _query((await _start(env, connector_id=second.id)).json()["authorize_url"])["state"]
+
+    first = await _callback(env, state=first_state, code="CODE-1")
+    after = await _callback(env, state=second_state, code="CODE-2")
+
+    assert _query(first.headers["location"])["connector_status"] == "connected"
+    assert _query(after.headers["location"])["connector_status"] == "connected"
+    assert (await env["store"].load(env["connector"].id)).grant is not None
+    assert (await env["store"].load(second.id)).grant is not None
 
 
 async def test_the_last_start_wins(env):

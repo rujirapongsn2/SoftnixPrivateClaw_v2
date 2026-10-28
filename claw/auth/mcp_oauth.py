@@ -130,6 +130,8 @@ class McpOAuthStartError(Exception):
 @dataclass(frozen=True)
 class Started:
     authorize_url: str
+    # The state the callback will carry; it names the flow's nonce cookie.
+    state: str
     # Set by the route as an HttpOnly cookie; only its hash is stored, and
     # the callback must present it, so a victim's browser cannot complete a
     # flow an attacker started.
@@ -261,7 +263,7 @@ class McpOAuth:
         if scope:
             params["scope"] = scope
         authorize_url = httpx.URL(found.authorization_endpoint).copy_merge_params(params)
-        return Started(authorize_url=str(authorize_url), browser_nonce=nonce)
+        return Started(authorize_url=str(authorize_url), state=state, browser_nonce=nonce)
 
     async def _scope_to_request(self, connector_id: str, found: Discovered) -> str | None:
         """The discovered scope, widened by what the connector's grant at this
