@@ -21,6 +21,7 @@ import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
 import { Brand, EleMark, SoftnixLogo, SoftnixMark } from "./Logo";
 import { useBranding, useT } from "./branding";
+import { connectorCallbackToast } from "./connectorCallbackToast";
 import { PasswordField } from "./PasswordField";
 import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "./Settings";
 import { ApiError, AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
@@ -711,20 +712,9 @@ export default function App() {
       setResetToken(resetPassword);
       window.history.replaceState({}, "", window.location.pathname);
     }
-    // Connector OAuth callback lands here with ?connector=<key>&connector_status=…
-    const connector = params.get("connector");
-    const connectorStatus = params.get("connector_status");
-    if (connectorStatus) {
-      toast(
-        connectorStatus === "connected"
-          ? { body: `${connector || "Connector"} connected`, type: "info", autoHideDuration: 3000 }
-          : connectorStatus === "name_conflict"
-            ? {
-                body: `You already have your own connector named "${connector || ""}". Rename it first, then connect.`,
-                type: "error",
-              }
-            : { body: "Couldn't connect. Please try again.", type: "error" },
-      );
+    const connectorToast = connectorCallbackToast(params);
+    if (connectorToast) {
+      toast(connectorToast);
       window.history.replaceState({}, "", window.location.pathname);
     }
     if (urlToken || urlError) {

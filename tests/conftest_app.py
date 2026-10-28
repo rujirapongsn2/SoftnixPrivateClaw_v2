@@ -12,9 +12,12 @@ from claw.api.browser_ext import router as browser_ext_router
 from claw.api.deps import AppState
 from claw.api.knowledge import router as knowledge_router
 from claw.api.manage import router as manage_router
+from claw.api import mcp_oauth_routes
 from claw.api.routes import router as core_router
 from claw.api.telegram import router as telegram_router
 from claw.api.workspace_admin import router as workspace_admin_router
+from claw.auth.mcp_oauth import McpOAuth
+from claw.auth.mcp_oauth_discovery import ReturnTo
 from claw.browser.broker import BrowserBrokerStore
 from claw.channels.link import LinkCodeService
 from claw.channels.telegram import TelegramManager
@@ -30,6 +33,7 @@ from claw.db.stores import (
     GuardrailStore,
     KnowledgeStore,
     LLMConfigStore,
+    McpAuthStore,
     MemoryStore,
     MessageStore,
     OAuthAppStore,
@@ -45,6 +49,7 @@ from claw.db.stores import (
     UserStore,
 )
 from claw.knowledge.service import KnowledgeService
+from claw.security.crypto import SecretBox
 from claw.security.policy import PolicyEngine
 from claw.workspace.policy import WorkspacePolicyStore
 
@@ -102,10 +107,16 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         groups=GroupStore(db_factory),
         shares=ShareStore(db_factory),
         workspace_policy=WorkspacePolicyStore(db_factory, settings),
+        mcp_oauth=McpOAuth(
+            McpAuthStore(db_factory, SecretBox(settings.secret_key)), public_base_url=settings.public_base_url
+        ),
     )
     from claw.api.files import create_files_router
     from claw.api.deps import current_user, get_state
     app.include_router(create_files_router(get_state, current_user, "privateclaw"))
+    app.include_router(mcp_oauth_routes.build_user_router(get_state, current_user, ReturnTo.CLAW))
+    app.include_router(mcp_oauth_routes.callback_router)
+    app.include_router(mcp_oauth_routes.admin_router)
     return app
 
 

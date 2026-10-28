@@ -622,6 +622,17 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.memory.historyEmpty":
       "Nothing consolidated yet — history entries appear as conversations grow.",
 
+    "connectorCallback.preset.connected": "{name} connected",
+    "connectorCallback.preset.nameConflict": "You already have your own connector named \"{name}\". Rename it first, then connect.",
+    "connectorCallback.failed": "Couldn't connect. Please try again.",
+    "connectorCallback.mcp.connected": "Connector authorized. Its tools are ready to use.",
+    "connectorCallback.mcp.denied": "Access wasn't granted, so the connector is still not connected.",
+    "connectorCallback.mcp.expired": "That sign-in link expired or was already used. Please connect again.",
+    "connectorCallback.mcp.browserMismatch":
+      "Sign-in has to finish in the same browser it started in. Please connect again from this browser.",
+    "connectorCallback.mcp.tokenFailed":
+      "The service didn't issue a sign-in token. Try again, or ask your administrator to check its OAuth client.",
+
     "settings.connectors.authHint.oauth": "1-click sign-in",
     "settings.connectors.authHint.apiKey": "API key",
     "settings.connectors.connected": "Connected",
@@ -712,6 +723,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.commandAdminOnly":
       "Only an administrator can set a custom local command — ask them to change this.",
     "settings.connectors.urlLabel": "Server URL (e.g. https://mcp.example.com/mcp)",
+    "settings.connectors.urlOAuthHint":
+      "Servers that sign in with OAuth need only the URL. Leave headers and env empty, save, then click Connect to authorize. Use HEADER_ entries only for servers that take an API key.",
     "settings.connectors.envLabel":
       "Environment variables (KEY=value, or Header-Name: value for an HTTP header, or QUERY_name=value for a URL query param — one per line)",
     "settings.connectors.timeoutLabel": "Timeout (ms)",
@@ -729,6 +742,16 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.connectedTools": "Connected · {count} tools",
     "settings.connectors.error": "Error",
     "settings.connectors.reconnectRequired": "Reconnect required",
+    "settings.connectors.notConnected": "Not connected",
+    "settings.connectors.mcpAuth.needsAuthorization": "Needs authorization",
+    "settings.connectors.mcpAuth.issuer": "Authorized by {issuer}",
+    "settings.connectors.mcpAuth.menuFor": "Authorization options for {name}",
+    "settings.connectors.mcpAuth.disconnect": "Disconnect account",
+    "settings.connectors.mcpAuth.revoke": "Revoke access",
+    "settings.connectors.mcpAuth.disconnectConfirm":
+      "Disconnect {name}? Its saved sign-in is removed from this server and its tools stop until you connect again.",
+    "settings.connectors.mcpAuth.revokeConfirm":
+      "Revoke access for {name}? The service is asked to cancel the sign-in, it is removed from this server, and its tools stop until you connect again.",
     "settings.connectors.add": "Add",
     "settings.connectors.yourConnectors": "Your connectors",
     "settings.connectors.yourEmptyTitle": "No personal connectors",
@@ -1389,6 +1412,27 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.oauth.tenant": "Tenant (optional — default: common)",
     "admin.oauth.save": "Save",
     "admin.oauth.savedToast": "{label} OAuth saved",
+    "admin.mcpOAuth.title": "MCP authorization servers",
+    "admin.mcpOAuth.intro":
+      "Register an OAuth client for a remote MCP server's authorization server when it doesn't let apps register themselves. Users then connect their own accounts from Settings → Connectors.",
+    "admin.mcpOAuth.redirectDesc": "Register this redirect URI with each authorization server:",
+    "admin.mcpOAuth.copyRedirect": "Copy redirect URI",
+    "admin.mcpOAuth.copied": "Redirect URI copied",
+    "admin.mcpOAuth.copyFailed": "Couldn't copy. Select the URI and copy it manually.",
+    "admin.mcpOAuth.add": "Add client",
+    "admin.mcpOAuth.empty": "No clients registered yet.",
+    "admin.mcpOAuth.issuer": "Issuer URL",
+    "admin.mcpOAuth.authMethod": "Client authentication",
+    "admin.mcpOAuth.method.basic": "Basic auth",
+    "admin.mcpOAuth.method.post": "Secret in body",
+    "admin.mcpOAuth.method.none": "None (public client)",
+    "admin.mcpOAuth.clientIdLine": "Client ID: {clientId}",
+    "admin.mcpOAuth.issuerInvalid": "Issuer must be an https:// URL without a query or fragment.",
+    "admin.mcpOAuth.clientIdRequired": "Client ID is required.",
+    "admin.mcpOAuth.secretRequired": "Client secret is required for this authentication method.",
+    "admin.mcpOAuth.savedToast": "Saved the client for {issuer}",
+    "admin.mcpOAuth.deleteConfirm":
+      "Delete the client for {issuer}? Connectors that sign in through it can't connect or reconnect until a client is set up again.",
     "admin.telegram.configuredDisabled": "Configured (disabled)",
     "admin.telegram.connected": "Connected",
     "admin.telegram.connectedAs": "Connected · @{username}",
@@ -2194,6 +2238,17 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.memory.historyTitle": "ประวัติการรวบรวมล่าสุด",
     "settings.memory.historyEmpty": "ยังไม่มีการรวบรวม — รายการประวัติจะปรากฏเมื่อบทสนทนาสะสมมากขึ้น",
 
+    "connectorCallback.preset.connected": "เชื่อมต่อ {name} แล้ว",
+    "connectorCallback.preset.nameConflict": "คุณมีตัวเชื่อมต่อของตัวเองชื่อ \"{name}\" อยู่แล้ว กรุณาเปลี่ยนชื่อก่อน แล้วจึงเชื่อมต่อ",
+    "connectorCallback.failed": "เชื่อมต่อไม่สำเร็จ กรุณาลองใหม่อีกครั้ง",
+    "connectorCallback.mcp.connected": "อนุญาตตัวเชื่อมต่อแล้ว พร้อมใช้งานเครื่องมือได้ทันที",
+    "connectorCallback.mcp.denied": "ไม่ได้รับอนุญาตให้เข้าถึง ตัวเชื่อมต่อจึงยังไม่ได้เชื่อมต่อ",
+    "connectorCallback.mcp.expired": "ลิงก์ลงชื่อเข้าใช้หมดอายุหรือถูกใช้ไปแล้ว กรุณาเชื่อมต่ออีกครั้ง",
+    "connectorCallback.mcp.browserMismatch":
+      "ต้องลงชื่อเข้าใช้ให้เสร็จในเบราว์เซอร์เดียวกับที่เริ่มต้น กรุณาเชื่อมต่ออีกครั้งจากเบราว์เซอร์นี้",
+    "connectorCallback.mcp.tokenFailed":
+      "บริการไม่ได้ออกโทเค็นสำหรับลงชื่อเข้าใช้ กรุณาลองอีกครั้ง หรือขอให้ผู้ดูแลระบบตรวจสอบ OAuth client ของบริการนั้น",
+
     "settings.connectors.authHint.oauth": "เข้าสู่ระบบคลิกเดียว",
     "settings.connectors.authHint.apiKey": "คีย์ API",
     "settings.connectors.connected": "เชื่อมต่อแล้ว",
@@ -2284,6 +2339,8 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.commandAdminOnly":
       "มีเพียงผู้ดูแลระบบเท่านั้นที่ตั้งค่าคำสั่งภายในเครื่องแบบกำหนดเองได้ — ขอให้ผู้ดูแลระบบเปลี่ยนค่านี้",
     "settings.connectors.urlLabel": "URL เซิร์ฟเวอร์ (เช่น https://mcp.example.com/mcp)",
+    "settings.connectors.urlOAuthHint":
+      "เซิร์ฟเวอร์ที่ล็อกอินด้วย OAuth ใส่แค่ URL ก็พอ ไม่ต้องใส่ header หรือ env บันทึกแล้วกด Connect เพื่ออนุญาต ใส่ HEADER_ เฉพาะเซิร์ฟเวอร์ที่ใช้ API key",
     "settings.connectors.envLabel":
       "ตัวแปรสภาพแวดล้อม (KEY=value หรือ Header-Name: value สำหรับ HTTP header หรือ QUERY_name=value สำหรับพารามิเตอร์ใน URL — บรรทัดละหนึ่งรายการ)",
     "settings.connectors.timeoutLabel": "ระยะเวลาหมดเวลา (ms)",
@@ -2301,6 +2358,16 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.connectors.connectedTools": "เชื่อมต่อแล้ว · {count} เครื่องมือ",
     "settings.connectors.error": "ข้อผิดพลาด",
     "settings.connectors.reconnectRequired": "ต้องเชื่อมต่อใหม่",
+    "settings.connectors.notConnected": "ยังไม่เชื่อมต่อ",
+    "settings.connectors.mcpAuth.needsAuthorization": "ต้องอนุญาตการเข้าถึง",
+    "settings.connectors.mcpAuth.issuer": "อนุญาตผ่าน {issuer}",
+    "settings.connectors.mcpAuth.menuFor": "ตัวเลือกการอนุญาตของ {name}",
+    "settings.connectors.mcpAuth.disconnect": "ยกเลิกการเชื่อมต่อบัญชี",
+    "settings.connectors.mcpAuth.revoke": "เพิกถอนสิทธิ์การเข้าถึง",
+    "settings.connectors.mcpAuth.disconnectConfirm":
+      "ยกเลิกการเชื่อมต่อ {name} หรือไม่? ข้อมูลการลงชื่อเข้าใช้ที่บันทึกไว้จะถูกลบออกจากเซิร์ฟเวอร์นี้ และเครื่องมือของตัวเชื่อมต่อนี้จะหยุดทำงานจนกว่าคุณจะเชื่อมต่ออีกครั้ง",
+    "settings.connectors.mcpAuth.revokeConfirm":
+      "เพิกถอนสิทธิ์การเข้าถึงของ {name} หรือไม่? ระบบจะแจ้งให้บริการปลายทางยกเลิกการลงชื่อเข้าใช้ ลบข้อมูลออกจากเซิร์ฟเวอร์นี้ และเครื่องมือจะหยุดทำงานจนกว่าคุณจะเชื่อมต่ออีกครั้ง",
     "settings.connectors.add": "เพิ่ม",
     "settings.connectors.yourConnectors": "ตัวเชื่อมต่อของคุณ",
     "settings.connectors.yourEmptyTitle": "ยังไม่มีตัวเชื่อมต่อส่วนตัว",
@@ -2959,6 +3026,27 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "admin.oauth.tenant": "Tenant (ไม่บังคับ — ค่าเริ่มต้น: common)",
     "admin.oauth.save": "บันทึก",
     "admin.oauth.savedToast": "บันทึก OAuth ของ {label} แล้ว",
+    "admin.mcpOAuth.title": "เซิร์ฟเวอร์อนุญาตสิทธิ์ของ MCP",
+    "admin.mcpOAuth.intro":
+      "ลงทะเบียน OAuth client สำหรับเซิร์ฟเวอร์อนุญาตสิทธิ์ของ MCP ระยะไกลที่ไม่รองรับการลงทะเบียนแอปอัตโนมัติ จากนั้นผู้ใช้จะเชื่อมต่อบัญชีของตนเองได้ที่ การตั้งค่า → ตัวเชื่อมต่อ",
+    "admin.mcpOAuth.redirectDesc": "ลงทะเบียน Redirect URI นี้กับเซิร์ฟเวอร์อนุญาตสิทธิ์แต่ละแห่ง:",
+    "admin.mcpOAuth.copyRedirect": "คัดลอก Redirect URI",
+    "admin.mcpOAuth.copied": "คัดลอก Redirect URI แล้ว",
+    "admin.mcpOAuth.copyFailed": "คัดลอกไม่สำเร็จ กรุณาเลือก URI แล้วคัดลอกด้วยตนเอง",
+    "admin.mcpOAuth.add": "เพิ่ม client",
+    "admin.mcpOAuth.empty": "ยังไม่มี client ที่ลงทะเบียนไว้",
+    "admin.mcpOAuth.issuer": "URL ของ Issuer",
+    "admin.mcpOAuth.authMethod": "วิธียืนยันตัวตนของ client",
+    "admin.mcpOAuth.method.basic": "Basic auth",
+    "admin.mcpOAuth.method.post": "ส่ง secret ใน body",
+    "admin.mcpOAuth.method.none": "ไม่มี (public client)",
+    "admin.mcpOAuth.clientIdLine": "Client ID: {clientId}",
+    "admin.mcpOAuth.issuerInvalid": "Issuer ต้องเป็น URL แบบ https:// ที่ไม่มี query หรือ fragment",
+    "admin.mcpOAuth.clientIdRequired": "กรุณาระบุ Client ID",
+    "admin.mcpOAuth.secretRequired": "วิธียืนยันตัวตนนี้ต้องระบุ Client secret",
+    "admin.mcpOAuth.savedToast": "บันทึก client ของ {issuer} แล้ว",
+    "admin.mcpOAuth.deleteConfirm":
+      "ลบ client ของ {issuer} หรือไม่? ตัวเชื่อมต่อที่ลงชื่อเข้าใช้ผ่าน client นี้จะเชื่อมต่อหรือเชื่อมต่อใหม่ไม่ได้ จนกว่าจะตั้งค่า client อีกครั้ง",
     "admin.telegram.configuredDisabled": "ตั้งค่าแล้ว (ปิดใช้งาน)",
     "admin.telegram.connected": "เชื่อมต่อแล้ว",
     "admin.telegram.connectedAs": "เชื่อมต่อแล้ว · @{username}",

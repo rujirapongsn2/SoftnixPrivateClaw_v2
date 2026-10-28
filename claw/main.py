@@ -45,6 +45,7 @@ from claw.db.stores import (
     GuardrailStore,
     KnowledgeStore,
     LLMConfigStore,
+    McpAuthStore,
     MemoryStore,
     MessageStore,
     OAuthAppStore,
@@ -63,6 +64,7 @@ from claw.knowledge.service import KnowledgeService
 from claw.logging_setup import configure_logging
 from claw.providers.litellm_provider import LiteLLMProvider
 from claw.providers.registry import context_window
+from claw.auth.mcp_oauth import McpOAuth
 from claw.security.crypto import SecretBox
 
 
@@ -96,11 +98,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     secret_box = SecretBox(settings.secret_key)
     connectors = ConnectorStore(factory, secret_box=secret_box)
     schedules = ScheduleStore(factory)
+    mcp_oauth = McpOAuth(McpAuthStore(factory, secret_box), public_base_url=settings.public_base_url)
     connectors_mgr = ConnectorManager(
         connectors,
         connect_timeout_seconds=settings.connectors.connect_timeout_seconds,
         tool_call_timeout_seconds=settings.connectors.tool_call_timeout_seconds,
         error_retry_cooldown_seconds=settings.connectors.error_retry_cooldown_seconds,
+        mcp_oauth=mcp_oauth,
     )
     guardrails = GuardrailStore(factory)
     llm_config = LLMConfigStore(factory, secret_box=secret_box)
@@ -358,6 +362,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project_containers=None,
         jobs=jobs,
         workspace_policy=workspace_policy,
+        mcp_oauth=mcp_oauth,
     )
     from claw.workspace.lifecycle import FileLifecycle
 
@@ -420,6 +425,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(workspace_admin_router)
     app.include_router(browser_ext_router)
     app.include_router(connector_oauth_router)
+    from claw.api import mcp_oauth_routes
+    from claw.api.deps import current_user as claw_current_user, get_state as claw_get_state
+    from claw.auth.mcp_oauth_discovery import ReturnTo
+
+    app.include_router(mcp_oauth_routes.build_user_router(claw_get_state, claw_current_user, ReturnTo.CLAW))
+    app.include_router(mcp_oauth_routes.callback_router)
+    # Mounted in both modes: it depends only on the host's state, which sbot's
+    # replacement admin router shares.
+    app.include_router(mcp_oauth_routes.admin_router)
     app.include_router(knowledge_router)
     app.include_router(project_containers_router)
     from claw.api.files import create_files_router

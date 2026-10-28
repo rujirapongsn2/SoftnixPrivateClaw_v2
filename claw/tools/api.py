@@ -22,7 +22,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
-from claw.security.ssrf import UnsafeUrlError, resolve_public_ips
+from claw.security.ssrf import UnsafeUrlError, pinned_client
 from claw.tools.base import Tool
 
 _MAX_RESPONSE_CHARS = 30_000
@@ -272,7 +272,7 @@ class GenericApiTool(Tool):
             # can hold a chat turn open for hours under a nominal 60s setting.
             # asyncio.timeout is the only thing here that bounds the whole call.
             async with asyncio.timeout(self._timeout_seconds):
-                async with httpx.AsyncClient(timeout=self._timeout_seconds, follow_redirects=False) as client:
+                async with pinned_client(timeout=self._timeout_seconds) as client:
                     status_code, text = await self._send(
                         client, target, headers, body_content, env_query
                     )
@@ -319,7 +319,8 @@ class GenericApiTool(Tool):
         origin = _origin_of(url)
 
         for _ in range(_MAX_REDIRECTS + 1):
-            response = await _send_pinned(client, method, url, headers, body)
+            request = client.build_request(method, url, headers=headers, content=body)
+            response = await client.send(request, stream=True)
             try:
                 location = response.headers.get("location")
                 if response.is_redirect and location:
@@ -378,49 +379,6 @@ def _has_header(headers: dict[str, str], name: str) -> bool:
 def _drop_header(headers: dict[str, str], name: str) -> None:
     for key in [key for key in headers if key.lower() == name]:
         del headers[key]
-
-
-async def _send_pinned(
-    client: httpx.AsyncClient,
-    method: str,
-    url: httpx.URL,
-    headers: dict[str, str],
-    body: str | None,
-) -> httpx.Response:
-    """Validate `url`'s host and send the request to the exact IP that was
-    validated, so the socket cannot re-resolve the name to a private address in
-    between (see claw/security/ssrf.py).
-
-    Pinning removes the resolver's own address fallback, so the fallback is
-    reimplemented here: try each validated address until one connects. Only a
-    connect-level failure moves on — once the peer has answered, its response
-    (or its error) is the answer.
-    """
-    addresses = await resolve_public_ips(str(url))
-    if not addresses:
-        # Host is already an IP literal; there is nothing to pin.
-        return await client.send(client.build_request(method, url, headers=headers, content=body), stream=True)
-
-    # The URL now carries an IP, so both the Host header and TLS validation
-    # would otherwise follow the IP rather than the name the operator
-    # configured. sni_hostname keeps certificate verification pinned to the
-    # real hostname; without it every https connector would fail to verify.
-    request_headers = dict(headers)
-    request_headers["Host"] = url.netloc.decode("ascii")
-    last_error: httpx.TransportError | None = None
-    for address in addresses:
-        request = client.build_request(
-            method,
-            url.copy_with(host=address),
-            headers=request_headers,
-            content=body,
-            extensions={"sni_hostname": url.host},
-        )
-        try:
-            return await client.send(request, stream=True)
-        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-            last_error = exc
-    raise last_error  # type: ignore[misc]
 
 
 async def _read_capped(response: httpx.Response) -> str:

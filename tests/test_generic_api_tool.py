@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import httpx
 
 import claw.core.connectors  # noqa: F401
+import claw.security.ssrf as ssrf_mod
 import claw.tools.api as api_mod
 from claw.core.connectors import _redact_secrets
 from claw.tools.api import GenericApiTool
@@ -41,9 +42,9 @@ def _operation(**overrides):
 
 
 def _mock_client(monkeypatch, handler, *, resolve=None):
-    """Patch httpx.AsyncClient (as imported into claw.tools.api) so every
-    request made during the test is served by `handler` instead of hitting
-    the network.
+    """Patch the pinned client claw.tools.api builds so every request made
+    during the test is served by `handler` (behind the real PinnedTransport)
+    instead of hitting the network.
 
     The SSRF guard is stubbed out too: it resolves the request host for real,
     and these hosts are deliberately unroutable, so leaving it live would make
@@ -58,10 +59,15 @@ def _mock_client(monkeypatch, handler, *, resolve=None):
             return []
         return [result] if isinstance(result, str) else list(result)
 
-    monkeypatch.setattr(api_mod, "resolve_public_ips", _resolve)
+    monkeypatch.setattr(ssrf_mod, "resolve_public_ips", _resolve)
     transport = httpx.MockTransport(handler)
-    real_client = httpx.AsyncClient
-    monkeypatch.setattr(api_mod.httpx, "AsyncClient", lambda **kw: real_client(transport=transport))
+    monkeypatch.setattr(
+        api_mod,
+        "pinned_client",
+        lambda **kw: httpx.AsyncClient(
+            transport=ssrf_mod.PinnedTransport(inner=lambda: transport), follow_redirects=False
+        ),
+    )
 
 
 async def test_success_substitutes_path_param_and_returns_body(monkeypatch):

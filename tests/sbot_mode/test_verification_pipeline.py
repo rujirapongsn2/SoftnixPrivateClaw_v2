@@ -203,14 +203,16 @@ async def test_research_requires_evidence_from_fetched_source(tmp_path, monkeypa
     import json
     from types import SimpleNamespace
     import httpx
-    import sbot.tools.api as api
+    from claw.security import ssrf
     from sbot.core.deep_verification import TaskVerifier
     from sbot.providers.base import ChatResult
 
-    async def fetch(client, method, url, headers, body):
-        return httpx.Response(200, text="<p>Flights are suspended.</p>", request=httpx.Request("GET", url))
+    def fetch(request):
+        return httpx.Response(200, text="<p>Flights are suspended.</p>")
 
-    monkeypatch.setattr(api, "_send_pinned", fetch)
+    monkeypatch.setattr(
+        ssrf, "pinned_client", lambda **kw: httpx.AsyncClient(transport=httpx.MockTransport(fetch))
+    )
 
     class Provider:
         async def chat(self, messages, **kwargs):

@@ -356,4 +356,8 @@ _ALLOWED_STDIO_COMMANDS: frozenset[str] = frozenset(
 
 
 def is_allowed_stdio_command(command: str) -> bool:
-    return command.strip() in _ALLOWED_STDIO_COMMANDS
+    # Same module-root equivalence as oauth_preset_for_connector: a preset row
+    # saved from Bot Mode still names `sbot.integrations`, and re-saving it
+    # must not be refused as a custom command.
+    normalized = command.strip().replace("sbot.integrations.", "claw.integrations.")
+    return normalized in _ALLOWED_STDIO_COMMANDS

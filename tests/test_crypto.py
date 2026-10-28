@@ -1,5 +1,7 @@
 from claw.db.stores import ConnectorStore
-from claw.security.crypto import SecretBox
+import pytest
+
+from claw.security.crypto import SecretBox, UndecryptableSecret
 
 
 def test_encrypt_decrypt_roundtrip():
@@ -54,3 +56,12 @@ async def test_connector_env_encrypted_at_rest(db_factory, stores):
     raw = await raw_store.list_for_user(user.id)
     assert raw[0].env["TOKEN"].startswith("enc::")
     assert "ghp_secret123" not in raw[0].env["TOKEN"]
+
+
+def test_decrypt_strict_raises_instead_of_passing_ciphertext_through():
+    token = SecretBox("key-a").encrypt("secret")
+    assert SecretBox("key-a").decrypt_strict(token) == "secret"
+    with pytest.raises(UndecryptableSecret):
+        SecretBox("key-b").decrypt_strict(token)
+    with pytest.raises(UndecryptableSecret):
+        SecretBox("key-a").decrypt_strict("plain-value")

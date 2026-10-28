@@ -28,7 +28,13 @@ export interface TaskResult {
 
 
 const MODE_LOCAL = /^\/api\/(sessions|bots|bot-groups|missions|memory|schedules|feedback|heartbeat|projects|blueprints|shares|share)(?:[/?]|$)/;
+// sbot mounts its own copy of the per-connector OAuth routes so the callback
+// returns the browser to /chat/sbot instead of the claw UI.
+const CONNECTOR_AUTHORIZATION = /^\/api\/connectors\/[^/]+\/authorization(?:[?]|$)/;
 function endpoint(path: string): string {
+  if (CONNECTOR_AUTHORIZATION.test(path)) {
+    return window.location.pathname.startsWith("/chat/sbot") ? `/modes/sbot${path}` : path;
+  }
   return (MODE_LOCAL.test(path) && (window.location.pathname.startsWith("/chat/sbot") || /^\/api\/projects(?:[/?]|$)/.test(path))) ? `/modes/sbot${path}` : path;
 }
 import type { LucideIcon } from "lucide-react";
@@ -388,6 +394,8 @@ export interface ConnectorInfo {
     provider: string;
     has_refresh_token: boolean;
   } | null;
+  // OAuth for a per-user remote MCP server; null until a flow was started.
+  oauth_grant: ConnectorAuthGrant | null;
   // Only meaningful when kind === "api".
   operations: ApiOperation[];
   // Per-connector connect/tool-call timeout override, in milliseconds. null =
@@ -406,6 +414,48 @@ export interface ConnectorInfo {
     shadowed_tools?: string[];
     error?: string;
   };
+}
+
+export type ConnectorAuthState = "needs_authorization" | "connected" | "reauthorization_required";
+
+export interface ConnectorAuthGrant {
+  state: ConnectorAuthState;
+  issuer: string | null;
+  scope: string | null;
+  can_revoke: boolean;
+  failure:
+    | "invalid_grant"
+    | "invalid_client"
+    | "client_gone"
+    | "rejected_token"
+    | "insufficient_scope"
+    | "undecryptable"
+    | null;
+}
+
+export type ConnectorCallbackStatus =
+  | "connected"
+  | "denied"
+  | "expired"
+  | "browser_mismatch"
+  | "token_failed"
+  | "error";
+
+export type McpOAuthAuthMethod = "client_secret_basic" | "client_secret_post" | "none";
+
+export interface McpOAuthClient {
+  id: string;
+  issuer: string;
+  client_id: string;
+  token_endpoint_auth_method: McpOAuthAuthMethod;
+  has_client_secret: boolean;
+  redirect_uri: string;
+}
+
+export interface McpOAuthClients {
+  // The callback URL every admin-registered client must list at its provider.
+  redirect_uri: string;
+  clients: McpOAuthClient[];
 }
 
 // Redacted view of an admin-global connector — never carries command/url/env/
@@ -1394,7 +1444,7 @@ export const api = {
 
   listConnectors: () => request<ConnectorInfo[]>("/api/connectors"),
   connectorPresets: () => request<ConnectorPreset[]>("/api/connectors/presets"),
-  saveConnector: (c: Omit<ConnectorInfo, "id" | "runtime">) =>
+  saveConnector: (c: Omit<ConnectorInfo, "id" | "runtime" | "oauth_grant">) =>
     request<ConnectorInfo>(`/api/connectors/${encodeURIComponent(c.name)}`, {
       method: "PUT",
       body: JSON.stringify(c),
@@ -1407,6 +1457,20 @@ export const api = {
     request<{ disconnected: boolean }>(`/api/connectors/oauth/${encodeURIComponent(presetKey)}/disconnect`, {
       method: "DELETE",
     }),
+  // OAuth for a per-user remote MCP connector. The browser must navigate to
+  // authorize_url in this same tab: the response also set the cookie that
+  // binds the callback to this browser.
+  startConnectorAuthorization: (connectorId: string) =>
+    request<{ authorize_url: string }>(`/api/connectors/${encodeURIComponent(connectorId)}/authorization`, {
+      method: "POST",
+    }),
+  // revoke=false only forgets the tokens here; revoke=true also asks the
+  // authorization server to invalidate them.
+  disconnectConnectorAuthorization: (connectorId: string, revoke: boolean) =>
+    request<{ disconnected: true; revoked: boolean }>(
+      `/api/connectors/${encodeURIComponent(connectorId)}/authorization?revoke=${revoke}`,
+      { method: "DELETE" },
+    ),
   // Admin-global connectors ("Provided by your organization") — read-only,
   // redacted (no command/url/env), for Settings' transparency panel.
   listGlobalConnectors: () => request<ConnectorGlobalSummary[]>("/api/connectors/global"),
@@ -1643,6 +1707,16 @@ export const api = {
     }),
 
   adminGetOAuthApps: () => request<OAuthAppsInfo>("/api/admin/oauth-apps"),
+  adminListMcpOAuthClients: () => request<McpOAuthClients>("/api/admin/mcp-oauth-clients"),
+  // client_secret "" keeps the stored secret; it is never returned.
+  adminPutMcpOAuthClient: (body: {
+    issuer: string;
+    client_id: string;
+    client_secret: string;
+    token_endpoint_auth_method: McpOAuthAuthMethod;
+  }) => request<McpOAuthClients>("/api/admin/mcp-oauth-clients", { method: "PUT", body: JSON.stringify(body) }),
+  adminDeleteMcpOAuthClient: (id: string) =>
+    request<McpOAuthClients>(`/api/admin/mcp-oauth-clients/${encodeURIComponent(id)}`, { method: "DELETE" }),
   adminSetOAuthApp: (
     provider: "google" | "microsoft",
     body: { client_id: string; client_secret: string; tenant?: string },
@@ -1804,7 +1878,7 @@ export const USER_LLM_API: LlmApi = makeLlmApi("/api/my");
 // just scoped to /api/admin instead of /api/connectors.
 export const ADMIN_CONNECTOR_API = {
   list: () => request<ConnectorInfo[]>("/api/admin/connectors"),
-  save: (c: Omit<ConnectorInfo, "id" | "runtime">) =>
+  save: (c: Omit<ConnectorInfo, "id" | "runtime" | "oauth_grant">) =>
     request<ConnectorInfo>(`/api/admin/connectors/${encodeURIComponent(c.name)}`, {
       method: "PUT",
       body: JSON.stringify(c),

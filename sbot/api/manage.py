@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field, field_validator
 
-from sbot.api import connector_shared as connectors
+from claw.api import connector_shared as connectors
 from sbot.api import llm_shared as llm
 from sbot.api.deps import AppState, current_user, get_state, require_admin
 from sbot.core.memory import MAX_CORE_MEMORY_CHARS, sanitize_core_document

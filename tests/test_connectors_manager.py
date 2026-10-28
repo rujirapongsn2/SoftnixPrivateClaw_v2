@@ -412,7 +412,7 @@ async def test_query_env_preserves_duplicate_keys_and_clears_on_empty_string(db_
         async def __aexit__(self, *a):
             return False
 
-    def fake_streamablehttp_client(url, headers=None):
+    def fake_streamablehttp_client(url, headers=None, auth=None):
         captured["url"] = url
         captured["headers"] = headers
         return FakeReadWriteContext()
@@ -1704,7 +1704,7 @@ async def test_global_http_connector_may_dial_internal_infrastructure(db_factory
 
     dialled: list[str] = []
 
-    def fake_client(url, headers=None):
+    def fake_client(url, headers=None, auth=None):
         dialled.append(url)
         return FakeReadWriteContext()
 

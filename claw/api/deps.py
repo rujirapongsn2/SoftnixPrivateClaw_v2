@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, WebSocket
 
+from claw.auth.mcp_oauth import McpOAuth
 from claw.browser.broker import BrowserBrokerStore
 from claw.config import Settings
 from claw.core.bus import EventBus
@@ -89,6 +90,8 @@ class AppState:
     model_health: ModelHealthService | None = None
     # Workspace storage policy (quota + retention), editable in the Control Plane.
     workspace_policy: WorkspacePolicyStore | None = None
+    # OAuth grants for per-user remote MCP connectors (claw/auth/mcp_oauth.py).
+    mcp_oauth: McpOAuth | None = None
 
 
 def get_state(request: Request) -> AppState:
