@@ -98,7 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     secret_box = SecretBox(settings.secret_key)
     connectors = ConnectorStore(factory, secret_box=secret_box)
     schedules = ScheduleStore(factory)
-    mcp_oauth = McpOAuth(McpAuthStore(factory, secret_box))
+    mcp_oauth = McpOAuth(McpAuthStore(factory, secret_box), public_base_url=settings.public_base_url)
     connectors_mgr = ConnectorManager(
         connectors,
         connect_timeout_seconds=settings.connectors.connect_timeout_seconds,

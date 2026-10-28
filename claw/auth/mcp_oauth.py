@@ -23,35 +23,51 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
+import secrets
 import weakref
-from collections.abc import AsyncGenerator, Callable
-from dataclasses import replace
+from collections.abc import AsyncGenerator, Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+from loguru import logger
+from mcp.client.auth.oauth2 import PKCEParameters
 from mcp.shared.auth import OAuthToken
 from pydantic import ValidationError
 
 from claw.auth.mcp_oauth_discovery import (
+    CALLBACK_PATH,
     MAX_TOKEN_RESPONSE_BYTES,
+    PENDING_TTL,
     REAUTH_MARKER,
     TOKEN_TIMEOUT_S,
     AdminClientRef,
+    AuthView,
     BearerChallenge,
+    CallbackOutcome,
     ClientCredentials,
     ClientRef,
+    ClientStrategy,
+    DiscoveryError,
     FailureReason,
     Grant,
     MetadataDocClientRef,
+    PendingFlow,
     RegisteredClientRef,
+    ReturnTo,
+    auth_view,
     canonical_resource,
+    choose_client_strategy,
+    discover,
     parse_bearer_challenge,
 )
 from claw.db.stores import Lease, McpAuthStore
-from claw.security.ssrf import ResponseTooLarge, pinned_client, read_bounded
+from claw.security.ssrf import ResponseTooLarge, UnsafeUrlError, pinned_client, read_bounded
 
 _LEASE_POLL_SECONDS = 0.1
 _LEASE_POLL_ATTEMPTS = 20
@@ -89,20 +105,234 @@ class McpTokenRefreshFailed(Exception):
     released, so the next request retries."""
 
 
+class McpOAuthStartError(Exception):
+    """A consent flow could not be started. `code` is stable for the UI;
+    the message is safe to show the user."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class Started:
+    authorize_url: str
+    # Set by the route as an HttpOnly cookie; only its hash is stored, and
+    # the callback must present it, so a victim's browser cannot complete a
+    # flow an attacker started.
+    browser_nonce: str
+
+
+@dataclass(frozen=True)
+class Completed:
+    outcome: CallbackOutcome
+    connector_id: str | None
+    owner_id: str | None
+    return_to: ReturnTo
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 class McpOAuth:
     def __init__(
         self,
         store: McpAuthStore,
         *,
+        public_base_url: str,
         http: Callable[..., httpx.AsyncClient] | None = None,
         now: Callable[[], datetime] | None = None,
         lease_poll_seconds: float = _LEASE_POLL_SECONDS,
     ) -> None:
         self._store = store
+        # One fixed redirect URI for every mount (claw and sbot): the flow's
+        # origin travels in the pending row, not the URL.
+        self.redirect_uri = public_base_url.rstrip("/") + CALLBACK_PATH
         self._http = http or (lambda: pinned_client(require_https=True, timeout=TOKEN_TIMEOUT_S))
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._lease_poll_seconds = lease_poll_seconds
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    @property
+    def store(self) -> McpAuthStore:
+        return self._store
+
+    async def begin(self, user_id: str, connector_id: str, *, return_to: ReturnTo) -> Started:
+        """Start a consent flow; the caller sends the browser to
+        `authorize_url`. Raises LookupError unless `connector_id` is an http
+        MCP connector `user_id` owns, McpOAuthStartError otherwise."""
+        url = await self._store.oauth_connector_url(user_id, connector_id)
+        if url is None:
+            raise LookupError("connector not found")
+        if not url.lower().startswith("https://"):
+            raise McpOAuthStartError("https_required", "OAuth is only available for HTTPS MCP servers.")
+        try:
+            async with self._http() as http:
+                found = await discover(http, url)
+        except DiscoveryError as exc:
+            raise McpOAuthStartError("discovery_failed", str(exc)) from exc
+
+        admin_row = await self._store.admin_client_id(found.issuer, self.redirect_uri)
+        strategy = choose_client_strategy(has_admin_client=admin_row is not None)
+        if strategy is None:
+            raise McpOAuthStartError(
+                "no_client",
+                f"No OAuth client is registered for {found.issuer}. Ask your administrator to add one.",
+            )
+        assert strategy is ClientStrategy.ADMIN and admin_row is not None
+        client: ClientRef = AdminClientRef(row_id=admin_row)
+        try:
+            credentials = await self._credentials(client)
+        except McpReauthorizationRequired as exc:
+            raise McpOAuthStartError(
+                "no_client", "The OAuth client for this server was just removed."
+            ) from exc
+
+        pkce = PKCEParameters.generate()
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        pending = PendingFlow(
+            code_verifier=pkce.code_verifier,
+            browser_nonce_hash=_sha256(nonce),
+            issuer=found.issuer,
+            resource=found.resource,
+            token_endpoint=found.token_endpoint,
+            revocation_endpoint=found.revocation_endpoint,
+            client=client,
+            redirect_uri=self.redirect_uri,
+            scope=found.scope,
+            return_to=return_to,
+        )
+        await self._store.put_pending(
+            connector_id, user_id, _sha256(state), self._now() + PENDING_TTL, pending
+        )
+        params = {
+            "response_type": "code",
+            "client_id": credentials.client_id,
+            "redirect_uri": self.redirect_uri,
+            "code_challenge": pkce.code_challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+            "resource": found.resource,
+        }
+        if found.scope:
+            params["scope"] = found.scope
+        authorize_url = httpx.URL(found.authorization_endpoint).copy_merge_params(params)
+        return Started(authorize_url=str(authorize_url), browser_nonce=nonce)
+
+    async def complete(
+        self, *, state: str, code: str | None, error: str | None, browser_nonce: str | None
+    ) -> Completed:
+        """Finish the flow the authorization server redirected back. Never
+        raises: every failure is a CallbackOutcome for the browser."""
+        consumed = await self._store.consume_pending(_sha256(state), self._now()) if state else None
+        if consumed is None:
+            return Completed(CallbackOutcome.EXPIRED, None, None, ReturnTo.CLAW)
+        connector_id, owner_id, pending = consumed
+
+        def done(outcome: CallbackOutcome) -> Completed:
+            return Completed(outcome, connector_id, owner_id, pending.return_to)
+
+        # Checked after consuming, so a wrong cookie burns the flow instead of
+        # leaving it open to further guesses.
+        if not hmac.compare_digest(_sha256(browser_nonce or ""), pending.browser_nonce_hash):
+            return done(CallbackOutcome.BROWSER_MISMATCH)
+        if error == "access_denied":
+            return done(CallbackOutcome.DENIED)
+        if error or not code:
+            return done(CallbackOutcome.ERROR)
+
+        form = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": pending.redirect_uri,
+            "code_verifier": pending.code_verifier,
+            "resource": pending.resource,
+        }
+        try:
+            token = await self._token_request(
+                pending.token_endpoint, form, await self._credentials(pending.client)
+            )
+        except _TokenEndpointRejected as exc:
+            logger.warning("MCP OAuth code exchange rejected for connector {}: {}", connector_id, exc.code)
+            return done(CallbackOutcome.TOKEN_FAILED)
+        except (McpTokenRefreshFailed, McpReauthorizationRequired, httpx.HTTPError, UnsafeUrlError) as exc:
+            logger.warning(
+                "MCP OAuth code exchange failed for connector {}: {}", connector_id, type(exc).__name__
+            )
+            return done(CallbackOutcome.TOKEN_FAILED)
+
+        now = self._now()
+        grant = Grant(
+            access_token=token.access_token,
+            refresh_token=token.refresh_token,
+            expires_at=now + timedelta(seconds=token.expires_in) if token.expires_in is not None else None,
+            scope=token.scope or pending.scope,
+            issuer=pending.issuer,
+            resource=pending.resource,
+            token_endpoint=pending.token_endpoint,
+            revocation_endpoint=pending.revocation_endpoint,
+            client=pending.client,
+        )
+        try:
+            await self._store.put_grant(connector_id, owner_id, grant)
+        except LookupError:
+            # The connector was deleted or changed kind while consent was open.
+            return done(CallbackOutcome.ERROR)
+        return done(CallbackOutcome.CONNECTED)
+
+    async def disconnect(self, user_id: str, connector_id: str, *, revoke: bool) -> bool:
+        """Forget the grant, then, when asked, revoke it at the authorization
+        server (RFC 7009). The local delete comes first and is unconditional,
+        so a failing server can never keep alive a grant the user dropped.
+        Returns whether the server accepted every revocation. Raises
+        LookupError unless `connector_id` is an http MCP connector `user_id`
+        owns; idempotent otherwise."""
+        if await self._store.oauth_connector_url(user_id, connector_id) is None:
+            raise LookupError("connector not found")
+        grant = await self._store.take_grant(user_id, connector_id)
+        if not revoke or grant is None or grant.revocation_endpoint is None:
+            return False
+        try:
+            credentials = await self._credentials(grant.client)
+        except McpReauthorizationRequired:
+            return False
+        tokens = [("refresh_token", grant.refresh_token), ("access_token", grant.access_token)]
+        revoked = True
+        for hint, value in tokens:
+            if value is None:
+                continue
+            form = {"token": value, "token_type_hint": hint}
+            data, headers = _client_auth(form, credentials)
+            try:
+                async with self._http() as http:
+                    async with http.stream(
+                        "POST", grant.revocation_endpoint, data=data, headers=headers
+                    ) as response:
+                        await read_bounded(response, MAX_TOKEN_RESPONSE_BYTES)
+                ok = response.status_code == 200
+            except (httpx.HTTPError, UnsafeUrlError, ResponseTooLarge) as exc:
+                logger.warning(
+                    "MCP OAuth revocation failed for connector {}: {}", connector_id, type(exc).__name__
+                )
+                ok = False
+            revoked = revoked and ok
+        return revoked
+
+    async def describe(self, owner_id: str, urls: Mapping[str, str]) -> dict[str, AuthView]:
+        """AuthViews for connectors `owner_id` owns, keyed by id, from one
+        query; `urls` maps each connector id to its current URL. A grant bound
+        to a URL the connector no longer points at is reported as absent,
+        matching access_token, which will not send it."""
+        loaded = await self._store.load_many(owner_id, list(urls))
+        views = {}
+        for cid, row in loaded.items():
+            grant = row.grant
+            if grant is not None and grant.resource != canonical_resource(urls[cid]):
+                grant = None
+            views[cid] = auth_view(grant, row.failure)
+        return views
 
     def http_auth(self, connector: Any) -> McpBearerAuth:
         """The auth for one connection to a per-user http MCP connector.
@@ -211,15 +441,7 @@ class McpOAuth:
     async def _token_request(
         self, endpoint: str, form: dict[str, str], credentials: ClientCredentials
     ) -> OAuthToken:
-        headers = {"Accept": "application/json"}
-        data = dict(form)
-        if credentials.auth_method == "client_secret_basic" and credentials.client_secret is not None:
-            pair = f"{_form_quote(credentials.client_id)}:{_form_quote(credentials.client_secret)}"
-            headers["Authorization"] = "Basic " + base64.b64encode(pair.encode()).decode("ascii")
-        else:
-            data["client_id"] = credentials.client_id
-            if credentials.auth_method == "client_secret_post" and credentials.client_secret is not None:
-                data["client_secret"] = credentials.client_secret
+        data, headers = _client_auth(form, credentials)
         async with self._http() as http:
             try:
                 async with http.stream("POST", endpoint, data=data, headers=headers) as response:
@@ -234,6 +456,23 @@ class McpOAuth:
             return OAuthToken.model_validate_json(body)
         except ValidationError as exc:
             raise McpTokenRefreshFailed("token endpoint returned an unusable token response") from exc
+
+
+def _client_auth(
+    form: dict[str, str], credentials: ClientCredentials
+) -> tuple[dict[str, str], dict[str, str]]:
+    """The form and headers for a token or revocation request, with client
+    authentication applied per the client's token_endpoint_auth_method."""
+    headers = {"Accept": "application/json"}
+    data = dict(form)
+    if credentials.auth_method == "client_secret_basic" and credentials.client_secret is not None:
+        pair = f"{_form_quote(credentials.client_id)}:{_form_quote(credentials.client_secret)}"
+        headers["Authorization"] = "Basic " + base64.b64encode(pair.encode()).decode("ascii")
+    else:
+        data["client_id"] = credentials.client_id
+        if credentials.auth_method == "client_secret_post" and credentials.client_secret is not None:
+            data["client_secret"] = credentials.client_secret
+    return data, headers
 
 
 class _TokenEndpointRejected(Exception):

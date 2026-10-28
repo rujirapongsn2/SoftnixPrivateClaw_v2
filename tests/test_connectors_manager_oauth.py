@@ -88,7 +88,7 @@ async def _world(db_factory, monkeypatch, server: ChallengingServer, *, owner: b
         user.id if owner else None, "remote", transport="http", url=URL, enabled=True
     )
     auth_store = McpAuthStore(db_factory, box)
-    oauth = McpOAuth(auth_store, http=lambda: httpx.AsyncClient(), now=lambda: NOW)
+    oauth = McpOAuth(auth_store, public_base_url="https://claw.example.com", http=lambda: httpx.AsyncClient(), now=lambda: NOW)
     mgr = ConnectorManager(connectors, connect_timeout_seconds=5, mcp_oauth=oauth)
     fake = server.streamablehttp_client()
     monkeypatch.setattr("mcp.client.streamable_http.streamablehttp_client", fake)

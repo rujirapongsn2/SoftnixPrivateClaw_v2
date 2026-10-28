@@ -89,7 +89,7 @@ async def world(db_factory):
     store = McpAuthStore(db_factory, SecretBox("test-secret"))
     endpoint = TokenEndpoint()
     clock = {"now": NOW}
-    oauth = McpOAuth(store, http=endpoint.client, now=lambda: clock["now"], lease_poll_seconds=0.01)
+    oauth = McpOAuth(store, public_base_url="https://claw.example.com", http=endpoint.client, now=lambda: clock["now"], lease_poll_seconds=0.01)
     return {
         "alice": alice.id,
         "connector": connector,
