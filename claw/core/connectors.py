@@ -1244,18 +1244,33 @@ class ConnectorManager:
 
     async def _connect_and_list(self, stack: AsyncExitStack, connector) -> tuple[Any, Any]:
         auth = self._bearer_auth(connector)
-        try:
+
+        async def connect_and_list() -> tuple[Any, Any]:
             session = await self._connect(stack, connector, auth)
-            listed = await self._list_catalog(session)
-        except BaseException as exc:
-            # The SDK surfaces a 401 during the handshake as whatever its task
-            # group happened to die of (an HTTPStatusError, a cancel-scope
-            # CancelledError, a closed stream), so the auth object, which saw
-            # the challenge itself, is the authority on what happened.
-            if auth is not None and auth.outcome is not None:
+            return session, await self._list_catalog(session)
+
+        if auth is None:
+            return await connect_and_list()
+        # The SDK surfaces a 401 during the handshake as whatever its task
+        # group happened to die of (an HTTPStatusError, a cancel-scope
+        # CancelledError, a closed stream), so the auth object, which saw the
+        # challenge itself, is the authority on what happened. The handshake
+        # runs in its own task so the SDK's cancellation stays inside it: a
+        # cancel request on THIS task is a real one (the connect timeout,
+        # shutdown) and must propagate rather than become an auth status.
+        task = asyncio.current_task()
+        cancels_before = task.cancelling() if task is not None else 0
+        attempt = asyncio.ensure_future(connect_and_list())
+        try:
+            return await attempt
+        except (Exception, asyncio.CancelledError) as exc:
+            if task is not None and task.cancelling() > cancels_before:
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise asyncio.CancelledError() from exc
+            if auth.outcome is not None:
                 raise auth.outcome from exc
             raise
-        return session, listed
 
     def _bearer_auth(self, connector):
         """The OAuth auth for a per-user http MCP connector, or None. Never for

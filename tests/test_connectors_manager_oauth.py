@@ -3,14 +3,20 @@ challenge during the handshake becomes a connector status rather than an
 error, that status never enters the error backoff, admin-global connectors
 never carry a token, and OAuth material never survives redaction."""
 
-from contextlib import asynccontextmanager
+import asyncio
+import functools
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
-from claw.auth.mcp_oauth import McpOAuth
-from claw.auth.mcp_oauth_discovery import FailureReason, Grant, MetadataDocClientRef
+# Bound at import, before any test swaps the module attribute for a fake.
+from mcp.client.streamable_http import streamablehttp_client
+
+from claw.auth.mcp_oauth import McpAuthorizationNeeded, McpOAuth
+from claw.auth.mcp_oauth_discovery import BearerChallenge, FailureReason, Grant, MetadataDocClientRef
 from claw.core.connectors import ConnectorManager, _redact_secrets, _requires_oauth_reauthorization
 from claw.db.stores import ConnectorStore, McpAuthStore, UserStore
 from claw.security.crypto import SecretBox
@@ -151,6 +157,61 @@ async def test_an_admin_global_connector_never_gets_oauth(db_factory, monkeypatc
     status = (await w.mgr.status_global())["remote"]
     assert status["status"] == "error"
     assert server.seen == [None]
+
+
+def _real_sdk_client(monkeypatch, server: ChallengingServer) -> None:
+    """The SDK's own streamable HTTP client over a MockTransport, so a 401
+    surfaces however the SDK really surfaces it."""
+
+    def factory(headers=None, timeout=None, auth=None):
+        return httpx.AsyncClient(transport=httpx.MockTransport(server.handler), headers=headers, auth=auth)
+
+    monkeypatch.setattr(
+        "mcp.client.streamable_http.streamablehttp_client",
+        functools.partial(streamablehttp_client, httpx_client_factory=factory),
+    )
+
+
+async def test_the_sdks_own_401_failure_maps_to_the_auth_outcome(db_factory, monkeypatch):
+    server = ChallengingServer()
+    w = await _world(db_factory, monkeypatch, server)
+    _real_sdk_client(monkeypatch, server)
+
+    await w.mgr.sync_tools(w.user.id, ToolRegistry())
+
+    assert (await w.mgr.status(w.user.id))["remote"]["status"] == "needs_authorization"
+    assert server.seen == [None]
+    await w.mgr.disconnect_user(w.user.id)
+
+
+async def _hangs_after_a_challenge(self, stack, connector, auth=None):
+    auth.outcome = McpAuthorizationNeeded(BearerChallenge(resource_metadata=None, scope=None, error=None))
+    await asyncio.Event().wait()
+
+
+async def test_an_external_cancel_after_a_challenge_still_cancels(db_factory, monkeypatch):
+    w = await _world(db_factory, monkeypatch, ChallengingServer())
+    monkeypatch.setattr(ConnectorManager, "_connect", _hangs_after_a_challenge)
+
+    async with AsyncExitStack() as stack:
+        task = asyncio.create_task(w.mgr._connect_and_list(stack, w.connector))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_a_connect_timeout_after_a_challenge_is_reported_as_a_timeout(db_factory, monkeypatch):
+    w = await _world(db_factory, monkeypatch, ChallengingServer())
+    w.mgr.connect_timeout_seconds = 0.05
+    monkeypatch.setattr(ConnectorManager, "_connect", _hangs_after_a_challenge)
+
+    async with AsyncExitStack() as stack:
+        _, _, _, status = await w.mgr._connect_one(stack, w.connector)
+
+    assert status["status"] == "error"
+    assert "timed out" in status["error"]
+    assert asyncio.current_task().cancelling() == 0
 
 
 def test_reauth_marker_is_recognised_by_the_tool_call_path():
