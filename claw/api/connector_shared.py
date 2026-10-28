@@ -441,6 +441,9 @@ async def delete_connector(state: AppState, connector_id: str, owner_id: str | N
     if name is None:
         raise HTTPException(status_code=404, detail="connector not found")
     if owner_id is not None:
+        if state.mcp_oauth is not None:
+            # The auth row went with the connector (ON DELETE CASCADE).
+            state.mcp_oauth.forget(connector_id)
         await state.connectors_mgr.invalidate(owner_id)
     else:
         # Tear down this one connector's live session right away rather than

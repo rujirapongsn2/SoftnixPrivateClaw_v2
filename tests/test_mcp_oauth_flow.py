@@ -451,6 +451,30 @@ async def test_a_failing_revocation_still_forgets_locally(env):
     assert (await env["store"].load(env["connector"].id)) is None
 
 
+async def test_connect_and_disconnect_take_effect_on_the_next_request(env):
+    oauth = env["app"].state.claw.mcp_oauth
+    assert await oauth.access_token(env["connector"]) is None
+
+    await _authorized(env)
+    assert await oauth.access_token(env["connector"]) == "AT-SECRET"
+
+    await env["c"].delete(f"/api/connectors/{env['connector'].id}/authorization", headers=ALICE)
+    assert await oauth.access_token(env["connector"]) is None
+
+
+async def test_deleting_the_connector_drops_its_cached_grant(env):
+    oauth = env["app"].state.claw.mcp_oauth
+    await _authorized(env)
+    assert await oauth.access_token(env["connector"]) == "AT-SECRET"
+
+    gone = await env["c"].delete(f"/api/connectors/{env['connector'].id}", headers=ALICE)
+    # The test database does not enforce foreign keys, so do the cascade.
+    await env["store"].take_grant(env["alice"].id, env["connector"].id)
+
+    assert gone.status_code == 200, gone.text
+    assert await oauth.access_token(env["connector"]) is None
+
+
 async def test_disconnect_without_revoke_never_calls_the_server(env):
     await _authorized(env)
     gone = await env["c"].delete(f"/api/connectors/{env['connector'].id}/authorization", headers=ALICE)

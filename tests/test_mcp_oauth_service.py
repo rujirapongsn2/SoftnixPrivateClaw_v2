@@ -394,6 +394,75 @@ async def test_a_non_bearer_token_response_is_a_transient_failure(world):
     assert loaded.grant.access_token == "at-1" and loaded.failure is None
 
 
+def _count_loads(world, monkeypatch) -> list[str]:
+    calls: list[str] = []
+    load = world["store"].load
+
+    async def counting(connector_id):
+        calls.append(connector_id)
+        return await load(connector_id)
+
+    monkeypatch.setattr(world["store"], "load", counting)
+    return calls
+
+
+async def test_requests_on_a_fresh_grant_share_one_store_read(world, monkeypatch):
+    await _seed(world)
+    loads = _count_loads(world, monkeypatch)
+
+    tokens = [await world["oauth"].access_token(world["connector"]) for _ in range(20)]
+
+    assert tokens == ["at-1"] * 20
+    assert len(loads) == 1
+
+
+async def test_a_connector_without_a_grant_is_read_once(world, monkeypatch):
+    loads = _count_loads(world, monkeypatch)
+
+    for _ in range(20):
+        assert await world["oauth"].access_token(world["connector"]) is None
+
+    assert len(loads) == 1
+
+
+async def test_a_refresh_replaces_the_cached_token(world):
+    await _seed(world)
+    oauth = world["oauth"]
+    assert await oauth.access_token(world["connector"]) == "at-1"
+
+    assert await oauth.access_token(world["connector"], stale="at-1") == "at-2"
+
+    assert await oauth.access_token(world["connector"]) == "at-2"
+
+
+async def test_an_expired_cached_token_is_still_refreshed(world):
+    await _seed(world)
+    oauth = world["oauth"]
+    assert await oauth.access_token(world["connector"]) == "at-1"
+
+    world["clock"]["now"] = NOW + timedelta(hours=2)
+
+    assert await oauth.access_token(world["connector"]) == "at-2"
+    assert len(world["endpoint"].requests) == 1
+
+
+async def test_the_cache_rereads_after_its_ttl_so_other_processes_converge(world, monkeypatch):
+    await _seed(world)
+    oauth = world["oauth"]
+    ticks = {"now": 1000.0}
+    monkeypatch.setattr(oauth, "_monotonic", lambda: ticks["now"])
+    assert await oauth.access_token(world["connector"]) == "at-1"
+    # Another process refreshes; this one has not heard about it.
+    loaded = await world["store"].load(world["connector"].id)
+    lease = await world["store"].try_lease(world["connector"].id, loaded.version, NOW)
+    await world["store"].commit_under_lease(lease, _grant(access_token="theirs"))
+
+    assert await oauth.access_token(world["connector"]) == "at-1"
+    ticks["now"] += 31
+
+    assert await oauth.access_token(world["connector"]) == "theirs"
+
+
 def _step_up_server(status: int, challenge: str):
     seen: list[str | None] = []
 

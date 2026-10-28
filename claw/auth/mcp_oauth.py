@@ -5,7 +5,9 @@ the httpx.Auth that puts them on the wire.
 behind a few methods; nothing outside this module and McpAuthStore ever holds
 a token. `McpBearerAuth` is handed to the MCP streamable HTTP client as
 `auth=` and asks the service for a token on every request, so a refresh done
-by another session or process is picked up without a reconnect.
+by another session or process is picked up without a reconnect: at once in
+this process, and within the grant cache's TTL (or on the next 401) in
+another.
 
 Refresh race: two refreshers presenting the same rotating refresh token can
 make an authorization server revoke the whole token family, so refreshes are
@@ -27,6 +29,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import time
 import weakref
 from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -70,11 +73,15 @@ from claw.auth.mcp_oauth_discovery import (
     parse_bearer_challenge,
     registration_auth_method,
 )
-from claw.db.stores import Lease, McpAuthStore
+from claw.db.stores import Lease, LoadedAuth, McpAuthStore
 from claw.security.ssrf import ResponseTooLarge, UnsafeUrlError, pinned_client, read_bounded
 
 _LEASE_POLL_SECONDS = 0.1
 _LEASE_POLL_ATTEMPTS = 20
+# How long this process trusts its copy of a grant row. Every write here
+# invalidates it at once; the TTL only bounds how long another process's
+# refresh or disconnect can go unseen.
+_GRANT_CACHE_TTL_S = 30.0
 CLIENT_NAME = "Softnix PrivateClaw"
 _PERMANENT_TOKEN_ERRORS = {
     "invalid_grant": FailureReason.INVALID_GRANT,
@@ -161,6 +168,11 @@ class McpOAuth:
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._lease_poll_seconds = lease_poll_seconds
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        # connector id -> (monotonic deadline, row); a None row is cached too,
+        # since most http connectors never have one and ask on every request.
+        self._grants: dict[str, tuple[float, LoadedAuth | None]] = {}
+        self._grants_generation = 0
+        self._monotonic = time.monotonic
 
     @property
     def store(self) -> McpAuthStore:
@@ -390,6 +402,8 @@ class McpOAuth:
         except LookupError:
             # The connector was deleted or changed kind while consent was open.
             return done(CallbackOutcome.ERROR)
+        finally:
+            self.forget(connector_id)
         return done(CallbackOutcome.CONNECTED)
 
     async def disconnect(self, user_id: str, connector_id: str, *, revoke: bool) -> bool:
@@ -402,6 +416,7 @@ class McpOAuth:
         if await self._store.oauth_connector_url(user_id, connector_id) is None:
             raise LookupError("connector not found")
         grant = await self._store.take_grant(user_id, connector_id)
+        self.forget(connector_id)
         if not revoke or grant is None or grant.revocation_endpoint is None:
             return False
         try:
@@ -460,7 +475,7 @@ class McpOAuth:
         just rejected; it is never returned again, so a 401 on a token we
         believed fresh forces a refresh (or adopts a peer's newer token).
         Raises McpReauthorizationRequired when the grant is failed."""
-        loaded = await self._store.load(connector.id)
+        loaded = await (self._store.load(connector.id) if stale is not None else self._cached(connector.id))
         if loaded is None:
             return None
         if loaded.failure is not None:
@@ -474,7 +489,29 @@ class McpOAuth:
             return None
         if grant.access_token != stale and grant.is_fresh(self._now()):
             return grant.access_token
-        return await self._refresh(connector.id, stale)
+        try:
+            return await self._refresh(connector.id, stale)
+        finally:
+            # Rotated, failed, or adopted from a peer: either way the cached
+            # row is no longer the one to trust.
+            self.forget(connector.id)
+
+    async def _cached(self, connector_id: str) -> LoadedAuth | None:
+        hit = self._grants.get(connector_id)
+        if hit is not None and hit[0] > self._monotonic():
+            return hit[1]
+        generation = self._grants_generation
+        loaded = await self._store.load(connector_id)
+        # A write that landed while this read was in flight wins over it.
+        if generation == self._grants_generation:
+            self._grants[connector_id] = (self._monotonic() + _GRANT_CACHE_TTL_S, loaded)
+        return loaded
+
+    def forget(self, connector_id: str) -> None:
+        """Drop this process's copy of the connector's grant row; called
+        after every write to it, including the connector's deletion."""
+        self._grants_generation += 1
+        self._grants.pop(connector_id, None)
 
     async def mark_rejected(
         self, connector: Any, reason: FailureReason, *, token: str, scope: str | None = None
@@ -489,6 +526,7 @@ class McpOAuth:
             return
         grant = replace(loaded.grant, required_scope=scope) if scope else None
         await self._store.mark_failed(connector.id, loaded.version, reason, grant=grant)
+        self.forget(connector.id)
 
     async def _refresh(self, connector_id: str, stale: str | None) -> str:
         lock = self._locks.get(connector_id)
