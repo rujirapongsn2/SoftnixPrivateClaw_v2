@@ -257,7 +257,9 @@ function useAsyncError() {
       // .message, not String(e): a thrown Error renders as "Error: <text>",
       // which reads as a crash when the text is a validation message written
       // for the user.
-      setError(e instanceof Error ? e.message : String(e));
+      const body = typeof e === "object" && e !== null && "body" in e ? e.body : undefined;
+      const detail = typeof body === "object" && body !== null && "detail" in body ? body.detail : undefined;
+      setError(typeof detail === "string" ? detail : e instanceof Error ? e.message : String(e));
     }
   }, []);
   return { error, guard };
@@ -1968,6 +1970,7 @@ function ModelRow({
   const [locality, setLocality] = useState<ModelLocality>(model.data_locality);
   const [description, setDescription] = useState(model.description);
   const [kind, setKind] = useState<ModelKind>(model.kind);
+  const [saveDisabled, setSaveDisabled] = useState(!model.enabled);
   const [contextWindow, setContextWindow] = useState(String(model.context_window ?? ""));
   const toast = useToast();
 
@@ -2020,6 +2023,12 @@ function ModelRow({
             </Text>
             <KindSegmented value={kind} onChange={setKind} />
           </div>
+          {kind === "image" && (
+            <>
+              <Text size="2xs" color="secondary">{t("admin.providers.kindImageHint")}</Text>
+              <Switch value={saveDisabled} changeAction={setSaveDisabled} label={t("admin.providers.saveDisabledImage")} />
+            </>
+          )}
           {kind === "vision" && (
             <Text size="2xs" color="secondary">
               {t("admin.providers.kindVisionHint")}
@@ -2065,6 +2074,7 @@ function ModelRow({
                     data_locality: locality,
                     description: description.trim(),
                     kind,
+                    ...(kind === "image" ? { enabled: !saveDisabled } : {}),
                     // 0 clears the override; the backend stores it as NULL. Only
                     // send it while the field is on screen — a non-chat kind hides
                     // the input, and sending 0 there would wipe an override the
@@ -2089,6 +2099,7 @@ function ModelRow({
                 setLocality(model.data_locality);
                 setDescription(model.description);
                 setKind(model.kind);
+                setSaveDisabled(!model.enabled);
                 setContextWindow(String(model.context_window ?? ""));
                 setEditing(false);
               }}
@@ -2174,7 +2185,18 @@ function ModelRow({
           icon={<Icon icon={Pencil} size="sm" />}
           size="sm"
           variant="ghost"
-          clickAction={() => setEditing(true)}
+          clickAction={() => {
+            setModelId(prefixApplies ? stripKnownPrefix(modelPrefix, model.model_id) : model.model_id);
+            setLabel(model.label);
+            setCost(model.cost);
+            setPurposes(model.purposes);
+            setLocality(model.data_locality);
+            setDescription(model.description);
+            setKind(model.kind);
+            setSaveDisabled(!model.enabled);
+            setContextWindow(String(model.context_window ?? ""));
+            setEditing(true);
+          }}
         />
         <IconButton
           label={t("admin.providers.removeModelName", { name: model.label || model.model_id })}
@@ -2215,13 +2237,14 @@ function AddModelForm({
   const [locality, setLocality] = useState<ModelLocality>("external");
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState<ModelKind>("chat");
+  const [saveDisabled, setSaveDisabled] = useState(false);
   const [contextWindow, setContextWindow] = useState("");
   const toast = useToast();
 
   const hasPrefix = Boolean(modelPrefix);
 
   return (
-    <Card padding={2} variant="muted">
+    <Card padding={2} variant="muted" className="claw-model-add">
       <div className="claw-panel">
         <div className="claw-info-box">
           <Icon icon={Plus} size="sm" color="secondary" />
@@ -2267,7 +2290,13 @@ function AddModelForm({
           </Text>
           <KindSegmented value={kind} onChange={setKind} />
         </div>
-        {kind === "vision" && (
+        {kind === "image" && (
+            <>
+              <Text size="2xs" color="secondary">{t("admin.providers.kindImageHint")}</Text>
+              <Switch value={saveDisabled} changeAction={setSaveDisabled} label={t("admin.providers.saveDisabledImage")} />
+            </>
+          )}
+          {kind === "vision" && (
           <Text size="2xs" color="secondary">
             {t("admin.providers.kindVisionHint")}
           </Text>
@@ -2312,6 +2341,7 @@ function AddModelForm({
                   data_locality: locality,
                   description: description.trim(),
                   kind,
+                  ...(kind === "image" ? { enabled: !saveDisabled } : {}),
                   context_window: kind === "chat" ? Number(contextWindow || 0) : 0,
                 });
                 toast({ body: t("admin.providers.modelAddedToast"), type: "info", autoHideDuration: 2500 });

@@ -3,6 +3,8 @@ per-minute quotas, admin CRUD, and the runtime messages/day gate."""
 
 from types import SimpleNamespace
 
+import pytest
+
 from claw.core.plans import builtin_plan_seeds, cost_allowed
 from claw.db.models import UserGroup
 from claw.db.stores import LLMConfigStore, PolicyPlanStore, UsageStore, UserStore, GroupStore
@@ -10,6 +12,20 @@ from claw.providers.base import ProviderError
 from tests.conftest import FakeProvider, text_turn
 from tests.conftest_app import build_api_app, client
 from tests.test_runtime import make_runtime
+
+
+@pytest.fixture
+def image_catalog(monkeypatch):
+    async def catalog():
+        return {
+            model: {
+                "architecture": {"input_modalities": ["text"], "output_modalities": ["text", "image"]},
+                "supported_parameters": ["modalities"],
+            }
+            for model in ("vendor/pixel", "vendor/mypixel")
+        }
+
+    monkeypatch.setattr("claw.providers.image_capability.openrouter_catalog", catalog)
 
 
 # ---- pure predicate ----
@@ -312,7 +328,7 @@ async def test_models_endpoint_shows_env_default_with_credentials(db_factory):
         assert r["default"] == "anthropic/claude-sonnet-4-5"
 
 
-async def test_image_plan_gates(db_factory):
+async def test_image_plan_gates(db_factory, image_catalog):
     app = build_api_app(db_factory)
     async with client(app) as c:
         admin_token, _ = await _register(c, "admin@x.io")
@@ -341,7 +357,7 @@ async def test_image_plan_gates(db_factory):
         assert r.status_code == 403
 
 
-async def test_image_plan_gate_exempts_byok(db_factory):
+async def test_image_plan_gate_exempts_byok(db_factory, image_catalog):
     # A plan that forbids image generation must not block the user's own
     # (BYOK) image model — only admin-global models are gated.
     app = build_api_app(db_factory)
@@ -389,7 +405,7 @@ async def test_image_plan_gate_exempts_byok(db_factory):
         assert r2.status_code == 403
 
 
-async def test_images_per_day_quota_exempts_byok(db_factory):
+async def test_images_per_day_quota_exempts_byok(db_factory, image_catalog):
     # A low images_per_day cap on the plan must not throttle the user's own
     # BYOK image model — only admin-global usage counts against it.
     app = build_api_app(db_factory)
@@ -425,7 +441,7 @@ async def test_images_per_day_quota_exempts_byok(db_factory):
         assert r.status_code == 200  # BYOK generation goes through despite the plan cap already used
 
 
-async def test_images_per_day_quota_atomic_no_overshoot(db_factory):
+async def test_images_per_day_quota_atomic_no_overshoot(db_factory, image_catalog):
     # Reserve-then-verify must not overshoot even if the counter is already AT
     # the limit when the request arrives (simulates a concurrent winner).
     app = build_api_app(db_factory)
@@ -462,7 +478,7 @@ async def test_images_per_day_quota_atomic_no_overshoot(db_factory):
         assert (await app.state.claw.usage.usage_today(user["id"]))["images"] == 1
 
 
-async def test_images_per_day_quota(db_factory):
+async def test_images_per_day_quota(db_factory, image_catalog):
     app = build_api_app(db_factory)
     async with client(app) as c:
         admin_token, _ = await _register(c, "admin@x.io")

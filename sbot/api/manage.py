@@ -1258,8 +1258,9 @@ async def my_delete_model(
 # ---------------------------------------------------------------- feedback (self-learning signal)
 
 class FeedbackBody(BaseModel):
-    signal: str = Field(pattern=r"^(up|down)$")
-    session_id: str | None = None
+    signal: str = Field(pattern=r"^(up|down|none)$")  # "none" clears the rating
+    session_id: str = Field(min_length=1, max_length=32)
+    message_key: str = Field(pattern=r"^[A-Za-z0-9:_-]{1,64}$")
     note: str = Field(default="", max_length=2000)
     message_preview: str = Field(default="", max_length=500)
 
@@ -1268,14 +1269,25 @@ class FeedbackBody(BaseModel):
 async def submit_feedback(
     body: FeedbackBody, user: User = Depends(current_user), state: AppState = Depends(get_state)
 ) -> dict:
-    if body.session_id:
-        session = await state.sessions.get(body.session_id)
-        if session is None or session.user_id != user.id:
-            raise HTTPException(status_code=404, detail="session not found")
+    session = await state.sessions.get(body.session_id)
+    if session is None or session.user_id != user.id:
+        raise HTTPException(status_code=404, detail="session not found")
     await state.feedback.record(
-        user.id, body.session_id, body.signal, body.note, body.message_preview
+        user.id, body.session_id, body.signal, body.note, body.message_preview, body.message_key
     )
     return {"recorded": True}
+
+
+@router.get("/sessions/{session_id}/feedback")
+async def session_feedback(
+    session_id: str, user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> dict[str, str]:
+    """Ratings the user gave in this session, {message_key: "up"|"down"}, so the
+    thumbs survive a reload."""
+    session = await state.sessions.get(session_id)
+    if session is None or session.user_id != user.id:
+        raise HTTPException(status_code=404, detail="session not found")
+    return await state.feedback.for_session(user.id, session_id)
 
 
 @router.get("/feedback/stats")

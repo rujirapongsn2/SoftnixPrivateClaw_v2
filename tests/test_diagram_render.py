@@ -1,5 +1,5 @@
 import pytest
-from claw.skills.render import render_diagram
+from claw.skills.render import RenderRejected, render_diagram
 
 
 async def test_render_static_svg_and_boundaries(tmp_path):
@@ -46,7 +46,7 @@ async def test_render_rate_limits_new_browser_jobs(tmp_path, monkeypatch):
         '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="300"/>'
     )
     await render_diagram(tmp_path, "diagram.svg", 640, 480, user_id="limited-user")
-    with pytest.raises(PermissionError, match="rate limit"):
+    with pytest.raises(RenderRejected, match="rate limit"):
         await render_diagram(tmp_path, "diagram.svg", 641, 480, user_id="limited-user")
 
 

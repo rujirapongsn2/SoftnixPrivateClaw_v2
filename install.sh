@@ -14,6 +14,7 @@
 #     ./install.sh --macos-daemon  # macOS: boot-time LaunchDaemon (headless server)
 #                                  # instead of the default per-login LaunchAgent
 #     ./install.sh --web-only      # just rebuild the web frontend (used by `claw update`)
+#     ./install.sh --browsers-only # just install the matching Playwright Chromium (used by `claw update`)
 #
 # Config via env (all optional): CLAW_LLM__API_KEY, CLAW_LLM__MODEL, CLAW_PORT,
 #     CLAW_PG_PORT, CLAW_DATA_DIR.
@@ -39,6 +40,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSUME_YES=0
 INSTALL_SERVICE=1
 WEB_ONLY=0
+BROWSERS_ONLY=0
 MACOS_DAEMON=0
 APP_PORT="${CLAW_PORT:-8700}"
 PG_PORT="${CLAW_PG_PORT:-5442}"
@@ -54,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --no-service) INSTALL_SERVICE=0 ;;
     --macos-daemon) MACOS_DAEMON=1 ;;
     --web-only) WEB_ONLY=1 ;;
+    --browsers-only) BROWSERS_ONLY=1 ;;
     --port) APP_PORT="$2"; shift ;;
     --pg-port) PG_PORT="$2"; shift ;;
     --data-dir) DATA_DIR="$2"; shift ;;
@@ -115,8 +118,42 @@ build_web() {
   ok "web/dist ready"
 }
 
+# Headless Chromium for render_diagram PNG export and browser automation.
+# The revision must match the Playwright package uv just installed (a stale
+# cache makes every launch fail), and it must land in the browser cache of the
+# user the service runs as (${SUDO_USER:-$USER}), not root's. Idempotent: a
+# matching revision already in the cache is a no-op.
+install_browsers() {
+  step "Installing Playwright Chromium (matches the installed Playwright)"
+  local svc_user="${SUDO_USER:-$USER}" uv_bin
+  uv_bin="$(command -v uv)" || { warn "uv not found — skipped Chromium install"; return 0; }
+  local pw=("$uv_bin" run --no-sync python -m playwright)
+  if [[ $OS == "linux" && $BROWSERS_ONLY -eq 0 ]]; then
+    # System libraries need root (playwright sudo's itself) and rarely change,
+    # so only a full install does this — `claw update` must not prompt.
+    "${pw[@]}" install-deps chromium || warn "Chromium system deps failed — run: uv run playwright install-deps chromium"
+  fi
+  if [[ $EUID -eq 0 && "$svc_user" != "root" ]]; then
+    # uv and the .venv's Python live under /root here, which the service user
+    # can't execute — so install as root into the service user's default
+    # Playwright cache, then hand that cache over.
+    local svc_home cache
+    svc_home="$(eval echo "~${svc_user}")"
+    if [[ $OS == "macos" ]]; then cache="$svc_home/Library/Caches/ms-playwright"
+    else cache="$svc_home/.cache/ms-playwright"; fi
+    sudo -u "$svc_user" mkdir -p "$cache" \
+      && PLAYWRIGHT_BROWSERS_PATH="$cache" "${pw[@]}" install chromium \
+      && chown -R "$svc_user:$(id -gn "$svc_user")" "$cache"
+  else
+    "${pw[@]}" install chromium
+  fi && ok "Chromium ready for $svc_user" \
+    || warn "Chromium install failed — diagram PNG export is unavailable until: uv run playwright install chromium"
+}
+
 # `claw update --web-only` shortcut: rebuild and exit.
 if [[ $WEB_ONLY -eq 1 ]]; then build_web; exit 0; fi
+# `claw update` uses this after uv sync may have moved Playwright.
+if [[ $BROWSERS_ONLY -eq 1 ]]; then install_browsers; exit 0; fi
 
 # ═══════════════════════════ preflight ═══════════════════════════════
 printf "\n${B}Softnix PrivateClaw installer${R}  ${DIM}(%s / %s)${R}\n" "$OS${DISTRO:+/$DISTRO}" "$ARCH"
@@ -171,6 +208,7 @@ step "Installing Python 3.12 + app dependencies (uv sync)"
 uv python install 3.12 >/dev/null 2>&1 || true
 uv sync --frozen --no-dev
 ok "app dependencies installed into .venv"
+install_browsers
 
 # 2) Web frontend
 build_web

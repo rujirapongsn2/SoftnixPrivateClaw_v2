@@ -1008,9 +1008,10 @@ class AgentLoop:
                     # is pending. Emit this only once execution can actually
                     # begin, so the timeline never claims an unapproved
                     # container was started.
-                    emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
-                    tool_started = True
-                    logger.info("Tool call: {}({})", tc.name, args_preview)
+                    if not tool_started:
+                        emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
+                        tool_started = True
+                        logger.info("Tool call: {}({})", tc.name, args_preview)
                     foreground = foreground_accounting.get()
                     if foreground is not None and not foreground.adopted_job_id:
                         await foreground.checkpoint({**foreground.state,

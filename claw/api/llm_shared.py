@@ -14,6 +14,8 @@ from fastapi import HTTPException
 from pydantic import AfterValidator, BaseModel, Field
 
 from claw.api.deps import AppState
+from claw.providers.image_capability import image_capability
+from loguru import logger
 
 _PREFIX_RE = r"^[a-z0-9_]*$"
 _COST_RE = r"^(low|medium|high|very_high)$"
@@ -143,7 +145,9 @@ async def update_provider(
         existing = await state.llm_config.get_by_name(body.name, owner_id)
         if existing is not None and existing.id != provider_id:
             raise HTTPException(status_code=409, detail="a provider with this name already exists")
-    p = await state.llm_config.update_provider(provider_id, owner_id, **body.model_dump(exclude_none=True))
+    p = await state.llm_config.update_provider(
+        provider_id, owner_id, image_guard=validate_image_model, **body.model_dump(exclude_none=True)
+    )
     if p is None:
         raise HTTPException(status_code=404, detail="provider not found")
     models = await state.llm_config.list_models(owner_id)
@@ -170,6 +174,7 @@ async def create_model(state: AppState, provider_id: str, body: ModelBody, owner
         context_window=body.context_window,
         purposes=body.purposes,
         data_locality=body.data_locality,
+        image_guard=validate_image_model,
     )
     if m is None:
         raise HTTPException(status_code=404, detail="provider not found")
@@ -177,7 +182,9 @@ async def create_model(state: AppState, provider_id: str, body: ModelBody, owner
 
 
 async def update_model(state: AppState, model_pk: str, body: ModelPatch, owner_id: str | None) -> dict:
-    m = await state.llm_config.update_model(model_pk, owner_id, **body.model_dump(exclude_none=True))
+    m = await state.llm_config.update_model(
+        model_pk, owner_id, image_guard=validate_image_model, **body.model_dump(exclude_none=True)
+    )
     if m is None:
         raise HTTPException(status_code=404, detail="model not found")
     return model_row(m)
@@ -188,3 +195,26 @@ async def delete_model(state: AppState, model_pk: str, owner_id: str | None) -> 
     if not ok:
         raise HTTPException(status_code=404, detail="model not found")
     return {"deleted": True}
+
+
+async def validate_image_model(prefix: str, api_base: str, model: str, enabled: bool):
+    capability = await image_capability(prefix or "", api_base or "", model)
+    if capability.status == "unsupported" or (enabled and capability.status != "verified"):
+        logger.info(
+            "Image capability rejected status={} source={} reason={}",
+            capability.status,
+            capability.source,
+            capability.reason,
+        )
+        if capability.reason == "vision_only":
+            detail = "โมเดลนี้รองรับการวิเคราะห์ภาพ แต่ไม่รองรับการสร้างภาพ"
+        elif capability.status == "unsupported":
+            detail = "โมเดลนี้ไม่รองรับการสร้างภาพด้วยเส้นทางที่ตั้งค่าไว้ กรุณาเลือกโมเดลสร้างภาพและผู้ให้บริการที่ตรงกัน"
+        else:
+            detail = (
+                "ยังยืนยันไม่ได้ว่าโมเดลนี้สร้างภาพได้ กรุณาตรวจสอบ Model ID, ผู้ให้บริการ และ metadata "
+                "แล้วลองเปิดใช้งานอีกครั้ง หรือบันทึกแบบปิดใช้งานก่อน ระบบไม่ทดลองสร้างภาพอัตโนมัติ "
+                "การสร้างภาพจริงอาจมีค่าใช้จ่าย"
+            )
+        raise HTTPException(status_code=422, detail=detail)
+    return capability

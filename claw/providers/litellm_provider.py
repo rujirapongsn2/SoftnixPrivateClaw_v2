@@ -648,6 +648,8 @@ class LiteLLMProvider(LLMProvider):
         size: str | None = None,
         mode: str = "chat",
         timeout: float = 120.0,
+        explicit_credentials: bool = False,
+        request_modalities: tuple[str, ...] | None = None,
     ) -> list[tuple[bytes, str]]:
         """Generate image(s) from a text prompt. Returns [(bytes, ext), ...].
 
@@ -672,7 +674,13 @@ class LiteLLMProvider(LLMProvider):
             # rather than silently routed through the wrong dispatcher.
             raise ProviderError("Cloudflare AI image generation is not supported yet")
 
-        effective_key, effective_base = self._effective_credentials(api_key, api_base)
+        if explicit_credentials and not api_key:
+            raise ProviderError("Image generation requires a saved provider API key")
+
+        effective_key, effective_base = (
+            (api_key or "", api_base or "") if explicit_credentials
+            else self._effective_credentials(api_key, api_base)
+        )
         try:
             if mode == "images_endpoint":
                 results = await self._image_via_images_endpoint(
@@ -680,13 +688,13 @@ class LiteLLMProvider(LLMProvider):
                 )
             else:
                 results = await self._image_via_chat(
-                    prompt, model, effective_key, effective_base, timeout, base64
+                    prompt, model, effective_key, effective_base, timeout, base64, request_modalities
                 )
         except ProviderError:
             raise
         except Exception as exc:
-            logger.warning("Image generation failed for {}: {}", model, exc)
-            raise ProviderError(str(exc)) from exc
+            logger.warning("Image generation failed error_type={}", type(exc).__name__)
+            raise ProviderError("Image generation failed; check provider configuration and try again") from exc
         if not results:
             raise ProviderError("the model returned no image")
         return results
@@ -697,14 +705,24 @@ class LiteLLMProvider(LLMProvider):
         import base64
 
         from litellm import aimage_generation
+        from litellm.utils import ProviderConfigManager
+        from litellm.types.utils import LlmProviders
+
+        route, separator, bare = model.partition("/")
+        provider = route if separator and route in {"openai", "azure"} else "openai"
+        adapter = ProviderConfigManager.get_provider_image_generation_config(
+            model=bare if separator and route == provider else model,
+            provider=LlmProviders(provider),
+        )
 
         kwargs: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
             "n": 1,
-            "response_format": "b64_json",
             "timeout": timeout,
         }
+        if adapter is not None and "response_format" in adapter.get_supported_openai_params(model):
+            kwargs["response_format"] = "b64_json"
         if size:
             kwargs["size"] = size
         if key:
@@ -722,12 +740,15 @@ class LiteLLMProvider(LLMProvider):
                 out.append((await self._fetch_bytes(url, timeout), _ext_from_url(url)))
         return out
 
-    async def _image_via_chat(self, prompt, model, key, base, timeout, base64) -> list[tuple[bytes, str]]:
+    async def _image_via_chat(
+        self, prompt, model, key, base, timeout, base64, request_modalities
+    ) -> list[tuple[bytes, str]]:
         from litellm import acompletion
 
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
+            "modalities": list(request_modalities) if request_modalities is not None else ["image", "text"],
             "timeout": timeout,
         }
         if key:

@@ -106,7 +106,6 @@ def generate(root, source, output):
 
 class GenerateWorkbookTool(Tool):
     name = 'generate_workbook'
-    ends_turn_on_success = False
     description = ('Generate a validated Excel workbook from an intermediate JSON file. '
                    'Schema: {"sheets":[{"name":"Sheet1","columns":["Name","Qty"],"rows":[["Item",1]]}]}. '
                    'Literal cells only; no formulas. No shell required. Preserve source references in columns.')

@@ -830,11 +830,6 @@ async def upload_attachments(
     return result
 
 
-# DALL·E-style /images-endpoint providers; everything else (openrouter,
-# gemini, …) returns images through the chat-multimodal path instead.
-_IMAGES_ENDPOINT_PREFIXES = {"openai", "azure"}
-
-
 class GenerateImageRequest(BaseModel):
     prompt: str
     model: str
@@ -897,6 +892,11 @@ async def generate_image(
     if resolved is None:
         raise HTTPException(status_code=404, detail="image model not found")
 
+    from claw.api.llm_shared import validate_image_model
+
+    capability = await validate_image_model(resolved["model_prefix"], resolved["api_base"],
+                                            resolved["model_id"], True)
+
     # Usage-plan gate: the caller's plan must permit image generation at all —
     # but only for admin-global models; the caller's own BYOK model is exempt
     # (same reasoning as the cost ceiling: they pay for their own key, so the
@@ -919,7 +919,7 @@ async def generate_image(
         if full:
             raise HTTPException(status_code=413, detail=full.removeprefix("Error: "))
 
-    mode = "images_endpoint" if resolved["model_prefix"] in _IMAGES_ENDPOINT_PREFIXES else "chat"
+    mode = capability.generation_mode
 
     # Reserve the images/day slot atomically BEFORE the paid provider call:
     # increment the counter, then verify the user is still within their cap.
@@ -957,16 +957,18 @@ async def generate_image(
     try:
         images = await state.runtime.provider.generate_image(
             prompt,
-            resolved["model_id"],
+            capability.routed_model,
             api_key=resolved["api_key"] or None,
             api_base=resolved["api_base"] or None,
             size=body.size or state.settings.image.default_size,
             mode=mode,
+            explicit_credentials=True,
+            request_modalities=capability.request_modalities,
             timeout=state.settings.image.timeout_seconds,
         )
     except ProviderError as exc:
         await _release()
-        raise HTTPException(status_code=502, detail=f"image generation failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="สร้างภาพไม่สำเร็จ กรุณาตรวจสอบการตั้งค่าผู้ให้บริการแล้วลองอีกครั้ง") from exc
 
     data, ext = images[0]
     # Guard against an oversized payload (a misbehaving provider or a

@@ -1626,7 +1626,14 @@ export const api = {
       body: JSON.stringify({ interval_minutes }),
     }),
 
-  submitFeedback: (signal: "up" | "down", opts: { session_id?: string; note?: string; message_preview?: string }) =>
+  sessionFeedback: (sessionId: string) =>
+    request<Record<string, "up" | "down">>(`/api/sessions/${sessionId}/feedback`),
+
+  // "none" clears the rating on that reply.
+  submitFeedback: (
+    signal: "up" | "down" | "none",
+    opts: { session_id: string; message_key: string; note?: string; message_preview?: string },
+  ) =>
     request<{ recorded: boolean }>("/api/feedback", {
       method: "POST",
       body: JSON.stringify({ signal, ...opts }),

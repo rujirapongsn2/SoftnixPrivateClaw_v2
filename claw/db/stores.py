@@ -2104,19 +2104,88 @@ class FeedbackStore:
         self.factory = factory
 
     async def record(
-        self, user_id: str, session_id: str | None, signal: str, note: str, message_preview: str
+        self,
+        user_id: str,
+        session_id: str | None,
+        signal: str,
+        note: str,
+        message_preview: str,
+        message_key: str | None = None,
+    ) -> None:
+        """Rate a reply. With a `message_key` this is an upsert (one row per reply)
+        and signal "none" clears the rating; without one it appends (legacy)."""
+        if message_key is None:
+            async with self.factory() as db:
+                db.add(
+                    Feedback(
+                        user_id=user_id,
+                        session_id=session_id,
+                        signal=signal,
+                        note=note[:2000],
+                        message_preview=message_preview[:500],
+                    )
+                )
+                await db.commit()
+            return
+        # The unique index is the backstop for two concurrent first ratings: the
+        # loser's insert fails, and the retry finds the winner's row and updates it.
+        for attempt in (0, 1):
+            try:
+                await self._upsert(user_id, session_id, signal, note, message_preview, message_key)
+                return
+            except IntegrityError:
+                if attempt:
+                    raise
+
+    async def _upsert(
+        self, user_id, session_id, signal, note, message_preview, message_key
     ) -> None:
         async with self.factory() as db:
-            db.add(
-                Feedback(
-                    user_id=user_id,
-                    session_id=session_id,
-                    signal=signal,
-                    note=note[:2000],
-                    message_preview=message_preview[:500],
+            row = (
+                await db.execute(
+                    select(Feedback).where(
+                        Feedback.user_id == user_id,
+                        Feedback.session_id == session_id,
+                        Feedback.message_key == message_key,
+                    )
                 )
-            )
+            ).scalar_one_or_none()
+            if signal == "none":
+                if row is not None:
+                    await db.delete(row)
+            elif row is None:
+                db.add(
+                    Feedback(
+                        user_id=user_id,
+                        session_id=session_id,
+                        signal=signal,
+                        message_key=message_key,
+                        note=note[:2000],
+                        message_preview=message_preview[:500],
+                    )
+                )
+            else:
+                row.signal = signal
+                row.note = note[:2000]
+                row.message_preview = message_preview[:500]
+                row.created_at = datetime.now(timezone.utc)
             await db.commit()
+
+    async def for_session(self, user_id: str, session_id: str, limit: int = 2000) -> dict[str, str]:
+        """{message_key: signal} for one session, bounded; legacy keyless rows skipped."""
+        async with self.factory() as db:
+            rows = (
+                await db.execute(
+                    select(Feedback.message_key, Feedback.signal)
+                    .where(
+                        Feedback.user_id == user_id,
+                        Feedback.session_id == session_id,
+                        Feedback.message_key.is_not(None),
+                    )
+                    .limit(limit)
+                )
+            ).all()
+        return {key: sig for key, sig in rows}
 
     @staticmethod
     def _counts_query(user_id: str | None):
@@ -2369,14 +2438,27 @@ class LLMConfigStore:
             return row
 
     async def update_provider(
-        self, provider_id: str, owner_id: str | None = None, **fields: Any
+        self, provider_id: str, owner_id: str | None = None, *, image_guard=None, **fields: Any
     ) -> LLMProvider | None:
         async with self.factory() as db:
-            row = await db.get(LLMProvider, provider_id)
+            row = await db.scalar(select(LLMProvider).where(LLMProvider.id == provider_id).with_for_update())
             # Ownership guard: a caller can only touch rows in its own scope, so a
             # user can never edit another user's (or a global) provider.
             if row is None or row.owner_id != owner_id:
                 return None
+            unchanged_disabled_route = (
+                fields.get("enabled", row.enabled) is False
+                and fields.get("api_base", row.api_base) == row.api_base
+                and fields.get("model_prefix", row.model_prefix) == row.model_prefix
+            )
+            if image_guard is not None and not unchanged_disabled_route and any(
+                key in fields for key in ("api_base", "model_prefix", "enabled")
+            ):
+                models = list(await db.scalars(select(LLMModel).where(LLMModel.provider_id == provider_id)))
+                for model in models:
+                    if model.kind == "image" and model.enabled:
+                        await image_guard(fields.get("model_prefix", row.model_prefix),
+                                          fields.get("api_base", row.api_base), model.model_id, True)
             route_changed = bool(fields.get("api_key"))
             route_changed = route_changed or (
                 "api_base" in fields and fields["api_base"] is not None and fields["api_base"] != row.api_base
@@ -2463,12 +2545,16 @@ class LLMConfigStore:
         context_window: int | None = None,
         purposes: list[str] | None = None,
         data_locality: str = "external",
+        image_guard=None,
     ) -> LLMModel | None:
         async with self.factory() as db:
             # The model inherits its provider's scope; only add it if the caller
             # owns that provider (global for admin, own for a user).
-            if not await self._owns_provider(db, provider_id, owner_id):
+            provider = await db.scalar(select(LLMProvider).where(LLMProvider.id == provider_id).with_for_update())
+            if provider is None or provider.owner_id != owner_id:
                 return None
+            if kind == "image" and image_guard is not None:
+                await image_guard(provider.model_prefix, provider.api_base, model_id, enabled)
             row = LLMModel(
                 provider_id=provider_id,
                 model_id=model_id,
@@ -2486,12 +2572,23 @@ class LLMConfigStore:
             return row
 
     async def update_model(
-        self, model_id_pk: str, owner_id: str | None = None, **fields: Any
+        self, model_id_pk: str, owner_id: str | None = None, *, image_guard=None, **fields: Any
     ) -> LLMModel | None:
         async with self.factory() as db:
             row = await db.get(LLMModel, model_id_pk)
             if row is None or not await self._owns_provider(db, row.provider_id, owner_id):
                 return None
+            provider = await db.scalar(select(LLMProvider).where(LLMProvider.id == row.provider_id).with_for_update())
+            await db.refresh(row)
+            unchanged_disabled_image = (
+                row.kind == "image"
+                and fields.get("kind", row.kind) == row.kind
+                and fields.get("model_id", row.model_id) == row.model_id
+                and fields.get("enabled", row.enabled) is False
+            )
+            if fields.get("kind", row.kind) == "image" and image_guard is not None and not unchanged_disabled_image:
+                await image_guard(provider.model_prefix, provider.api_base,
+                                  fields.get("model_id", row.model_id), fields.get("enabled", row.enabled))
             for key in ("model_id", "label", "enabled", "cost", "description", "kind", "purposes", "data_locality"):
                 if key in fields and fields[key] is not None:
                     setattr(row, key, fields[key])

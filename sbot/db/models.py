@@ -281,12 +281,19 @@ class Feedback(Base):
     """User rating on an assistant reply — the raw signal for self-learning."""
 
     __tablename__ = "sbot_feedback"
-    __table_args__ = (Index("ix_sbot_feedback_user_time", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_sbot_feedback_user_time", "user_id", "created_at"),
+        # One rating per reply: re-rating updates the row. NULL (legacy) keys never collide.
+        Index("ix_sbot_feedback_message", "user_id", "session_id", "message_key", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String(32), index=True)
     session_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     signal: Mapped[str] = mapped_column(String(8))  # up | down
+    # Client-computed fingerprint of the rated reply (length + content hash); the
+    # reply's identity within its session, since live replies have no DB id yet.
+    message_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
     # Short preview of the rated reply, so later reflection has context without a join.
     message_preview: Mapped[str] = mapped_column(Text, default="")

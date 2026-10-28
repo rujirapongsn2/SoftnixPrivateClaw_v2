@@ -5,6 +5,8 @@ one-shot /images endpoint that runs outside the agent loop."""
 import base64
 import os
 import time
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +24,19 @@ _PNG = base64.b64decode(
 async def _add_model(store: LLMConfigStore, model_id: str, kind: str, prefix: str = "openrouter"):
     p = await store.create_provider("prov-" + model_id[-6:], "sk-test", "", True, prefix, owner_id=None)
     return await store.create_model(p.id, model_id, model_id, True, "medium", "", kind=kind, owner_id=None)
+
+
+@pytest.fixture(autouse=True)
+def image_catalog(monkeypatch):
+    async def catalog():
+        return {
+            "vendor/pixel-1": {
+                "architecture": {"input_modalities": ["text"], "output_modalities": ["text", "image"]},
+                "supported_parameters": ["modalities"],
+            }
+        }
+
+    monkeypatch.setattr("claw.providers.image_capability.openrouter_catalog", catalog)
 
 
 # ---- store: chat vs image are separate + resolve_image gates on kind ----
@@ -232,7 +247,7 @@ async def test_images_endpoint_generates_and_persists(db_factory, monkeypatch):
         assert r.status_code == 200, r.text
         path = r.json()["path"]
         assert path.startswith("uploads/generated-") and path.endswith(".png")
-        assert captured["model"] == "vendor/pixel-1"
+        assert captured["model"] == "openrouter/vendor/pixel-1"
         assert captured["mode"] == "chat"  # openrouter prefix -> chat extraction
 
         # The generated image persists as an artifact message (survives reload).
