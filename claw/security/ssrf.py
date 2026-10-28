@@ -18,7 +18,11 @@ dialled are guaranteed to be the same one.
 import asyncio
 import ipaddress
 import socket
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlsplit
+
+import httpx
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
@@ -141,3 +145,104 @@ def _as_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
         return ipaddress.ip_address(host)
     except ValueError:
         return None
+
+
+class ResponseTooLarge(ValueError):
+    pass
+
+
+async def read_bounded(response: httpx.Response, max_bytes: int) -> bytes:
+    """Read a streamed response body, refusing anything over `max_bytes`.
+
+    For a response whose only legitimate shape is a small JSON document (an
+    OAuth token or metadata response), oversize means hostile or broken, so
+    this raises rather than truncating — a truncated token document is not
+    a token document."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > max_bytes:
+            raise ResponseTooLarge(f"response body exceeds {max_bytes} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+class PinnedTransport(httpx.AsyncBaseTransport):
+    """Dial every request at an address `resolve_public_ips` validated.
+
+    The request is re-aimed at that IP with the Host header and TLS SNI left
+    on the real hostname, so certificate verification still checks the name
+    the operator configured. Pinning removes the resolver's own address
+    fallback, so it is reimplemented here: each validated address is tried
+    until one connects. Only a connect-level failure moves on — once the peer
+    has answered, its response (or its error) is the answer.
+
+    One inner transport per hostname, not one shared pool: httpcore keys its
+    connection pool on the dialled origin, which is now the IP, so two vhosts
+    behind one CDN address would otherwise reuse a TLS connection negotiated
+    for the other name.
+
+    `require_https` is for OAuth-flow clients, where a cleartext token or
+    metadata exchange is never acceptable; the generic API connector keeps
+    allowing http because the operator chose that URL.
+    """
+
+    def __init__(
+        self,
+        *,
+        require_https: bool = False,
+        inner: Callable[[], httpx.AsyncBaseTransport] = httpx.AsyncHTTPTransport,
+    ) -> None:
+        self._require_https = require_https
+        self._make_inner = inner
+        self._inner: dict[str, httpx.AsyncBaseTransport] = {}
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        url = request.url
+        if self._require_https and url.scheme != "https":
+            raise UnsafeUrlError(f"https is required, got {url.scheme or '(none)'}://")
+        addresses = await resolve_public_ips(str(url))
+        inner = self._inner.get(url.host)
+        if inner is None:
+            inner = self._inner[url.host] = self._make_inner()
+        if not addresses:
+            # Host is already an IP literal; there is nothing to pin.
+            return await inner.handle_async_request(request)
+
+        headers = request.headers.copy()
+        headers["Host"] = url.netloc.decode("ascii")
+        last_error: httpx.TransportError | None = None
+        for address in addresses:
+            pinned = httpx.Request(
+                request.method,
+                url.copy_with(host=address),
+                headers=headers,
+                stream=request.stream,
+                extensions={**request.extensions, "sni_hostname": url.host},
+            )
+            try:
+                return await inner.handle_async_request(pinned)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                last_error = exc
+        raise last_error  # type: ignore[misc]
+
+    async def aclose(self) -> None:
+        for inner in self._inner.values():
+            await inner.aclose()
+        self._inner.clear()
+
+
+def pinned_client(
+    *,
+    require_https: bool = False,
+    inner: Callable[[], httpx.AsyncBaseTransport] | None = None,
+    **client_kwargs: Any,
+) -> httpx.AsyncClient:
+    """An httpx client whose every request goes through `PinnedTransport`.
+
+    Redirects are never followed by the client: a redirect target is a new
+    URL the peer chose, so the caller either re-validates and re-sends the
+    hop itself (claw/tools/api.py) or treats a 3xx as an error (OAuth)."""
+    transport = PinnedTransport(require_https=require_https, **({"inner": inner} if inner else {}))
+    return httpx.AsyncClient(transport=transport, follow_redirects=False, **client_kwargs)

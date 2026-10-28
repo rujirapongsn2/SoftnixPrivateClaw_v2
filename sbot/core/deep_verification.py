@@ -369,14 +369,15 @@ class TaskVerifier(DocumentVerifier):
         import hashlib
         from datetime import datetime, timezone
         import httpx
-        from sbot.tools.api import _send_pinned, _read_capped
+        from claw.security.ssrf import pinned_client
+        from sbot.tools.api import _read_capped
         from sbot.tools.web import _html_to_text
 
         urls = self.specification.get("source_urls")
         if not isinstance(urls, list) or not 0 < len(urls) <= 5 or any(not isinstance(u, str) for u in urls):
             return {**report, "reason": "missing_source_urls"}
         sources = []
-        async with httpx.AsyncClient(trust_env=False, timeout=10, follow_redirects=False) as client:
+        async with pinned_client(trust_env=False, timeout=10) as client:
             for raw in urls:
                 url = httpx.URL(raw)
                 if url.scheme != "https" or url.username or url.password:
@@ -384,7 +385,7 @@ class TaskVerifier(DocumentVerifier):
                 for hop in range(4):
                     if url.scheme != "https" or url.username or url.password:
                         raise ValueError("unsafe source redirect")
-                    response = await _send_pinned(client, "GET", url, {}, None)
+                    response = await client.send(client.build_request("GET", url), stream=True)
                     try:
                         if response.is_redirect:
                             url = url.join(response.headers["location"])

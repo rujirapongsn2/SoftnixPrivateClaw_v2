@@ -13,9 +13,15 @@ import socket
 
 import pytest
 
+import httpx
+
 from claw.security.ssrf import (
+    PinnedTransport,
+    ResponseTooLarge,
     UnsafeUrlError,
     assert_public_url,
+    pinned_client,
+    read_bounded,
     resolve_public_ip,
     resolve_public_ips,
 )
@@ -157,3 +163,118 @@ async def test_save_time_check_skips_dns_but_still_blocks_ip_literals(monkeypatc
         await assert_public_url("http://169.254.169.254/latest/meta-data/", resolve=False)
     with pytest.raises(UnsafeUrlError):
         await assert_public_url("https://[64:ff9b::7f00:1]/x", resolve=False)
+
+
+# --- PinnedTransport ---------------------------------------------------------
+
+
+async def test_pinned_transport_dials_the_validated_ip_with_host_and_sni_on_the_name(monkeypatch):
+    _patch_dns(monkeypatch, ["93.184.216.34"])
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["dialled"] = request.url.host
+        seen["host"] = request.headers["Host"]
+        seen["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(200, text="ok")
+
+    async with pinned_client(inner=lambda: httpx.MockTransport(handler)) as client:
+        response = await client.get("https://pinned.invalid/x")
+
+    assert response.status_code == 200
+    assert seen == {"dialled": "93.184.216.34", "host": "pinned.invalid", "sni": "pinned.invalid"}
+
+
+async def test_pinned_transport_refuses_cleartext_when_https_is_required(monkeypatch):
+    _patch_dns(monkeypatch, ["93.184.216.34"])
+    dialled = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        dialled.append(str(request.url))
+        return httpx.Response(200)
+
+    async with pinned_client(require_https=True, inner=lambda: httpx.MockTransport(handler)) as client:
+        with pytest.raises(UnsafeUrlError, match="https is required"):
+            await client.get("http://pinned.invalid/token")
+    assert dialled == []
+
+
+async def test_pinned_transport_never_follows_redirects(monkeypatch):
+    _patch_dns(monkeypatch, ["93.184.216.34"])
+    dialled = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        dialled.append(request.url.path)
+        return httpx.Response(302, headers={"location": "https://elsewhere.invalid/"})
+
+    async with pinned_client(inner=lambda: httpx.MockTransport(handler)) as client:
+        response = await client.get("https://pinned.invalid/start")
+
+    assert response.status_code == 302
+    assert dialled == ["/start"]
+
+
+async def test_pinned_transport_keeps_one_connection_pool_per_hostname(monkeypatch):
+    """httpcore pools by dialled origin (now an IP), so two names on one address
+    must not share a pool or they would share a TLS session negotiated for the
+    wrong SNI."""
+    _patch_dns(monkeypatch, ["93.184.216.34"])
+    pools = []
+
+    def make_inner():
+        pools.append(httpx.MockTransport(lambda request: httpx.Response(200)))
+        return pools[-1]
+
+    async with pinned_client(inner=make_inner) as client:
+        await client.get("https://one.invalid/")
+        await client.get("https://two.invalid/")
+        await client.get("https://one.invalid/again")
+
+    assert len(pools) == 2
+
+
+async def test_pinned_transport_falls_back_to_the_next_address_on_connect_failure(monkeypatch):
+    _patch_dns(monkeypatch, ["2606:2800:220::1", "93.184.216.34"])
+    tried = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tried.append(request.url.host)
+        if request.url.host == "2606:2800:220::1":
+            raise httpx.ConnectError("no route to host", request=request)
+        return httpx.Response(200)
+
+    async with pinned_client(inner=lambda: httpx.MockTransport(handler)) as client:
+        response = await client.get("https://dual.invalid/")
+
+    assert response.status_code == 200
+    assert tried == ["2606:2800:220::1", "93.184.216.34"]
+
+
+async def test_pinned_transport_passes_an_ip_literal_through_unchanged():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["dialled"] = request.url.host
+        seen["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(200)
+
+    async with pinned_client(inner=lambda: httpx.MockTransport(handler)) as client:
+        await client.get("https://93.184.216.34/x")
+
+    assert seen == {"dialled": "93.184.216.34", "sni": None}
+
+    transport = PinnedTransport(inner=lambda: httpx.MockTransport(handler))
+    with pytest.raises(UnsafeUrlError):
+        await transport.handle_async_request(httpx.Request("GET", "https://127.0.0.1/x"))
+
+
+async def test_read_bounded_refuses_an_oversize_body():
+    async def drip():
+        for _ in range(4):
+            yield b"x" * 100
+
+    response = httpx.Response(200, content=drip())
+    with pytest.raises(ResponseTooLarge):
+        await read_bounded(response, 250)
+
+    assert await read_bounded(httpx.Response(200, content=b"small"), 250) == b"small"
