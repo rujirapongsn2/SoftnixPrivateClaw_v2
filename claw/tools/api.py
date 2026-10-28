@@ -87,7 +87,7 @@ def _quote_path_value(name: str, value: Any) -> str:
     # An empty value collapses the segment: "/v1/users/{id}" with id="" is
     # "/v1/users/", the *collection* endpoint, reached with this connector's
     # credentials attached — a "read one user" tool silently becomes "list
-    # every user" (or, on DELETE, something far worse). Tool._validate only
+    # every user" (or, on DELETE, something far worse). Tool.validate_params only
     # checks key presence and JSON type, so "" passes as a required string.
     if not formatted or formatted in (".", ".."):
         raise UnsafeUrlError(f"path parameter {name!r} must be a non-empty path segment")
