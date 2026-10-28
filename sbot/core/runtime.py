@@ -170,6 +170,21 @@ class TurnFailed(Exception):
         self.message = message
 
 
+def _provider_error_message(exc: ProviderError, locale: str) -> str:
+    detail = str(exc)
+    if is_no_tool_support_error(detail):
+        # Retrying gets the identical rejection every time (the selected model
+        # can never handle a tool-calling request) — tell the user to switch
+        # models instead of error.llm's generic "please try again".
+        return t("error.llm_no_tool_support", locale)
+    if is_no_vision_support_error(detail):
+        # Safety net for a text-only model the registry's proactive
+        # supports_vision() check doesn't yet know about — same non-retryable
+        # reasoning as the tool-support branch.
+        return t("error.llm_no_vision_support", locale)
+    return t("error.llm", locale, reason=t(classify_error_reason(detail), locale))
+
+
 class _TranscriptSaveError(Exception):
     """Marks a SQLAlchemyError as specifically coming from a transcript
     write, not from some other DB access nested inside the turn (audit log,
@@ -1750,21 +1765,7 @@ class AgentRuntime:
                         confirm=_confirm,
                     )
                 except ProviderError as exc:
-                    detail = str(exc)
-                    if is_no_tool_support_error(detail):
-                        # Retrying gets the identical rejection every time (the
-                        # selected model can never handle a tool-calling
-                        # request) — tell the user to switch models instead of
-                        # error.llm's generic "please try again".
-                        message = t("error.llm_no_tool_support", locale)
-                    elif is_no_vision_support_error(detail):
-                        # Safety net for a text-only model the registry's proactive
-                        # supports_vision() check above doesn't yet know about —
-                        # same non-retryable reasoning as the tool-support branch.
-                        message = t("error.llm_no_vision_support", locale)
-                    else:
-                        reason = t(classify_error_reason(detail), locale)
-                        message = t("error.llm", locale, reason=reason)
+                    message = _provider_error_message(exc, locale)
                     self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
                     # The user message is already persisted (above); never persist the
                     # error text, so a bad provider response can't poison future
@@ -2000,8 +2001,12 @@ class AgentRuntime:
                     message = (
                         t("error.save_request", locale) if exc.stage == "request" else t("error.save", locale)
                     )
+                elif isinstance(exc, ProviderError):
+                    # A provider call outside the main loop (e.g. compaction).
+                    message = _provider_error_message(exc, locale)
                 else:
-                    message = t("error.llm", locale, reason=t("reason.internal", locale))
+                    # Anything else is a runtime/tool fault, not the model.
+                    message = t("error.runtime", locale)
                 self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
                 raise TurnFailed(message) from exc
 

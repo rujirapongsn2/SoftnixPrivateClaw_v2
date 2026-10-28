@@ -9,6 +9,10 @@ import sys
 from pathlib import Path
 
 
+class _Rejected(Exception):
+    """A diagram check failed; the message is safe to show the caller."""
+
+
 def _limits() -> None:
     limits = (
         (resource.RLIMIT_CORE, 0, 0),
@@ -34,10 +38,10 @@ async def _render(root: Path, source: Path, target: Path, width: int, height: in
     source = source.resolve()
     target = target.resolve()
     if not source.is_relative_to(root) or not target.is_relative_to(root):
-        raise ValueError("Renderer paths must stay inside the workspace")
+        raise _Rejected("Renderer paths must stay inside the workspace")
     markup = preview_html(source)["html"]
     if not re.search(r"<svg\b", markup, re.I):
-        raise ValueError("Diagram must contain an SVG element")
+        raise _Rejected("Diagram must contain an SVG element")
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -66,7 +70,7 @@ async def _render(root: Path, source: Path, target: Path, width: int, height: in
                 overflow: document.documentElement.scrollWidth > innerWidth || document.documentElement.scrollHeight > innerHeight};
             }""")
             if bounds["width"] < 1 or bounds["height"] < 1:
-                raise ValueError("SVG has no visible dimensions")
+                raise _Rejected("SVG has no visible dimensions")
             await page.screenshot(path=str(target), type="png", animations="disabled")
         finally:
             await browser.close()
@@ -84,7 +88,14 @@ def main() -> None:
         raise SystemExit("invalid renderer arguments")
     _limits()
     root, source, target = map(Path, sys.argv[1:4])
-    result = asyncio.run(_render(root, source, target, int(sys.argv[4]), int(sys.argv[5])))
+    try:
+        result = asyncio.run(_render(root, source, target, int(sys.argv[4]), int(sys.argv[5])))
+    except _Rejected as exc:
+        # Report as a rejection the caller can show, not as a renderer crash.
+        os.write(1, json.dumps({"error": str(exc)}).encode())
+        from claw.skills.render import REJECTED_EXIT_CODE
+
+        raise SystemExit(REJECTED_EXIT_CODE) from None
     os.write(1, json.dumps(result, separators=(",", ":")).encode())
 
 

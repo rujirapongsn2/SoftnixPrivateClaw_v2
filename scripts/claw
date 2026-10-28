@@ -503,6 +503,9 @@ cmd_update() {
   echo "==> git pull"; git pull --ff-only
   after="$(git rev-parse HEAD)"
   echo "==> uv sync"; uv sync --frozen --no-dev
+  # A Playwright bump in uv.lock needs its matching Chromium, or every
+  # render_diagram launch fails against the old cached revision.
+  "$PROJECT_DIR/install.sh" --browsers-only
   echo "==> rebuild web"; "$PROJECT_DIR/install.sh" --web-only
   update_sandbox_image "$before" "$after"
   echo "==> migrate"; uv run alembic upgrade head

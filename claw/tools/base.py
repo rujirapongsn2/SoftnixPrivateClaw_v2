@@ -24,6 +24,9 @@ class Tool(ABC):
     # When True, the loop passes a `progress` callback into execute() so a
     # long-running tool can stream sub-step updates to the Execution panel.
     wants_progress: bool = False
+    # A durable handoff or explicit completion needs no extra model round.
+    # Declared here too so shared tools satisfy the SBot loop's contract.
+    ends_turn_on_success: bool = False
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str:

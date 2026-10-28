@@ -32,6 +32,13 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "th": "โมเดลนี้ไม่รองรับการรับรูปภาพ จึงไม่สามารถอ่านรูปที่แนบมาได้ กรุณานำไฟล์แนบออก หรือเลือกโมเดลที่รองรับรูปภาพแทน",
     },
+    # An unexpected failure inside the agent runtime (tool bookkeeping, a bug
+    # after a tool returned). Provider failures arrive as ProviderError and
+    # get error.llm; blaming the model here sends debugging to the wrong place.
+    "error.runtime": {
+        "en": "Something went wrong while processing this request (internal error, not the AI model). Please try again.",
+        "th": "เกิดข้อผิดพลาดภายในระบบระหว่างประมวลผลคำขอ (ไม่ใช่ปัญหาการติดต่อโมเดล AI) กรุณาลองใหม่อีกครั้ง",
+    },
     "error.tool": {
         "en": "A tool failed while working on your request ({reason}).",
         "th": "เครื่องมือทำงานไม่สำเร็จระหว่างประมวลผลคำขอ ({reason})",

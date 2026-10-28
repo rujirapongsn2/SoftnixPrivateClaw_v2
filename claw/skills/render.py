@@ -19,6 +19,13 @@ _CACHE_MAX_FILES = 20
 _CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 _WORKER_TIMEOUT_SECONDS = 30
 _WORKER_MEMORY_BYTES = 1024 * 1024 * 1024
+# Worker exit status for a diagram it refused (message on stdout as JSON).
+REJECTED_EXIT_CODE = 2
+
+
+class RenderRejected(ValueError):
+    """The diagram or request can't be rendered as given. The message is ours,
+    safe to show, and tells the caller what to change."""
 
 
 def allow_export(user_id: str) -> bool:
@@ -32,9 +39,9 @@ def _source(workspace: Path, path: str) -> tuple[Path, bytes]:
     root = workspace.resolve()
     source = (root / path.removeprefix("/workspace/")).resolve()
     if not source.is_relative_to(root) or not source.is_file():
-        raise ValueError("Diagram file not found in workspace")
+        raise RenderRejected("Diagram file not found in workspace")
     if source.stat().st_size > HTML_MAX_BYTES:
-        raise ValueError("Diagram exceeds 2 MB")
+        raise RenderRejected("Diagram exceeds 2 MB")
     return source, source.read_bytes()
 
 
@@ -105,7 +112,7 @@ async def render_diagram(
     root = workspace.resolve()
     source, raw = await asyncio.to_thread(_source, root, path)
     if not 320 <= width <= 2400 or not 240 <= height <= 2400:
-        raise ValueError("Canvas must be between 320×240 and 2400×2400")
+        raise RenderRejected("Canvas must be between 320×240 and 2400×2400")
 
     digest = hashlib.sha256(raw + f"\0{width}x{height}\0v2".encode()).hexdigest()[:32]
     target = root / f"{_CACHE_PREFIX}{digest}.png"
@@ -120,7 +127,7 @@ async def render_diagram(
             metadata.unlink(missing_ok=True)
 
     if user_id is not None and not allow_export(user_id):
-        raise PermissionError("PNG export rate limit exceeded; wait a minute and try again")
+        raise RenderRejected("PNG export rate limit exceeded; wait a minute and try again")
 
     temporary = root / f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     async with asyncio.timeout(_WORKER_TIMEOUT_SECONDS):
@@ -155,7 +162,14 @@ async def render_diagram(
                 await asyncio.gather(memory_guard, return_exceptions=True)
     if memory_exceeded.is_set():
         temporary.unlink(missing_ok=True)
-        raise RuntimeError("Diagram renderer exceeded its 1 GB memory limit")
+        raise RenderRejected("Diagram needs more than 1 GB to render; simplify it or use a smaller canvas")
+    if proc.returncode == REJECTED_EXIT_CODE:
+        temporary.unlink(missing_ok=True)
+        try:
+            reason = str(json.loads(stdout.decode("utf-8"))["error"])
+        except (UnicodeDecodeError, ValueError, TypeError, KeyError):
+            reason = "Diagram was rejected by the renderer"
+        raise RenderRejected(reason)
     if proc.returncode != 0:
         temporary.unlink(missing_ok=True)
         detail = stderr.decode("utf-8", "replace")[-2000:].strip()
@@ -167,7 +181,7 @@ async def render_diagram(
         raise RuntimeError("Diagram renderer returned an invalid response") from exc
     if not temporary.is_file() or temporary.is_symlink() or temporary.stat().st_size > 25 * 1024 * 1024:
         temporary.unlink(missing_ok=True)
-        raise RuntimeError("Diagram renderer did not produce a bounded PNG")
+        raise RenderRejected("Rendered PNG exceeds 25 MB; use a smaller canvas")
     temporary.replace(target)
     result["path"] = target.name
     metadata.write_text(json.dumps(result, separators=(",", ":")))
