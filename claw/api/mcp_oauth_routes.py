@@ -3,7 +3,8 @@
 Three routers. `build_user_router` starts and ends a user's authorization for
 one connector; claw mounts it at the root and sbot at /modes/sbot, each with
 its own auth dependency and its own `ReturnTo`. `callback_router` is the one
-fixed redirect URI every authorization server sends the browser back to.
+fixed redirect URI every authorization server sends the browser back to, plus
+the Client ID Metadata Document those servers fetch; both are unauthenticated.
 `admin_router` manages the admin-registered client per issuer.
 
 None of these paths can be captured by the preset flow's
@@ -21,7 +22,13 @@ from pydantic import BaseModel, Field
 
 from claw.api.deps import AppState, get_state, require_admin
 from claw.auth.mcp_oauth import McpOAuthStartError
-from claw.auth.mcp_oauth_discovery import CALLBACK_PATH, PENDING_TTL, CallbackOutcome, ReturnTo
+from claw.auth.mcp_oauth_discovery import (
+    CALLBACK_PATH,
+    CLIENT_METADATA_PATH,
+    PENDING_TTL,
+    CallbackOutcome,
+    ReturnTo,
+)
 from claw.db.models import User
 
 NONCE_COOKIE = "claw_mcp_oauth_nonce"
@@ -111,6 +118,13 @@ async def callback(request: Request, state: AppState = Depends(get_state)) -> Re
         # flow started in another tab, so it is left to its max-age.
         response.delete_cookie(NONCE_COOKIE, path=CALLBACK_PATH)
     return response
+
+
+@callback_router.get(CLIENT_METADATA_PATH)
+async def client_metadata(state: AppState = Depends(get_state)) -> dict:
+    """Fetched by authorization servers that accept a URL as client_id; it
+    carries nothing secret."""
+    return state.mcp_oauth.client_metadata_document()
 
 
 admin_router = APIRouter(prefix="/api/admin/mcp-oauth-clients")

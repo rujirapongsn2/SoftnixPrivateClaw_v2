@@ -32,19 +32,21 @@ from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from loguru import logger
 from mcp.client.auth.oauth2 import PKCEParameters
-from mcp.shared.auth import OAuthToken
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import ValidationError
 
 from claw.auth.mcp_oauth_discovery import (
     CALLBACK_PATH,
+    CLIENT_METADATA_PATH,
     MAX_TOKEN_RESPONSE_BYTES,
     PENDING_TTL,
     REAUTH_MARKER,
+    REGISTRABLE_AUTH_METHODS,
     TOKEN_TIMEOUT_S,
     AdminClientRef,
     AuthView,
@@ -53,6 +55,7 @@ from claw.auth.mcp_oauth_discovery import (
     ClientCredentials,
     ClientRef,
     ClientStrategy,
+    Discovered,
     DiscoveryError,
     FailureReason,
     Grant,
@@ -65,12 +68,14 @@ from claw.auth.mcp_oauth_discovery import (
     choose_client_strategy,
     discover,
     parse_bearer_challenge,
+    registration_auth_method,
 )
 from claw.db.stores import Lease, McpAuthStore
 from claw.security.ssrf import ResponseTooLarge, UnsafeUrlError, pinned_client, read_bounded
 
 _LEASE_POLL_SECONDS = 0.1
 _LEASE_POLL_ATTEMPTS = 20
+CLIENT_NAME = "Softnix PrivateClaw"
 _PERMANENT_TOKEN_ERRORS = {
     "invalid_grant": FailureReason.INVALID_GRANT,
     "invalid_client": FailureReason.INVALID_CLIENT,
@@ -149,6 +154,9 @@ class McpOAuth:
         # One fixed redirect URI for every mount (claw and sbot): the flow's
         # origin travels in the pending row, not the URL.
         self.redirect_uri = public_base_url.rstrip("/") + CALLBACK_PATH
+        self._public_base_url = public_base_url
+        # A Client ID Metadata Document's client_id is the URL it is served at.
+        self.client_metadata_url = public_base_url.rstrip("/") + CLIENT_METADATA_PATH
         self._http = http or (lambda: pinned_client(require_https=True, timeout=TOKEN_TIMEOUT_S))
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._lease_poll_seconds = lease_poll_seconds
@@ -174,14 +182,28 @@ class McpOAuth:
             raise McpOAuthStartError("discovery_failed", str(exc)) from exc
 
         admin_row = await self._store.admin_client_id(found.issuer, self.redirect_uri)
-        strategy = choose_client_strategy(has_admin_client=admin_row is not None)
-        if strategy is None:
-            raise McpOAuthStartError(
-                "no_client",
-                f"No OAuth client is registered for {found.issuer}. Ask your administrator to add one.",
-            )
-        assert strategy is ClientStrategy.ADMIN and admin_row is not None
-        client: ClientRef = AdminClientRef(row_id=admin_row)
+        strategy = choose_client_strategy(
+            has_admin_client=admin_row is not None,
+            public_base_url=self._public_base_url,
+            cimd_supported=found.cimd_supported,
+            registration_endpoint=found.registration_endpoint,
+            token_auth_methods=found.token_auth_methods,
+        )
+        client: ClientRef
+        match strategy:
+            case ClientStrategy.ADMIN:
+                assert admin_row is not None
+                client = AdminClientRef(row_id=admin_row)
+            case ClientStrategy.METADATA_DOCUMENT:
+                client = MetadataDocClientRef(client_id=self.client_metadata_url)
+            case ClientStrategy.REGISTRATION:
+                client = await self._registered_client(found)
+            case None:
+                raise McpOAuthStartError(
+                    "no_client",
+                    f"{found.issuer} does not let this app register itself. "
+                    "Ask your administrator to register an OAuth client for it.",
+                )
         try:
             credentials = await self._credentials(client)
         except McpReauthorizationRequired as exc:
@@ -221,6 +243,82 @@ class McpOAuth:
         authorize_url = httpx.URL(found.authorization_endpoint).copy_merge_params(params)
         return Started(authorize_url=str(authorize_url), browser_nonce=nonce)
 
+    def client_metadata_document(self) -> dict:
+        """The Client ID Metadata Document served at `client_metadata_url`."""
+        return {
+            **self._client_metadata("none"),
+            "client_id": self.client_metadata_url,
+        }
+
+    def _client_metadata(self, auth_method: str) -> dict:
+        return {
+            "client_name": CLIENT_NAME,
+            "redirect_uris": [self.redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": auth_method,
+        }
+
+    async def _registered_client(self, found: Discovered) -> RegisteredClientRef:
+        """The cached Dynamic Client Registration for `found.issuer`,
+        registering (RFC 7591) when there is none or its secret expired. Only
+        begin() reaches this, so registrations are bounded by users clicking
+        Connect; a refresh or a Bearer challenge never registers."""
+        cached = await self._store.registered_client(found.issuer, self.redirect_uri)
+        if cached is not None:
+            if cached.secret_expires_at is None or cached.secret_expires_at > self._now():
+                return RegisteredClientRef(row_id=cached.row_id)
+            await self._store.delete_registered_client(cached.row_id)
+
+        endpoint = found.registration_endpoint
+        auth_method = registration_auth_method(found.token_auth_methods)
+        assert endpoint is not None and auth_method is not None, "choose_client_strategy checked both"
+        host = urlsplit(endpoint).hostname or endpoint
+        failed = f"Could not register this app with {host}."
+        if urlsplit(endpoint).scheme.lower() != "https":
+            raise McpOAuthStartError("registration_failed", f"The registration endpoint {host} is not HTTPS.")
+        body = self._client_metadata(auth_method)
+        if found.scope:
+            body["scope"] = found.scope
+        try:
+            async with self._http() as http:
+                async with http.stream(
+                    "POST", endpoint, json=body, headers={"Accept": "application/json"}
+                ) as response:
+                    raw = await read_bounded(response, MAX_TOKEN_RESPONSE_BYTES)
+        except UnsafeUrlError as exc:
+            raise McpOAuthStartError(
+                "registration_failed", f"The registration endpoint {host} is not a public HTTPS address."
+            ) from exc
+        except (httpx.HTTPError, ResponseTooLarge) as exc:
+            logger.warning("MCP OAuth registration at {} failed: {}", host, type(exc).__name__)
+            raise McpOAuthStartError("registration_failed", failed) from exc
+        if response.status_code not in (200, 201):
+            logger.warning("MCP OAuth registration at {} answered {}", host, response.status_code)
+            raise McpOAuthStartError("registration_failed", failed)
+        try:
+            info = OAuthClientInformationFull.model_validate_json(raw)
+        except ValidationError as exc:
+            raise McpOAuthStartError("registration_failed", failed) from exc
+        # The server may assign a different method than we asked for; it is
+        # the one the client must use from now on.
+        method = info.token_endpoint_auth_method or auth_method
+        if (
+            not info.client_id
+            or method not in REGISTRABLE_AUTH_METHODS
+            or (method != "none" and not info.client_secret)
+        ):
+            raise McpOAuthStartError("registration_failed", failed)
+        row_id = await self._store.add_registered_client(
+            issuer=found.issuer,
+            redirect_uri=self.redirect_uri,
+            client_id=info.client_id,
+            client_secret=info.client_secret if method != "none" else None,
+            auth_method=method,
+            registration=info.model_dump(mode="json", exclude_none=True),
+        )
+        return RegisteredClientRef(row_id=row_id)
+
     async def complete(
         self, *, state: str, code: str | None, error: str | None, browser_nonce: str | None
     ) -> Completed:
@@ -256,6 +354,7 @@ class McpOAuth:
             )
         except _TokenEndpointRejected as exc:
             logger.warning("MCP OAuth code exchange rejected for connector {}: {}", connector_id, exc.code)
+            await self._forget_rejected_client(pending.client, exc.code)
             return done(CallbackOutcome.TOKEN_FAILED)
         except (McpTokenRefreshFailed, McpReauthorizationRequired, httpx.HTTPError, UnsafeUrlError) as exc:
             logger.warning(
@@ -410,6 +509,7 @@ class McpOAuth:
                 await self._store.release_lease(lease)
                 raise McpTokenRefreshFailed(f"token endpoint rejected the refresh ({exc.code})") from exc
             await self._store.fail_under_lease(lease, reason)
+            await self._forget_rejected_client(grant.client, exc.code)
             raise McpReauthorizationRequired(reason) from exc
         except BaseException:
             await self._store.release_lease(lease)
@@ -428,6 +528,13 @@ class McpOAuth:
             # unknown to anyone, so the grant is gone.
             raise McpReauthorizationRequired(FailureReason.REJECTED_TOKEN)
         return refreshed.access_token
+
+    async def _forget_rejected_client(self, client: ClientRef, error_code: str) -> None:
+        """Drop a cached registration the server answered invalid_client for,
+        so the next Connect registers afresh instead of reusing a dead client.
+        Admin clients are the administrator's to fix."""
+        if error_code == "invalid_client" and isinstance(client, RegisteredClientRef):
+            await self._store.delete_registered_client(client.row_id)
 
     async def _credentials(self, ref: ClientRef) -> ClientCredentials:
         if isinstance(ref, MetadataDocClientRef):

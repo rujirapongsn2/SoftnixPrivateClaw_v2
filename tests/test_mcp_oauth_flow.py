@@ -19,7 +19,7 @@ from claw.auth.tokens import create_access_token
 from claw.config import Settings
 from claw.db.models import Base
 from claw.main import create_app
-from claw.auth.mcp_oauth_discovery import FailureReason, choose_client_strategy, ClientStrategy
+from claw.auth.mcp_oauth_discovery import FailureReason
 from claw.db.stores import ConnectorStore, McpAuthStore, UserStore
 from claw.security.crypto import SecretBox
 from claw.security.ssrf import pinned_client
@@ -449,11 +449,6 @@ async def test_persisted_failure_beats_a_stale_connected_runtime_status(env):
 async def test_listing_without_any_flow_has_no_grant(env):
     (row,) = (await env["c"].get("/api/connectors", headers=ALICE)).json()
     assert row["oauth_grant"] is None
-
-
-def test_client_strategy_is_admin_or_nothing():
-    assert choose_client_strategy(has_admin_client=True) is ClientStrategy.ADMIN
-    assert choose_client_strategy(has_admin_client=False) is None
 
 
 # ---------------------------------------------------------------- admin client API

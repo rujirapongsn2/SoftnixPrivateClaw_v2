@@ -8,7 +8,9 @@ never cross out of it.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -42,6 +44,7 @@ MAX_METADATA_BYTES = 64 * 1024
 # state stops being accepted.
 PENDING_TTL = timedelta(minutes=10)
 CALLBACK_PATH = "/api/mcp-oauth/callback"
+CLIENT_METADATA_PATH = "/api/mcp-oauth/client-metadata.json"
 # Matched by claw/core/connectors.py's _OAUTH_REAUTH_MARKERS, so a failure
 # raised through a live tool call flips the connector's status the same way a
 # preset connector's "invalid_grant" does, with no agent-loop change.
@@ -77,13 +80,64 @@ class ReturnTo(StrEnum):
 
 class ClientStrategy(StrEnum):
     ADMIN = "admin"
+    METADATA_DOCUMENT = "cimd"
+    REGISTRATION = "dcr"
 
 
-def choose_client_strategy(*, has_admin_client: bool) -> ClientStrategy | None:
-    """How to identify ourselves to an authorization server. Only an
-    admin-registered client exists today; Client ID Metadata Documents and
-    Dynamic Client Registration slot in here, after ADMIN, as fallbacks."""
-    return ClientStrategy.ADMIN if has_admin_client else None
+# Most to least preferred. "none" first: a public client has no secret to
+# leak or rotate, and PKCE already binds the code to this flow.
+REGISTRABLE_AUTH_METHODS = ("none", "client_secret_basic", "client_secret_post")
+# Host suffixes that only resolve inside a private network, so an
+# authorization server on the internet could never fetch a document there.
+_PRIVATE_NAME_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
+
+
+def registration_auth_method(supported: Sequence[str] | None) -> str | None:
+    """The token_endpoint_auth_method to register with, or None when the
+    authorization server accepts none we can use. An absent list means
+    client_secret_basic (RFC 8414 §2)."""
+    offered = supported if supported is not None else ["client_secret_basic"]
+    return next((m for m in REGISTRABLE_AUTH_METHODS if m in offered), None)
+
+
+def is_publicly_reachable(base_url: str) -> bool:
+    """Whether an authorization server could fetch a document under
+    `base_url`: https, and a host that is neither a non-public IP literal
+    nor a name that only resolves privately (localhost, a single label, or a
+    private suffix such as .local or .internal). A public-looking name is
+    not resolved here; one pointing at a private address simply fails at the
+    authorization server's fetch, which is the server's call, not a risk to
+    us."""
+    parts = urlsplit(base_url)
+    host = (parts.hostname or "").lower().rstrip(".")
+    if parts.scheme.lower() != "https" or not host:
+        return False
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        return "." in host and not host.endswith(_PRIVATE_NAME_SUFFIXES)
+    return literal.is_global
+
+
+def choose_client_strategy(
+    *,
+    has_admin_client: bool,
+    public_base_url: str,
+    cimd_supported: bool,
+    registration_endpoint: str | None,
+    token_auth_methods: Sequence[str] | None,
+) -> ClientStrategy | None:
+    """How to identify ourselves to an authorization server: an
+    admin-registered client, else a Client ID Metadata Document the server
+    can fetch from us, else Dynamic Client Registration. None means no way
+    exists and an administrator has to register a client."""
+    if has_admin_client:
+        return ClientStrategy.ADMIN
+    if cimd_supported and is_publicly_reachable(public_base_url):
+        return ClientStrategy.METADATA_DOCUMENT
+    if registration_endpoint and registration_auth_method(token_auth_methods) is not None:
+        return ClientStrategy.REGISTRATION
+    return None
 
 
 class FailureReason(StrEnum):
@@ -310,6 +364,11 @@ class Discovered:
     token_endpoint: str
     revocation_endpoint: str | None
     scope: str | None
+    # Client identity options; registration_endpoint is checked for https
+    # only when it is used, so a bad one cannot block an admin client.
+    cimd_supported: bool
+    registration_endpoint: str | None
+    token_auth_methods: tuple[str, ...] | None
 
 
 class DiscoveryError(Exception):
@@ -381,6 +440,13 @@ async def discover(http: httpx.AsyncClient, server_url: str) -> Discovered:
         token_endpoint=endpoints["token endpoint"],
         revocation_endpoint=endpoints.get("revocation endpoint"),
         scope=get_client_metadata_scopes(challenge.scope, prm),
+        cimd_supported=metadata.client_id_metadata_document_supported is True,
+        registration_endpoint=str(metadata.registration_endpoint) if metadata.registration_endpoint else None,
+        token_auth_methods=(
+            tuple(metadata.token_endpoint_auth_methods_supported)
+            if metadata.token_endpoint_auth_methods_supported is not None
+            else None
+        ),
     )
 
 
