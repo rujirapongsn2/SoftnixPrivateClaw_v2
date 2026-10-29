@@ -151,13 +151,14 @@ class ToolRegistry:
             return f"Error: tool '{name}' not found. Available: {', '.join(self.tool_names)}"
         failure = check_params(tool, name, params)
         if failure is not None:
-            if failure.failure.category is Category.INVALID_ARGUMENTS:
-                on_validation_error = getattr(tool, "on_validation_error", None)
-                if callable(on_validation_error):
-                    try:
-                        on_validation_error()
-                    except Exception:
-                        logger.warning("Tool {} validation refresh hook failed", name)
+            # Bad arguments and an unusable schema both refresh an MCP catalog:
+            # the server may already publish the schema that fixes either.
+            on_validation_error = getattr(tool, "on_validation_error", None)
+            if callable(on_validation_error):
+                try:
+                    on_validation_error()
+                except Exception:
+                    logger.warning("Tool {} validation refresh hook failed", name)
             self._audit(name, params, failure)
             return failure
         # Only tools that opt in receive the progress callback / turn deadline

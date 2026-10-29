@@ -353,3 +353,27 @@ async def test_local_validation_rejection_refreshes_without_executing(impl, monk
     await registry.execute('mcp_p_old', {})
     assert session.calls == 1
     await manager.shutdown()
+
+
+@pytest.mark.parametrize('scope', ['private', 'global'])
+async def test_broken_stale_schema_is_refreshed_and_the_tool_recovers(impl, monkeypatch, scope):
+    """A server that published an unusable schema and then fixed it is picked up
+    without an admin: the definition problem still blocks the call, and also
+    refreshes the catalog."""
+    manager, registry, sessions = await setup(
+        impl, monkeypatch, own=[connector('p')] if scope == 'private' else [],
+        globals_=[connector('p', None)] if scope == 'global' else [])
+    session = sessions['p']
+    stale = registry.get('mcp_p_old')
+    stale.parameters = {'type': 'object', 'properties': {'q': {'type': 'any'}}}
+    session.tools = [remote('old', 'fixed schema')]
+
+    blocked = await registry.execute('mcp_p_old', {'q': 'x'})
+
+    assert '[tool_definition_problem;' in blocked
+    assert session.calls == 0
+    await until(lambda: registry.get('mcp_p_old') is not stale)
+    recovered = await registry.execute('mcp_p_old', {'q': 'x'})
+    assert '[tool_definition_problem;' not in recovered
+    assert session.calls == 1
+    await manager.shutdown()

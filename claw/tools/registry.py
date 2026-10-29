@@ -104,13 +104,14 @@ class ToolRegistry:
                 return refusal
         failure = check_params(tool, name, params)
         if failure is not None:
-            if failure.failure.category is Category.INVALID_ARGUMENTS:
-                on_validation_error = getattr(tool, "on_validation_error", None)
-                if callable(on_validation_error):
-                    try:
-                        on_validation_error()
-                    except Exception:
-                        logger.warning("Tool {} validation refresh hook failed", name)
+            # Bad arguments and an unusable schema both refresh an MCP catalog:
+            # the server may already publish the schema that fixes either.
+            on_validation_error = getattr(tool, "on_validation_error", None)
+            if callable(on_validation_error):
+                try:
+                    on_validation_error()
+                except Exception:
+                    logger.warning("Tool {} validation refresh hook failed", name)
             if audit:
                 self._audit(name, params, failure)
             return failure
