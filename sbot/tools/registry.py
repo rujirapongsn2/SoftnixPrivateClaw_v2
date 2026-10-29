@@ -6,13 +6,15 @@ from typing import Any
 from loguru import logger
 
 from claw.core.tool_errors import (
+    OWN_TOOL_DETAIL_LIMIT,
     Category,
     SideEffect,
     check_params,
     is_control_flow,
     tool_failure,
 )
-from sbot.tools.base import Tool
+from claw.tools.base import ToolError as ClawToolError
+from sbot.tools.base import Tool, ToolError
 
 # Reading a file the user handed the bot, and turning a result into something
 # they can look at. Not capability grants: every one of them is confined to the
@@ -180,6 +182,8 @@ class ToolRegistry:
                 f"{type(exc).__name__}: {exc}",
                 side_effect=SideEffect.UNKNOWN,
                 exc=exc,
+                # Shared claw tools raise claw's ToolError here too.
+                detail_limit=OWN_TOOL_DETAIL_LIMIT if isinstance(exc, (ToolError, ClawToolError)) else None,
             )
         self._audit(name, params, result)
         return result

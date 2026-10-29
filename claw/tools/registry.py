@@ -6,13 +6,14 @@ from typing import Any
 from loguru import logger
 
 from claw.core.tool_errors import (
+    OWN_TOOL_DETAIL_LIMIT,
     Category,
     SideEffect,
     check_params,
     is_control_flow,
     tool_failure,
 )
-from claw.tools.base import Tool
+from claw.tools.base import Tool, ToolError
 
 AuditHook = Callable[[str, dict[str, Any], str], None]
 
@@ -134,6 +135,7 @@ class ToolRegistry:
                 f"{type(exc).__name__}: {exc}",
                 side_effect=SideEffect.UNKNOWN,
                 exc=exc,
+                detail_limit=OWN_TOOL_DETAIL_LIMIT if isinstance(exc, ToolError) else None,
             )
         if not audit:
             return result

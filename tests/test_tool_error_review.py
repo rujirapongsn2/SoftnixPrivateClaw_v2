@@ -3,6 +3,7 @@ and both loops agreeing on it. Every test drives the real claw and sbot loops,
 registries or MCP proxies with fake providers and fake MCP sessions."""
 
 import re
+from types import SimpleNamespace
 from typing import Any
 
 import anyio
@@ -14,12 +15,16 @@ from pydantic_core import PydanticSerializationError
 
 from claw.core.tool_errors import Category, SideEffect, tool_failure
 from tests.conftest import text_turn
-from tests.test_tool_error_recovery import IMPLS, assert_paired, call, run, tool_messages
+from claw.tools.base import ToolError as ClawToolError
+from sbot.tools.base import ToolError as SbotToolError
+from tests.test_tool_error_recovery import IMPLS, assert_paired, call, counting_tool, run, tool_messages
+
+TOOL_ERRORS = {"claw": ClawToolError, "sbot": SbotToolError}
 
 
 @pytest.fixture(params=sorted(IMPLS))
 def impl(request):
-    return IMPLS[request.param]
+    return SimpleNamespace(**vars(IMPLS[request.param]), tool_error=TOOL_ERRORS[request.param])
 
 
 def category_of(text: str) -> str:
@@ -175,3 +180,60 @@ async def test_only_a_tool_that_may_add_an_effect_is_refused_after_a_timeout(imp
     assert ("Do not call it again in this turn" in first) is (sent == 1)
     assert session.calls == sent
     assert ("Not run again" in tool_messages(provider, 2)[1]["content"]) is (sent == 1)
+
+
+# ---------------------------------------------------------------- what the model sees
+
+
+def raising_tool(impl, exc: BaseException):
+    tool = counting_tool(impl, "lookup")
+
+    async def execute(**_: Any) -> str:
+        raise exc
+
+    tool.execute = execute
+    return tool
+
+
+async def test_sandbox_paths_stay_visible_while_host_paths_and_secrets_are_scrubbed(impl):
+    exc = FileNotFoundError(
+        2,
+        "No such file or directory (loaded from /srv/claw-host/app/loader.py, "
+        "key=sk-test-SYNTHETIC0001; also tried data/report.csv and /workspace2/x.csv)",
+        "/workspace/data/report.csv",
+    )
+    registry = impl.registry()
+    registry.register(raising_tool(impl, exc))
+
+    _, _, provider = await run(impl, registry, call("c1", "lookup", q="a"), text_turn("ok"))
+
+    content = tool_messages(provider, 1)[0]["content"]
+    assert "'/workspace/data/report.csv'" in content
+    assert "data/report.csv" in content
+    assert "/srv/claw-host" not in content and "sk-test-SYNTHETIC0001" not in content
+    assert "/workspace2/x.csv" not in content
+
+
+async def test_our_own_tool_error_keeps_its_guidance_and_remote_text_stays_short(impl):
+    guidance = "Use one of: " + ", ".join(f"option_{i}" for i in range(150)) + ". token=SYNTHETIC-SECRET-1"
+    assert 1200 < len(guidance) < 2000
+    own = raising_tool(impl, impl.tool_error(guidance))
+    registry = impl.registry()
+    registry.register(own)
+
+    _, _, provider = await run(impl, registry, call("c1", "lookup", q="a"), text_turn("ok"))
+
+    content = tool_messages(provider, 1)[0]["content"]
+    assert "option_149." in content
+    assert "SYNTHETIC-SECRET-1" not in content
+
+    class LongRemote:
+        async def call_tool(self, name, kwargs, read_timeout_seconds=None):
+            return SimpleNamespace(content=[SimpleNamespace(text=guidance)], isError=True)
+
+    registry = impl.registry()
+    registry.register(impl.proxy(LongRemote(), "kb", "search", "Search", {"type": "object"}))
+    _, _, provider = await run(impl, registry, call("c1", "mcp_kb_search", q="a"), text_turn("ok"))
+
+    remote = tool_messages(provider, 1)[0]["content"]
+    assert "option_10," in remote and "option_149" not in remote

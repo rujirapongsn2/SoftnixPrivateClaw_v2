@@ -22,6 +22,7 @@ from typing import Any, TypeVar
 from loguru import logger
 
 from claw.providers.base import ProviderError
+from claw.sandbox.ephemeral import WORKSPACE_MOUNT
 
 T = TypeVar("T")
 
@@ -112,6 +113,10 @@ _DATA_NOTE = (
 )
 
 _DETAIL_LIMIT = 600
+# A ToolError raised by one of our own tools is guidance written for the model
+# (valid options, how to fix the call), so it gets more room than text from a
+# remote service. It is still scrubbed.
+OWN_TOOL_DETAIL_LIMIT = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +182,7 @@ def tool_failure(
     retryable: bool = False,
     exc: BaseException | None = None,
     error_id: str | None = None,
+    detail_limit: int | None = None,
 ) -> FailedToolResult:
     """The one construction point for a tool failure the model will see.
 
@@ -187,7 +193,7 @@ def tool_failure(
     failure = ToolFailure(
         tool=tool,
         category=category,
-        detail=scrub(detail),
+        detail=scrub(detail, detail_limit or _DETAIL_LIMIT),
         side_effect=side_effect,
         retryable=retryable,
         error_id=error_id or new_error_id(),
@@ -486,7 +492,12 @@ _ASSIGNMENT = re.compile(
 )
 # An absolute host path: /Users/x/..., /home/..., /srv/..., C:\... Two segments
 # minimum, and not part of a URL (no word, ':' or '/' just before the slash).
-_POSIX_PATH = re.compile(r"(?<![\w:/.~-])/(?:[\w.@+~-]+/)+[\w.@+~-]*")
+# Paths under the sandbox's workspace mount are the model's own view of its
+# files, not the server's layout, so they stay.
+_POSIX_PATH = re.compile(
+    r"(?<![\w:/.~-])/(?!" + re.escape(WORKSPACE_MOUNT.strip("/")) + r"(?![\w.@+~-]))"
+    r"(?:[\w.@+~-]+/)+[\w.@+~-]*"
+)
 _WINDOWS_PATH = re.compile(r"\b[A-Za-z]:\\(?:[^\\\s\"'<>]+\\)*[^\\\s\"'<>]*")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _FRAME_TAG = re.compile(r"(?i)</?\s*tool_error_data\s*>")
