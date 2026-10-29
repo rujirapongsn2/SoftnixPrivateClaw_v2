@@ -5,6 +5,7 @@ SBot loop crashed reading `ends_turn_on_success`, which only sbot's base
 declared; the runtime reported that crash as "could not reach the AI model".
 """
 
+import re
 from typing import Any
 
 import pytest
@@ -251,7 +252,8 @@ async def test_runtime_bug_is_not_reported_as_an_unreachable_model(stores, tmp_p
 
     message = await _turn_error(stores, BuggyProvider([]), tmp_path, "runtime-bug@sbot.ai")
 
-    assert message == t("error.runtime", "en")
+    assert message.startswith(t("error.runtime", "en", error_id="").removesuffix(" "))
+    assert re.search(r"Error ID: te_[0-9a-f]{10}$", message)
     assert "AI model could not be reached" not in message
     assert "ends_turn_on_success" not in message
 
@@ -273,8 +275,9 @@ async def test_provider_failure_is_still_reported_as_the_model(stores, tmp_path)
 
 
 def test_runtime_message_is_localized():
-    assert t("error.runtime", "th") != t("error.runtime", "en")
-    assert "{" not in t("error.runtime", "th")
+    assert t("error.runtime", "th", error_id="te_x") != t("error.runtime", "en", error_id="te_x")
+    assert "{" not in t("error.runtime", "th", error_id="te_x")
+    assert "te_x" in t("error.runtime", "th", error_id="te_x")
 
 
 async def test_filesystem_permission_error_does_not_leak_host_paths(monkeypatch, tmp_path):

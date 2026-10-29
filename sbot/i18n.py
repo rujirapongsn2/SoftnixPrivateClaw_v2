@@ -35,21 +35,50 @@ _MESSAGES: dict[str, dict[str, str]] = {
     # An unexpected failure inside the agent runtime (tool bookkeeping, a bug
     # after a tool returned). Provider failures arrive as ProviderError and
     # get error.llm; blaming the model here sends debugging to the wrong place.
+    # Steps already reported as done did run, so a blind "try again" could
+    # repeat them; the error id joins this banner to the server log.
     "error.runtime": {
-        "en": "Something went wrong while processing this request (internal error, not the AI model). Please try again.",
-        "th": "เกิดข้อผิดพลาดภายในระบบระหว่างประมวลผลคำขอ (ไม่ใช่ปัญหาการติดต่อโมเดล AI) กรุณาลองใหม่อีกครั้ง",
+        "en": (
+            "This request did not finish because of an internal error (not a problem reaching "
+            "the AI model). Steps already shown as completed did run, so check them before "
+            "sending the request again. Error ID: {error_id}"
+        ),
+        "th": (
+            "คำขอนี้ทำงานไม่เสร็จเพราะเกิดข้อผิดพลาดภายในระบบ (ไม่ใช่ปัญหาการติดต่อโมเดล AI) "
+            "ขั้นตอนที่แสดงว่าเสร็จแล้วได้ทำไปแล้วจริง กรุณาตรวจสอบก่อนส่งคำขอซ้ำ "
+            "รหัสข้อผิดพลาด: {error_id}"
+        ),
     },
-    "error.tool": {
-        "en": "A tool failed while working on your request ({reason}).",
-        "th": "เครื่องมือทำงานไม่สำเร็จระหว่างประมวลผลคำขอ ({reason})",
+    # A tool failed, and the model call that should have explained it failed
+    # too. A system notice, never agent text: no model said this.
+    "error.tool_unexplained": {
+        "en": (
+            "The task did not complete. The tool {tool} failed (error ID {error_id}), and then "
+            "the AI model could not be reached to continue ({reason}). Nothing ran after that failure."
+        ),
+        "th": (
+            "งานนี้ยังไม่เสร็จ เครื่องมือ {tool} ทำงานไม่สำเร็จ (รหัสข้อผิดพลาด {error_id}) "
+            "และหลังจากนั้นไม่สามารถติดต่อโมเดล AI เพื่อทำงานต่อได้ ({reason}) "
+            "ไม่มีขั้นตอนใดทำงานต่อหลังจากข้อผิดพลาดนั้น"
+        ),
     },
     # Distinct from error.llm because the model is not at fault: the answer was
     # produced and then lost on the way to storage. Saying "could not reach the
     # model" here sends the user (and whoever reads the bug report) after the
     # provider instead of the database.
+    # The work of the turn already ran and the reply was delivered; only the
+    # history write failed. "Please try again" would invite repeating actions.
     "error.save": {
-        "en": "The answer was generated but could not be saved (internal error). Please try again.",
-        "th": "สร้างคำตอบสำเร็จแล้ว แต่บันทึกไม่สำเร็จ (ข้อผิดพลาดภายใน) กรุณาลองใหม่อีกครั้ง",
+        "en": (
+            "The answer above was generated and this turn's work already ran, but it could not be "
+            "saved to the chat history (internal error). It may be missing after a reload. "
+            "Sending the request again may repeat actions that already ran."
+        ),
+        "th": (
+            "สร้างคำตอบด้านบนสำเร็จแล้ว และงานในรอบนี้ได้ทำไปแล้ว แต่บันทึกลงประวัติแชตไม่สำเร็จ "
+            "(ข้อผิดพลาดภายใน) คำตอบอาจหายไปเมื่อโหลดหน้าใหม่ "
+            "หากส่งคำขอซ้ำ การดำเนินการที่ทำไปแล้วอาจเกิดซ้ำ"
+        ),
     },
     # Distinct from error.save: this is the user's own message failing to
     # persist *before* the model was ever called — no answer exists yet, so

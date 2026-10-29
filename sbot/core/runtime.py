@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
 
+from claw.core.tool_errors import ExplanationUnavailable, new_error_id
 from sbot.browser.broker import BrowserBrokerStore
 from sbot.browser.manager import BrowserManager
 from sbot.config import Settings
@@ -182,13 +183,16 @@ def _provider_error_message(exc: ProviderError, locale: str) -> str:
         # supports_vision() check doesn't yet know about — same non-retryable
         # reasoning as the tool-support branch.
         return t("error.llm_no_vision_support", locale)
-    return t("error.llm", locale, reason=t(classify_error_reason(detail), locale))
+    reason = t(classify_error_reason(detail), locale)
+    if isinstance(exc, ExplanationUnavailable):
+        return t("error.tool_unexplained", locale, tool=exc.tools, error_id=exc.error_ids, reason=reason)
+    return t("error.llm", locale, reason=reason)
 
 
 class _TranscriptSaveError(Exception):
     """Marks a SQLAlchemyError as specifically coming from a transcript
     write, not from some other DB access nested inside the turn (audit log,
-    a tool querying the DB, …) — those get the generic error.llm message
+    a tool querying the DB, …) — those get the generic error.runtime message
     instead of a misleading "your message/answer wasn't saved".
 
     `stage` distinguishes the two save points: "request" is the user's own
@@ -196,9 +200,12 @@ class _TranscriptSaveError(Exception):
     default) for the assistant/tool messages persisted after generation —
     only the latter can truthfully say "the answer was generated"."""
 
-    def __init__(self, stage: str = "answer") -> None:
+    def __init__(self, stage: str = "answer", reply: TurnCompleted | None = None) -> None:
         super().__init__(stage)
         self.stage = stage
+        # The completion the user already watched stream in. Delivered even
+        # though the save failed, so the reply does not vanish from the screen.
+        self.reply = reply
 
 
 class ClawAgent:
@@ -591,7 +598,9 @@ class ClawAgent:
             "everything you have is already in this prompt or one `read_skill` call away.\n\n"
             "## Guidelines\n"
             "- State intent before tool calls; never claim results before receiving them.\n"
-            "- Read a file before modifying it. Analyze tool errors before retrying.\n"
+            "- Read a file before modifying it. Analyze tool errors before retrying. When a tool "
+            "fails, tell the user what did and did not get done and what is unknown, citing only "
+            "the cause the error states.\n"
             "- Ask for clarification when the request is ambiguous.\n"
             "- Complete all authorized steps before ending the turn. 'Do A first, then B' "
             "authorizes both: do not stop after A to ask optional approval. Choose reasonable "
@@ -1963,6 +1972,15 @@ class AgentRuntime:
                         len(to_store),
                     )
                     to_store[at:at] = answered
+                completed = TurnCompleted(
+                    turn_id=turn_id,
+                    content=final or "",
+                    usage=outcome.usage,
+                    artifacts=outcome.artifacts,
+                    vision_model=vision_delegate or "",
+                    coordinator_bot_id=bot_id if group is not None else None,
+                    speaker_name=bot.name if group is not None else "",
+                )
                 if foreground is not None and not foreground.adopted_job_id:
                     await foreground.deliver(to_store, metrics={
                         'iterations': outcome.iterations, 'tool_calls': outcome.tool_calls,
@@ -1971,22 +1989,17 @@ class AgentRuntime:
                     try:
                         await self.messages.append(session_id, to_store)
                     except SQLAlchemyError as exc:
-                        raise _TranscriptSaveError from exc
+                        raise _TranscriptSaveError(reply=completed) from exc
 
-                self.bus.publish(
-                    session_id,
-                    TurnCompleted(
-                        turn_id=turn_id,
-                        content=final or "",
-                        usage=outcome.usage,
-                        artifacts=outcome.artifacts,
-                        vision_model=vision_delegate or "",
-                        coordinator_bot_id=bot_id if group is not None else None,
-                        speaker_name=bot.name if group is not None else "",
-                    ),
-                )
+                self.bus.publish(session_id, completed)
             except Exception as exc:
-                logger.exception("Unhandled turn failure for session {}", session_id)
+                from claw.jobs.store import BudgetExhausted, LeaseLost
+                if isinstance(exc, (BudgetExhausted, LeaseLost)):
+                    # Ownership or allowance moved: the durable layer decides,
+                    # and a stale writer must not report anything.
+                    raise
+                error_id = new_error_id()
+                logger.exception("Unhandled turn failure {} for session {}", error_id, session_id)
                 # This block wraps the whole turn, so it also catches failures that
                 # happen after the model has already answered — including other DB
                 # access nested inside the turn (audit.log, a tool querying the DB).
@@ -2001,12 +2014,14 @@ class AgentRuntime:
                     message = (
                         t("error.save_request", locale) if exc.stage == "request" else t("error.save", locale)
                     )
+                    if exc.reply is not None:
+                        self.bus.publish(session_id, exc.reply)
                 elif isinstance(exc, ProviderError):
                     # A provider call outside the main loop (e.g. compaction).
                     message = _provider_error_message(exc, locale)
                 else:
                     # Anything else is a runtime/tool fault, not the model.
-                    message = t("error.runtime", locale)
+                    message = t("error.runtime", locale, error_id=error_id)
                 self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
                 raise TurnFailed(message) from exc
 

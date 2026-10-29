@@ -1,6 +1,7 @@
 """End-to-end runtime test: message in → events on bus → messages in DB."""
 
 import asyncio
+import re
 import json
 
 import pytest
@@ -287,7 +288,9 @@ async def test_sqlalchemy_error_outside_the_transcript_write_is_not_misattribute
     await asyncio.wait_for(listener, 2)
 
     assert received[-1]["type"] == "turn_error"
-    assert received[-1]["message"] == t("error.llm", "en", reason=t("reason.internal", "en"))
+    # An internal fault is not a model outage; the banner carries the log id.
+    pattern = re.escape(t("error.runtime", "en", error_id="ERRID")).replace("ERRID", r"te_[0-9a-f]{10}")
+    assert re.fullmatch(pattern, received[-1]["message"])
 
 
 async def test_sqlalchemy_error_from_the_transcript_write_still_says_save_failed(stores, tmp_path):
@@ -320,7 +323,7 @@ async def test_sqlalchemy_error_from_the_transcript_write_still_says_save_failed
             while True:
                 event = await queue.get()
                 received.append(event.to_dict())
-                if event.to_dict()["type"] in ("turn_completed", "turn_error"):
+                if event.to_dict()["type"] == "turn_error":
                     return
 
     listener = asyncio.create_task(listen())
@@ -329,8 +332,13 @@ async def test_sqlalchemy_error_from_the_transcript_write_still_says_save_failed
         await runtime.handle_message(user.id, session.id, "hello")
     await asyncio.wait_for(listener, 2)
 
-    assert received[-1]["type"] == "turn_error"
+    # The reply the user watched stream in is still delivered, then the
+    # save failure is reported without claiming the work itself failed.
+    kinds = [e["type"] for e in received]
+    assert kinds[-2:] == ["turn_completed", "turn_error"]
+    assert received[-2]["content"] == "hi"
     assert received[-1]["message"] == t("error.save", "en")
+    assert "try again" not in received[-1]["message"].lower()
 
 
 async def test_sqlalchemy_error_saving_the_user_message_says_request_not_answer(stores, tmp_path):
