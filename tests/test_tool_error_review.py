@@ -9,7 +9,7 @@ import anyio
 import httpx
 import pytest
 from mcp.shared.exceptions import McpError
-from mcp.types import CONNECTION_CLOSED, ErrorData
+from mcp.types import CONNECTION_CLOSED, ErrorData, ToolAnnotations
 from pydantic_core import PydanticSerializationError
 
 from claw.core.tool_errors import Category, SideEffect, tool_failure
@@ -138,3 +138,40 @@ async def test_a_request_that_may_have_reached_the_server_is_not_repeated(impl, 
     assert category_of(first) == "outcome_unknown" and "side_effect: unknown" in first
     assert session.calls == 1
     assert "Not run again" in tool_messages(provider, 2)[1]["content"]
+
+
+# ---------------------------------------------------------------- repeat-safe tools
+
+
+@pytest.mark.parametrize(
+    "annotations, sent",
+    [
+        (ToolAnnotations(readOnlyHint=True), 2),
+        (ToolAnnotations(readOnlyHint=False, idempotentHint=True), 2),
+        (ToolAnnotations(readOnlyHint=False, destructiveHint=True), 1),
+        (None, 1),
+    ],
+    ids=["read-only", "idempotent", "destructive", "unannotated"],
+)
+async def test_only_a_tool_that_may_add_an_effect_is_refused_after_a_timeout(impl, annotations, sent):
+    session = RaisingSession(McpError(ErrorData(code=httpx.codes.REQUEST_TIMEOUT, message="Timed out")))
+    proxy = impl.proxy(
+        session, "linear", "list_issues", "List", {"type": "object"}, annotations=annotations
+    )
+    registry = impl.registry()
+    registry.register(proxy)
+
+    _, _, provider = await run(
+        impl, registry,
+        call("c1", "mcp_linear_list_issues", q="open"),
+        call("c2", "mcp_linear_list_issues", q="open"),
+        text_turn("done"),
+    )
+
+    first = tool_messages(provider, 1)[0]["content"]
+    assert category_of(first) == "outcome_unknown"
+    # What the model is told matches what the loop will allow.
+    assert ("retryable: yes" in first) is (sent == 2)
+    assert ("Do not call it again in this turn" in first) is (sent == 1)
+    assert session.calls == sent
+    assert ("Not run again" in tool_messages(provider, 2)[1]["content"]) is (sent == 1)

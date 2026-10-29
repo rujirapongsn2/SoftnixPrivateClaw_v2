@@ -97,6 +97,12 @@ _GUIDANCE = {
         "files it created may not be attached). Continue normally."
     ),
 }
+# An unknown outcome from a tool whose repeat adds no effect (read-only or
+# idempotent): sending it again is safe, so the model may.
+_REPEATABLE_UNKNOWN_GUIDANCE = (
+    "The request may have reached the service, but calling this tool again with the same "
+    "arguments adds no effect, so you may try it once more. " + _EXPLAIN
+)
 
 _DATA_OPEN = "<tool_error_data>"
 _DATA_CLOSE = "</tool_error_data>"
@@ -126,7 +132,9 @@ class ToolFailure:
             _DATA_CLOSE,
             f"side_effect: {_SIDE_EFFECT_TEXT[self.side_effect]}. retryable: {'yes' if self.retryable else 'no'}.",
             _DATA_NOTE,
-            _GUIDANCE[self.category],
+            _REPEATABLE_UNKNOWN_GUIDANCE
+            if self.category is Category.OUTCOME_UNKNOWN and self.retryable
+            else _GUIDANCE[self.category],
         ]
         return "\n".join(lines)
 
@@ -292,7 +300,9 @@ class TurnFailures:
             error_id=prior.error_id,
         )
 
-    def record(self, name: str, arguments: dict[str, Any], result: str) -> None:
+    def record(self, name: str, arguments: dict[str, Any], result: str, *, idempotent: bool) -> None:
+        """Note a call's result. `idempotent` tools are never refused a repeat:
+        sending them again cannot add an effect."""
         failure = failure_of(result)
         if failure is None and result.startswith("Error"):
             # A tool's own error text carries no id; mint one so a provider
@@ -301,7 +311,7 @@ class TurnFailures:
         if failure is None:
             return
         self._unexplained.append(failure)
-        if failure.category is Category.OUTCOME_UNKNOWN:
+        if failure.category is Category.OUTCOME_UNKNOWN and not idempotent:
             self._unknown_outcomes[call_identity(name, arguments)] = failure
 
     def answered(self) -> None:

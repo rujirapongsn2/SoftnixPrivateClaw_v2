@@ -528,6 +528,7 @@ class McpToolProxy(Tool):
         session_ref: Callable[[], Any] | None = None,
         on_auth_error: Callable[[], None] | None = None,
         on_catalog_error: Callable[[], None] | None = None,
+        annotations: Any = None,
     ):
         # `session_ref`, when given, is looked up fresh on every call instead
         # of using the captured `session` — used only for global-connector
@@ -543,6 +544,7 @@ class McpToolProxy(Tool):
         self._session_ref = session_ref
         self._on_auth_error = on_auth_error
         self._on_catalog_error = on_catalog_error
+        self.idempotent = repeat_safe(annotations)
         self._remote_name = tool_name
         self._connector_name = connector
         self._tool_call_timeout_seconds = tool_call_timeout_seconds
@@ -556,6 +558,17 @@ class McpToolProxy(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         return await call_mcp_tool(self, kwargs, requires_reauthorization=_requires_oauth_reauthorization)
+
+
+def repeat_safe(annotations: Any) -> bool:
+    """Whether the server says an identical repeat of its tool adds no effect.
+
+    These are hints from the connector's own server, so a false hint can only
+    repeat a call against that same server.
+    """
+    return bool(
+        getattr(annotations, "readOnlyHint", None) or getattr(annotations, "idempotentHint", None)
+    )
 
 
 # Failures that prove the request never left this process. In the SDK's
@@ -601,6 +614,7 @@ async def call_mcp_tool(
                 Category.OUTCOME_UNKNOWN,
                 f"No response within {proxy._tool_call_timeout_seconds}s.",
                 side_effect=SideEffect.UNKNOWN,
+                retryable=proxy.idempotent,
                 exc=exc,
             )
         if exc.error.code == CONNECTION_CLOSED and exc.error.message == "Connection closed":
@@ -611,6 +625,7 @@ async def call_mcp_tool(
                 Category.OUTCOME_UNKNOWN,
                 "The connection closed before the response arrived.",
                 side_effect=SideEffect.UNKNOWN,
+                retryable=proxy.idempotent,
                 exc=exc,
             )
         if _catalog_error(str(exc), exc.error.code):
@@ -656,6 +671,7 @@ async def call_mcp_tool(
             Category.OUTCOME_UNKNOWN,
             f"The connection failed after the request may have been sent ({type(exc).__name__}).",
             side_effect=SideEffect.UNKNOWN,
+            retryable=proxy.idempotent,
             exc=exc,
         )
     parts: list[str] = []
@@ -941,6 +957,7 @@ class ConnectorManager:
                     return
                 proxies = [McpToolProxy(
                     session, connector.name, tool.name, tool.description or "", tool.inputSchema or {},
+                    annotations=getattr(tool, "annotations", None),
                     tool_call_timeout_seconds=self._effective_timeout_seconds(connector, self.tool_call_timeout_seconds),
                     session_ref=(lambda: self._global.sessions.get(connector.name)) if user_id is None else None,
                     on_auth_error=(lambda: state.statuses.get(connector.name, {}).update(
@@ -1235,6 +1252,7 @@ class ConnectorManager:
                         tool.name,
                         tool.description or "",
                         tool.inputSchema or {},
+                        annotations=getattr(tool, "annotations", None),
                         tool_call_timeout_seconds=self._effective_timeout_seconds(
                             connector, self.tool_call_timeout_seconds
                         ),
@@ -1678,6 +1696,7 @@ class ConnectorManager:
                             tool.name,
                             tool.description or "",
                             tool.inputSchema or {},
+                            annotations=getattr(tool, "annotations", None),
                             tool_call_timeout_seconds=self._effective_timeout_seconds(
                                 connector, self.tool_call_timeout_seconds
                             ),

@@ -1053,7 +1053,10 @@ class AgentLoop:
                     tool_result = await self.tools.execute(
                         tc.name, args, progress=_progress, deadline=turn_deadline
                     )
-                failures.record(tc.name, tc.arguments, tool_result)
+                failures.record(
+                    tc.name, tc.arguments, tool_result,
+                    idempotent=getattr(self.tools.get(tc.name), "idempotent", False),
+                )
                 from claw.jobs.tool_results import observe
                 await observe(tool_result)
                 try:

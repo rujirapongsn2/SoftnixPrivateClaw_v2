@@ -20,6 +20,9 @@ class Tool(ABC):
     # A durable handoff or explicit completion needs no extra model round.
     # Declared here too so shared tools satisfy the SBot loop's contract.
     ends_turn_on_success: bool = False
+    # True only when an identical repeat cannot add an effect (read-only or
+    # idempotent). Such a call is sent again even after an unknown outcome.
+    idempotent: bool = False
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str:

@@ -19,6 +19,9 @@ class Tool(ABC):
     wants_progress: bool = False
     # A durable handoff or explicit completion needs no extra model round.
     ends_turn_on_success: bool = False
+    # True only when an identical repeat cannot add an effect (read-only or
+    # idempotent). Such a call is sent again even after an unknown outcome.
+    idempotent: bool = False
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str:

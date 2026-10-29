@@ -1115,7 +1115,10 @@ class AgentLoop:
                         )
                         if not tool_result.startswith("Error"):
                             successful_tool_results[replay_signature] = tool_result
-                failures.record(tc.name, tc.arguments, tool_result)
+                failures.record(
+                    tc.name, tc.arguments, tool_result,
+                    idempotent=getattr(self.tools.get(tc.name), "idempotent", False),
+                )
                 # Outside the try below: a durable checkpoint that cannot be
                 # written is a state problem, never a note for the model.
                 from claw.jobs.tool_results import observe
