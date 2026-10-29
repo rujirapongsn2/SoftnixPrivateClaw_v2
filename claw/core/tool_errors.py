@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TypeVar
@@ -282,8 +282,10 @@ class TurnFailures:
     """
 
     def __init__(self) -> None:
-        # Failures the model has not yet been given a chance to answer.
+        # Failures the model has not yet been given a chance to answer, and
+        # the calls that succeeded beside them in the same step.
         self._unexplained: list[ToolFailure] = []
+        self._completed: list[str] = []
         # Calls whose earlier attempt may or may not have taken effect.
         self._unknown_outcomes: dict[str, ToolFailure] = {}
 
@@ -309,6 +311,7 @@ class TurnFailures:
             # failure right after can still cite it.
             failure = tool_failure(name, Category.EXECUTION_FAILED, result, side_effect=SideEffect.UNKNOWN).failure
         if failure is None:
+            self._completed.append(name)
             return
         self._unexplained.append(failure)
         if failure.category is Category.OUTCOME_UNKNOWN and not idempotent:
@@ -317,12 +320,13 @@ class TurnFailures:
     def answered(self) -> None:
         """The provider answered, so the model has seen every failure so far."""
         self._unexplained = []
+        self._completed = []
 
     def explain(self, cause: ProviderError) -> ProviderError:
         """What to raise when a provider call fails: `cause`, plus the failures it left unexplained."""
         if not self._unexplained:
             return cause
-        return ExplanationUnavailable(cause, self._unexplained)
+        return ExplanationUnavailable(cause, self._unexplained, self._completed)
 
 
 def guard_arguments(
@@ -434,7 +438,7 @@ class ExplanationUnavailable(ProviderError):
     runtime adds that the task did not complete and cites the tool error id.
     """
 
-    def __init__(self, cause: ProviderError, failures: list[ToolFailure]) -> None:
+    def __init__(self, cause: ProviderError, failures: list[ToolFailure], completed: Iterable[str] = ()) -> None:
         super().__init__(
             str(cause),
             error_type=cause.error_type,
@@ -445,10 +449,16 @@ class ExplanationUnavailable(ProviderError):
             retryable=cause.retryable,
         )
         self.failures = failures
+        self._completed = list(completed)
 
     @property
     def tools(self) -> str:
         return ", ".join(dict.fromkeys(f.tool for f in self.failures))
+
+    @property
+    def completed_tools(self) -> str:
+        """Tools whose calls in the same step succeeded, or '' if none did."""
+        return ", ".join(dict.fromkeys(self._completed))
 
     @property
     def error_ids(self) -> str:

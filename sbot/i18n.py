@@ -54,13 +54,18 @@ _MESSAGES: dict[str, dict[str, str]] = {
     "error.tool_unexplained": {
         "en": (
             "The task did not complete. The tool {tool} failed (error ID {error_id}), and then "
-            "the AI model could not be reached to continue ({reason}). Nothing ran after that failure."
+            "the AI model could not be reached to continue ({reason})."
         ),
         "th": (
             "งานนี้ยังไม่เสร็จ เครื่องมือ {tool} ทำงานไม่สำเร็จ (รหัสข้อผิดพลาด {error_id}) "
-            "และหลังจากนั้นไม่สามารถติดต่อโมเดล AI เพื่อทำงานต่อได้ ({reason}) "
-            "ไม่มีขั้นตอนใดทำงานต่อหลังจากข้อผิดพลาดนั้น"
+            "และหลังจากนั้นไม่สามารถติดต่อโมเดล AI เพื่อทำงานต่อได้ ({reason})"
         ),
+    },
+    # Appended to error.tool_unexplained when other calls in the same step
+    # succeeded: they did run, and may have changed something.
+    "error.tool_unexplained_completed": {
+        "en": "Other tool calls in the same step did complete: {tools}.",
+        "th": "เครื่องมืออื่นในขั้นตอนเดียวกันทำงานเสร็จแล้ว: {tools}",
     },
     # Distinct from error.llm because the model is not at fault: the answer was
     # produced and then lost on the way to storage. Saying "could not reach the

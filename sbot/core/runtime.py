@@ -185,7 +185,10 @@ def _provider_error_message(exc: ProviderError, locale: str) -> str:
         return t("error.llm_no_vision_support", locale)
     reason = t(classify_error_reason(detail), locale)
     if isinstance(exc, ExplanationUnavailable):
-        return t("error.tool_unexplained", locale, tool=exc.tools, error_id=exc.error_ids, reason=reason)
+        message = t("error.tool_unexplained", locale, tool=exc.tools, error_id=exc.error_ids, reason=reason)
+        if exc.completed_tools:
+            message += " " + t("error.tool_unexplained_completed", locale, tools=exc.completed_tools)
+        return message
     return t("error.llm", locale, reason=reason)
 
 

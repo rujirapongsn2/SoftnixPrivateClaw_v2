@@ -110,6 +110,45 @@ async def test_tool_error_then_provider_failure_is_a_system_notice_citing_the_to
     assert [m["role"] for m in await stores["messages"].recent(session.id)] == ["user"]
 
 
+class Mailer(Tool):
+    name = "mcp_mail_send"
+    description = "Send an email"
+    parameters = {"type": "object", "properties": {"to": {"type": "string"}}}
+
+    async def execute(self, **_: Any) -> str:
+        return "sent"
+
+
+async def test_the_notice_names_calls_in_the_same_step_that_did_complete(stores, tmp_path):
+    class DiesSecond(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            if self.calls:
+                self.calls.append(list(messages))
+                raise ProviderError("connection refused")
+            async for event in super().stream_chat(messages, **kwargs):
+                yield event
+
+    provider = DiesSecond([[ChatResult(content=None, tool_calls=[
+        ToolCall(id="c1", name=Lookup.name, arguments={"q": "open"}),
+        ToolCall(id="c2", name=Mailer.name, arguments={"to": "a@example.invalid"}),
+    ])]])
+    runtime, user, session, events, listener = await turn(
+        stores, provider, tmp_path, Lookup(raises=RuntimeError("boom")), "batch@x.y"
+    )
+    bot = await stores["bots"].get_or_create_cos(user.id)
+    runtime.get_agent(user.id, bot_id=bot.id, is_cos=True).tools.register(Mailer())
+
+    message = await runtime.handle_message(user.id, session.id, "list and mail")
+    await asyncio.wait_for(listener, 2)
+
+    tool_text = next(m for m in provider.calls[1] if m.get("tool_call_id") == "c1")["content"]
+    error_id = re.search(r"error_id=(te_[0-9a-f]{10})", tool_text).group(1)
+    assert f"The tool {Lookup.name} failed (error ID {error_id})" in message
+    assert message.endswith(t("error.tool_unexplained_completed", "en", tools=Mailer.name))
+    # The mail did go out, so the notice must not say nothing ran.
+    assert "Nothing ran" not in message
+
+
 async def test_direct_provider_failure_keeps_its_classification(stores, tmp_path):
     class Down(FakeProvider):
         async def stream_chat(self, *args, **kwargs):

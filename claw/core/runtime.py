@@ -2199,6 +2199,10 @@ class AgentRuntime:
                                 "error.tool_unexplained", locale,
                                 tool=exc.tools, error_id=exc.error_ids, reason=t(reason_key, locale),
                             )
+                            if exc.completed_tools:
+                                message += " " + t(
+                                    "error.tool_unexplained_completed", locale, tools=exc.completed_tools
+                                )
                         elif reason_key == "reason.provider_unavailable":
                             message = t("error.provider_unavailable", locale)
                         else:
