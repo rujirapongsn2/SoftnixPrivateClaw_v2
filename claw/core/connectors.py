@@ -28,9 +28,12 @@ from typing import Any, Callable
 from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+import anyio
 import httpx
 from loguru import logger
 from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
+from pydantic_core import PydanticSerializationError
 
 from claw.core.tool_errors import Category, SideEffect, is_control_flow, tool_failure
 from claw.db.stores import ConnectorStore
@@ -555,6 +558,15 @@ class McpToolProxy(Tool):
         return await call_mcp_tool(self, kwargs, requires_reauthorization=_requires_oauth_reauthorization)
 
 
+# Failures that prove the request never left this process. In the SDK's
+# send_request, ClosedResourceError comes only from writing to a session whose
+# streams are already closed, and a serialization error only from encoding the
+# request before the write. BrokenResourceError is left out on purpose: it is
+# raised by the same write today, but a transport that raises it after
+# delivering bytes would turn a sent request into a "safe to repeat" one.
+_NOT_SENT = (anyio.ClosedResourceError, PydanticSerializationError)
+
+
 async def call_mcp_tool(
     proxy: Any, kwargs: dict[str, Any], *, requires_reauthorization: Callable[[str], bool]
 ) -> str:
@@ -591,6 +603,16 @@ async def call_mcp_tool(
                 side_effect=SideEffect.UNKNOWN,
                 exc=exc,
             )
+        if exc.error.code == CONNECTION_CLOSED and exc.error.message == "Connection closed":
+            # The SDK answers every request still waiting when the connection
+            # drops with this error, so the request was already written.
+            return tool_failure(
+                proxy.name,
+                Category.OUTCOME_UNKNOWN,
+                "The connection closed before the response arrived.",
+                side_effect=SideEffect.UNKNOWN,
+                exc=exc,
+            )
         if _catalog_error(str(exc), exc.error.code):
             # The server rejected the request against its own schema
             # before running it; the catalog refresh above picks up the
@@ -612,17 +634,27 @@ async def call_mcp_tool(
             side_effect=SideEffect.UNKNOWN,
             exc=exc,
         )
+    except _NOT_SENT as exc:
+        await unavailable(proxy._connector_name)
+        return tool_failure(
+            proxy.name,
+            Category.TEMPORARILY_UNAVAILABLE,
+            f"The request could not be sent ({type(exc).__name__}).",
+            side_effect=SideEffect.NONE,
+            retryable=True,
+            exc=exc,
+        )
     except Exception as exc:
         await uncertain(proxy._connector_name)
         if is_control_flow(exc):
             raise
-        # The request was sent and its answer was lost (dropped connection,
-        # transport error): the remote may have acted, so this must not
-        # read as a failure the model can safely repeat.
+        # Anything else may have happened after the request was written
+        # (a transport reset, a malformed response): the remote may have
+        # acted, so this must not read as a failure the model can repeat.
         return tool_failure(
             proxy.name,
             Category.OUTCOME_UNKNOWN,
-            f"The connection failed after the request was sent ({type(exc).__name__}).",
+            f"The connection failed after the request may have been sent ({type(exc).__name__}).",
             side_effect=SideEffect.UNKNOWN,
             exc=exc,
         )
