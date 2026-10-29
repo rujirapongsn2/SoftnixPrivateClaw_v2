@@ -35,6 +35,7 @@ try:
 except ImportError:
     from mcp.shared.exceptions import MCPError as McpError
 
+from claw.core.tool_errors import Category, SideEffect, is_control_flow, tool_failure
 from sbot.db.stores import ConnectorStore
 from sbot.security.ssrf import resolve_public_ips
 from sbot.tools.base import Tool
@@ -534,7 +535,13 @@ class McpToolProxy(Tool):
         session = self._session_ref() if self._session_ref is not None else self._session
         if session is None:
             await unavailable(self._connector_name)
-            return f"Error: {self.name} is not currently connected (reconnecting) — try again shortly"
+            return tool_failure(
+                self.name,
+                Category.TEMPORARILY_UNAVAILABLE,
+                "The connector is not currently connected (reconnecting).",
+                side_effect=SideEffect.NONE,
+                retryable=True,
+            )
         try:
             result = await session.call_tool(
                 self._remote_name,
@@ -548,14 +555,48 @@ class McpToolProxy(Tool):
                 self._on_auth_error()
             await uncertain(self._connector_name)
             if exc.error.code == httpx.codes.REQUEST_TIMEOUT:
-                return (
-                    f"Error: {self.name} timed out after {self._tool_call_timeout_seconds}s "
-                    "waiting for a response"
+                return tool_failure(
+                    self.name,
+                    Category.OUTCOME_UNKNOWN,
+                    f"No response within {self._tool_call_timeout_seconds}s.",
+                    side_effect=SideEffect.UNKNOWN,
+                    exc=exc,
                 )
-            raise
-        except Exception:
+            if _catalog_error(str(exc), exc.error.code):
+                # The server rejected the request against its own schema
+                # before running it; the catalog refresh above picks up the
+                # schema it now expects.
+                return tool_failure(
+                    self.name,
+                    Category.INVALID_ARGUMENTS,
+                    str(exc),
+                    side_effect=SideEffect.NONE,
+                    retryable=True,
+                    exc=exc,
+                )
+            # A JSON-RPC error is the server's own answer, but nothing says
+            # whether it gave up before or after acting.
+            return tool_failure(
+                self.name,
+                Category.EXECUTION_FAILED,
+                str(exc),
+                side_effect=SideEffect.UNKNOWN,
+                exc=exc,
+            )
+        except Exception as exc:
             await uncertain(self._connector_name)
-            raise
+            if is_control_flow(exc):
+                raise
+            # The request was sent and its answer was lost (dropped connection,
+            # transport error): the remote may have acted, so this must not
+            # read as a failure the model can safely repeat.
+            return tool_failure(
+                self.name,
+                Category.OUTCOME_UNKNOWN,
+                f"The connection failed after the request was sent ({type(exc).__name__}).",
+                side_effect=SideEffect.UNKNOWN,
+                exc=exc,
+            )
         parts: list[str] = []
         for item in getattr(result, "content", None) or []:
             text = getattr(item, "text", None)
@@ -568,7 +609,13 @@ class McpToolProxy(Tool):
             if _requires_oauth_reauthorization(message) and self._on_auth_error is not None:
                 self._on_auth_error()
             await uncertain(self._connector_name)
-            return rendered("Error: " + message, self._connector_name, error=True)
+            return tool_failure(
+                self.name,
+                Category.INVALID_ARGUMENTS if _catalog_error(message) else Category.EXECUTION_FAILED,
+                message,
+                side_effect=SideEffect.NONE if _catalog_error(message) else SideEffect.UNKNOWN,
+                retryable=_catalog_error(message),
+            )
         return rendered("\n".join(parts) or "(empty result)", self._connector_name)
 
 

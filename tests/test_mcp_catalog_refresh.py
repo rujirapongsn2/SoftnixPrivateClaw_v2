@@ -341,9 +341,10 @@ async def test_local_validation_rejection_refreshes_without_executing(impl, monk
     old.parameters = {'type': 'object', 'properties': {'removed': {'type': 'string'}},
                       'required': ['removed']}
     session.tools = [remote('old', 'new schema')]
-    expected = "Error: invalid parameters for 'mcp_p_old': " + '; '.join(old.validate_params({}))
     result = await registry.execute('mcp_p_old', {})
-    assert result == expected + '\n\n[Analyze the error above and try a different approach.]'
+    assert result.startswith("Error: invalid parameters for 'mcp_p_old' [invalid_arguments;")
+    assert '; '.join(old.validate_params({})) in result
+    assert '[Analyze the error above and try a different approach.]' in result
     assert session.calls == 0
     await until(lambda: registry.get('mcp_p_old') is not old)
     assert session.lists == 2

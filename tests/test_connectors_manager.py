@@ -465,23 +465,29 @@ async def test_tool_call_times_out_instead_of_hanging_the_turn_forever():
     )
     result = await proxy.execute(query="x")
 
+    # The request was sent and no answer came back: the remote may have acted,
+    # so this is an unknown outcome, never a retryable failure.
     assert result.startswith("Error:")
-    assert "timed out after 0.05s" in result
+    assert "No response within 0.05s" in result
+    assert "[outcome_unknown;" in result
+    assert "retryable: no" in result
 
 
-async def test_tool_call_non_timeout_mcp_error_is_not_swallowed():
-    """A non-timeout McpError (e.g. the remote tool genuinely rejected the
-    call) must propagate — ToolRegistry.execute() already turns any raised
-    exception into a normal "Error executing ..." result, so McpToolProxy
-    must not silently absorb errors that aren't its own timeout."""
+async def test_tool_call_non_timeout_mcp_error_reaches_the_model():
+    """A non-timeout McpError (the remote tool rejected the call) comes back as
+    an execution failure with the remote's message as framed data, not as a
+    retryable error and not as an exception that ends the turn."""
 
     class RejectingSession:
         async def call_tool(self, name, kwargs, read_timeout_seconds=None):
             raise McpError(ErrorData(code=403, message="not allowed"))
 
     proxy = McpToolProxy(RejectingSession(), "softnixkb", "search_knowledge", "desc", {})
-    with pytest.raises(McpError):
-        await proxy.execute(query="x")
+    result = await proxy.execute(query="x")
+
+    assert result.startswith("Error: executing mcp_softnixkb_search_knowledge failed [execution_failed;")
+    assert "<tool_error_data>\nnot allowed\n</tool_error_data>" in result
+    assert "retryable: no" in result
 
 
 async def test_resolve_tool_names_survives_connector_rename(db_factory, monkeypatch):

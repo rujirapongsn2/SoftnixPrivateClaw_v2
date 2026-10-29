@@ -5,9 +5,14 @@ from typing import Any
 
 from loguru import logger
 
+from claw.core.tool_errors import (
+    Category,
+    SideEffect,
+    check_params,
+    is_control_flow,
+    tool_failure,
+)
 from claw.tools.base import Tool
-
-_RETRY_HINT = "\n\n[Analyze the error above and try a different approach.]"
 
 AuditHook = Callable[[str, dict[str, Any], str], None]
 
@@ -80,23 +85,35 @@ class ToolRegistry:
         if self.gate is not None:
             # A pre-execution policy check (e.g. the workspace quota). A non-empty
             # answer is the result the model sees instead of running the tool.
-            refusal = await self.gate(name, params)
+            try:
+                refusal = await self.gate(name, params)
+            except Exception as exc:
+                if is_control_flow(exc):
+                    raise
+                # Fail closed: a check that cannot answer does not let the tool run.
+                refusal = tool_failure(
+                    name,
+                    Category.PRECHECK_FAILED,
+                    "An internal check that runs before this tool could not complete.",
+                    side_effect=SideEffect.NONE,
+                    exc=exc,
+                )
             if refusal:
                 if audit:
                     self._audit(name, params, refusal)
                 return refusal
-        errors = tool.validate_params(params)
-        if errors:
-            on_validation_error = getattr(tool, "on_validation_error", None)
-            if callable(on_validation_error):
-                try:
-                    on_validation_error()
-                except Exception:
-                    logger.warning("Tool {} validation refresh hook failed", name)
-            result = f"Error: invalid parameters for '{name}': " + "; ".join(errors) + _RETRY_HINT
+        failure = check_params(tool, name, params)
+        if failure is not None:
+            if failure.failure.category is Category.INVALID_ARGUMENTS:
+                on_validation_error = getattr(tool, "on_validation_error", None)
+                if callable(on_validation_error):
+                    try:
+                        on_validation_error()
+                    except Exception:
+                        logger.warning("Tool {} validation refresh hook failed", name)
             if audit:
-                self._audit(name, params, result)
-            return result
+                self._audit(name, params, failure)
+            return failure
         # Only tools that opt in receive the progress callback / turn deadline
         # (kept out of the normal param set so validation and every other tool
         # are unaffected).
@@ -108,8 +125,15 @@ class ToolRegistry:
         try:
             result = await tool.execute(**call_kwargs)
         except Exception as exc:
-            logger.warning("Tool {} failed: {}", name, exc)
-            result = f"Error executing {name}: {exc}" + _RETRY_HINT
+            if is_control_flow(exc):
+                raise
+            result = tool_failure(
+                name,
+                Category.EXECUTION_FAILED,
+                f"{type(exc).__name__}: {exc}",
+                side_effect=SideEffect.UNKNOWN,
+                exc=exc,
+            )
         if not audit:
             return result
         self._audit(name, params, result)
