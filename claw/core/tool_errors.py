@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import traceback
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -198,15 +199,38 @@ def tool_failure(
         retryable=retryable,
         error_id=error_id or new_error_id(),
     )
-    logger.opt(exception=exc).warning(
-        "Tool failure {} tool={} category={} side_effect={} detail={!r}",
+    # The traceback is formatted here, not by loguru, so the exception's
+    # message is redacted like the detail while every frame is kept.
+    stack = "" if exc is None else "\n" + "".join(traceback.format_exception(exc))
+    logger.warning(
+        "Tool failure {} tool={} category={} side_effect={} detail={!r}{}",
         failure.error_id,
         tool,
         category,
         side_effect,
-        detail[:2000],
+        redact_secrets(detail[:2000]),
+        redact_secrets(stack),
     )
     return FailedToolResult(failure)
+
+
+def error_result_failure(tool: str) -> ToolFailure:
+    """An id for a plain "Error..." result (a refusal, a declined confirmation,
+    a tool's own error text) so a later fallback notice can cite it.
+
+    Not a tool failure in the log's sense: no warning and no detail, just the
+    id beside the tool name so the notice can be traced.
+    """
+    failure = ToolFailure(
+        tool=tool,
+        category=Category.EXECUTION_FAILED,
+        detail="",
+        side_effect=SideEffect.UNKNOWN,
+        retryable=False,
+        error_id=new_error_id(),
+    )
+    logger.info("Tool {} returned an error result {}", tool, failure.error_id)
+    return failure
 
 
 def is_control_flow(exc: BaseException) -> bool:
@@ -313,9 +337,7 @@ class TurnFailures:
         sending them again cannot add an effect."""
         failure = failure_of(result)
         if failure is None and result.startswith("Error"):
-            # A tool's own error text carries no id; mint one so a provider
-            # failure right after can still cite it.
-            failure = tool_failure(name, Category.EXECUTION_FAILED, result, side_effect=SideEffect.UNKNOWN).failure
+            failure = error_result_failure(name)
         if failure is None:
             self._completed.append(name)
             return
@@ -503,6 +525,14 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _FRAME_TAG = re.compile(r"(?i)</?\s*tool_error_data\s*>")
 
 
+def redact_secrets(text: str) -> str:
+    """Mask credentials and keep everything else, for text an operator reads."""
+    text = _URL_USERINFO.sub(r"\1***@", text)
+    text = _BEARER.sub("Bearer ***", text)
+    text = _KEY_SHAPED.sub("***", text)
+    return _ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+
+
 def scrub(text: str, limit: int = _DETAIL_LIMIT) -> str:
     """Reduce untrusted error text to a short description that is safe to show.
 
@@ -518,10 +548,7 @@ def scrub(text: str, limit: int = _DETAIL_LIMIT) -> str:
         text = kept[-1] if kept else ""
     text = _SQL_BLOCK.sub("[SQL omitted]", text)
     text = _SQLA_BACKGROUND.sub("", text)
-    text = _URL_USERINFO.sub(r"\1***@", text)
-    text = _BEARER.sub("Bearer ***", text)
-    text = _KEY_SHAPED.sub("***", text)
-    text = _ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = redact_secrets(text)
     text = _POSIX_PATH.sub("[path]", text)
     text = _WINDOWS_PATH.sub("[path]", text)
     text = _CONTROL.sub("", text)
