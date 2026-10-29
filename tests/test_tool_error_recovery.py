@@ -7,6 +7,8 @@ answered with a tool call. These tests drive the real claw and sbot loops.
 """
 
 import asyncio
+import copy
+import pickle
 import re
 from types import SimpleNamespace
 from typing import Any
@@ -17,7 +19,15 @@ import claw.core.loop as claw_loop
 import sbot.core.loop as sbot_loop
 from claw.core import connectors as claw_connectors
 from claw.core import events as claw_events
-from claw.core.tool_errors import ExplanationUnavailable, ToolCallLedger, scrub
+from claw.core.tool_errors import (
+    Category,
+    ExplanationUnavailable,
+    SideEffect,
+    ToolCallLedger,
+    failure_of,
+    scrub,
+    tool_failure,
+)
 from claw.jobs.store import BudgetExhausted, LeaseLost
 from claw.providers.base import ChatResult, ProviderError, ToolCall
 from claw.tools import base as claw_base
@@ -467,3 +477,18 @@ def test_scrub_bounds_length_and_keeps_urls_readable():
     text = scrub("see https://api.linear.app/graphql " + "x" * 5000)
     assert text.startswith("see https://api.linear.app/graphql")
     assert len(text) <= 601
+
+
+@pytest.mark.parametrize(
+    "clone",
+    [copy.deepcopy, copy.copy, lambda value: pickle.loads(pickle.dumps(value))],
+    ids=["deepcopy", "copy", "pickle"],
+)
+def test_failed_tool_result_survives_copy_and_pickle(clone):
+    result = tool_failure("x", Category.EXECUTION_FAILED, "boom", side_effect=SideEffect.UNKNOWN)
+
+    [message] = clone([{"role": "tool", "content": result}])
+
+    assert message["content"] == str(result)
+    assert failure_of(message["content"]) == result.failure
+    assert failure_of(clone(result)) == result.failure

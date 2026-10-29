@@ -144,6 +144,11 @@ class FailedToolResult(str):
         value.failure = failure
         return value
 
+    def __reduce__(self) -> tuple[type[FailedToolResult], tuple[ToolFailure]]:
+        # str's own protocol would rebuild this as cls.__new__(cls, <text>),
+        # which copy.deepcopy and pickle then crash on.
+        return (FailedToolResult, (self.failure,))
+
 
 def failure_of(result: str) -> ToolFailure | None:
     return getattr(result, "failure", None)
