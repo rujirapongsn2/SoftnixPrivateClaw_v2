@@ -11,17 +11,19 @@ and fenced as data before the model sees it.
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypeVar
 
 from loguru import logger
 
 from claw.providers.base import ProviderError
 
+T = TypeVar("T")
 
 class Category(StrEnum):
     INVALID_ARGUMENTS = "invalid_arguments"
@@ -253,7 +255,131 @@ def check_params(tool: Any, name: str, params: dict[str, Any]) -> FailedToolResu
     return None
 
 
+def call_identity(name: str, arguments: dict[str, Any]) -> str:
+    """Exact identity of a tool call: its name and every argument.
+
+    Not the loop-breaker's identity, which groups writes by path: a write of
+    new content to the same path is a different call, not a retry.
+    """
+    return f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
+
+
+class TurnFailures:
+    """One turn's record of its tool failures, shared by the claw and sbot loops.
+
+    It answers two questions the same way in both loops: may this call run
+    again after an earlier identical one ended with an unknown outcome, and
+    which failures does the runtime cite if the provider call that should
+    explain them fails.
+    """
+
+    def __init__(self) -> None:
+        # Failures the model has not yet been given a chance to answer.
+        self._unexplained: list[ToolFailure] = []
+        # Calls whose earlier attempt may or may not have taken effect.
+        self._unknown_outcomes: dict[str, ToolFailure] = {}
+
+    def refused_repeat(self, name: str, arguments: dict[str, Any]) -> FailedToolResult | None:
+        """The result for a call that must not be sent again, or None to run it."""
+        prior = self._unknown_outcomes.get(call_identity(name, arguments))
+        if prior is None:
+            return None
+        return tool_failure(
+            name,
+            Category.OUTCOME_UNKNOWN,
+            f"Not run again: an identical call earlier in this turn ({prior.error_id}) has an unknown outcome.",
+            side_effect=SideEffect.UNKNOWN,
+            error_id=prior.error_id,
+        )
+
+    def record(self, name: str, arguments: dict[str, Any], result: str) -> None:
+        failure = failure_of(result)
+        if failure is None and result.startswith("Error"):
+            # A tool's own error text carries no id; mint one so a provider
+            # failure right after can still cite it.
+            failure = tool_failure(name, Category.EXECUTION_FAILED, result, side_effect=SideEffect.UNKNOWN).failure
+        if failure is None:
+            return
+        self._unexplained.append(failure)
+        if failure.category is Category.OUTCOME_UNKNOWN:
+            self._unknown_outcomes[call_identity(name, arguments)] = failure
+
+    def answered(self) -> None:
+        """The provider answered, so the model has seen every failure so far."""
+        self._unexplained = []
+
+    def explain(self, cause: ProviderError) -> ProviderError:
+        """What to raise when a provider call fails: `cause`, plus the failures it left unexplained."""
+        if not self._unexplained:
+            return cause
+        return ExplanationUnavailable(cause, self._unexplained)
+
+
+def guard_arguments(
+    arg_guard: Callable[[str, dict[str, Any]], tuple[dict[str, Any], str | None]],
+    name: str,
+    arguments: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    """Run the argument guardrail; returns the arguments to use and a refusal result, or None."""
+    try:
+        args, block_message = arg_guard(name, arguments)
+    except Exception as exc:
+        if is_control_flow(exc):
+            raise
+        # Fail closed: an argument guard that cannot answer does not let the
+        # call through unchecked.
+        return arguments, tool_failure(
+            name,
+            Category.PRECHECK_FAILED,
+            "The guardrail check on this call's arguments could not complete.",
+            side_effect=SideEffect.NONE,
+            exc=exc,
+        )
+    return args, None if block_message is None else f"Error: {block_message}"
+
+
+def with_bookkeeping_failure(name: str, result: str, exc: Exception, *, ran: bool) -> str:
+    """`result` plus a note that our own handling of it failed after the tool returned.
+
+    The tool's result is already known, so it is kept; the note only says that
+    something like artifact tracking did not happen.
+    """
+    if is_control_flow(exc):
+        raise exc
+    note = tool_failure(
+        name,
+        Category.RESULT_PROCESSING_FAILED,
+        f"{type(exc).__name__} while recording the result.",
+        side_effect=SideEffect.COMPLETED if ran and not result.startswith("Error") else SideEffect.UNKNOWN,
+        exc=exc,
+    )
+    return f"{result}\n\n{note}"
+
+
 INTERRUPTED_PREVIEW = "Interrupted before a result was recorded."
+
+
+async def settle_tool_calls(
+    finished_event: Callable[..., Any],
+    turn_id: str,
+    emit: Callable[[Any], None],
+    body: Callable[[Callable[[Any], None]], Awaitable[T]],
+) -> T:
+    """Run a turn's `body` with an emit that finishes every started call exactly once.
+
+    However the turn ends, a call still open is finished as interrupted (see
+    ToolCallLedger).
+    """
+    ledger = ToolCallLedger(
+        emit,
+        lambda tool, call_id: finished_event(
+            turn_id=turn_id, tool=tool, result_preview=INTERRUPTED_PREVIEW, is_error=True, call_id=call_id
+        ),
+    )
+    try:
+        return await body(ledger)
+    finally:
+        ledger.settle()
 
 
 class ToolCallLedger:

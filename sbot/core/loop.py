@@ -43,15 +43,10 @@ from sbot.tools.project import (
 )
 from sbot.tools.registry import ToolRegistry
 from claw.core.tool_errors import (
-    INTERRUPTED_PREVIEW,
-    Category,
-    ExplanationUnavailable,
-    SideEffect,
-    ToolCallLedger,
-    ToolFailure,
-    failure_of,
-    is_control_flow,
-    tool_failure,
+    TurnFailures,
+    guard_arguments,
+    settle_tool_calls,
+    with_bookkeeping_failure,
 )
 
 Emit = Callable[[AgentEvent], None]
@@ -463,18 +458,12 @@ class AgentLoop:
         """Run one user turn; see `_run_turn` for the parameters.
 
         However the turn ends, every tool call it started is finished exactly
-        once on `emit` (see ToolCallLedger).
+        once on `emit`.
         """
-        ledger = ToolCallLedger(
-            emit,
-            lambda tool, call_id: ToolFinished(
-                turn_id=turn_id, tool=tool, result_preview=INTERRUPTED_PREVIEW, is_error=True, call_id=call_id
-            ),
+        return await settle_tool_calls(
+            ToolFinished, turn_id, emit,
+            lambda ledger: self._run_turn(turn_id, messages, ledger, *args, **kwargs),
         )
-        try:
-            return await self._run_turn(turn_id, messages, ledger, *args, **kwargs)
-        finally:
-            ledger.settle()
 
     async def _run_turn(
         self,
@@ -521,12 +510,7 @@ class AgentLoop:
             )
         )
         fallback_selected = False
-        # Tool failures the model has not yet been given a chance to answer. If
-        # the very next provider call fails, the runtime's fallback cites them.
-        unexplained: list[ToolFailure] = []
-        # An identical call whose earlier attempt this turn may or may not have
-        # taken effect is never sent again, whatever the model decides.
-        unknown_outcomes: dict[str, ToolFailure] = {}
+        failures = TurnFailures()
         # Files the agent wrote/edited this turn (deduped, in order). Split into
         # surfaced/suppressed by _split_artifacts at each exit, since whether a
         # template counts as an intermediate depends on what else the turn wrote.
@@ -677,19 +661,16 @@ class AgentLoop:
                                 else None
                             )
                             continue
-                        if unexplained:
-                            raise ExplanationUnavailable(exc, unexplained) from exc
-                        raise
+                        raise failures.explain(exc)
             except TimeoutError as exc:
                 # A provider that raises TimeoutError of its own (its per-request
                 # HTTP budget) lands here too, and that is NOT the turn running
                 # out of time — it's a provider failure, which the runtime
                 # reports differently. budget.expired() tells the two apart.
                 if not budget.expired():
-                    provider_failure = ProviderError("provider request timed out", error_type="timeout")
-                    if unexplained:
-                        raise ExplanationUnavailable(provider_failure, unexplained) from exc
-                    raise provider_failure from exc
+                    raise failures.explain(
+                        ProviderError("provider request timed out", error_type="timeout")
+                    ) from exc
                 timed_out = True
                 streamed = "".join(partial)
                 # The interrupted call never yielded a ChatResult, so its usage
@@ -721,11 +702,10 @@ class AgentLoop:
                 break
 
             if result is None:
-                provider_failure = ProviderError("provider stream ended without a result", error_type="protocol")
-                if unexplained:
-                    raise ExplanationUnavailable(provider_failure, unexplained)
-                raise provider_failure
-            unexplained = []
+                raise failures.explain(
+                    ProviderError("provider stream ended without a result", error_type="protocol")
+                )
+            failures.answered()
             for key in usage_total:
                 usage_total[key] += result.usage.get(key, 0)
 
@@ -859,7 +839,6 @@ class AgentLoop:
                 args_preview = _args_preview(tc.arguments)
                 args = tc.arguments
                 block_message: str | None = None
-                precheck_failure: str | None = None
                 project_slug = (
                     str(tc.arguments.get("project") or "").strip()
                     if tc.name == "project"
@@ -900,18 +879,10 @@ class AgentLoop:
                 if signature != last_signature:
                     last_signature = signature
                     repeats = 0
-                prior_unknown = unknown_outcomes.get(signature)
-                if block_message is None and prior_unknown is not None:
-                    precheck_failure = tool_failure(
-                        tc.name,
-                        Category.OUTCOME_UNKNOWN,
-                        f"Not run again: an identical call earlier in this turn ({prior_unknown.error_id}) "
-                        "has an unknown outcome.",
-                        side_effect=SideEffect.UNKNOWN,
-                        error_id=prior_unknown.error_id,
-                    )
+                refusal = None if block_message is not None else failures.refused_repeat(tc.name, tc.arguments)
+                if refusal is not None:
                     # Skips the confirmation and guards below: nothing will run.
-                    block_message = precheck_failure
+                    block_message = refusal
                 # The first project action that can create/start a persistent
                 # container is confirmed even in Auto mode. Its approval grants
                 # the rest of this turn access to that exact project slug; a new
@@ -971,25 +942,12 @@ class AgentLoop:
                         "again produces the same result. Do something different: take the next "
                         "step, or answer the user with what you have."
                     )
-                if block_message is None and self.arg_guard is not None:
-                    try:
-                        args, block_message = self.arg_guard(tc.name, tc.arguments)
-                    except Exception as exc:
-                        if is_control_flow(exc):
-                            raise
-                        # Fail closed: an argument guard that cannot answer
-                        # does not let the call through unchecked.
-                        precheck_failure = tool_failure(
-                            tc.name,
-                            Category.PRECHECK_FAILED,
-                            "The guardrail check on this call's arguments could not complete.",
-                            side_effect=SideEffect.NONE,
-                            exc=exc,
-                        )
-                if precheck_failure is not None:
-                    tool_result = precheck_failure
-                elif block_message is not None:
-                    tool_result = f"Error: {block_message}"
+                if refusal is None and block_message is not None:
+                    refusal = f"Error: {block_message}"
+                elif refusal is None and self.arg_guard is not None:
+                    args, refusal = guard_arguments(self.arg_guard, tc.name, tc.arguments)
+                if refusal is not None:
+                    tool_result = refusal
                 else:
                     # Counted here, not at the gates above: a call the user
                     # declined or the guardrail masked never ran, so it must not
@@ -1095,9 +1053,9 @@ class AgentLoop:
                     tool_result = await self.tools.execute(
                         tc.name, args, progress=_progress, deadline=turn_deadline
                     )
+                failures.record(tc.name, tc.arguments, tool_result)
                 from claw.jobs.tool_results import observe
                 await observe(tool_result)
-                failure = failure_of(tool_result)
                 try:
                     if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
                         written.append(str(args['output']))
@@ -1137,32 +1095,7 @@ class AgentLoop:
                             )
                         )
                 except Exception as exc:
-                    if is_control_flow(exc):
-                        raise
-                    # The tool's own result is already known; only our
-                    # bookkeeping on it failed. Keep the result and say so.
-                    note = tool_failure(
-                        tc.name,
-                        Category.RESULT_PROCESSING_FAILED,
-                        f"{type(exc).__name__} while recording the result.",
-                        side_effect=(
-                            SideEffect.UNKNOWN if tool_result.startswith("Error") else SideEffect.COMPLETED
-                        ),
-                        exc=exc,
-                    )
-                    tool_result = f"{tool_result}\n\n{note}"
-                if failure is not None:
-                    unexplained.append(failure)
-                    if failure.category is Category.OUTCOME_UNKNOWN:
-                        unknown_outcomes[signature] = failure
-                elif tool_result.startswith("Error"):
-                    # A tool's own error text carries no id; mint one so a
-                    # provider failure right after can still cite it.
-                    unexplained.append(
-                        tool_failure(
-                            tc.name, Category.EXECUTION_FAILED, tool_result, side_effect=SideEffect.UNKNOWN
-                        ).failure
-                    )
+                    tool_result = with_bookkeeping_failure(tc.name, tool_result, exc, ran=refusal is None)
                 if tool_started:
                     emit(
                         ToolFinished(

@@ -23,19 +23,13 @@ import time
 import weakref
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Any, Callable
 from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-import httpx
 from loguru import logger
-try:
-    from mcp.shared.exceptions import McpError
-except ImportError:
-    from mcp.shared.exceptions import MCPError as McpError
 
-from claw.core.tool_errors import Category, SideEffect, is_control_flow, tool_failure
+from claw.core.connectors import call_mcp_tool
 from sbot.db.stores import ConnectorStore
 from sbot.security.ssrf import resolve_public_ips
 from sbot.tools.base import Tool
@@ -530,93 +524,7 @@ class McpToolProxy(Tool):
             self._on_catalog_error()
 
     async def execute(self, **kwargs: Any) -> str:
-        from claw.jobs.connectors import authorize, unavailable, uncertain, rendered
-        await authorize(self._connector_name)
-        session = self._session_ref() if self._session_ref is not None else self._session
-        if session is None:
-            await unavailable(self._connector_name)
-            return tool_failure(
-                self.name,
-                Category.TEMPORARILY_UNAVAILABLE,
-                "The connector is not currently connected (reconnecting).",
-                side_effect=SideEffect.NONE,
-                retryable=True,
-            )
-        try:
-            result = await session.call_tool(
-                self._remote_name,
-                kwargs,
-                read_timeout_seconds=timedelta(seconds=self._tool_call_timeout_seconds),
-            )
-        except McpError as exc:
-            if _catalog_error(str(exc), exc.error.code) and self._on_catalog_error is not None:
-                self._on_catalog_error()
-            if _requires_oauth_reauthorization(str(exc)) and self._on_auth_error is not None:
-                self._on_auth_error()
-            await uncertain(self._connector_name)
-            if exc.error.code == httpx.codes.REQUEST_TIMEOUT:
-                return tool_failure(
-                    self.name,
-                    Category.OUTCOME_UNKNOWN,
-                    f"No response within {self._tool_call_timeout_seconds}s.",
-                    side_effect=SideEffect.UNKNOWN,
-                    exc=exc,
-                )
-            if _catalog_error(str(exc), exc.error.code):
-                # The server rejected the request against its own schema
-                # before running it; the catalog refresh above picks up the
-                # schema it now expects.
-                return tool_failure(
-                    self.name,
-                    Category.INVALID_ARGUMENTS,
-                    str(exc),
-                    side_effect=SideEffect.NONE,
-                    retryable=True,
-                    exc=exc,
-                )
-            # A JSON-RPC error is the server's own answer, but nothing says
-            # whether it gave up before or after acting.
-            return tool_failure(
-                self.name,
-                Category.EXECUTION_FAILED,
-                str(exc),
-                side_effect=SideEffect.UNKNOWN,
-                exc=exc,
-            )
-        except Exception as exc:
-            await uncertain(self._connector_name)
-            if is_control_flow(exc):
-                raise
-            # The request was sent and its answer was lost (dropped connection,
-            # transport error): the remote may have acted, so this must not
-            # read as a failure the model can safely repeat.
-            return tool_failure(
-                self.name,
-                Category.OUTCOME_UNKNOWN,
-                f"The connection failed after the request was sent ({type(exc).__name__}).",
-                side_effect=SideEffect.UNKNOWN,
-                exc=exc,
-            )
-        parts: list[str] = []
-        for item in getattr(result, "content", None) or []:
-            text = getattr(item, "text", None)
-            if text:
-                parts.append(text)
-        if getattr(result, "isError", False):
-            message = "\n".join(parts) or "MCP tool call failed"
-            if _catalog_error(message) and self._on_catalog_error is not None:
-                self._on_catalog_error()
-            if _requires_oauth_reauthorization(message) and self._on_auth_error is not None:
-                self._on_auth_error()
-            await uncertain(self._connector_name)
-            return tool_failure(
-                self.name,
-                Category.INVALID_ARGUMENTS if _catalog_error(message) else Category.EXECUTION_FAILED,
-                message,
-                side_effect=SideEffect.NONE if _catalog_error(message) else SideEffect.UNKNOWN,
-                retryable=_catalog_error(message),
-            )
-        return rendered("\n".join(parts) or "(empty result)", self._connector_name)
+        return await call_mcp_tool(self, kwargs, requires_reauthorization=_requires_oauth_reauthorization)
 
 
 @dataclass

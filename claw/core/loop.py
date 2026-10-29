@@ -29,15 +29,11 @@ from claw.core.events import (
 )
 from claw.providers.base import ChatResult, LLMProvider, ProviderError, TextDelta, ThinkingDelta
 from claw.core.tool_errors import (
-    INTERRUPTED_PREVIEW,
-    Category,
-    ExplanationUnavailable,
-    SideEffect,
-    ToolCallLedger,
-    ToolFailure,
-    failure_of,
-    is_control_flow,
-    tool_failure,
+    TurnFailures,
+    call_identity,
+    guard_arguments,
+    settle_tool_calls,
+    with_bookkeeping_failure,
 )
 from claw.providers.registry import context_window, output_window
 from claw.tools.registry import ToolRegistry
@@ -271,16 +267,6 @@ def _call_signature(name: str, arguments: dict[str, Any]) -> str:
     """Identity of a tool call, for detecting a model stuck repeating itself."""
     if name in _PATH_KEYED_TOOLS and isinstance(arguments.get("path"), str):
         return f"{name}:{arguments['path']}"
-    return f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
-
-
-def _exact_call_signature(name: str, arguments: dict[str, Any]) -> str:
-    """Exact identity used only to prevent replay after provider recovery.
-
-    This must include every argument. The regular loop-breaker intentionally
-    groups writes by path, but a fallback model may legitimately write new
-    content to the same path and that must still execute.
-    """
     return f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
@@ -557,18 +543,12 @@ class AgentLoop:
         """Run one user turn; see `_run_turn` for the parameters.
 
         However the turn ends, every tool call it started is finished exactly
-        once on `emit` (see ToolCallLedger).
+        once on `emit`.
         """
-        ledger = ToolCallLedger(
-            emit,
-            lambda tool, call_id: ToolFinished(
-                turn_id=turn_id, tool=tool, result_preview=INTERRUPTED_PREVIEW, is_error=True, call_id=call_id
-            ),
+        return await settle_tool_calls(
+            ToolFinished, turn_id, emit,
+            lambda ledger: self._run_turn(turn_id, messages, ledger, *args, **kwargs),
         )
-        try:
-            return await self._run_turn(turn_id, messages, ledger, *args, **kwargs)
-        finally:
-            ledger.settle()
 
     async def _run_turn(
         self,
@@ -658,12 +638,7 @@ class AgentLoop:
         # model has made progress (for example edit script → rerun generator).
         recovery_generation = bool(resume_tool_results)
         fallback_selected = False
-        # Tool failures the model has not yet been given a chance to answer. If
-        # the very next provider call fails, the runtime's fallback cites them.
-        unexplained: list[ToolFailure] = []
-        # An identical call whose earlier attempt this turn may or may not have
-        # taken effect is never sent again, whatever the model decides.
-        unknown_outcomes: dict[str, ToolFailure] = {}
+        failures = TurnFailures()
         # Output-limit recovery: how many times this turn was retried after a cut-off response, the
         # (possibly raised) cap for the next call, and the one-shot instruction for that retry.
         output_continuations = 0
@@ -877,19 +852,16 @@ class AgentLoop:
                             if on_fallback is not None:
                                 on_fallback(effective_model)
                             continue
-                        if unexplained:
-                            raise ExplanationUnavailable(exc, unexplained) from exc
-                        raise
+                        raise failures.explain(exc)
             except TimeoutError as exc:
                 # A provider that raises TimeoutError of its own (its per-request
                 # HTTP budget) lands here too, and that is NOT the turn running
                 # out of time — it's a provider failure, which the runtime
                 # reports differently. budget.expired() tells the two apart.
                 if not budget.expired():
-                    provider_failure = ProviderError("provider request timed out", error_type="timeout")
-                    if unexplained:
-                        raise ExplanationUnavailable(provider_failure, unexplained) from exc
-                    raise provider_failure from exc
+                    raise failures.explain(
+                        ProviderError("provider request timed out", error_type="timeout")
+                    ) from exc
                 timed_out = True
                 streamed = "".join(partial)
                 # The interrupted call never yielded a ChatResult, so its usage
@@ -921,11 +893,10 @@ class AgentLoop:
                 break
 
             if result is None:
-                provider_failure = ProviderError("provider stream ended without a result", error_type="protocol")
-                if unexplained:
-                    raise ExplanationUnavailable(provider_failure, unexplained)
-                raise provider_failure
-            unexplained = []
+                raise failures.explain(
+                    ProviderError("provider stream ended without a result", error_type="protocol")
+                )
+            failures.answered()
             for key in usage_total:
                 usage_total[key] += result.usage.get(key, 0)
 
@@ -1016,13 +987,12 @@ class AgentLoop:
                 logger.info("Tool call: {}({})", tc.name, args_preview)
                 args = tc.arguments
                 block_message: str | None = None
-                precheck_failure: str | None = None
                 # Loop-breaker identity: only back-to-back repeats count — any
                 # different call in between may have changed the state this one
                 # reads (edit a script, then re-run it), which makes the repeat
                 # legitimate.
                 signature = _call_signature(tc.name, tc.arguments)
-                replay_signature = _exact_call_signature(tc.name, tc.arguments)
+                replay_signature = call_identity(tc.name, tc.arguments)
                 uncertain_replay = bool(
                     resume_pending_call
                     and resume_pending_call.get("signature") == replay_signature
@@ -1046,16 +1016,8 @@ class AgentLoop:
                         tool=tc.name,
                         tool_call_id=tc.id,
                     ).warning("Reused successful tool result during provider recovery")
-                elif replay_signature in unknown_outcomes:
-                    prior = unknown_outcomes[replay_signature]
-                    tool_result = tool_failure(
-                        tc.name,
-                        Category.OUTCOME_UNKNOWN,
-                        f"Not run again: an identical call earlier in this turn ({prior.error_id}) "
-                        "has an unknown outcome.",
-                        side_effect=SideEffect.UNKNOWN,
-                        error_id=prior.error_id,
-                    )
+                elif (refusal := failures.refused_repeat(tc.name, tc.arguments)) is not None:
+                    tool_result = refusal
                 else:
                     if signature != last_signature:
                         last_signature = signature
@@ -1100,25 +1062,12 @@ class AgentLoop:
                             "again produces the same result. Do something different: take the next "
                             "step, or answer the user with what you have."
                         )
-                    if block_message is None and self.arg_guard is not None:
-                        try:
-                            args, block_message = self.arg_guard(tc.name, tc.arguments)
-                        except Exception as exc:
-                            if is_control_flow(exc):
-                                raise
-                            # Fail closed: an argument guard that cannot answer
-                            # does not let the call through unchecked.
-                            precheck_failure = tool_failure(
-                                tc.name,
-                                Category.PRECHECK_FAILED,
-                                "The guardrail check on this call's arguments could not complete.",
-                                side_effect=SideEffect.NONE,
-                                exc=exc,
-                            )
-                    if precheck_failure is not None:
-                        tool_result = precheck_failure
-                    elif block_message is not None:
-                        tool_result = f"Error: {block_message}"
+                    if block_message is not None:
+                        refusal = f"Error: {block_message}"
+                    elif self.arg_guard is not None:
+                        args, refusal = guard_arguments(self.arg_guard, tc.name, tc.arguments)
+                    if refusal is not None:
+                        tool_result = refusal
                     else:
                         # Counted here, not at the gates above: a call the user
                         # declined or the guardrail masked never ran, so it must not
@@ -1166,7 +1115,7 @@ class AgentLoop:
                         )
                         if not tool_result.startswith("Error"):
                             successful_tool_results[replay_signature] = tool_result
-                failure = failure_of(tool_result)
+                failures.record(tc.name, tc.arguments, tool_result)
                 # Outside the try below: a durable checkpoint that cannot be
                 # written is a state problem, never a note for the model.
                 from claw.jobs.tool_results import observe
@@ -1246,34 +1195,7 @@ class AgentLoop:
                             )
                         )
                 except Exception as exc:
-                    if is_control_flow(exc):
-                        raise
-                    # The tool's own result is already known; only our
-                    # bookkeeping on it failed. Keep the result and say so.
-                    note = tool_failure(
-                        tc.name,
-                        Category.RESULT_PROCESSING_FAILED,
-                        f"{type(exc).__name__} while recording the result.",
-                        side_effect=(
-                            SideEffect.COMPLETED
-                            if tool_executed and not tool_result.startswith("Error")
-                            else SideEffect.UNKNOWN
-                        ),
-                        exc=exc,
-                    )
-                    tool_result = f"{tool_result}\n\n{note}"
-                if failure is not None:
-                    unexplained.append(failure)
-                    if failure.category is Category.OUTCOME_UNKNOWN:
-                        unknown_outcomes[replay_signature] = failure
-                elif tool_result.startswith("Error"):
-                    # A tool's own error text carries no id; mint one so a
-                    # provider failure right after can still cite it.
-                    unexplained.append(
-                        tool_failure(
-                            tc.name, Category.EXECUTION_FAILED, tool_result, side_effect=SideEffect.UNKNOWN
-                        ).failure
-                    )
+                    tool_result = with_bookkeeping_failure(tc.name, tool_result, exc, ran=tool_executed)
                 emit(
                     ToolFinished(
                         turn_id=turn_id,
