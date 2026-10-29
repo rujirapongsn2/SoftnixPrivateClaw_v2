@@ -28,6 +28,17 @@ from claw.core.events import (
     ToolStarted,
 )
 from claw.providers.base import ChatResult, LLMProvider, ProviderError, TextDelta, ThinkingDelta
+from claw.core.tool_errors import (
+    INTERRUPTED_PREVIEW,
+    Category,
+    ExplanationUnavailable,
+    SideEffect,
+    ToolCallLedger,
+    ToolFailure,
+    failure_of,
+    is_control_flow,
+    tool_failure,
+)
 from claw.providers.registry import context_window, output_window
 from claw.tools.registry import ToolRegistry
 
@@ -541,6 +552,25 @@ class AgentLoop:
         self.snapshot_max_files = snapshot_max_files
 
     async def run_turn(
+        self, turn_id: str, messages: list[dict[str, Any]], emit: Emit, *args: Any, **kwargs: Any
+    ) -> TurnOutcome:
+        """Run one user turn; see `_run_turn` for the parameters.
+
+        However the turn ends, every tool call it started is finished exactly
+        once on `emit` (see ToolCallLedger).
+        """
+        ledger = ToolCallLedger(
+            emit,
+            lambda tool, call_id: ToolFinished(
+                turn_id=turn_id, tool=tool, result_preview=INTERRUPTED_PREVIEW, is_error=True, call_id=call_id
+            ),
+        )
+        try:
+            return await self._run_turn(turn_id, messages, ledger, *args, **kwargs)
+        finally:
+            ledger.settle()
+
+    async def _run_turn(
         self,
         turn_id: str,
         messages: list[dict[str, Any]],
@@ -628,6 +658,12 @@ class AgentLoop:
         # model has made progress (for example edit script → rerun generator).
         recovery_generation = bool(resume_tool_results)
         fallback_selected = False
+        # Tool failures the model has not yet been given a chance to answer. If
+        # the very next provider call fails, the runtime's fallback cites them.
+        unexplained: list[ToolFailure] = []
+        # An identical call whose earlier attempt this turn may or may not have
+        # taken effect is never sent again, whatever the model decides.
+        unknown_outcomes: dict[str, ToolFailure] = {}
         # Output-limit recovery: how many times this turn was retried after a cut-off response, the
         # (possibly raised) cap for the next call, and the one-shot instruction for that retry.
         output_continuations = 0
@@ -841,14 +877,19 @@ class AgentLoop:
                             if on_fallback is not None:
                                 on_fallback(effective_model)
                             continue
+                        if unexplained:
+                            raise ExplanationUnavailable(exc, unexplained) from exc
                         raise
-            except TimeoutError:
+            except TimeoutError as exc:
                 # A provider that raises TimeoutError of its own (its per-request
                 # HTTP budget) lands here too, and that is NOT the turn running
                 # out of time — it's a provider failure, which the runtime
                 # reports differently. budget.expired() tells the two apart.
                 if not budget.expired():
-                    raise
+                    provider_failure = ProviderError("provider request timed out", error_type="timeout")
+                    if unexplained:
+                        raise ExplanationUnavailable(provider_failure, unexplained) from exc
+                    raise provider_failure from exc
                 timed_out = True
                 streamed = "".join(partial)
                 # The interrupted call never yielded a ChatResult, so its usage
@@ -880,7 +921,11 @@ class AgentLoop:
                 break
 
             if result is None:
-                raise RuntimeError("provider stream ended without a result")
+                provider_failure = ProviderError("provider stream ended without a result", error_type="protocol")
+                if unexplained:
+                    raise ExplanationUnavailable(provider_failure, unexplained)
+                raise provider_failure
+            unexplained = []
             for key in usage_total:
                 usage_total[key] += result.usage.get(key, 0)
 
@@ -967,10 +1012,11 @@ class AgentLoop:
                 exec_snapshot: _Snapshot | None = None
                 after_exec: _Snapshot | None = None
                 args_preview = _args_preview(tc.arguments)
-                emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
+                emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview, call_id=tc.id))
                 logger.info("Tool call: {}({})", tc.name, args_preview)
                 args = tc.arguments
                 block_message: str | None = None
+                precheck_failure: str | None = None
                 # Loop-breaker identity: only back-to-back repeats count — any
                 # different call in between may have changed the state this one
                 # reads (edit a script, then re-run it), which makes the repeat
@@ -1000,6 +1046,16 @@ class AgentLoop:
                         tool=tc.name,
                         tool_call_id=tc.id,
                     ).warning("Reused successful tool result during provider recovery")
+                elif replay_signature in unknown_outcomes:
+                    prior = unknown_outcomes[replay_signature]
+                    tool_result = tool_failure(
+                        tc.name,
+                        Category.OUTCOME_UNKNOWN,
+                        f"Not run again: an identical call earlier in this turn ({prior.error_id}) "
+                        "has an unknown outcome.",
+                        side_effect=SideEffect.UNKNOWN,
+                        error_id=prior.error_id,
+                    )
                 else:
                     if signature != last_signature:
                         last_signature = signature
@@ -1045,8 +1101,23 @@ class AgentLoop:
                             "step, or answer the user with what you have."
                         )
                     if block_message is None and self.arg_guard is not None:
-                        args, block_message = self.arg_guard(tc.name, tc.arguments)
-                    if block_message is not None:
+                        try:
+                            args, block_message = self.arg_guard(tc.name, tc.arguments)
+                        except Exception as exc:
+                            if is_control_flow(exc):
+                                raise
+                            # Fail closed: an argument guard that cannot answer
+                            # does not let the call through unchecked.
+                            precheck_failure = tool_failure(
+                                tc.name,
+                                Category.PRECHECK_FAILED,
+                                "The guardrail check on this call's arguments could not complete.",
+                                side_effect=SideEffect.NONE,
+                                exc=exc,
+                            )
+                    if precheck_failure is not None:
+                        tool_result = precheck_failure
+                    elif block_message is not None:
                         tool_result = f"Error: {block_message}"
                     else:
                         # Counted here, not at the gates above: a call the user
@@ -1095,80 +1166,113 @@ class AgentLoop:
                         )
                         if not tool_result.startswith("Error"):
                             successful_tool_results[replay_signature] = tool_result
-                if tool_executed and not tool_result.startswith("Error"):
-                    if tc.name in {"write_file", "edit_file"}:
-                        _invalidate_read_cache(
-                            successful_tool_results,
-                            str(args.get("path") or "") if isinstance(args, dict) else "",
-                        )
-                    elif tc.name == "exec":
-                        after_exec = (
-                            await asyncio.to_thread(_snapshot_workspace, self.workspace, self.snapshot_max_files)
-                            if self.workspace
-                            else _Snapshot()
-                        )
-                        if (exec_snapshot is not None and exec_snapshot.truncated) or after_exec.truncated:
-                            # Too many files to tell what the command touched: forget every cached read.
-                            _invalidate_read_cache(successful_tool_results)
-                        else:
-                            changed = {
-                                path
-                                for path in set(exec_snapshot or {}) | set(after_exec)
-                                if (exec_snapshot or {}).get(path) != after_exec.get(path)
-                            }
-                            for path in changed:
-                                _invalidate_read_cache(successful_tool_results, path)
+                failure = failure_of(tool_result)
+                # Outside the try below: a durable checkpoint that cannot be
+                # written is a state problem, never a note for the model.
                 from claw.jobs.tool_results import observe
                 await observe(tool_result)
-                if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
-                    written.append(str(args['output']))
-                # Track files the agent created/edited (successful write_file /
-                # edit_file) so the UI can offer them as artifacts.
-                if (
-                    tc.name in ("write_file", "edit_file")
-                    and not tool_result.startswith("Error")
-                    and isinstance(args, dict)
-                    and args.get("path")
-                ):
-                    p = str(args["path"])
-                    if p not in written:
-                        written.append(p)
-                # Files created/modified by a shell command (e.g. matplotlib
-                # savefig) aren't captured above, so diff the workspace vs the
-                # turn's baseline and surface anything new or freshly changed.
-                elif (
-                    (tc.name == "exec" or getattr(self.tools.get(tc.name), "writes_workspace", False))
-                    and self.workspace is not None
-                    and not tool_result.startswith("Error")
-                ):
-                    # Reuse the listing taken right after the command when there is one.
-                    current = after_exec
-                    if current is None:
-                        current = await asyncio.to_thread(
-                            _snapshot_workspace, self.workspace, self.snapshot_max_files
-                        )
-                    if baseline.truncated or current.truncated:
-                        if not snapshot_skipped_logged:
-                            snapshot_skipped_logged = True
-                            logger.warning(
-                                "Workspace has more than {} files; not looking for files created by commands this turn",
-                                self.snapshot_max_files,
+                try:
+                    if tool_executed and not tool_result.startswith("Error"):
+                        if tc.name in {"write_file", "edit_file"}:
+                            _invalidate_read_cache(
+                                successful_tool_results,
+                                str(args.get("path") or "") if isinstance(args, dict) else "",
                             )
-                    else:
-                        for rel, mtime in current.items():
-                            if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
-                                written.append(rel)
-                # Surface a plan revision to the Execution panel in real time, from
-                # the args the model just sent (already persisted by the tool).
-                elif tc.name == "update_plan" and not tool_result.startswith("Error"):
-                    raw_steps = args.get("steps") if isinstance(args, dict) else None
-                    steps = [s for s in (raw_steps or []) if isinstance(s, dict)]
-                    emit(
-                        PlanUpdated(
-                            turn_id=turn_id,
-                            goal=str(args.get("goal") or "") if isinstance(args, dict) else "",
-                            steps=steps,
+                        elif tc.name == "exec":
+                            after_exec = (
+                                await asyncio.to_thread(_snapshot_workspace, self.workspace, self.snapshot_max_files)
+                                if self.workspace
+                                else _Snapshot()
+                            )
+                            if (exec_snapshot is not None and exec_snapshot.truncated) or after_exec.truncated:
+                                # Too many files to tell what the command touched: forget every cached read.
+                                _invalidate_read_cache(successful_tool_results)
+                            else:
+                                changed = {
+                                    path
+                                    for path in set(exec_snapshot or {}) | set(after_exec)
+                                    if (exec_snapshot or {}).get(path) != after_exec.get(path)
+                                }
+                                for path in changed:
+                                    _invalidate_read_cache(successful_tool_results, path)
+                    if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
+                        written.append(str(args['output']))
+                    # Track files the agent created/edited (successful write_file /
+                    # edit_file) so the UI can offer them as artifacts.
+                    if (
+                        tc.name in ("write_file", "edit_file")
+                        and not tool_result.startswith("Error")
+                        and isinstance(args, dict)
+                        and args.get("path")
+                    ):
+                        p = str(args["path"])
+                        if p not in written:
+                            written.append(p)
+                    # Files created/modified by a shell command (e.g. matplotlib
+                    # savefig) aren't captured above, so diff the workspace vs the
+                    # turn's baseline and surface anything new or freshly changed.
+                    elif (
+                        (tc.name == "exec" or getattr(self.tools.get(tc.name), "writes_workspace", False))
+                        and self.workspace is not None
+                        and not tool_result.startswith("Error")
+                    ):
+                        # Reuse the listing taken right after the command when there is one.
+                        current = after_exec
+                        if current is None:
+                            current = await asyncio.to_thread(
+                                _snapshot_workspace, self.workspace, self.snapshot_max_files
+                            )
+                        if baseline.truncated or current.truncated:
+                            if not snapshot_skipped_logged:
+                                snapshot_skipped_logged = True
+                                logger.warning(
+                                    "Workspace has more than {} files; not looking for files created by commands this turn",
+                                    self.snapshot_max_files,
+                                )
+                        else:
+                            for rel, mtime in current.items():
+                                if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
+                                    written.append(rel)
+                    # Surface a plan revision to the Execution panel in real time, from
+                    # the args the model just sent (already persisted by the tool).
+                    elif tc.name == "update_plan" and not tool_result.startswith("Error"):
+                        raw_steps = args.get("steps") if isinstance(args, dict) else None
+                        steps = [s for s in (raw_steps or []) if isinstance(s, dict)]
+                        emit(
+                            PlanUpdated(
+                                turn_id=turn_id,
+                                goal=str(args.get("goal") or "") if isinstance(args, dict) else "",
+                                steps=steps,
+                            )
                         )
+                except Exception as exc:
+                    if is_control_flow(exc):
+                        raise
+                    # The tool's own result is already known; only our
+                    # bookkeeping on it failed. Keep the result and say so.
+                    note = tool_failure(
+                        tc.name,
+                        Category.RESULT_PROCESSING_FAILED,
+                        f"{type(exc).__name__} while recording the result.",
+                        side_effect=(
+                            SideEffect.COMPLETED
+                            if tool_executed and not tool_result.startswith("Error")
+                            else SideEffect.UNKNOWN
+                        ),
+                        exc=exc,
+                    )
+                    tool_result = f"{tool_result}\n\n{note}"
+                if failure is not None:
+                    unexplained.append(failure)
+                    if failure.category is Category.OUTCOME_UNKNOWN:
+                        unknown_outcomes[replay_signature] = failure
+                elif tool_result.startswith("Error"):
+                    # A tool's own error text carries no id; mint one so a
+                    # provider failure right after can still cite it.
+                    unexplained.append(
+                        tool_failure(
+                            tc.name, Category.EXECUTION_FAILED, tool_result, side_effect=SideEffect.UNKNOWN
+                        ).failure
                     )
                 emit(
                     ToolFinished(
@@ -1176,6 +1280,7 @@ class AgentLoop:
                         tool=tc.name,
                         result_preview=tool_result[:_PREVIEW_CHARS],
                         is_error=tool_result.startswith("Error"),
+                        call_id=tc.id,
                     )
                 )
                 if tc.id not in sent_results:
