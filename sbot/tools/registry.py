@@ -5,9 +5,16 @@ from typing import Any
 
 from loguru import logger
 
-from sbot.tools.base import Tool
-
-_RETRY_HINT = "\n\n[Analyze the error above and try a different approach.]"
+from claw.core.tool_errors import (
+    OWN_TOOL_DETAIL_LIMIT,
+    Category,
+    SideEffect,
+    check_params,
+    is_control_flow,
+    tool_failure,
+)
+from claw.tools.base import ToolError as ClawToolError
+from sbot.tools.base import Tool, ToolError
 
 # Reading a file the user handed the bot, and turning a result into something
 # they can look at. Not capability grants: every one of them is confined to the
@@ -144,17 +151,18 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             return f"Error: tool '{name}' not found. Available: {', '.join(self.tool_names)}"
-        errors = tool.validate_params(params)
-        if errors:
+        failure = check_params(tool, name, params)
+        if failure is not None:
+            # Bad arguments and an unusable schema both refresh an MCP catalog:
+            # the server may already publish the schema that fixes either.
             on_validation_error = getattr(tool, "on_validation_error", None)
             if callable(on_validation_error):
                 try:
                     on_validation_error()
                 except Exception:
                     logger.warning("Tool {} validation refresh hook failed", name)
-            result = f"Error: invalid parameters for '{name}': " + "; ".join(errors) + _RETRY_HINT
-            self._audit(name, params, result)
-            return result
+            self._audit(name, params, failure)
+            return failure
         # Only tools that opt in receive the progress callback / turn deadline
         # (kept out of the normal param set so validation and every other tool
         # are unaffected).
@@ -166,8 +174,17 @@ class ToolRegistry:
         try:
             result = await tool.execute(**call_kwargs)
         except Exception as exc:
-            logger.warning("Tool {} failed: {}", name, exc)
-            result = f"Error executing {name}: {exc}" + _RETRY_HINT
+            if is_control_flow(exc):
+                raise
+            result = tool_failure(
+                name,
+                Category.EXECUTION_FAILED,
+                f"{type(exc).__name__}: {exc}",
+                side_effect=SideEffect.UNKNOWN,
+                exc=exc,
+                # Shared claw tools raise claw's ToolError here too.
+                detail_limit=OWN_TOOL_DETAIL_LIMIT if isinstance(exc, (ToolError, ClawToolError)) else None,
+            )
         self._audit(name, params, result)
         return result
 

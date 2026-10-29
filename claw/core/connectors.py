@@ -28,10 +28,14 @@ from typing import Any, Callable
 from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+import anyio
 import httpx
 from loguru import logger
 from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
+from pydantic_core import PydanticSerializationError
 
+from claw.core.tool_errors import Category, SideEffect, is_control_flow, tool_failure
 from claw.db.stores import ConnectorStore
 from claw.auth.mcp_oauth import McpAuthorizationNeeded, McpOAuth, McpReauthorizationRequired
 from claw.auth.mcp_oauth_discovery import REAUTH_MARKER
@@ -524,6 +528,7 @@ class McpToolProxy(Tool):
         session_ref: Callable[[], Any] | None = None,
         on_auth_error: Callable[[], None] | None = None,
         on_catalog_error: Callable[[], None] | None = None,
+        annotations: Any = None,
     ):
         # `session_ref`, when given, is looked up fresh on every call instead
         # of using the captured `session` — used only for global-connector
@@ -539,6 +544,7 @@ class McpToolProxy(Tool):
         self._session_ref = session_ref
         self._on_auth_error = on_auth_error
         self._on_catalog_error = on_catalog_error
+        self.idempotent = repeat_safe(annotations)
         self._remote_name = tool_name
         self._connector_name = connector
         self._tool_call_timeout_seconds = tool_call_timeout_seconds
@@ -551,47 +557,143 @@ class McpToolProxy(Tool):
             self._on_catalog_error()
 
     async def execute(self, **kwargs: Any) -> str:
-        from claw.jobs.connectors import authorize, unavailable, uncertain, rendered
-        await authorize(self._connector_name)
-        session = self._session_ref() if self._session_ref is not None else self._session
-        if session is None:
-            await unavailable(self._connector_name)
-            return f"Error: {self.name} is not currently connected (reconnecting) — try again shortly"
-        try:
-            result = await session.call_tool(
-                self._remote_name,
-                kwargs,
-                read_timeout_seconds=timedelta(seconds=self._tool_call_timeout_seconds),
+        return await call_mcp_tool(self, kwargs, requires_reauthorization=_requires_oauth_reauthorization)
+
+
+def repeat_safe(annotations: Any) -> bool:
+    """Whether the server says an identical repeat of its tool adds no effect.
+
+    These are hints from the connector's own server, so a false hint can only
+    repeat a call against that same server.
+    """
+    return bool(
+        getattr(annotations, "readOnlyHint", None) or getattr(annotations, "idempotentHint", None)
+    )
+
+
+# Failures that prove the request never left this process. In the SDK's
+# send_request, ClosedResourceError comes only from writing to a session whose
+# streams are already closed, and a serialization error only from encoding the
+# request before the write. BrokenResourceError is left out on purpose: it is
+# raised by the same write today, but a transport that raises it after
+# delivering bytes would turn a sent request into a "safe to repeat" one.
+_NOT_SENT = (anyio.ClosedResourceError, PydanticSerializationError)
+
+
+async def call_mcp_tool(
+    proxy: Any, kwargs: dict[str, Any], *, requires_reauthorization: Callable[[str], bool]
+) -> str:
+    """Call the remote tool behind an MCP proxy and map how it failed (shared by claw and sbot)."""
+    from claw.jobs.connectors import authorize, unavailable, uncertain, rendered
+    await authorize(proxy._connector_name)
+    session = proxy._session_ref() if proxy._session_ref is not None else proxy._session
+    if session is None:
+        await unavailable(proxy._connector_name)
+        return tool_failure(
+            proxy.name,
+            Category.TEMPORARILY_UNAVAILABLE,
+            "The connector is not currently connected (reconnecting).",
+            side_effect=SideEffect.NONE,
+            retryable=True,
+        )
+    try:
+        result = await session.call_tool(
+            proxy._remote_name,
+            kwargs,
+            read_timeout_seconds=timedelta(seconds=proxy._tool_call_timeout_seconds),
+        )
+    except McpError as exc:
+        if _catalog_error(str(exc), exc.error.code) and proxy._on_catalog_error is not None:
+            proxy._on_catalog_error()
+        if requires_reauthorization(str(exc)) and proxy._on_auth_error is not None:
+            proxy._on_auth_error()
+        await uncertain(proxy._connector_name)
+        if exc.error.code == httpx.codes.REQUEST_TIMEOUT:
+            return tool_failure(
+                proxy.name,
+                Category.OUTCOME_UNKNOWN,
+                f"No response within {proxy._tool_call_timeout_seconds}s.",
+                side_effect=SideEffect.UNKNOWN,
+                retryable=proxy.idempotent,
+                exc=exc,
             )
-        except McpError as exc:
-            if _catalog_error(str(exc), exc.error.code) and self._on_catalog_error is not None:
-                self._on_catalog_error()
-            if _requires_oauth_reauthorization(str(exc)) and self._on_auth_error is not None:
-                self._on_auth_error()
-            await uncertain(self._connector_name)
-            if exc.error.code == httpx.codes.REQUEST_TIMEOUT:
-                return (
-                    f"Error: {self.name} timed out after {self._tool_call_timeout_seconds}s "
-                    "waiting for a response"
-                )
+        if exc.error.code == CONNECTION_CLOSED and exc.error.message == "Connection closed":
+            # The SDK answers every request still waiting when the connection
+            # drops with this error, so the request was already written.
+            return tool_failure(
+                proxy.name,
+                Category.OUTCOME_UNKNOWN,
+                "The connection closed before the response arrived.",
+                side_effect=SideEffect.UNKNOWN,
+                retryable=proxy.idempotent,
+                exc=exc,
+            )
+        if _catalog_error(str(exc), exc.error.code):
+            # The server rejected the request against its own schema
+            # before running it; the catalog refresh above picks up the
+            # schema it now expects.
+            return tool_failure(
+                proxy.name,
+                Category.INVALID_ARGUMENTS,
+                str(exc),
+                side_effect=SideEffect.NONE,
+                retryable=True,
+                exc=exc,
+            )
+        # A JSON-RPC error is the server's own answer, but nothing says
+        # whether it gave up before or after acting.
+        return tool_failure(
+            proxy.name,
+            Category.EXECUTION_FAILED,
+            str(exc),
+            side_effect=SideEffect.UNKNOWN,
+            exc=exc,
+        )
+    except _NOT_SENT as exc:
+        await unavailable(proxy._connector_name)
+        return tool_failure(
+            proxy.name,
+            Category.TEMPORARILY_UNAVAILABLE,
+            f"The request could not be sent ({type(exc).__name__}).",
+            side_effect=SideEffect.NONE,
+            retryable=True,
+            exc=exc,
+        )
+    except Exception as exc:
+        await uncertain(proxy._connector_name)
+        if is_control_flow(exc):
             raise
-        except Exception:
-            await uncertain(self._connector_name)
-            raise
-        parts: list[str] = []
-        for item in getattr(result, "content", None) or []:
-            text = getattr(item, "text", None)
-            if text:
-                parts.append(text)
-        if getattr(result, "isError", False):
-            message = "\n".join(parts) or "MCP tool call failed"
-            if _catalog_error(message) and self._on_catalog_error is not None:
-                self._on_catalog_error()
-            if _requires_oauth_reauthorization(message) and self._on_auth_error is not None:
-                self._on_auth_error()
-            await uncertain(self._connector_name)
-            return rendered("Error: " + message, self._connector_name, error=True)
-        return rendered("\n".join(parts) or "(empty result)", self._connector_name)
+        # Anything else may have happened after the request was written
+        # (a transport reset, a malformed response): the remote may have
+        # acted, so this must not read as a failure the model can repeat.
+        return tool_failure(
+            proxy.name,
+            Category.OUTCOME_UNKNOWN,
+            f"The connection failed after the request may have been sent ({type(exc).__name__}).",
+            side_effect=SideEffect.UNKNOWN,
+            retryable=proxy.idempotent,
+            exc=exc,
+        )
+    parts: list[str] = []
+    for item in getattr(result, "content", None) or []:
+        text = getattr(item, "text", None)
+        if text:
+            parts.append(text)
+    if getattr(result, "isError", False):
+        message = "\n".join(parts) or "MCP tool call failed"
+        if _catalog_error(message) and proxy._on_catalog_error is not None:
+            proxy._on_catalog_error()
+        if requires_reauthorization(message) and proxy._on_auth_error is not None:
+            proxy._on_auth_error()
+        await uncertain(proxy._connector_name)
+        return tool_failure(
+            proxy.name,
+            Category.INVALID_ARGUMENTS if _catalog_error(message) else Category.EXECUTION_FAILED,
+            message,
+            side_effect=SideEffect.NONE if _catalog_error(message) else SideEffect.UNKNOWN,
+            retryable=_catalog_error(message),
+        )
+    return rendered("\n".join(parts) or "(empty result)", proxy._connector_name)
 
 
 @dataclass
@@ -855,6 +957,7 @@ class ConnectorManager:
                     return
                 proxies = [McpToolProxy(
                     session, connector.name, tool.name, tool.description or "", tool.inputSchema or {},
+                    annotations=getattr(tool, "annotations", None),
                     tool_call_timeout_seconds=self._effective_timeout_seconds(connector, self.tool_call_timeout_seconds),
                     session_ref=(lambda: self._global.sessions.get(connector.name)) if user_id is None else None,
                     on_auth_error=(lambda: state.statuses.get(connector.name, {}).update(
@@ -1149,6 +1252,7 @@ class ConnectorManager:
                         tool.name,
                         tool.description or "",
                         tool.inputSchema or {},
+                        annotations=getattr(tool, "annotations", None),
                         tool_call_timeout_seconds=self._effective_timeout_seconds(
                             connector, self.tool_call_timeout_seconds
                         ),
@@ -1592,6 +1696,7 @@ class ConnectorManager:
                             tool.name,
                             tool.description or "",
                             tool.inputSchema or {},
+                            annotations=getattr(tool, "annotations", None),
                             tool_call_timeout_seconds=self._effective_timeout_seconds(
                                 connector, self.tool_call_timeout_seconds
                             ),

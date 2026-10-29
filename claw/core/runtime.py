@@ -21,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from claw.config import Settings
 from claw.core.bus import EventBus
+from claw.core.tool_errors import ExplanationUnavailable, new_error_id
 from claw.core.context import (
     ContextAssembler,
     build_runtime_context,
@@ -381,7 +382,7 @@ class TurnFailed(Exception):
 class _TranscriptSaveError(Exception):
     """Marks a SQLAlchemyError as specifically coming from a transcript
     write, not from some other DB access nested inside the turn (audit log,
-    a tool querying the DB, …) — those get the generic error.llm message
+    a tool querying the DB, …) — those get the generic error.runtime message
     instead of a misleading "your message/answer wasn't saved".
 
     `stage` distinguishes the two save points: "request" is the user's own
@@ -389,9 +390,12 @@ class _TranscriptSaveError(Exception):
     default) for the assistant/tool messages persisted after generation —
     only the latter can truthfully say "the answer was generated"."""
 
-    def __init__(self, stage: str = "answer") -> None:
+    def __init__(self, stage: str = "answer", reply: TurnCompleted | None = None) -> None:
         super().__init__(stage)
         self.stage = stage
+        # The completion the user already watched stream in. Delivered even
+        # though the save failed, so the reply does not vanish from the screen.
+        self.reply = reply
 
 
 class ClawAgent:
@@ -623,7 +627,9 @@ class ClawAgent:
             "everything you have is already in this prompt or one `read_skill` call away.\n\n"
             "## Guidelines\n"
             "- State intent before tool calls; never claim results before receiving them.\n"
-            "- Read a file before modifying it. Analyze tool errors before retrying.\n"
+            "- Read a file before modifying it. Analyze tool errors before retrying. When a tool "
+            "fails, tell the user what did and did not get done and what is unknown, citing only "
+            "the cause the error states.\n"
             "- Ask for clarification when the request is ambiguous.\n"
             "- Match the user's language in your replies.\n"
             "- When a task will genuinely take several tool calls, call `update_plan` to record "
@@ -2188,7 +2194,16 @@ class AgentRuntime:
                             if exc.error_type == "provider_unavailable"
                             else classify_error_reason(detail)
                         )
-                        if reason_key == "reason.provider_unavailable":
+                        if isinstance(exc, ExplanationUnavailable):
+                            message = t(
+                                "error.tool_unexplained", locale,
+                                tool=exc.tools, error_id=exc.error_ids, reason=t(reason_key, locale),
+                            )
+                            if exc.completed_tools:
+                                message += " " + t(
+                                    "error.tool_unexplained_completed", locale, tools=exc.completed_tools
+                                )
+                        elif reason_key == "reason.provider_unavailable":
                             message = t("error.provider_unavailable", locale)
                         else:
                             reason = t(reason_key, locale)
@@ -2400,6 +2415,14 @@ class AgentRuntime:
                     anchor["meta"] = {**(anchor.get("meta") or {}), "vision_model": vision_delegate}
                 from claw.jobs.runtime_bridge import handoff_delivery
                 await handoff_delivery(agent.workspace, final, outcome.artifacts)
+                completed = TurnCompleted(
+                    turn_id=turn_id,
+                    content=final or "",
+                    usage=outcome.usage,
+                    artifacts=outcome.artifacts,
+                    vision_model=vision_delegate or "",
+                    info=answer_info,
+                )
                 if foreground is not None:
                     await foreground.deliver(to_store, metrics={
                         'iterations': outcome.iterations, 'tool_calls': outcome.tool_calls,
@@ -2408,7 +2431,7 @@ class AgentRuntime:
                     try:
                         await self.messages.append(session_id, to_store)
                     except SQLAlchemyError as exc:
-                        raise _TranscriptSaveError from exc
+                        raise _TranscriptSaveError(reply=completed) from exc
 
                 if artifact_job and self.artifact_jobs is not None:
                     final_status = "limit_reached" if artifact_limit_reached else "completed"
@@ -2432,22 +2455,13 @@ class AgentRuntime:
                         ),
                     )
 
-                self.bus.publish(
-                    session_id,
-                    TurnCompleted(
-                        turn_id=turn_id,
-                        content=final or "",
-                        usage=outcome.usage,
-                        artifacts=outcome.artifacts,
-                        vision_model=vision_delegate or "",
-                        info=answer_info,
-                    ),
-                )
+                self.bus.publish(session_id, completed)
             except Exception as exc:
                 from claw.jobs.store import BudgetExhausted, LeaseLost
                 if isinstance(exc, (BudgetExhausted, LeaseLost)):
                     raise
-                logger.exception("Unhandled turn failure for session {}", session_id)
+                error_id = new_error_id()
+                logger.exception("Unhandled turn failure {} for session {}", error_id, session_id)
                 # This block wraps the whole turn, so it also catches failures that
                 # happen after the model has already answered — including other DB
                 # access nested inside the turn (audit.log, a tool querying the DB).
@@ -2462,8 +2476,15 @@ class AgentRuntime:
                     message = (
                         t("error.save_request", locale) if exc.stage == "request" else t("error.save", locale)
                     )
+                    if exc.reply is not None:
+                        self.bus.publish(session_id, exc.reply)
+                elif isinstance(exc, ProviderError):
+                    # A provider call outside the main loop (e.g. a vision delegate).
+                    message = t("error.llm", locale, reason=t(classify_error_reason(str(exc)), locale))
                 else:
-                    message = t("error.llm", locale, reason=t("reason.internal", locale))
+                    # Provider failures were classified above; whatever reaches
+                    # here is ours, so it must not be reported as the model.
+                    message = t("error.runtime", locale, error_id=error_id)
                 self.bus.publish(session_id, TurnError(turn_id=turn_id, message=message))
                 if artifact_job and self.artifact_jobs is not None:
                     artifact_job = await self.artifact_jobs.finish(

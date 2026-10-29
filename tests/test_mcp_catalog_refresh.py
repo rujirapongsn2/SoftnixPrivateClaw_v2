@@ -341,14 +341,39 @@ async def test_local_validation_rejection_refreshes_without_executing(impl, monk
     old.parameters = {'type': 'object', 'properties': {'removed': {'type': 'string'}},
                       'required': ['removed']}
     session.tools = [remote('old', 'new schema')]
-    expected = "Error: invalid parameters for 'mcp_p_old': " + '; '.join(old.validate_params({}))
     result = await registry.execute('mcp_p_old', {})
-    assert result == expected + '\n\n[Analyze the error above and try a different approach.]'
+    assert result.startswith("Error: invalid parameters for 'mcp_p_old' [invalid_arguments;")
+    assert '; '.join(old.validate_params({})) in result
+    assert '[Analyze the error above and try a different approach.]' in result
     assert session.calls == 0
     await until(lambda: registry.get('mcp_p_old') is not old)
     assert session.lists == 2
     assert session.calls == 0
     assert registry.get('mcp_p_old').validate_params({}) == []
     await registry.execute('mcp_p_old', {})
+    assert session.calls == 1
+    await manager.shutdown()
+
+
+@pytest.mark.parametrize('scope', ['private', 'global'])
+async def test_broken_stale_schema_is_refreshed_and_the_tool_recovers(impl, monkeypatch, scope):
+    """A server that published an unusable schema and then fixed it is picked up
+    without an admin: the definition problem still blocks the call, and also
+    refreshes the catalog."""
+    manager, registry, sessions = await setup(
+        impl, monkeypatch, own=[connector('p')] if scope == 'private' else [],
+        globals_=[connector('p', None)] if scope == 'global' else [])
+    session = sessions['p']
+    stale = registry.get('mcp_p_old')
+    stale.parameters = {'type': 'object', 'properties': {'q': {'type': 'any'}}}
+    session.tools = [remote('old', 'fixed schema')]
+
+    blocked = await registry.execute('mcp_p_old', {'q': 'x'})
+
+    assert '[tool_definition_problem;' in blocked
+    assert session.calls == 0
+    await until(lambda: registry.get('mcp_p_old') is not stale)
+    recovered = await registry.execute('mcp_p_old', {'q': 'x'})
+    assert '[tool_definition_problem;' not in recovered
     assert session.calls == 1
     await manager.shutdown()

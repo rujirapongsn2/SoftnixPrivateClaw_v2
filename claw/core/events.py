@@ -58,6 +58,8 @@ class ToolStarted(AgentEvent):
     turn_id: str
     tool: str
     args_preview: str
+    # The provider's tool_call_id: a ToolStarted and its ToolFinished share it.
+    call_id: str = ""
     type: str = field(default="tool_started", init=False)
 
 
@@ -67,6 +69,7 @@ class ToolFinished(AgentEvent):
     tool: str
     result_preview: str
     is_error: bool = False
+    call_id: str = ""
     type: str = field(default="tool_finished", init=False)
 
 

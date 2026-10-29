@@ -3,21 +3,14 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from claw.tools.schema_validation import Verdict, check
+
 
 class ToolError(Exception):
     """Tool failed in a way the model should see and react to."""
 
 
 class Tool(ABC):
-    _TYPE_MAP = {
-        "string": str,
-        "integer": int,
-        "number": (int, float),
-        "boolean": bool,
-        "array": list,
-        "object": dict,
-    }
-
     name: str
     description: str
     parameters: dict[str, Any]
@@ -26,6 +19,9 @@ class Tool(ABC):
     wants_progress: bool = False
     # A durable handoff or explicit completion needs no extra model round.
     ends_turn_on_success: bool = False
+    # True only when an identical repeat cannot add an effect (read-only or
+    # idempotent). Such a call is sent again even after an unknown outcome.
+    idempotent: bool = False
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str:
@@ -42,27 +38,11 @@ class Tool(ABC):
         }
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
-        if not isinstance(params, dict):
-            return [f"parameters must be an object, got {type(params).__name__}"]
-        return self._validate(params, {**(self.parameters or {}), "type": "object"}, "")
+        return self.check_params(params).messages
 
-    def _validate(self, val: Any, schema: dict[str, Any], path: str) -> list[str]:
-        t, label = schema.get("type"), path or "parameter"
-        expected = self._TYPE_MAP.get(t)
-        if expected and not isinstance(val, expected):
-            return [f"{label} should be {t}"]
-        errors: list[str] = []
-        if "enum" in schema and val not in schema["enum"]:
-            errors.append(f"{label} must be one of {schema['enum']}")
-        if t == "object":
-            props = schema.get("properties", {})
-            for key in schema.get("required", []):
-                if key not in val:
-                    errors.append(f"missing required {(path + '.' + key) if path else key}")
-            for key, item in val.items():
-                if key in props:
-                    errors.extend(self._validate(item, props[key], f"{path}.{key}" if path else key))
-        if t == "array" and "items" in schema:
-            for i, item in enumerate(val):
-                errors.extend(self._validate(item, schema["items"], f"{label}[{i}]"))
-        return errors
+    def check_params(self, params: dict[str, Any]) -> Verdict:
+        """Like validate_params, but tells a broken tool schema (`schema_problem`)
+        apart from arguments that don't fit it (`errors`)."""
+        if not isinstance(params, dict):
+            return Verdict(errors=(f"parameters must be an object, got {type(params).__name__}",))
+        return check(params, {**(self.parameters or {}), "type": "object"})

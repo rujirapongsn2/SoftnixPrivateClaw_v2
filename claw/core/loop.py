@@ -28,6 +28,13 @@ from claw.core.events import (
     ToolStarted,
 )
 from claw.providers.base import ChatResult, LLMProvider, ProviderError, TextDelta, ThinkingDelta
+from claw.core.tool_errors import (
+    TurnFailures,
+    call_identity,
+    guard_arguments,
+    settle_tool_calls,
+    with_bookkeeping_failure,
+)
 from claw.providers.registry import context_window, output_window
 from claw.tools.registry import ToolRegistry
 
@@ -260,16 +267,6 @@ def _call_signature(name: str, arguments: dict[str, Any]) -> str:
     """Identity of a tool call, for detecting a model stuck repeating itself."""
     if name in _PATH_KEYED_TOOLS and isinstance(arguments.get("path"), str):
         return f"{name}:{arguments['path']}"
-    return f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
-
-
-def _exact_call_signature(name: str, arguments: dict[str, Any]) -> str:
-    """Exact identity used only to prevent replay after provider recovery.
-
-    This must include every argument. The regular loop-breaker intentionally
-    groups writes by path, but a fallback model may legitimately write new
-    content to the same path and that must still execute.
-    """
     return f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
@@ -541,6 +538,19 @@ class AgentLoop:
         self.snapshot_max_files = snapshot_max_files
 
     async def run_turn(
+        self, turn_id: str, messages: list[dict[str, Any]], emit: Emit, *args: Any, **kwargs: Any
+    ) -> TurnOutcome:
+        """Run one user turn; see `_run_turn` for the parameters.
+
+        However the turn ends, every tool call it started is finished exactly
+        once on `emit`.
+        """
+        return await settle_tool_calls(
+            ToolFinished, turn_id, emit,
+            lambda ledger: self._run_turn(turn_id, messages, ledger, *args, **kwargs),
+        )
+
+    async def _run_turn(
         self,
         turn_id: str,
         messages: list[dict[str, Any]],
@@ -628,6 +638,7 @@ class AgentLoop:
         # model has made progress (for example edit script → rerun generator).
         recovery_generation = bool(resume_tool_results)
         fallback_selected = False
+        failures = TurnFailures()
         # Output-limit recovery: how many times this turn was retried after a cut-off response, the
         # (possibly raised) cap for the next call, and the one-shot instruction for that retry.
         output_continuations = 0
@@ -841,14 +852,16 @@ class AgentLoop:
                             if on_fallback is not None:
                                 on_fallback(effective_model)
                             continue
-                        raise
-            except TimeoutError:
+                        raise failures.explain(exc)
+            except TimeoutError as exc:
                 # A provider that raises TimeoutError of its own (its per-request
                 # HTTP budget) lands here too, and that is NOT the turn running
                 # out of time — it's a provider failure, which the runtime
                 # reports differently. budget.expired() tells the two apart.
                 if not budget.expired():
-                    raise
+                    raise failures.explain(
+                        ProviderError("provider request timed out", error_type="timeout")
+                    ) from exc
                 timed_out = True
                 streamed = "".join(partial)
                 # The interrupted call never yielded a ChatResult, so its usage
@@ -880,7 +893,10 @@ class AgentLoop:
                 break
 
             if result is None:
-                raise RuntimeError("provider stream ended without a result")
+                raise failures.explain(
+                    ProviderError("provider stream ended without a result", error_type="protocol")
+                )
+            failures.answered()
             for key in usage_total:
                 usage_total[key] += result.usage.get(key, 0)
 
@@ -967,7 +983,7 @@ class AgentLoop:
                 exec_snapshot: _Snapshot | None = None
                 after_exec: _Snapshot | None = None
                 args_preview = _args_preview(tc.arguments)
-                emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
+                emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview, call_id=tc.id))
                 logger.info("Tool call: {}({})", tc.name, args_preview)
                 args = tc.arguments
                 block_message: str | None = None
@@ -976,7 +992,7 @@ class AgentLoop:
                 # reads (edit a script, then re-run it), which makes the repeat
                 # legitimate.
                 signature = _call_signature(tc.name, tc.arguments)
-                replay_signature = _exact_call_signature(tc.name, tc.arguments)
+                replay_signature = call_identity(tc.name, tc.arguments)
                 uncertain_replay = bool(
                     resume_pending_call
                     and resume_pending_call.get("signature") == replay_signature
@@ -1000,6 +1016,8 @@ class AgentLoop:
                         tool=tc.name,
                         tool_call_id=tc.id,
                     ).warning("Reused successful tool result during provider recovery")
+                elif (refusal := failures.refused_repeat(tc.name, tc.arguments)) is not None:
+                    tool_result = refusal
                 else:
                     if signature != last_signature:
                         last_signature = signature
@@ -1044,10 +1062,12 @@ class AgentLoop:
                             "again produces the same result. Do something different: take the next "
                             "step, or answer the user with what you have."
                         )
-                    if block_message is None and self.arg_guard is not None:
-                        args, block_message = self.arg_guard(tc.name, tc.arguments)
                     if block_message is not None:
-                        tool_result = f"Error: {block_message}"
+                        refusal = f"Error: {block_message}"
+                    elif self.arg_guard is not None:
+                        args, refusal = guard_arguments(self.arg_guard, tc.name, tc.arguments)
+                    if refusal is not None:
+                        tool_result = refusal
                     else:
                         # Counted here, not at the gates above: a call the user
                         # declined or the guardrail masked never ran, so it must not
@@ -1095,87 +1115,97 @@ class AgentLoop:
                         )
                         if not tool_result.startswith("Error"):
                             successful_tool_results[replay_signature] = tool_result
-                if tool_executed and not tool_result.startswith("Error"):
-                    if tc.name in {"write_file", "edit_file"}:
-                        _invalidate_read_cache(
-                            successful_tool_results,
-                            str(args.get("path") or "") if isinstance(args, dict) else "",
-                        )
-                    elif tc.name == "exec":
-                        after_exec = (
-                            await asyncio.to_thread(_snapshot_workspace, self.workspace, self.snapshot_max_files)
-                            if self.workspace
-                            else _Snapshot()
-                        )
-                        if (exec_snapshot is not None and exec_snapshot.truncated) or after_exec.truncated:
-                            # Too many files to tell what the command touched: forget every cached read.
-                            _invalidate_read_cache(successful_tool_results)
-                        else:
-                            changed = {
-                                path
-                                for path in set(exec_snapshot or {}) | set(after_exec)
-                                if (exec_snapshot or {}).get(path) != after_exec.get(path)
-                            }
-                            for path in changed:
-                                _invalidate_read_cache(successful_tool_results, path)
+                failures.record(
+                    tc.name, tc.arguments, tool_result,
+                    idempotent=getattr(self.tools.get(tc.name), "idempotent", False),
+                )
+                # Outside the try below: a durable checkpoint that cannot be
+                # written is a state problem, never a note for the model.
                 from claw.jobs.tool_results import observe
                 await observe(tool_result)
-                if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
-                    written.append(str(args['output']))
-                # Track files the agent created/edited (successful write_file /
-                # edit_file) so the UI can offer them as artifacts.
-                if (
-                    tc.name in ("write_file", "edit_file")
-                    and not tool_result.startswith("Error")
-                    and isinstance(args, dict)
-                    and args.get("path")
-                ):
-                    p = str(args["path"])
-                    if p not in written:
-                        written.append(p)
-                # Files created/modified by a shell command (e.g. matplotlib
-                # savefig) aren't captured above, so diff the workspace vs the
-                # turn's baseline and surface anything new or freshly changed.
-                elif (
-                    (tc.name == "exec" or getattr(self.tools.get(tc.name), "writes_workspace", False))
-                    and self.workspace is not None
-                    and not tool_result.startswith("Error")
-                ):
-                    # Reuse the listing taken right after the command when there is one.
-                    current = after_exec
-                    if current is None:
-                        current = await asyncio.to_thread(
-                            _snapshot_workspace, self.workspace, self.snapshot_max_files
-                        )
-                    if baseline.truncated or current.truncated:
-                        if not snapshot_skipped_logged:
-                            snapshot_skipped_logged = True
-                            logger.warning(
-                                "Workspace has more than {} files; not looking for files created by commands this turn",
-                                self.snapshot_max_files,
+                try:
+                    if tool_executed and not tool_result.startswith("Error"):
+                        if tc.name in {"write_file", "edit_file"}:
+                            _invalidate_read_cache(
+                                successful_tool_results,
+                                str(args.get("path") or "") if isinstance(args, dict) else "",
                             )
-                    else:
-                        for rel, mtime in current.items():
-                            if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
-                                written.append(rel)
-                # Surface a plan revision to the Execution panel in real time, from
-                # the args the model just sent (already persisted by the tool).
-                elif tc.name == "update_plan" and not tool_result.startswith("Error"):
-                    raw_steps = args.get("steps") if isinstance(args, dict) else None
-                    steps = [s for s in (raw_steps or []) if isinstance(s, dict)]
-                    emit(
-                        PlanUpdated(
-                            turn_id=turn_id,
-                            goal=str(args.get("goal") or "") if isinstance(args, dict) else "",
-                            steps=steps,
+                        elif tc.name == "exec":
+                            after_exec = (
+                                await asyncio.to_thread(_snapshot_workspace, self.workspace, self.snapshot_max_files)
+                                if self.workspace
+                                else _Snapshot()
+                            )
+                            if (exec_snapshot is not None and exec_snapshot.truncated) or after_exec.truncated:
+                                # Too many files to tell what the command touched: forget every cached read.
+                                _invalidate_read_cache(successful_tool_results)
+                            else:
+                                changed = {
+                                    path
+                                    for path in set(exec_snapshot or {}) | set(after_exec)
+                                    if (exec_snapshot or {}).get(path) != after_exec.get(path)
+                                }
+                                for path in changed:
+                                    _invalidate_read_cache(successful_tool_results, path)
+                    if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
+                        written.append(str(args['output']))
+                    # Track files the agent created/edited (successful write_file /
+                    # edit_file) so the UI can offer them as artifacts.
+                    if (
+                        tc.name in ("write_file", "edit_file")
+                        and not tool_result.startswith("Error")
+                        and isinstance(args, dict)
+                        and args.get("path")
+                    ):
+                        p = str(args["path"])
+                        if p not in written:
+                            written.append(p)
+                    # Files created/modified by a shell command (e.g. matplotlib
+                    # savefig) aren't captured above, so diff the workspace vs the
+                    # turn's baseline and surface anything new or freshly changed.
+                    elif (
+                        (tc.name == "exec" or getattr(self.tools.get(tc.name), "writes_workspace", False))
+                        and self.workspace is not None
+                        and not tool_result.startswith("Error")
+                    ):
+                        # Reuse the listing taken right after the command when there is one.
+                        current = after_exec
+                        if current is None:
+                            current = await asyncio.to_thread(
+                                _snapshot_workspace, self.workspace, self.snapshot_max_files
+                            )
+                        if baseline.truncated or current.truncated:
+                            if not snapshot_skipped_logged:
+                                snapshot_skipped_logged = True
+                                logger.warning(
+                                    "Workspace has more than {} files; not looking for files created by commands this turn",
+                                    self.snapshot_max_files,
+                                )
+                        else:
+                            for rel, mtime in current.items():
+                                if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
+                                    written.append(rel)
+                    # Surface a plan revision to the Execution panel in real time, from
+                    # the args the model just sent (already persisted by the tool).
+                    elif tc.name == "update_plan" and not tool_result.startswith("Error"):
+                        raw_steps = args.get("steps") if isinstance(args, dict) else None
+                        steps = [s for s in (raw_steps or []) if isinstance(s, dict)]
+                        emit(
+                            PlanUpdated(
+                                turn_id=turn_id,
+                                goal=str(args.get("goal") or "") if isinstance(args, dict) else "",
+                                steps=steps,
+                            )
                         )
-                    )
+                except Exception as exc:
+                    tool_result = with_bookkeeping_failure(tc.name, tool_result, exc, ran=tool_executed)
                 emit(
                     ToolFinished(
                         turn_id=turn_id,
                         tool=tc.name,
                         result_preview=tool_result[:_PREVIEW_CHARS],
                         is_error=tool_result.startswith("Error"),
+                        call_id=tc.id,
                     )
                 )
                 if tc.id not in sent_results:

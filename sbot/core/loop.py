@@ -42,6 +42,12 @@ from sbot.tools.project import (
     PROJECT_ACTIONS_REQUIRING_CONFIRMATION,
 )
 from sbot.tools.registry import ToolRegistry
+from claw.core.tool_errors import (
+    TurnFailures,
+    guard_arguments,
+    settle_tool_calls,
+    with_bookkeeping_failure,
+)
 
 Emit = Callable[[AgentEvent], None]
 
@@ -447,6 +453,19 @@ class AgentLoop:
         self.workspace = workspace
 
     async def run_turn(
+        self, turn_id: str, messages: list[dict[str, Any]], emit: Emit, *args: Any, **kwargs: Any
+    ) -> TurnOutcome:
+        """Run one user turn; see `_run_turn` for the parameters.
+
+        However the turn ends, every tool call it started is finished exactly
+        once on `emit`.
+        """
+        return await settle_tool_calls(
+            ToolFinished, turn_id, emit,
+            lambda ledger: self._run_turn(turn_id, messages, ledger, *args, **kwargs),
+        )
+
+    async def _run_turn(
         self,
         turn_id: str,
         messages: list[dict[str, Any]],
@@ -491,6 +510,7 @@ class AgentLoop:
             )
         )
         fallback_selected = False
+        failures = TurnFailures()
         # Files the agent wrote/edited this turn (deduped, in order). Split into
         # surfaced/suppressed by _split_artifacts at each exit, since whether a
         # template counts as an intermediate depends on what else the turn wrote.
@@ -641,14 +661,16 @@ class AgentLoop:
                                 else None
                             )
                             continue
-                        raise
-            except TimeoutError:
+                        raise failures.explain(exc)
+            except TimeoutError as exc:
                 # A provider that raises TimeoutError of its own (its per-request
                 # HTTP budget) lands here too, and that is NOT the turn running
                 # out of time — it's a provider failure, which the runtime
                 # reports differently. budget.expired() tells the two apart.
                 if not budget.expired():
-                    raise
+                    raise failures.explain(
+                        ProviderError("provider request timed out", error_type="timeout")
+                    ) from exc
                 timed_out = True
                 streamed = "".join(partial)
                 # The interrupted call never yielded a ChatResult, so its usage
@@ -680,7 +702,10 @@ class AgentLoop:
                 break
 
             if result is None:
-                raise RuntimeError("provider stream ended without a result")
+                raise failures.explain(
+                    ProviderError("provider stream ended without a result", error_type="protocol")
+                )
+            failures.answered()
             for key in usage_total:
                 usage_total[key] += result.usage.get(key, 0)
 
@@ -842,7 +867,7 @@ class AgentLoop:
                 # showing it as running before that decision is misleading.
                 tool_started = not project_confirmation_required
                 if tool_started:
-                    emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
+                    emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview, call_id=tc.id))
                     logger.info("Tool call: {}({})", tc.name, args_preview)
                 if finalize_only and tc.name != 'finish_step':
                     block_message = 'Only recording the existing result is allowed during output recovery.'
@@ -854,6 +879,10 @@ class AgentLoop:
                 if signature != last_signature:
                     last_signature = signature
                     repeats = 0
+                refusal = None if block_message is not None else failures.refused_repeat(tc.name, tc.arguments)
+                if refusal is not None:
+                    # Skips the confirmation and guards below: nothing will run.
+                    block_message = refusal
                 # The first project action that can create/start a persistent
                 # container is confirmed even in Auto mode. Its approval grants
                 # the rest of this turn access to that exact project slug; a new
@@ -913,10 +942,12 @@ class AgentLoop:
                         "again produces the same result. Do something different: take the next "
                         "step, or answer the user with what you have."
                     )
-                if block_message is None and self.arg_guard is not None:
-                    args, block_message = self.arg_guard(tc.name, tc.arguments)
-                if block_message is not None:
-                    tool_result = f"Error: {block_message}"
+                if refusal is None and block_message is not None:
+                    refusal = f"Error: {block_message}"
+                elif refusal is None and self.arg_guard is not None:
+                    args, refusal = guard_arguments(self.arg_guard, tc.name, tc.arguments)
+                if refusal is not None:
+                    tool_result = refusal
                 else:
                     # Counted here, not at the gates above: a call the user
                     # declined or the guardrail masked never ran, so it must not
@@ -1009,7 +1040,7 @@ class AgentLoop:
                     # begin, so the timeline never claims an unapproved
                     # container was started.
                     if not tool_started:
-                        emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview))
+                        emit(ToolStarted(turn_id=turn_id, tool=tc.name, args_preview=args_preview, call_id=tc.id))
                         tool_started = True
                         logger.info("Tool call: {}({})", tc.name, args_preview)
                     foreground = foreground_accounting.get()
@@ -1022,45 +1053,52 @@ class AgentLoop:
                     tool_result = await self.tools.execute(
                         tc.name, args, progress=_progress, deadline=turn_deadline
                     )
+                failures.record(
+                    tc.name, tc.arguments, tool_result,
+                    idempotent=getattr(self.tools.get(tc.name), "idempotent", False),
+                )
                 from claw.jobs.tool_results import observe
                 await observe(tool_result)
-                if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
-                    written.append(str(args['output']))
-                # Track files the agent created/edited (successful write_file /
-                # edit_file) so the UI can offer them as artifacts.
-                if (
-                    tc.name in ("write_file", "edit_file")
-                    and not tool_result.startswith("Error")
-                    and isinstance(args, dict)
-                    and args.get("path")
-                ):
-                    p = str(args["path"])
-                    if p not in written:
-                        written.append(p)
-                # Files created/modified by an ordinary shell command (e.g.
-                # matplotlib savefig) aren't captured above, so diff the
-                # workspace vs the turn's baseline. Persistent project files
-                # intentionally do not become chat artifacts: an application
-                # is delivered through its access URL, with explicit
-                # publish_artifact reserved for requested downloads.
-                elif tc.name == "exec" and self.workspace is not None and not tool_result.startswith("Error"):
-                    for rel, mtime in _snapshot_workspace(self.workspace).items():
-                        if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
-                            written.append(rel)
-                # Surface a plan revision to the Execution panel in real time, from
-                # the args the model just sent (already persisted by the tool).
-                elif tc.name == "update_plan" and not tool_result.startswith("Error"):
-                    raw_steps = args.get("steps") if isinstance(args, dict) else None
-                    steps = [s for s in (raw_steps or []) if isinstance(s, dict)]
-                    continue_plan_work = args.get("continue_work") is True
-                    active_plan = [dict(s) for s in steps if str(s.get("step") or "").strip()][:40]
-                    emit(
-                        PlanUpdated(
-                            turn_id=turn_id,
-                            goal=str(args.get("goal") or "") if isinstance(args, dict) else "",
-                            steps=steps,
+                try:
+                    if tc.name == 'generate_workbook' and not tool_result.startswith('Error') and args.get('output'):
+                        written.append(str(args['output']))
+                    # Track files the agent created/edited (successful write_file /
+                    # edit_file) so the UI can offer them as artifacts.
+                    if (
+                        tc.name in ("write_file", "edit_file")
+                        and not tool_result.startswith("Error")
+                        and isinstance(args, dict)
+                        and args.get("path")
+                    ):
+                        p = str(args["path"])
+                        if p not in written:
+                            written.append(p)
+                    # Files created/modified by an ordinary shell command (e.g.
+                    # matplotlib savefig) aren't captured above, so diff the
+                    # workspace vs the turn's baseline. Persistent project files
+                    # intentionally do not become chat artifacts: an application
+                    # is delivered through its access URL, with explicit
+                    # publish_artifact reserved for requested downloads.
+                    elif tc.name == "exec" and self.workspace is not None and not tool_result.startswith("Error"):
+                        for rel, mtime in _snapshot_workspace(self.workspace).items():
+                            if (rel not in baseline or mtime > baseline[rel]) and rel not in written:
+                                written.append(rel)
+                    # Surface a plan revision to the Execution panel in real time, from
+                    # the args the model just sent (already persisted by the tool).
+                    elif tc.name == "update_plan" and not tool_result.startswith("Error"):
+                        raw_steps = args.get("steps") if isinstance(args, dict) else None
+                        steps = [s for s in (raw_steps or []) if isinstance(s, dict)]
+                        continue_plan_work = args.get("continue_work") is True
+                        active_plan = [dict(s) for s in steps if str(s.get("step") or "").strip()][:40]
+                        emit(
+                            PlanUpdated(
+                                turn_id=turn_id,
+                                goal=str(args.get("goal") or "") if isinstance(args, dict) else "",
+                                steps=steps,
+                            )
                         )
-                    )
+                except Exception as exc:
+                    tool_result = with_bookkeeping_failure(tc.name, tool_result, exc, ran=refusal is None)
                 if tool_started:
                     emit(
                         ToolFinished(
@@ -1068,6 +1106,7 @@ class AgentLoop:
                             tool=tc.name,
                             result_preview=tool_result[:_PREVIEW_CHARS],
                             is_error=tool_result.startswith("Error"),
+                            call_id=tc.id,
                         )
                     )
                 if tc.id not in sent_results:

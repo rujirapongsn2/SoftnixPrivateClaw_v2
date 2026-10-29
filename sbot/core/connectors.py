@@ -23,18 +23,13 @@ import time
 import weakref
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Any, Callable
 from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-import httpx
 from loguru import logger
-try:
-    from mcp.shared.exceptions import McpError
-except ImportError:
-    from mcp.shared.exceptions import MCPError as McpError
 
+from claw.core.connectors import call_mcp_tool, repeat_safe
 from sbot.db.stores import ConnectorStore
 from sbot.security.ssrf import resolve_public_ips
 from sbot.tools.base import Tool
@@ -502,6 +497,7 @@ class McpToolProxy(Tool):
         session_ref: Callable[[], Any] | None = None,
         on_auth_error: Callable[[], None] | None = None,
         on_catalog_error: Callable[[], None] | None = None,
+        annotations: Any = None,
     ):
         # `session_ref`, when given, is looked up fresh on every call instead
         # of using the captured `session` — used only for global-connector
@@ -517,6 +513,7 @@ class McpToolProxy(Tool):
         self._session_ref = session_ref
         self._on_auth_error = on_auth_error
         self._on_catalog_error = on_catalog_error
+        self.idempotent = repeat_safe(annotations)
         self._remote_name = tool_name
         self._connector_name = connector
         self._tool_call_timeout_seconds = tool_call_timeout_seconds
@@ -529,47 +526,7 @@ class McpToolProxy(Tool):
             self._on_catalog_error()
 
     async def execute(self, **kwargs: Any) -> str:
-        from claw.jobs.connectors import authorize, unavailable, uncertain, rendered
-        await authorize(self._connector_name)
-        session = self._session_ref() if self._session_ref is not None else self._session
-        if session is None:
-            await unavailable(self._connector_name)
-            return f"Error: {self.name} is not currently connected (reconnecting) — try again shortly"
-        try:
-            result = await session.call_tool(
-                self._remote_name,
-                kwargs,
-                read_timeout_seconds=timedelta(seconds=self._tool_call_timeout_seconds),
-            )
-        except McpError as exc:
-            if _catalog_error(str(exc), exc.error.code) and self._on_catalog_error is not None:
-                self._on_catalog_error()
-            if _requires_oauth_reauthorization(str(exc)) and self._on_auth_error is not None:
-                self._on_auth_error()
-            await uncertain(self._connector_name)
-            if exc.error.code == httpx.codes.REQUEST_TIMEOUT:
-                return (
-                    f"Error: {self.name} timed out after {self._tool_call_timeout_seconds}s "
-                    "waiting for a response"
-                )
-            raise
-        except Exception:
-            await uncertain(self._connector_name)
-            raise
-        parts: list[str] = []
-        for item in getattr(result, "content", None) or []:
-            text = getattr(item, "text", None)
-            if text:
-                parts.append(text)
-        if getattr(result, "isError", False):
-            message = "\n".join(parts) or "MCP tool call failed"
-            if _catalog_error(message) and self._on_catalog_error is not None:
-                self._on_catalog_error()
-            if _requires_oauth_reauthorization(message) and self._on_auth_error is not None:
-                self._on_auth_error()
-            await uncertain(self._connector_name)
-            return rendered("Error: " + message, self._connector_name, error=True)
-        return rendered("\n".join(parts) or "(empty result)", self._connector_name)
+        return await call_mcp_tool(self, kwargs, requires_reauthorization=_requires_oauth_reauthorization)
 
 
 @dataclass
@@ -837,6 +794,7 @@ class ConnectorManager:
                     return
                 proxies = [McpToolProxy(
                     session, connector.name, tool.name, tool.description or "", tool.inputSchema or {},
+                    annotations=getattr(tool, "annotations", None),
                     tool_call_timeout_seconds=self._effective_timeout_seconds(connector, self.tool_call_timeout_seconds),
                     session_ref=(lambda: self._global.sessions.get(connector.name)) if user_id is None else None,
                     on_auth_error=(lambda: state.statuses.get(connector.name, {}).update(
@@ -1131,6 +1089,7 @@ class ConnectorManager:
                         tool.name,
                         tool.description or "",
                         tool.inputSchema or {},
+                        annotations=getattr(tool, "annotations", None),
                         tool_call_timeout_seconds=self._effective_timeout_seconds(
                             connector, self.tool_call_timeout_seconds
                         ),
@@ -1508,6 +1467,7 @@ class ConnectorManager:
                             tool.name,
                             tool.description or "",
                             tool.inputSchema or {},
+                            annotations=getattr(tool, "annotations", None),
                             tool_call_timeout_seconds=self._effective_timeout_seconds(
                                 connector, self.tool_call_timeout_seconds
                             ),

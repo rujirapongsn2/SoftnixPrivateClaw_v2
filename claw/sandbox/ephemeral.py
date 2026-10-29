@@ -16,6 +16,9 @@ from loguru import logger
 from claw.config import SandboxSettings
 
 _OUTPUT_CAP = 20_000
+# Where the user's workspace appears inside the sandbox. Paths under it are
+# the model's own namespace, not the host's.
+WORKSPACE_MOUNT = "/workspace"
 
 
 @dataclass(slots=True)
@@ -93,8 +96,8 @@ class EphemeralSandbox:
             "--cpus", str(s.cpu_limit),
             "--memory", s.memory_limit,
             "--pids-limit", str(s.pids_limit),
-            "--workdir", "/workspace",
-            "--mount", f"type=bind,source={workspace.resolve()},target=/workspace",
+            "--workdir", WORKSPACE_MOUNT,
+            "--mount", f"type=bind,source={workspace.resolve()},target={WORKSPACE_MOUNT}",
             s.image,
             "/bin/sh", "-lc", command,
         ]
