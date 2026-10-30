@@ -1,0 +1,252 @@
+[
+ {
+  "version": "v0.9",
+  "createSurface": {
+   "surfaceId": "openrouter-price-watch",
+   "catalogId": "https://softnix.ai/a2ui/catalogs/privateclaw/v0.9.json"
+  }
+ },
+ {
+  "version": "v0.9",
+  "updateComponents": {
+   "surfaceId": "openrouter-price-watch",
+   "components": [
+    {
+     "id": "root",
+     "component": "Card",
+     "child": "col"
+    },
+    {
+     "id": "col",
+     "component": "Column",
+     "children": [
+      "title",
+      "sub",
+      "stats",
+      "chart",
+      "table"
+     ]
+    },
+    {
+     "id": "title",
+     "component": "Text",
+     "variant": "h3",
+     "text": "ราคาโมเดลใหม่บน OpenRouter (7 วันล่าสุด)"
+    },
+    {
+     "id": "sub",
+     "component": "Text",
+     "variant": "caption",
+     "text": "ดึงจาก openrouter.ai/api/v1/models เมื่อ 30/10/2026 22:19 ICT · โมเดลใหม่ 6 จาก 449 · หน่วย USD ต่อ 1M tokens · ▼ ถูกลง ▲ แพงขึ้น (ราคา output)"
+    },
+    {
+     "id": "stat0",
+     "component": "DeltaStat",
+     "label": "Particle AI: Particle-1",
+     "value": 1.0,
+     "unit": "$/1M out",
+     "direction": "new",
+     "baseline": "ไม่มีรุ่นก่อนให้เทียบ"
+    },
+    {
+     "id": "stat1",
+     "component": "DeltaStat",
+     "label": "OpenAI: GPT-6.1 Terra Pro",
+     "value": 5.0,
+     "unit": "$/1M out",
+     "direction": "flat",
+     "baseline": "เทียบรุ่นก่อนของ openai: openai/gpt-6.1-terra ($5.00)",
+     "deltaPct": 0.0
+    },
+    {
+     "id": "stat2",
+     "component": "DeltaStat",
+     "label": "OpenAI: GPT-6.1 Terra Pro (batch)",
+     "value": 2.5,
+     "unit": "$/1M out",
+     "direction": "flat",
+     "baseline": "เทียบรุ่นก่อนของ openai: openai/gpt-6.1-terra:batch ($2.50)",
+     "deltaPct": 0.0
+    },
+    {
+     "id": "stat3",
+     "component": "DeltaStat",
+     "label": "OpenAI: GPT-6.1 Terra",
+     "value": 5.0,
+     "unit": "$/1M out",
+     "direction": "down",
+     "baseline": "เทียบรุ่นก่อนของ openai: openai/gpt-6.1-sol-pro ($10.00)",
+     "deltaPct": -50.0
+    },
+    {
+     "id": "stat4",
+     "component": "DeltaStat",
+     "label": "OpenAI: GPT-6.1 Terra (batch)",
+     "value": 2.5,
+     "unit": "$/1M out",
+     "direction": "down",
+     "baseline": "เทียบรุ่นก่อนของ openai: openai/gpt-6.1-sol-pro:batch ($5.00)",
+     "deltaPct": -50.0
+    },
+    {
+     "id": "stat5",
+     "component": "DeltaStat",
+     "label": "MoonshotAI: Kimi K3.1 Pro",
+     "value": 10.0,
+     "unit": "$/1M out",
+     "direction": "down",
+     "baseline": "เทียบรุ่นก่อนของ moonshotai: moonshotai/kimi-k3 ($15.00)",
+     "deltaPct": -33.3
+    },
+    {
+     "id": "stats",
+     "component": "Row",
+     "children": [
+      "stat0",
+      "stat1",
+      "stat2",
+      "stat3",
+      "stat4",
+      "stat5"
+     ]
+    },
+    {
+     "id": "chart",
+     "component": "PriceChart",
+     "title": "ราคา input เทียบ output (USD ต่อ 1M tokens)",
+     "unit": "$/1M",
+     "seriesLabels": [
+      "input",
+      "output"
+     ],
+     "items": [
+      {
+       "label": "particle-ai/particle-1",
+       "a": 0.1,
+       "b": 1.0
+      },
+      {
+       "label": "openai/gpt-6.1-terra-pro",
+       "a": 1.0,
+       "b": 5.0
+      },
+      {
+       "label": "openai/gpt-6.1-terra-pro:batch",
+       "a": 0.5,
+       "b": 2.5
+      },
+      {
+       "label": "openai/gpt-6.1-terra",
+       "a": 1.0,
+       "b": 5.0
+      },
+      {
+       "label": "openai/gpt-6.1-terra:batch",
+       "a": 0.5,
+       "b": 2.5
+      },
+      {
+       "label": "moonshotai/kimi-k3.1-pro",
+       "a": 2.0,
+       "b": 10.0
+      }
+     ]
+    },
+    {
+     "id": "table",
+     "component": "DataTable",
+     "columns": [
+      {
+       "key": "model",
+       "label": "โมเดล"
+      },
+      {
+       "key": "date",
+       "label": "เปิดตัว"
+      },
+      {
+       "key": "in",
+       "label": "Input $/1M",
+       "align": "end"
+      },
+      {
+       "key": "out",
+       "label": "Output $/1M",
+       "align": "end"
+      },
+      {
+       "key": "din",
+       "label": "Δ input",
+       "align": "end"
+      },
+      {
+       "key": "dout",
+       "label": "Δ output",
+       "align": "end"
+      },
+      {
+       "key": "basis",
+       "label": "เทียบกับ"
+      }
+     ],
+     "rows": [
+      {
+       "model": "particle-ai/particle-1",
+       "date": "29/10/2026",
+       "in": "0.1",
+       "out": "1",
+       "din": "ใหม่",
+       "dout": "ใหม่",
+       "basis": "ไม่มีรุ่นก่อนให้เทียบ"
+      },
+      {
+       "model": "openai/gpt-6.1-terra-pro",
+       "date": "27/10/2026",
+       "in": "1",
+       "out": "5",
+       "din": "■ 0.0%",
+       "dout": "■ 0.0%",
+       "basis": "เทียบรุ่นก่อนของ openai: openai/gpt-6.1-terra"
+      },
+      {
+       "model": "openai/gpt-6.1-terra-pro:batch",
+       "date": "27/10/2026",
+       "in": "0.5",
+       "out": "2.5",
+       "din": "■ 0.0%",
+       "dout": "■ 0.0%",
+       "basis": "เทียบรุ่นก่อนของ openai: openai/gpt-6.1-terra:batch"
+      },
+      {
+       "model": "openai/gpt-6.1-terra",
+       "date": "27/10/2026",
+       "in": "1",
+       "out": "5",
+       "din": "▼ -50.0%",
+       "dout": "▼ -50.0%",
+       "basis": "เทียบรุ่นก่อนของ openai: openai/gpt-6.1-sol-pro"
+      },
+      {
+       "model": "openai/gpt-6.1-terra:batch",
+       "date": "27/10/2026",
+       "in": "0.5",
+       "out": "2.5",
+       "din": "▼ -50.0%",
+       "dout": "▼ -50.0%",
+       "basis": "เทียบรุ่นก่อนของ openai: openai/gpt-6.1-sol-pro:batch"
+      },
+      {
+       "model": "moonshotai/kimi-k3.1-pro",
+       "date": "24/10/2026",
+       "in": "2",
+       "out": "10",
+       "din": "▲ +941.7%",
+       "dout": "▼ -33.3%",
+       "basis": "เทียบรุ่นก่อนของ moonshotai: moonshotai/kimi-k3"
+      }
+     ]
+    }
+   ]
+  }
+ }
+]

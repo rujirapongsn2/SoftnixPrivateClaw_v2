@@ -1,0 +1,17 @@
+[
+ {"version":"v0.9","createSurface":{"surfaceId":"report-clarify","catalogId":"https://softnix.ai/a2ui/catalogs/privateclaw/v0.9.json"}},
+ {"version":"v0.9","updateComponents":{"surfaceId":"report-clarify","components":[
+  {"id":"root","component":"Card","child":"col"},
+  {"id":"col","component":"Column","children":["q","style","detail","actions"]},
+  {"id":"q","component":"Text","variant":"h4","text":"อยากได้รายงานแบบไหนครับ"},
+  {"id":"style","component":"ChoicePicker","label":"รูปแบบรายงาน","variant":"mutuallyExclusive","displayStyle":"chips",
+   "options":[{"label":"ทางการ","value":"ทางการ"},{"label":"ไม่ทางการ","value":"ไม่ทางการ"},{"label":"ระบุเอง","value":"ระบุเอง"}],
+   "value":{"path":"/style"}},
+  {"id":"detail","component":"TextField","label":"หัวข้อ/ผู้อ่าน/รายละเอียด (ถ้าเลือกระบุเอง ให้พิมพ์ที่นี่)","variant":"longText","value":{"path":"/detail"}},
+  {"id":"actions","component":"Row","justify":"end","children":["go"]},
+  {"id":"go","component":"Button","variant":"primary","child":"go_t",
+   "action":{"event":{"name":"report_brief","context":{"style":{"path":"/style"},"detail":{"path":"/detail"}}}}},
+  {"id":"go_t","component":"Text","text":"ไปต่อ"}
+ ]}},
+ {"version":"v0.9","updateDataModel":{"surfaceId":"report-clarify","path":"/","value":{"style":[],"detail":""}}}
+]
