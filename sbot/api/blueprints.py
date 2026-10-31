@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from claw.api.group_sharing import resolve_share_groups
 from sbot.api.deps import AppState
 from sbot.db.models import Blueprint, BlueprintVersion, User
-from sbot.filenames import safe_filename
+from claw.filenames import safe_filename
 
 router = APIRouter(prefix="/api/blueprints")
 

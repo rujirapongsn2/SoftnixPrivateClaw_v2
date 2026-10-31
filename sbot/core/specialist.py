@@ -427,7 +427,7 @@ class SpecialistRunner:
         }
         assert set(all_tools) == DELEGATABLE_TOOLS, "delegatable tool set drifted"
         registry = ToolRegistry()
-        from sbot.tools.artifacts import PublishArtifactTool
+        from claw.tools.artifacts import PublishArtifactTool
         registry.register(PublishArtifactTool(self.workspace))
         from claw.jobs.workbook import GenerateWorkbookTool
         registry.register(GenerateWorkbookTool(self.workspace))

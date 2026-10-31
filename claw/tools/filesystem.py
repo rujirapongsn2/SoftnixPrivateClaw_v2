@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from claw.sandbox.ephemeral import WORKSPACE_MOUNT
 from claw.tools.base import Tool
 
 _MAX_READ_CHARS = 50_000
@@ -16,6 +17,10 @@ class _WorkspaceTool(Tool):
 
     def _resolve(self, raw: str) -> Path:
         path = Path(raw)
+        # The sandbox mounts the workspace at WORKSPACE_MOUNT, so the model may
+        # name a file by its in-sandbox path; a real host path is left alone.
+        if path.is_absolute() and not path.is_relative_to(self.workspace) and path.is_relative_to(WORKSPACE_MOUNT):
+            path = path.relative_to(WORKSPACE_MOUNT)
         resolved = (self.workspace / path).resolve() if not path.is_absolute() else path.resolve()
         if not resolved.is_relative_to(self.workspace):
             raise ValueError(f"path escapes the workspace: {raw}")
