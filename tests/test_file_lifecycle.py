@@ -235,7 +235,8 @@ async def test_trash_restore_audits_owner_over_the_api(db_factory, tmp_path):
         files = (await c.get('/api/files', headers=headers)).json()
         assert files['truncated'] is False
         assert files['files'] == [{'path': path, 'size': file.stat().st_size, 'modified_at': file.stat().st_mtime,
-                                   'zone': 'ai', 'expires_at': pytest.approx(file.stat().st_mtime + 30 * DAY)}]
+                                   'zone': 'ai', 'expires_at': pytest.approx(file.stat().st_mtime + 30 * DAY),
+                                   'kind': 'document'}]
     async with db_factory() as db:
         events = (await db.scalars(select(AuditEvent))).all()
     assert {'file_trashed', 'file_restored'} <= {event.kind for event in events}

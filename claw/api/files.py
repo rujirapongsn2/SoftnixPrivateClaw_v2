@@ -1,13 +1,21 @@
 """Authenticated owner workspace files, independent of conversation existence."""
 import asyncio
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from loguru import logger
 from pydantic import BaseModel
 
+from claw.workspace.browse import KINDS, OTHER, ListingCache, browse, kind_of
 from claw.workspace.lifecycle import FileConflict, FileLifecycle, safe_path
 from claw.workspace.policy import WorkspacePolicyStore
+
+
+# Upper bound on one walk of a workspace; the view says when it was reached.
+WALK_LIMIT = 20_000
+_listings = ListingCache()
 
 
 class FileRequest(BaseModel):
@@ -27,7 +35,7 @@ def _policy(state):
 def create_files_router(get_state, current_user, mode):
     router = APIRouter(prefix="/api/files", tags=["files"])
 
-    async def operation(fn):
+    async def operation(fn, owner: str):
         try:
             return await fn()
         except (FileNotFoundError, ValueError):
@@ -37,11 +45,41 @@ def create_files_router(get_state, current_user, mode):
         except OSError:
             logger.exception("File operation failed")
             raise HTTPException(503, "The file could not be changed right now. Try again later.") from None
+        finally:
+            _listings.forget((mode, owner))
 
     @router.get("")
-    async def list_files(user=Depends(current_user), state=Depends(get_state)):
+    async def list_files(
+        q: str = Query("", max_length=200),
+        kind: str = "",
+        sort: Literal["recent", "name", "size"] = "recent",
+        offset: int = Query(0, ge=0),
+        limit: int = Query(40, ge=1, le=200),
+        since: float | None = Query(None, ge=0),
+        zone: Literal["", "ai", "user", "scratch"] = "",
+        refresh: bool = False,
+        user=Depends(current_user),
+        state=Depends(get_state),
+    ):
+        if kind and kind != OTHER and kind not in KINDS:
+            raise HTTPException(422, "Unknown file kind")
         policy = await _policy(state)
-        return await asyncio.to_thread(FileLifecycle(state, mode).list_files, user.id, policy)
+
+        def walk():
+            listing = FileLifecycle(state, mode).list_files(user.id, policy, limit=WALK_LIMIT)
+            for entry in listing["files"]:
+                entry["kind"] = kind_of(entry["path"])
+            return listing
+
+        def page():
+            listing = _listings.get((mode, user.id), walk, fresh=refresh)
+            return {
+                **browse(listing["files"], q=q, kind=kind, sort=sort, offset=offset, limit=limit, since=since, zone=zone),
+                "truncated": listing["truncated"],
+                "walk_limit": WALK_LIMIT,
+            }
+
+        return await asyncio.to_thread(page)
 
     @router.get("/download/{path:path}")
     async def download(path: str, user=Depends(current_user), state=Depends(get_state)):
@@ -72,17 +110,17 @@ def create_files_router(get_state, current_user, mode):
 
     @router.post("/trash")
     async def trash(body: FileRequest, user=Depends(current_user), state=Depends(get_state)):
-        return await operation(lambda: FileLifecycle(state, mode).trash(user.id, body.path, actor=user.id))
+        return await operation(lambda: FileLifecycle(state, mode).trash(user.id, body.path, actor=user.id), user.id)
 
     @router.post("/trash/{ident}/restore")
     async def restore(ident: str, user=Depends(current_user), state=Depends(get_state)):
-        return await operation(lambda: FileLifecycle(state, mode).restore(user.id, ident))
+        return await operation(lambda: FileLifecycle(state, mode).restore(user.id, ident), user.id)
 
     async def purge(ident: str, body: PurgeRequest, user=Depends(current_user), state=Depends(get_state)):
         if not (await _policy(state)).permanent_delete_enabled:
             raise HTTPException(403, "Permanent deletion is disabled by the administrator.")
         return await operation(lambda: FileLifecycle(state, mode).purge(
-            user.id, ident, confirmed=body.confirm_permanent, expected_path=body.expected_path))
+            user.id, ident, confirmed=body.confirm_permanent, expected_path=body.expected_path), user.id)
 
     router.add_api_route("/trash/{ident}/purge", purge, methods=["POST"])
     router.add_api_route("/trash/{ident}", purge, methods=["DELETE"])
