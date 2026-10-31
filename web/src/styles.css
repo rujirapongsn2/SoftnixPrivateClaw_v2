@@ -5117,10 +5117,51 @@ a.claw-preview-action { text-decoration: none; }
 .claw-files-dialog header { justify-content: space-between; }
 .claw-files-dialog nav { display: flex; gap: .5rem; margin-bottom: 1rem; }
 .claw-files-dialog article { border-top: 1px solid #8884; padding: .8rem 0; flex-wrap: wrap; }
-.claw-files-dialog article span { flex: 1; min-width: 180px; overflow-wrap: anywhere; }
+.claw-files-dialog article > span:first-child, .claw-files-list .claw-files-meta { flex: 1; min-width: 180px; overflow-wrap: anywhere; }
 .claw-files-dialog small { display: block; opacity: .7; font-size: .8rem; }
 .claw-files-dialog button { border: 1px solid #8886; background: transparent; color: inherit; border-radius: 8px; padding: .4rem .7rem; cursor: pointer; }
 .claw-files-dialog button:disabled { opacity: .45; cursor: default; }
+.claw-files-dialog { width: min(1080px, 100%); overflow-x: hidden; }
+.claw-files-toolbar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .75rem; }
+.claw-files-search { flex: 1 1 220px; display: flex; align-items: center; gap: .4rem; border: 1px solid #8886; border-radius: 8px; padding: 0 .6rem; }
+.claw-files-search input { flex: 1; min-width: 0; border: 0; border-radius: 0; box-shadow: none; -webkit-appearance: none; appearance: none; background: transparent; color: inherit; padding: .5rem 0; font: inherit; outline: none; }
+.claw-files-search input::-webkit-search-decoration, .claw-files-search input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+@media (max-width: 640px) { .claw-files-search input { font-size: 16px; } }
+/* The wrapper draws the focus ring; the generic [data-astryx-theme] *:focus-visible
+   ring would outline the inner <input> too and show as a second frame. */
+[data-astryx-theme] .claw-files-search input:focus-visible { outline: none; }
+.claw-files-search:focus-within { outline: 2px solid #278bc2; outline-offset: 1px; }
+.claw-files-toolbar select { border: 1px solid #8886; background: transparent; color: inherit; border-radius: 8px; padding: .45rem .5rem; font: inherit; }
+.claw-files-viewtoggle { display: inline-flex; gap: .25rem; }
+.claw-files-viewtoggle button { display: inline-flex; align-items: center; padding: .4rem .5rem; }
+.claw-files-dialog button[aria-pressed="true"] { background: var(--color-accent-muted, #2786c21a); border-color: #278bc2; }
+.claw-files-kinds { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.claw-files-kinds button { border-radius: 999px; padding: .3rem .75rem; }
+.claw-files-kinds button span { opacity: .6; margin-left: .2rem; }
+.claw-files-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: .9rem; }
+.claw-files-dialog .claw-files-grid article.claw-files-item { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: .5rem; border: 1px solid #8884; border-radius: 12px; padding: .6rem; min-width: 0; }
+.claw-files-thumb { min-width: 0; max-width: 100%; aspect-ratio: 4 / 3; border-radius: 8px; overflow: hidden; display: grid; place-items: center; background: var(--color-surface-2, #f4f3f0); color: #278bc2; }
+.claw-files-thumb-image { width: 100%; height: 100%; display: grid; place-items: center; }
+.claw-files-thumb img { display: block; width: 100%; height: 100%; max-width: 100%; object-fit: cover; }
+.claw-files-kind-spreadsheet .claw-files-thumb { color: #1f8a4c; }
+.claw-files-kind-presentation .claw-files-thumb { color: #c2410c; }
+.claw-files-kind-web .claw-files-thumb { color: #7c3aed; }
+.claw-files-kind-card .claw-files-thumb { color: #0e7490; }
+.claw-files-kind-media .claw-files-thumb { color: #be185d; }
+.claw-files-kind-other .claw-files-thumb { color: #6b7280; }
+.claw-files-dialog .claw-files-meta { flex: 1; min-width: 0; }
+.claw-files-name { display: block; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.claw-files-list .claw-files-name { display: flex; align-items: center; gap: .4rem; }
+.claw-files-list .claw-files-name svg { flex: none; }
+.claw-files-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.claw-files-grid .claw-files-meta small { overflow-wrap: anywhere; }
+.claw-files-actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+.claw-files-grid .claw-files-actions button { flex: 1; }
+.claw-files-more { display: flex; justify-content: center; padding: 1rem 0; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .claw-files-thumb { background: #ffffff12; }
+}
+:root[data-theme="dark"] .claw-files-thumb { background: #ffffff12; }
 .claw-files-zone { display: inline-block; align-self: flex-start; width: fit-content; margin-right: .4rem; padding: 0 .4rem; border-radius: 999px; background: var(--color-accent-muted, #2786c21a); color: var(--color-text-primary, #1c1a18); font-weight: 600; }
 
 /* ===== A2UI cards (POC, CLAW_A2UI_ENABLED) ================================
