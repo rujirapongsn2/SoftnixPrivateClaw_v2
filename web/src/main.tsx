@@ -2,6 +2,7 @@ import "@astryxdesign/core/reset.css";
 import "@astryxdesign/core/astryx.css";
 import "@astryxdesign/theme-neutral/theme.css";
 import "./styles.css";
+import "./password-mask.css";
 
 import { LayerProvider } from "@astryxdesign/core/Layer";
 import { Theme } from "@astryxdesign/core/theme";

@@ -70,6 +70,9 @@ from claw.security.crypto import SecretBox
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
+    from claw import a2ui as _a2ui
+
+    _a2ui.configure(settings.a2ui_enabled)
     # Before anything that can raise: an unconfigured loguru dumps local
     # variables (database URL, prompts, message text) into every traceback.
     configure_logging(settings.log)

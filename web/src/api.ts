@@ -1030,7 +1030,7 @@ export const api = {
   me: () => request<AuthUser>("/api/auth/me"),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   providers: () => request<{ providers: string[] }>("/api/auth/providers"),
-  features: () => request<{ speech_to_text: boolean; text_to_speech: boolean }>("/api/features"),
+  features: () => request<{ speech_to_text: boolean; text_to_speech: boolean; a2ui?: boolean }>("/api/features"),
   // Public (no auth) — the login screen renders before authentication.
   getBranding: () => request<PublicBranding>("/api/branding"),
 

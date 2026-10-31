@@ -1820,13 +1820,24 @@ _BUILTIN_SKILLS: tuple[BuiltinSkill, ...] = (
 )
 
 
+def _a2ui_skills() -> tuple[BuiltinSkill, ...]:
+    """The A2UI POC skill, only while CLAW_A2UI_ENABLED is on."""
+    from claw import a2ui
+
+    if not a2ui.is_enabled():
+        return ()
+    from claw.a2ui.skill import A2UI_SKILL_CONTENT, A2UI_SKILL_DESCRIPTION, A2UI_SKILL_NAME
+
+    return (BuiltinSkill(name=A2UI_SKILL_NAME, description=A2UI_SKILL_DESCRIPTION, content=A2UI_SKILL_CONTENT),)
+
+
 def builtin_skills() -> list[BuiltinSkill]:
     """All built-in skills (always enabled)."""
-    return list(_BUILTIN_SKILLS)
+    return [*_BUILTIN_SKILLS, *_a2ui_skills()]
 
 
 def get_builtin_skill(name: str) -> BuiltinSkill | None:
-    for skill in _BUILTIN_SKILLS:
+    for skill in (*_BUILTIN_SKILLS, *_a2ui_skills()):
         if skill.name == name:
             return skill
     return None

@@ -180,6 +180,7 @@ async def features(user: User = Depends(current_user), state: AppState = Depends
     return {
         "speech_to_text": bool(state.settings.speech_api_key),
         "text_to_speech": bool(state.settings.tts.api_key),
+        "a2ui": bool(state.settings.a2ui_enabled),
     }
 
 

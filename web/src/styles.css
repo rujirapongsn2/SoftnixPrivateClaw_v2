@@ -5120,3 +5120,110 @@ html[data-chat-bg="grid"] .claw-chat {
 .claw-files-dialog button { border: 1px solid #8886; background: transparent; color: inherit; border-radius: 8px; padding: .4rem .7rem; cursor: pointer; }
 .claw-files-dialog button:disabled { opacity: .45; cursor: default; }
 .claw-files-zone { display: inline-block; align-self: flex-start; width: fit-content; margin-right: .4rem; padding: 0 .4rem; border-radius: 999px; background: var(--color-accent-muted, #2786c21a); color: var(--color-text-primary, #1c1a18); font-weight: 600; }
+
+/* ===== A2UI cards (POC, CLAW_A2UI_ENABLED) ================================
+   Agent-authored A2UI v0.9 surfaces rendered with the Softnix catalog
+   (web/src/a2ui/). Plain text only; layout via flex. */
+.a2ui-surface {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+  max-width: 640px;
+}
+.a2ui-surface[data-sent] { opacity: 0.85; }
+.a2ui-card {
+  border: 1px solid var(--color-border, #e4e4e7);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--color-background-surface, #fff);
+}
+.a2ui-col { display: flex; flex-direction: column; gap: 10px; }
+.a2ui-row { display: flex; flex-direction: row; flex-wrap: wrap; gap: 10px; align-items: center; }
+.a2ui-row[data-justify="end"] { justify-content: flex-end; }
+.a2ui-row[data-justify="spaceBetween"] { justify-content: space-between; }
+.a2ui-row > .a2ui-stat { flex: 1 1 160px; }
+.a2ui-divider { border: 0; border-top: 1px solid var(--color-border, #e4e4e7); margin: 4px 0; width: 100%; }
+.a2ui-choice { display: flex; flex-direction: column; gap: 6px; }
+.a2ui-choice-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.a2ui-chip {
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border, #d4d4d8);
+  background: var(--color-background-surface, #fff);
+  color: inherit;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.a2ui-chip:hover:not(:disabled) { border-color: var(--color-primary, #4b6bfb); }
+.a2ui-chip.is-on {
+  border-color: var(--color-primary, #4b6bfb);
+  background: color-mix(in srgb, var(--color-primary, #4b6bfb) 10%, transparent);
+  color: var(--color-primary, #4b6bfb);
+  font-weight: 600;
+}
+.a2ui-chip:disabled { cursor: default; opacity: 0.7; }
+.a2ui-chip:focus-visible { outline: 2px solid var(--color-primary, #4b6bfb); outline-offset: 2px; }
+.a2ui-stat {
+  border: 1px solid var(--color-border, #e4e4e7);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.a2ui-stat-delta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+/* ---- A2UI Chart (web/src/a2ui/ChartView.tsx) ----
+   Softnix palette: OA blue accent first, then hues that stay distinct for the
+   common colour-blindness types; red/green are reserved for ▲▼ deltas. */
+.a2ui-surface {
+  --a2ui-c0: var(--color-accent, #2786c2);
+  --a2ui-c1: #f59e0b;
+  --a2ui-c2: #14b8a6;
+  --a2ui-c3: #8b5cf6;
+  --a2ui-c4: #ec4899;
+  --a2ui-c5: #64748b;
+  --a2ui-c6: #84cc16;
+  --a2ui-c7: #0ea5e9;
+  --a2ui-good: #15803d;
+  --a2ui-bad: #b91c1c;
+}
+.a2ui-chart { margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.a2ui-chart-plot { width: 100%; min-width: 0; overflow: hidden; }
+.a2ui-chart-svg { display: block; max-width: 100%; overflow: visible; }
+.a2ui-chart-label { font-size: 12px; fill: currentColor; }
+.a2ui-chart-num { font-size: 11px; fill: var(--color-text-secondary, #71717a); font-variant-numeric: tabular-nums; }
+.a2ui-chart-axis-title { font-size: 11px; fill: var(--color-text-secondary, #71717a); }
+.a2ui-chart-delta { font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.a2ui-delta-good { fill: var(--a2ui-good); color: var(--a2ui-good); }
+.a2ui-delta-bad { fill: var(--a2ui-bad); color: var(--a2ui-bad); }
+.a2ui-delta-neutral { fill: var(--color-text-secondary, #71717a); }
+.a2ui-grid { stroke: var(--color-border, #e4e4e7); stroke-width: 1; stroke-dasharray: 3 3; }
+.a2ui-axis { stroke: var(--color-border-strong, #a1a1aa); stroke-width: 1; }
+.a2ui-line { fill: none; stroke-width: 2.25; stroke-linejoin: round; stroke-linecap: round; }
+.a2ui-area { fill-opacity: 0.14; stroke: none; }
+.a2ui-dot { stroke: var(--color-background-surface, #fff); stroke-width: 1.5; }
+.a2ui-track { fill: var(--color-background-muted, #f1f5f9); }
+.a2ui-slice { stroke: var(--color-background-surface, #fff); stroke-width: 1.5; }
+.a2ui-pie { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; }
+.a2ui-pie-total { font-size: 16px; font-weight: 600; fill: currentColor; font-variant-numeric: tabular-nums; }
+.a2ui-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; }
+.a2ui-legend li { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.a2ui-legend-col { flex-direction: column; flex: 1 1 180px; gap: 6px; min-width: 0; }
+.a2ui-legend-col li { width: 100%; }
+.a2ui-legend-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.a2ui-legend-num { color: var(--color-text-secondary, #71717a); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.a2ui-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.a2ui-chart-actions { display: flex; justify-content: flex-end; }
+.a2ui-table-wrap { overflow-x: auto; max-width: 100%; contain: inline-size; } /* a wide table scrolls; never widens the chat column */
+.a2ui-surface { min-width: 0; max-width: 100%; }
+.a2ui-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.a2ui-table th, .a2ui-table td { padding: 6px 8px; border-bottom: 1px solid var(--color-border, #e4e4e7); text-align: left; }
+.a2ui-table [data-align="end"] { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.a2ui-badge-ai { font-size: 11px; color: var(--color-text-secondary, #a1a1aa); align-self: flex-end; }
+.a2ui-fallback { margin: 6px 0; }

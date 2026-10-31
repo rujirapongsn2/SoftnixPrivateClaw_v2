@@ -348,6 +348,10 @@ class Settings(BaseSettings):
     # Root directory holding per-user agent workspaces.
     workspaces_root: Path = Path("workspaces")
     sbot_enabled: bool = True
+    # A2UI POC (claw mode): agent-authored interactive cards (fenced a2ui blocks,
+    # the present_ui / openrouter_price_watch tools and the a2ui-cards skill).
+    # Off: tools and skill are not offered and the chat shows the JSON as code.
+    a2ui_enabled: bool = True
     sbot_workspaces_root: Path | None = None
     blueprints_root: Path = Path("blueprints")
     # Root directory holding knowledge-base OKF bundles (one subdir per base).

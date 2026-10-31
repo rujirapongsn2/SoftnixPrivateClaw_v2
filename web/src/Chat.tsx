@@ -89,6 +89,8 @@ import { SoftnixLogo } from "./Logo";
 import { ModeSwitcher } from "./ModeSwitcher";
 import { ArchivedArtifactCard } from "./ArchivedArtifactCard";
 import { TablePreview } from "./TablePreview";
+import { A2uiArtifact, A2UI_ARTIFACT_RE } from "./a2ui/A2uiArtifact";
+import { makeA2uiCodeRenderer } from "./a2ui/A2uiCard";
 import { SaveToBlueprintButton } from "./SaveToBlueprintButton";
 import { api as blueprintApi, type BlueprintInfo } from "./shared-api";
 import { useBranding, useT } from "./branding";
@@ -528,6 +530,8 @@ export function Chat({
   // configured for the per-message "read aloud" speaker button, plus each
   // message's own loading/playing state and the audio element currently playing.
   const [ttsEnabled, setTtsEnabled] = useState(false);
+  // A2UI POC (CLAW_A2UI_ENABLED): render ```a2ui blocks and .a2ui artifacts as cards.
+  const [a2uiEnabled, setA2uiEnabled] = useState(false);
   const [speaking, setSpeaking] = useState<Record<number, "loading" | "playing" | undefined>>({});
   const speakingAudioRef = useRef<HTMLAudioElement | null>(null);
   const speakingIndexRef = useRef<number | null>(null);
@@ -1172,10 +1176,12 @@ export function Chat({
       .then((f) => {
         setSttEnabled(f.speech_to_text);
         setTtsEnabled(f.text_to_speech);
+        setA2uiEnabled(f.a2ui === true);
       })
       .catch(() => {
         setSttEnabled(false);
         setTtsEnabled(false);
+        setA2uiEnabled(false);
       });
   }, []);
 
@@ -1561,6 +1567,27 @@ export function Chat({
     },
     [attachments, sessionId, onRequireSession, rawSend, model, toast, queueOfflineMessage, t],
   );
+
+  // A2UI card actions send an ordinary, visible chat message. Renderers are
+  // created once (stable component identity, so a card keeps its state across
+  // re-renders) and reach the latest `send` through a ref.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const a2uiMarkdown = useMemo(() => {
+    const onAction = (text: string) => sendRef.current(text);
+    return {
+      live: { code: makeA2uiCodeRenderer({ interactive: true, onAction }) },
+      frozen: { code: makeA2uiCodeRenderer({ interactive: false }) },
+      streaming: { code: makeA2uiCodeRenderer({ interactive: false, streaming: true }) },
+      onAction,
+    };
+  }, []);
+  // Only the newest transcript message's card is clickable — an old card's
+  // answer would arrive out of context (and must not be replayed after reload).
+  const lastMessageIndex = useMemo(() => {
+    for (let j = items.length - 1; j >= 0; j--) if (items[j].kind === "message") return j;
+    return -1;
+  }, [items]);
 
   const selectBlueprint = async (blueprint: BlueprintInfo) => {
     setPlusOpen(false);
@@ -2596,7 +2623,17 @@ export function Chat({
                   {item.role === "assistant" ? (
                     <>
                       <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
-                        <Markdown>{sanitizeModelMarkdown(item.content)}</Markdown>
+                        <Markdown
+                          components={
+                            a2uiEnabled
+                              ? i === lastMessageIndex && !busy
+                                ? a2uiMarkdown.live
+                                : a2uiMarkdown.frozen
+                              : undefined
+                          }
+                        >
+                          {sanitizeModelMarkdown(item.content)}
+                        </Markdown>
                       </ChatMessageBubble>
                       {/* Intermediate files (the script that built the PDF, the
                           JSON/XML it read along the way) are not deliverables,
@@ -2622,6 +2659,16 @@ export function Chat({
                               );
                             }
                             const href = fileUrl(sessionId, p);
+                            if (a2uiEnabled && A2UI_ARTIFACT_RE.test(p)) {
+                              return (
+                                <A2uiArtifact
+                                  key={p}
+                                  href={href}
+                                  interactive={i === lastMessageIndex && !busy}
+                                  onAction={a2uiMarkdown.onAction}
+                                />
+                              );
+                            }
                             // Show images (e.g. a generated chart) inline; keep
                             // everything else as an openable chip.
                             if (PREVIEWABLE_TABLE_RE.test(p)) {
@@ -2800,7 +2847,7 @@ export function Chat({
             {streaming && (
               <ChatMessage sender="assistant">
                 <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
-                  <Markdown>{streaming}</Markdown>
+                  <Markdown components={a2uiEnabled ? a2uiMarkdown.streaming : undefined}>{streaming}</Markdown>
                   <span className="claw-cursor">▍</span>
                 </ChatMessageBubble>
               </ChatMessage>
