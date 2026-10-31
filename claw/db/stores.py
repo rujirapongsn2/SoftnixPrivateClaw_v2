@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ from claw.auth.mcp_oauth_discovery import (
 from claw.security.crypto import UndecryptableSecret
 from claw.db.models import (
     AppSetting,
+    WorkspaceFileText,
     AuditEvent,
     ChatSession,
     Feedback,
@@ -4652,3 +4654,89 @@ class McpAuthStore:
         return ClientCredentials(
             client_id=row.client_id, client_secret=secret, auth_method=row.token_endpoint_auth_method
         )
+
+
+def _path_hash(path: str) -> str:
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()
+
+
+def _like_term(term: str) -> str:
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+class WorkspaceFileTextStore:
+    """Extracted text of workspace files, for searching the Files view by
+    content. Matching is ILIKE per term, which the GIN trigram index serves on
+    Postgres and plain LIKE handles on SQLite (tests)."""
+
+    SNIPPET_BEFORE = 60
+    SNIPPET_LENGTH = 180
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], is_postgres: bool = True):
+        self.factory = factory
+        self.is_postgres = is_postgres
+
+    async def indexed(self, owner_id: str, mode: str) -> dict[str, float]:
+        """path -> mtime of every file with a stored text."""
+        async with self.factory() as db:
+            rows = await db.execute(
+                select(WorkspaceFileText.path, WorkspaceFileText.mtime).where(
+                    WorkspaceFileText.owner_id == owner_id, WorkspaceFileText.mode == mode
+                )
+            )
+            return {path: mtime for path, mtime in rows}
+
+    async def put(self, owner_id: str, mode: str, path: str, mtime: float, size: int, text: str) -> None:
+        key = _path_hash(path)
+        async with self.factory() as db:
+            await db.execute(
+                sa_delete(WorkspaceFileText).where(
+                    WorkspaceFileText.owner_id == owner_id,
+                    WorkspaceFileText.mode == mode,
+                    WorkspaceFileText.path_hash == key,
+                )
+            )
+            db.add(WorkspaceFileText(
+                owner_id=owner_id, mode=mode, path_hash=key, path=path, mtime=mtime, size=size, text=text,
+            ))
+            await db.commit()
+
+    async def remove(self, owner_id: str, mode: str, paths: Sequence[str]) -> None:
+        if not paths:
+            return
+        async with self.factory() as db:
+            await db.execute(
+                sa_delete(WorkspaceFileText).where(
+                    WorkspaceFileText.owner_id == owner_id,
+                    WorkspaceFileText.mode == mode,
+                    WorkspaceFileText.path_hash.in_([_path_hash(p) for p in paths]),
+                )
+            )
+            await db.commit()
+
+    async def search(
+        self, owner_id: str, mode: str, terms: Sequence[str], limit: int = 200
+    ) -> tuple[dict[str, str], bool]:
+        """(path -> a short excerpt around the first term, capped) for the newest
+        `limit` files whose text holds every term; `capped` says more matched.
+        The order is fixed so every page of one search sees the same set, and
+        only the excerpt leaves the database."""
+        terms = [t for t in terms if t][:8]
+        if not terms:
+            return {}, False
+        position = func.strpos if self.is_postgres else func.instr
+        first = position(func.lower(WorkspaceFileText.text), terms[0].lower())
+        start = func.greatest if self.is_postgres else func.max
+        excerpt = func.substr(
+            WorkspaceFileText.text, start(first - self.SNIPPET_BEFORE, 1), self.SNIPPET_LENGTH
+        )
+        query = select(WorkspaceFileText.path, excerpt).where(
+            WorkspaceFileText.owner_id == owner_id,
+            WorkspaceFileText.mode == mode,
+            *(WorkspaceFileText.text.ilike(_like_term(t), escape="\\") for t in terms),
+        ).order_by(WorkspaceFileText.mtime.desc(), WorkspaceFileText.path_hash).limit(limit + 1)
+        async with self.factory() as db:
+            rows = (await db.execute(query)).all()
+        found = {path: " ".join((snippet or "").split()) for path, snippet in rows[:limit]}
+        return found, len(rows) > limit

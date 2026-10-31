@@ -243,6 +243,9 @@ def create_app(settings: Settings | None = None, *, shared=None) -> FastAPI:
             await connectors_mgr.shutdown()
             if browser_mgr is not None:
                 await browser_mgr.close()
+            from claw.api.files import shutdown_content_index
+
+            await shutdown_content_index()
 
     app = FastAPI(title="Softnix Sbot", lifespan=lifespan)
     app.add_middleware(

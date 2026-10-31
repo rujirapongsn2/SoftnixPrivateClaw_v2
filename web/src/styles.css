@@ -5157,6 +5157,9 @@ a.claw-preview-action { text-decoration: none; }
 .claw-files-grid .claw-files-meta small { overflow-wrap: anywhere; }
 .claw-files-actions { display: flex; gap: .4rem; flex-wrap: wrap; }
 .claw-files-grid .claw-files-actions button { flex: 1; }
+.claw-files-dialog small.claw-files-snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.claw-files-found { display: inline-block; margin-right: .4rem; padding: 0 .4rem; border-radius: 999px; background: #7c3aed1f; font-weight: 600; }
+.claw-files-indexing { opacity: .7; font-size: .85rem; }
 .claw-files-more { display: flex; justify-content: center; padding: 1rem 0; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .claw-files-thumb { background: #ffffff12; }

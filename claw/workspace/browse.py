@@ -25,6 +25,7 @@ KINDS: dict[str, frozenset[str]] = {
     "media": frozenset({".mp4", ".webm", ".mov", ".m4v", ".mp3", ".wav", ".ogg", ".m4a"}),
 }
 OTHER = "other"
+_MATCH_RANK = {"name": 0, "path": 1, "content": 2}
 _SEPARATORS = re.compile(r"[\s._-]+")
 _KIND_BY_SUFFIX = {suffix: kind for kind, suffixes in KINDS.items() for suffix in suffixes}
 
@@ -88,6 +89,19 @@ class ListingCache:
             self._generations[key] = self._generations.get(key, 0) + 1
 
 
+def _annotated(entry: dict, how: str, content: dict[str, str]) -> dict:
+    """A copy saying how the entry matched; cached entries are never mutated."""
+    extra = {"match": how}
+    if how == "content":
+        extra["snippet"] = content[entry["path"]]
+    return {**entry, **extra}
+
+
+def search_terms(q: str) -> list[str]:
+    """The terms of a search, split the same way for names and for contents."""
+    return _words(q).split()
+
+
 def _words(text: str) -> str:
     """Case-folded text with -, _, . and runs of spaces read as one space, so
     "Q3 sales" finds sales/q3-summary.html."""
@@ -104,21 +118,38 @@ def browse(
     limit: int,
     since: float | None = None,
     zone: str = "",
+    content: dict[str, str] | None = None,
 ) -> dict:
     """One page of `files`, plus per-kind counts for the current search so the
     filter chips can say how many each would show. Entries already carry
     "kind" and are shared with the cache, so they are never mutated here.
 
-    Every search term must appear somewhere in the path, in any order. Files
-    whose own name holds every term come before ones matched through their
-    folder; within each group the chosen sort applies."""
-    terms = _words(q).split()
-    matched = [
-        f for f in files
+    Every search term must appear somewhere in the path, in any order, or
+    the file must be in `content` (path -> excerpt, files whose text holds
+    every term). Files whose own name holds every term come first, then ones
+    matched through their folder, then ones matched only by their text;
+    within each group the chosen sort applies. When searching, each returned
+    entry says which with "match", plus "snippet" for a text match."""
+    terms = search_terms(q)
+    content = content or {}
+
+    def match(f: dict) -> str | None:
+        if not terms:
+            return "name"
+        if all(t in _words(PurePosixPath(f["path"]).name) for t in terms):
+            return "name"
+        if all(t in _words(f["path"]) for t in terms):
+            return "path"
+        return "content" if f["path"] in content else None
+
+    found = [
+        (f, how) for f in files
         if (since is None or f["modified_at"] >= since)
         and (not zone or f["zone"] == zone)
-        and all(t in _words(f["path"]) for t in terms)
+        and (how := match(f)) is not None
     ]
+    matched = [f for f, _ in found]
+    how_by_path = {f["path"]: how for f, how in found}
     counts: dict[str, int] = {}
     for f in matched:
         counts[f["kind"]] = counts.get(f["kind"], 0) + 1
@@ -128,8 +159,10 @@ def browse(
     matched.sort(key=key, reverse=reverse)
     if terms:
         # Stable, so the chosen order holds inside each group.
-        matched.sort(key=lambda f: not all(t in _words(PurePosixPath(f["path"]).name) for t in terms))
+        matched.sort(key=lambda f: _MATCH_RANK[how_by_path[f["path"]]])
     page = matched[offset : offset + limit]
+    if terms:
+        page = [_annotated(f, how_by_path[f["path"]], content) for f in page]
     end = offset + len(page)
     return {
         "files": page,

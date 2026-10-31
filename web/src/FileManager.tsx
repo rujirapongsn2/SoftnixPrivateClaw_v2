@@ -8,8 +8,8 @@ type Kind = 'document' | 'spreadsheet' | 'presentation' | 'web' | 'image' | 'car
 type Sort = 'recent' | 'name' | 'size';
 type View = 'grid' | 'list';
 type Period = '' | 'today' | 'week' | 'month';
-type FileEntry = { path: string; size: number; modified_at: number; zone: Zone; expires_at: number | null; kind: Kind };
-type FilePage = { files: FileEntry[]; total: number; counts: Partial<Record<Kind, number>>; next_offset: number | null; truncated: boolean; walk_limit: number };
+type FileEntry = { path: string; size: number; modified_at: number; zone: Zone; expires_at: number | null; kind: Kind; match?: 'name' | 'path' | 'content'; snippet?: string };
+type FilePage = { files: FileEntry[]; total: number; counts: Partial<Record<Kind, number>>; next_offset: number | null; truncated: boolean; walk_limit: number; indexing: boolean; content_capped: boolean };
 type TrashEntry = { id: string; path: string; at: number; actor: string; rule: string; size: number; expires_at: number | null };
 type TrashListing = { files: TrashEntry[]; total: number; retention_days: number; cap_mb: number; permanent_delete_enabled: boolean };
 
@@ -272,6 +272,8 @@ export function FileManager({ mode, onClose }: { mode: 'privateclaw' | 'sbot'; o
             </button>
           ))}
         </div>
+        {search && page?.indexing && <p className="claw-files-indexing">{t('files.indexing')}</p>}
+        {search && page?.content_capped && <p className="claw-files-indexing">{t('files.contentCapped')}</p>}
         {page?.truncated && <p>{t('files.truncated', { count: page.walk_limit.toLocaleString() })}</p>}
         {page && !files.length && <p>{search || kind || period || zone ? t('files.noMatches') : t('files.empty')}</p>}
         <div className={view === 'grid' ? 'claw-files-grid' : 'claw-files-list'}>
@@ -288,6 +290,9 @@ export function FileManager({ mode, onClose }: { mode: 'privateclaw' | 'sbot'; o
               </div>}
               <span className="claw-files-meta">
                 <span className="claw-files-name" title={file.path}>{view === 'list' && <KindIcon size={16} aria-hidden="true" />}<span className="claw-files-name-text">{name}</span></span>
+                {file.match === 'content' && <small className="claw-files-snippet">
+                  <span className="claw-files-found">{t('files.foundInContent')}</span>{file.snippet}
+                </small>}
                 <small>
                   {folder && <>{folder} · </>}
                   {new Date(file.modified_at * 1000).toLocaleDateString()} · {formatSize(file.size)}

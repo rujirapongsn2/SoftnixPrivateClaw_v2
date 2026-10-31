@@ -8,10 +8,12 @@ import uuid
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
     ForeignKey,
+    Float,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -806,3 +808,21 @@ class Share(Base):
     view_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkspaceFileText(Base):
+    """Extracted text of one workspace file, so the Files view can search by
+    content. A derived cache of the disk, never the source of truth: a row is
+    rebuilt when the file's mtime changes and dropped once the file is gone.
+    A GIN trigram index on `text` is added in the migration (Postgres)."""
+
+    __tablename__ = "workspace_file_texts"
+
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(16), primary_key=True)
+    # sha256 of `path`: workspace paths can be longer than a btree key allows.
+    path_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    path: Mapped[str] = mapped_column(Text)
+    mtime: Mapped[float] = mapped_column(Float)
+    size: Mapped[int] = mapped_column(BigInteger)
+    text: Mapped[str] = mapped_column(Text, default="")
