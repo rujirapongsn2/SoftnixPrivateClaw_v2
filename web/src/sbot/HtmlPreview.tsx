@@ -1,7 +1,7 @@
 import { Icon } from "@astryxdesign/core/Icon";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { Text } from "@astryxdesign/core/Text";
-import { Eye, ExternalLink, FileCode, Maximize2, Minimize2, X } from "lucide-react";
+import { Download, Eye, ExternalLink, FileCode, Maximize2, Minimize2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fileHtmlPreview, filePngExport, fileUrl, type HtmlPreview as HtmlPreviewData, previewRetryDelay } from "./api";
 import { useT } from "../branding";
@@ -144,6 +144,7 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
   // the user can still open it.
   if (error) {
     return (
+      <span className="claw-artifact-with-download">
       <a
         className="claw-artifact-chip"
         href={href}
@@ -155,6 +156,8 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
         <span className="claw-artifact-name">{name}</span>
         <Icon icon={ExternalLink} size="xsm" color="secondary" />
       </a>
+        <a className="claw-preview-action" href={href} download={name} title={t("chat.preview.downloadHtml", { name })} aria-label={t("chat.preview.downloadHtml", { name })}><Icon icon={Download} size="sm" /></a>
+      </span>
     );
   }
 
@@ -185,6 +188,7 @@ export function HtmlPreview({ sessionId, path, href }: Props) {
           } catch { if (loadedKey.current === exportKey) setExportError(t("chat.preview.pngError")); }
           finally { setExportBusy(false); }
         }}>PNG{exportBusy ? "…" : ""}</button>}
+        <a className="claw-preview-action" href={href} download={name} title={t("chat.preview.downloadHtml", { name })} aria-label={t("chat.preview.downloadHtml", { name })}><Icon icon={Download} size="sm" /></a>
         {png && <a href={fileUrl(sessionId, png)} target="_blank" rel="noopener noreferrer" download>{t("chat.preview.downloadPng")}</a>}
       </div>
       {open && exportError && <div className="claw-html-preview-foot" role="status">{exportError}</div>}
