@@ -267,6 +267,6 @@ class WorkspaceAccounts:
         if name == "edit_file":
             grown = len(str(params.get("new_text") or "")) - len(str(params.get("old_text") or ""))
             return await self.check(user_id, max(0, grown), 0)
-        if name in {"generate_workbook", "render_diagram"}:
+        if name in {"generate_workbook", "render_diagram", "publish_artifact"}:
             return await self.check(user_id, 0, 1)
         return None

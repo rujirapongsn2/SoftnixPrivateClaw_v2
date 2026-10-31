@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from sbot.tools.base import Tool
-from sbot.filenames import safe_filename
+from claw.filenames import safe_filename
 
 
 class SaveBlueprintTool(Tool):

@@ -5,11 +5,15 @@ import hashlib
 import os
 import tempfile
 import shutil
-import uuid
 from typing import ClassVar
 
-from sbot.filenames import safe_filename
-from sbot.tools.filesystem import _WorkspaceTool
+from claw.filenames import safe_filename
+from claw.tools.filesystem import _WorkspaceTool
+
+
+def _sha256(path) -> str:
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 class PublishArtifactTool(_WorkspaceTool):
@@ -32,29 +36,27 @@ class PublishArtifactTool(_WorkspaceTool):
             return "Error: deliverable must be an existing, nonempty file."
         if source.stat().st_size > 100 * 1024 * 1024:
             return "Error: deliverable exceeds the 100 MB publication limit."
-        if content_hash is not None:
-            with source.open('rb') as stream:
-                if hashlib.file_digest(stream, 'sha256').hexdigest() != content_hash:
-                    return 'Error: artifact changed after verification.'
-        relative = f".deliveries/{content_hash or uuid.uuid4().hex}/{safe_filename(source.name)}"
+        digest = await asyncio.to_thread(_sha256, source)
+        if content_hash is not None and digest != content_hash:
+            return 'Error: artifact changed after verification.'
+        # Keyed by content, so publishing the same file again reuses one copy
+        # instead of growing .deliveries/ on every request.
+        relative = f".deliveries/{digest}/{safe_filename(source.name)}"
         destination = self._resolve(relative)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if content_hash is None:
-            await asyncio.to_thread(shutil.copy2, source, destination)
-        else:
-            def publish_once():
-                # Atomic create, no overwrite. Retries/restarts of an identical
-                # immutable deliverable retain the same public reference.
-                with tempfile.NamedTemporaryFile(dir=destination.parent) as temporary:
-                    shutil.copyfile(source, temporary.name)
-                    try:
-                        os.link(temporary.name, destination)
-                    except FileExistsError:
-                        pass
-                with destination.open('rb') as stream:
-                    if hashlib.file_digest(stream, 'sha256').hexdigest() != content_hash:
-                        raise ValueError('publication hash collision or modified artifact')
-            await asyncio.to_thread(publish_once)
+
+        def publish_once():
+            # Atomic create, no overwrite. Retries/restarts of an identical
+            # immutable deliverable retain the same public reference.
+            with tempfile.NamedTemporaryFile(dir=destination.parent) as temporary:
+                shutil.copyfile(source, temporary.name)
+                try:
+                    os.link(temporary.name, destination)
+                except FileExistsError:
+                    pass
+            if _sha256(destination) != digest:
+                raise ValueError('publication hash collision or modified artifact')
+        await asyncio.to_thread(publish_once)
         if progress:
             progress({"kind": "artifact_published", "path": relative})
         return f"Published downloadable file: {relative}"

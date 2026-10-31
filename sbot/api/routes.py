@@ -114,7 +114,7 @@ def _user_workspace(state: AppState, user_id: str) -> Path:
 
 
 def _safe_name(name: str) -> str:
-    from sbot.filenames import safe_filename
+    from claw.filenames import safe_filename
     return safe_filename(name)
 
 

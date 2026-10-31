@@ -78,6 +78,7 @@ from claw.security.policy import PolicyEngine
 from claw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from claw.tools.registry import ToolRegistry
 from claw.tools.browser import BrowserTool
+from claw.tools.artifacts import PublishArtifactTool
 from claw.tools.documents import build_document_tools
 from claw.tools.memory import MemoryTool, RecallMemoryTool
 from claw.tools.plan import PlanTool
@@ -132,7 +133,7 @@ _INFORMATION_REQUEST_RE = re.compile(
 _ARTIFACT_CORE_TOOLS = {
     "generate_workbook",
     "read_skill", "read_file", "read_excel", "read_csv", "read_pdf", "read_docx",
-    "list_dir", "write_file", "edit_file", "exec", "update_plan", "save_connector_file",
+    "list_dir", "write_file", "edit_file", "exec", "update_plan", "save_connector_file", "publish_artifact",
 }
 _ARTIFACT_DISCOVERY_TOOLS = {"web_search", "web_fetch", "search_knowledge", "query_knowledge_dataset"}
 _ARTIFACT_SKILL_HINTS = {
@@ -496,6 +497,7 @@ class ClawAgent:
             self.tools.register(ScheduleTool(schedules, scheduler, user_id))
         for doc_tool in build_document_tools(workspace):
             self.tools.register(doc_tool)
+        self.tools.register(PublishArtifactTool(workspace))
         from claw.jobs.workbook import GenerateWorkbookTool
         self.tools.register(GenerateWorkbookTool(workspace))
         from claw.tools.connector_files import SaveConnectorFileTool
@@ -569,7 +571,7 @@ class ClawAgent:
         """Keep the cached usage honest after a tool that may have written files."""
         if name == "write_file" and not result.startswith("Error"):
             self.quota.note_written(self.user_id, len(str(params.get("content") or "").encode("utf-8")))
-        elif name in {"exec", "edit_file", "generate_workbook", "render_diagram", "save_connector_file"}:
+        elif name in {"exec", "edit_file", "generate_workbook", "render_diagram", "save_connector_file", "publish_artifact"}:
             # A command that only deletes/lists files has just freed space: measure again at once.
             self.quota.forget(self.user_id, now=name == "exec" and is_cleanup_command(str(params.get("command") or "")))
 
@@ -629,6 +631,8 @@ class ClawAgent:
             "- an action in the world: running code, browsing, sending, scheduling\n"
             "Do not produce a .docx/.xlsx/.pptx/.pdf file unless the user actually asked for a "
             "file. Write the content in the chat as markdown and offer to export it.\n"
+            "To hand the user a file that already exists in the workspace, call `publish_artifact` "
+            "with its path; naming the file in your reply does not attach it.\n"
             "Never search the filesystem for your own instructions, skills, or capabilities — "
             "everything you have is already in this prompt or one `read_skill` call away.\n\n"
             "## Guidelines\n"

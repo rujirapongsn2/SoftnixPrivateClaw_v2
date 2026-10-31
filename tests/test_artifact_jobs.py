@@ -593,3 +593,7 @@ def test_artifact_connector_scope_requires_connector_name():
     assert "mcp_gmail_search" in _artifact_tool_scope(
         available, "Create an Excel file from Gmail", [], {"gmail"}
     )
+
+
+def test_file_task_scope_keeps_publish_artifact():
+    assert "publish_artifact" in _artifact_tool_scope(["publish_artifact", "write_file"], "ขอดาวน์โหลด report.csv", [], set())

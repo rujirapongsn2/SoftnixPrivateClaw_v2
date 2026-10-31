@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import ClassVar
 from sbot.core.verification import check_file, MAX_FILE_BYTES
 
-from sbot.tools.artifacts import PublishArtifactTool
+from claw.tools.artifacts import PublishArtifactTool
 from sbot.tools.base import Tool
 
 

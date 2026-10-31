@@ -388,7 +388,7 @@ class ClawAgent:
             self.tools.unregister("workflow")
         for doc_tool in build_document_tools(workspace):
             self.tools.register(doc_tool)
-        from sbot.tools.artifacts import PublishArtifactTool
+        from claw.tools.artifacts import PublishArtifactTool
         self.tools.register(PublishArtifactTool(workspace))
         self.loop = AgentLoop(
             provider=provider,
@@ -596,7 +596,8 @@ class ClawAgent:
             "Do not produce a .docx/.xlsx/.pptx/.pdf file unless the user actually asked for a "
             "file. Write the content in the chat as markdown and offer to export it.\n"
             "For a requested file, create it in the workspace and state its filename; Sbot attaches "
-            "created files automatically.\n"
+            "files you create or edit automatically. To hand the user a file that already exists, "
+            "call `publish_artifact` with its path; naming the file in your reply does not attach it.\n"
             "Never search the filesystem for your own instructions, skills, or capabilities — "
             "everything you have is already in this prompt or one `read_skill` call away.\n\n"
             "## Guidelines\n"

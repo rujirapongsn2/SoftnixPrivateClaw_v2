@@ -347,6 +347,8 @@ _ARTIFACT_HIDDEN_SUFFIXES = {".py", ".json", ".xml", ".b64"}
 # all (there is no workspace browser to go find it in).
 _ARTIFACT_HIDDEN_TOKENS = {"b64", "base64"}
 _TEMPLATE_TOKEN = "template"
+# Where publish_artifact puts files the user asked for by name; never suppressed.
+DELIVERIES_DIR = ".deliveries/"
 _NAME_TOKEN_RE = re.compile(r"[._\-\s]+")
 
 
@@ -355,6 +357,8 @@ def _name_tokens(path: str) -> set[str]:
 
 
 def _is_artifact_hidden(path: str) -> bool:
+    if path.startswith(DELIVERIES_DIR):
+        return False
     if Path(path).suffix.lower() in _ARTIFACT_HIDDEN_SUFFIXES:
         return True
     return bool(_ARTIFACT_HIDDEN_TOKENS & _name_tokens(path))
@@ -374,7 +378,9 @@ def _drop_shadowed_templates(artifacts: list[str]) -> list[str]:
     return [
         a
         for a in artifacts
-        if _TEMPLATE_TOKEN not in _name_tokens(a) or Path(a).suffix.lower() not in shadowing
+        if a.startswith(DELIVERIES_DIR)
+        or _TEMPLATE_TOKEN not in _name_tokens(a)
+        or Path(a).suffix.lower() not in shadowing
     ]
 
 
@@ -1076,6 +1082,11 @@ class AgentLoop:
 
                         # Sub-step progress for long tools (workflow) → Execution panel.
                         def _progress(payload: dict, _name: str = tc.name) -> None:
+                            if payload.get("kind") == "artifact_published":
+                                path = str(payload.get("path") or "")
+                                if _name == "publish_artifact" and path.startswith(DELIVERIES_DIR) and path not in written:
+                                    written.append(path)
+                                return
                             emit(
                                 ToolProgress(
                                     turn_id=turn_id,

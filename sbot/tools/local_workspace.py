@@ -3,7 +3,7 @@ import hashlib
 import json
 import uuid
 
-from sbot.filenames import safe_filename
+from claw.filenames import safe_filename
 from sbot.tools.filesystem import _WorkspaceTool
 from sbot.local_workspaces import MAX_BYTES, OfflineError
 

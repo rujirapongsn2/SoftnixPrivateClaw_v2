@@ -193,6 +193,7 @@ async def test_gate_refuses_writes_when_full_but_lets_cleanup_run(tmp_path):
     assert await accounts.gate("u1", "write_file", {"path": "a", "content": "x"})
     assert await accounts.gate("u1", "edit_file", {"path": "a", "old_text": "", "new_text": "yyyy"})
     assert await accounts.gate("u1", "generate_workbook", {})
+    assert await accounts.gate("u1", "publish_artifact", {"path": "big.bin"})
     assert await accounts.gate("u1", "exec", {"command": "python make.py"})
     assert await accounts.gate("u1", "exec", {"command": "rm big.bin"}) is None
     assert await accounts.gate("u1", "read_file", {"path": "big.bin"}) is None
