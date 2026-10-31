@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir .test-dist src/skill-access.ts src/sbot/artifact-list-state.ts && node --test test/skill-access.test.mjs test/artifact-list-state.test.mjs && npm run test:mission-activity && npm run test:a2ui",
-    "test:a2ui": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext --rootDir src --outDir .test-dist src/a2ui/protocol.ts && node --test test/a2ui-protocol.test.mjs",
+    "test:a2ui": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext --rootDir src --outDir .test-dist src/a2ui/protocol.ts src/a2ui/chartMath.ts && node --test test/a2ui-protocol.test.mjs",
     "preview": "vite preview",
     "test:mission-activity": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir .test-dist src/sbot/mission-activity-merge.ts && node --test test/mission-activity.test.mjs"
   },

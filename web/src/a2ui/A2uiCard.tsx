@@ -11,7 +11,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { A2uiSurface } from "@a2ui/react/v0_9";
 import { MessageProcessor, type ActionPayload } from "@a2ui/web_core/v0_9";
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { A2uiInteractive, A2uiLang, softnixCatalog } from "./catalog";
+import { A2uiInline, A2uiInteractive, A2uiLang, softnixCatalog } from "./catalog";
 import { CARD_UI, actionToMessage, cardLang, parseA2ui } from "./protocol";
 
 type Props = {
@@ -90,11 +90,13 @@ export function A2uiCard({ source, interactive, onAction, language = "a2ui" }: P
     <Boundary fallback={fallback}>
       <A2uiInteractive.Provider value={live}>
         <A2uiLang.Provider value={built.lang}>
+          <A2uiInline.Provider value={language !== "json"}>
           <div className="a2ui-surface" data-sent={sent || undefined} lang={built.lang}>
             <A2uiSurface surface={built.surface as never} />
             <div className="a2ui-badge-ai" aria-hidden="true">{CARD_UI[built.lang].badge}</div>
             {sent ? <Text size="sm" color="secondary">{CARD_UI[built.lang].sent}</Text> : null}
           </div>
+          </A2uiInline.Provider>
         </A2uiLang.Provider>
       </A2uiInteractive.Provider>
     </Boundary>

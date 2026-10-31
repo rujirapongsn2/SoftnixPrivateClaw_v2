@@ -32,12 +32,16 @@ import {
 } from "@a2ui/web_core/v0_9";
 import { createContext, useContext, type ReactNode } from "react";
 import { z } from "zod";
+import { ChartView } from "./ChartView";
+import { CHART_LIMITS, CHART_TYPES } from "./chartMath";
 import { CARD_UI, type CardLang, SOFTNIX_CATALOG_ID, deltaGlyph } from "./protocol";
 
 /** Whether the card's controls accept input (only the latest card does). */
 export const A2uiInteractive = createContext(true);
 /** Language of the card being rendered (see cardLang); picks the fixed UI strings. */
 export const A2uiLang = createContext<CardLang>("th");
+/** True for cards the model typed inline (```a2ui fence) rather than a tool-written `.a2ui` artifact. */
+export const A2uiInline = createContext(false);
 
 type ChildRef = string | { id: string; basePath: string };
 const kids = (children: ChildRef[] | undefined, build: (id: string, basePath?: string) => ReactNode) =>
@@ -221,44 +225,80 @@ const PriceChartApi = {
     .strict(),
 };
 
-/** Horizontal grouped bars, own SVG (no chart library, no script). */
+/** Legacy price card component (stored openrouter_price_watch artifacts use it):
+ * drawn by the generic Chart as grouped horizontal bars. */
 const SPriceChart = createComponentImplementation(PriceChartApi, ({ props }) => {
-  const items = props.items;
+  const lang = useContext(A2uiLang);
   const [la, lb] = (props.seriesLabels ?? ["input", "output"]).map(str);
-  const max = Math.max(...items.flatMap((i) => [i.a, i.b]), 0.000001);
-  const labelW = 190;
-  const barW = 300;
-  const rowH = 34;
-  const width = labelW + barW + 90;
-  const height = items.length * rowH + 30;
   return (
-    <figure className="a2ui-chart">
-      {props.title ? <Text size="sm" weight="semibold">{props.title}</Text> : null}
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={props.title ?? "chart"} width="100%">
-        {items.map((it, i) => {
-          const y = i * rowH + 4;
-          const wa = (it.a / max) * barW;
-          const wb = (it.b / max) * barW;
-          return (
-            <g key={i}>
-              <text x={labelW - 8} y={y + 16} textAnchor="end" className="a2ui-chart-label">
-                {it.label.length > 28 ? `${it.label.slice(0, 27)}…` : it.label}
-              </text>
-              <rect x={labelW} y={y} width={Math.max(wa, 1)} height={12} rx={2} className="a2ui-bar-a" />
-              <text x={labelW + Math.max(wa, 1) + 4} y={y + 10} className="a2ui-chart-num">{fmt(it.a)}</text>
-              <rect x={labelW} y={y + 14} width={Math.max(wb, 1)} height={12} rx={2} className="a2ui-bar-b" />
-              <text x={labelW + Math.max(wb, 1) + 4} y={y + 24} className="a2ui-chart-num">{fmt(it.b)}</text>
-            </g>
-          );
-        })}
-        <g transform={`translate(${labelW}, ${height - 12})`}>
-          <rect width={10} height={10} y={-9} className="a2ui-bar-a" />
-          <text x={14} className="a2ui-chart-num">{`${la}${props.unit ? ` (${props.unit})` : ""}`}</text>
-          <rect x={150} width={10} height={10} y={-9} className="a2ui-bar-b" />
-          <text x={164} className="a2ui-chart-num">{lb}</text>
-        </g>
-      </svg>
-    </figure>
+    <ChartView
+      chartType="hbar"
+      lang={lang}
+      title={props.title}
+      unit={props.unit}
+      categories={props.items.map((i) => i.label)}
+      series={[
+        { label: la, values: props.items.map((i) => i.a) },
+        { label: lb, values: props.items.map((i) => i.b) },
+      ]}
+    />
+  );
+});
+
+const deltaSchema = z
+  .object({ pct: z.number().nullable(), direction: z.enum(["up", "down", "flat", "new"]) })
+  .strict()
+  .nullable();
+const ChartApi = {
+  name: "Chart",
+  schema: z
+    .object({
+      chartType: z.enum(CHART_TYPES),
+      title: z.string().max(CHART_LIMITS.maxTitleChars).optional(),
+      categories: z.array(z.string().max(CHART_LIMITS.maxLabelChars)).min(1).max(CHART_LIMITS.maxCategories),
+      series: z
+        .array(
+          z
+            .object({
+              label: z.string().max(CHART_LIMITS.maxLabelChars),
+              values: z.array(z.number().finite().nullable()).max(CHART_LIMITS.maxCategories),
+              deltas: z.array(deltaSchema).max(CHART_LIMITS.maxCategories).optional(),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(CHART_LIMITS.maxSeries),
+      unit: z.string().max(CHART_LIMITS.maxUnitChars).optional(),
+      decimals: z.number().int().min(0).max(6).optional(),
+      xLabel: z.string().max(CHART_LIMITS.maxLabelChars).optional(),
+      yLabel: z.string().max(CHART_LIMITS.maxLabelChars).optional(),
+      goodDirection: z.enum(["up", "down"]).optional(),
+      max: z.number().positive().optional(),
+      showTable: z.boolean().optional(),
+      weight: z.number().optional(),
+    })
+    .strict(),
+};
+
+const SChart = createComponentImplementation(ChartApi, ({ props }) => {
+  const lang = useContext(A2uiLang);
+  const inline = useContext(A2uiInline);
+  return (
+    <ChartView
+      unverified={inline}
+      chartType={props.chartType}
+      lang={lang}
+      title={props.title}
+      categories={(props.categories as unknown[]).map(str)}
+      series={props.series.map((s) => ({ label: s.label, values: s.values, deltas: s.deltas }))}
+      unit={props.unit}
+      decimals={props.decimals}
+      xLabel={props.xLabel}
+      yLabel={props.yLabel}
+      goodDirection={props.goodDirection}
+      max={props.max}
+      showTable={props.showTable}
+    />
   );
 });
 
@@ -305,4 +345,5 @@ export const softnixCatalog = new Catalog(SOFTNIX_CATALOG_ID, "v0.9", [
   SDeltaStat,
   SPriceChart,
   SDataTable,
+  SChart,
 ]);

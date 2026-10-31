@@ -22,6 +22,8 @@
  * client `functionCall`s such as openUrl are rejected outright.
  */
 
+import { validateChart } from "./chartMath.js";
+
 export const A2UI_VERSION = "v0.9";
 export const SOFTNIX_CATALOG_ID = "https://softnix.ai/a2ui/catalogs/privateclaw/v0.9.json";
 
@@ -39,6 +41,7 @@ export const ALLOWED_COMPONENTS = [
   "DeltaStat",
   "PriceChart",
   "DataTable",
+  "Chart",
 ] as const;
 
 export const LIMITS = {
@@ -100,6 +103,10 @@ export function validateComponents(components: unknown): string | null {
     }
     if (c.component === "Button") {
       const e = checkAction(c.action, `components[${i}]`);
+      if (e) return e;
+    }
+    if (c.component === "Chart") {
+      const e = validateChart(c);
       if (e) return e;
     }
   }
@@ -181,12 +188,22 @@ export type CardLang = "th" | "en";
 export const CARD_PREFIX: Record<CardLang, string> = { th: "[การ์ด]", en: "[Card]" };
 
 /** Fixed UI strings around a card, in the card's language. */
-export const CARD_UI: Record<CardLang, { badge: string; sent: string; ok: string; isNew: string; flat: string }> = {
-  th: { badge: "การ์ดสร้างโดย AI", sent: "ส่งคำตอบแล้ว", ok: "ตกลง", isNew: "ใหม่", flat: "คงที่" },
-  en: { badge: "AI-generated card", sent: "Answer sent", ok: "OK", isNew: "new", flat: "flat" },
+export const CARD_UI: Record<
+  CardLang,
+  { badge: string; sent: string; ok: string; isNew: string; flat: string; showTable: string; hideTable: string; total: string; category: string; change: string; chart: string; unverified: string }
+> = {
+  th: {
+    badge: "การ์ดสร้างโดย AI", sent: "ส่งคำตอบแล้ว", ok: "ตกลง", isNew: "ใหม่", flat: "คงที่",
+    showTable: "ดูเป็นตาราง", unverified: "⚠ ตัวเลขในกราฟนี้ AI พิมพ์เอง ยังไม่ได้คำนวณจากไฟล์โดยระบบ", hideTable: "ซ่อนตาราง", total: "รวม", category: "หมวด", change: "เปลี่ยนแปลง", chart: "กราฟ",
+  },
+  en: {
+    badge: "AI-generated card", sent: "Answer sent", ok: "OK", isNew: "new", flat: "flat",
+    showTable: "Show table", unverified: "⚠ The AI typed these numbers itself; they were not computed from the data by the system", hideTable: "Hide table", total: "Total", category: "Category", change: "Change", chart: "Chart",
+  },
 };
 
-const THAI_RE = /[\u0E00-\u0E7F]/;
+// Thai letters, vowels, tone marks and digits; NOT the baht sign ฿ (U+0E3F), which English cards use too.
+const THAI_RE = /[\u0E01-\u0E3A\u0E40-\u0E5B]/;
 
 /** Language of a card = Thai if any of its text is Thai, else English. The model
  * writes the card in the user's language, so this follows the user too. */

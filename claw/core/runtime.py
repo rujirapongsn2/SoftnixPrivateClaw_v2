@@ -479,9 +479,10 @@ class ClawAgent:
         from claw.tools.diagram import RenderDiagramTool
         self.tools.register(RenderDiagramTool(workspace, user_id))
         if settings.a2ui_enabled:
-            from claw.tools.a2ui import OpenRouterPriceWatchTool, PresentUiTool
+            from claw.tools.a2ui import ChartFromDataTool, OpenRouterPriceWatchTool, PresentUiTool
 
             self.tools.register(PresentUiTool(workspace))
+            self.tools.register(ChartFromDataTool(workspace))
             self.tools.register(OpenRouterPriceWatchTool(workspace))
         if skills is not None:
             self.tools.register(ReadSkillTool(skills, user_id, workspace=workspace))

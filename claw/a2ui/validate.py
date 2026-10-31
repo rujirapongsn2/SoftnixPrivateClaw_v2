@@ -33,7 +33,16 @@ REQUIRED: dict[str, tuple[str, ...]] = {
     "DeltaStat": ("label", "value"),
     "PriceChart": ("items",),
     "DataTable": ("columns", "rows"),
+    "Chart": ("chartType", "categories", "series"),
 }
+
+# keep in step with web/src/a2ui/chartMath.ts
+CHART_TYPES = ("bar", "line", "area", "pie", "donut", "stackedBar", "hbar", "progress")
+CHART_MAX_CATEGORIES = 60
+CHART_MAX_SERIES = 8
+CHART_MAX_POINTS = 480
+CHART_MAX_PIE = 12
+CHART_MAX_LABEL = 60
 ALLOWED = tuple(REQUIRED)
 _FORBIDDEN_KEYS = {"__proto__", "constructor", "prototype"}
 
@@ -115,8 +124,80 @@ def _check_component(i: int, c: dict, errors: list[str]) -> None:
             errors.append(f"{where}.columns: non-empty list of {{key, label}}")
         if not isinstance(c.get("rows"), list):
             errors.append(f"{where}.rows: must be a list of objects")
+    elif name == "Chart":
+        errors.extend(f"{where}.{e}" for e in validate_chart(c))
     elif name in ("Column", "Row") and not isinstance(c.get("children"), list):
         errors.append(f"{where}.children: must be a list of component ids")
+
+
+def _finite(v: Any) -> bool:
+    return _is_num(v) and v == v and v not in (float("inf"), float("-inf"))
+
+
+def validate_chart(c: dict) -> list[str]:
+    """Structural rules of the Softnix `Chart` component; errors are 'prop: message'."""
+    errs: list[str] = []
+    ctype = c.get("chartType")
+    if ctype not in CHART_TYPES:
+        errs.append(f"chartType: one of {'|'.join(CHART_TYPES)}")
+    cats = c.get("categories")
+    if not (
+        isinstance(cats, list)
+        and 1 <= len(cats) <= CHART_MAX_CATEGORIES
+        and all(isinstance(x, str) and len(x) <= CHART_MAX_LABEL for x in cats)
+    ):
+        errs.append(f"categories: 1-{CHART_MAX_CATEGORIES} strings (max {CHART_MAX_LABEL} chars each)")
+        return errs
+    series = c.get("series")
+    if not (isinstance(series, list) and 1 <= len(series) <= CHART_MAX_SERIES):
+        errs.append(f"series: 1-{CHART_MAX_SERIES} items of {{label, values}}")
+        return errs
+    if len(cats) * len(series) > CHART_MAX_POINTS:
+        errs.append(f"series: too many points (max {CHART_MAX_POINTS})")
+    for i, s in enumerate(series):
+        if not isinstance(s, dict) or not isinstance(s.get("label"), str) or len(s["label"]) > CHART_MAX_LABEL:
+            errs.append(f"series[{i}].label: string (max {CHART_MAX_LABEL} chars)")
+            continue
+        vals = s.get("values")
+        if not isinstance(vals, list) or len(vals) != len(cats):
+            errs.append(f"series[{i}].values: one number (or null) per category")
+        elif not all(v is None or _finite(v) for v in vals):
+            errs.append(f"series[{i}].values: numbers or null only")
+        elif ctype in ("pie", "donut", "progress") and any(v is not None and v < 0 for v in vals):
+            errs.append(f"series[{i}].values: {ctype} values must be >= 0")
+        deltas = s.get("deltas")
+        if deltas is not None and (
+            not isinstance(deltas, list)
+            or len(deltas) != len(cats)
+            or not all(
+                d is None
+                or (
+                    isinstance(d, dict)
+                    and d.get("direction") in ("up", "down", "flat", "new")
+                    and (d.get("pct") is None or _finite(d.get("pct")))
+                )
+                for d in deltas
+            )
+        ):
+            errs.append(f"series[{i}].deltas: one {{pct, direction}} (or null) per category")
+        extra = set(s) - {"label", "values", "deltas"}
+        if extra:
+            errs.append(f"series[{i}]: unknown keys {sorted(extra)}")
+    if ctype in ("pie", "donut"):
+        if len(series) != 1:
+            errs.append(f"series: {ctype} takes exactly one series")
+        if len(cats) > CHART_MAX_PIE:
+            errs.append(f"categories: {ctype} takes at most {CHART_MAX_PIE} slices")
+    if c.get("goodDirection") not in (None, "up", "down"):
+        errs.append("goodDirection: up|down")
+    if c.get("decimals") is not None and not (isinstance(c["decimals"], int) and 0 <= c["decimals"] <= 6):
+        errs.append("decimals: integer 0-6")
+    for key, cap in (("title", 200), ("unit", 20), ("xLabel", CHART_MAX_LABEL), ("yLabel", CHART_MAX_LABEL)):
+        if c.get(key) is not None and not (isinstance(c[key], str) and len(c[key]) <= cap):
+            errs.append(f"{key}: string (max {cap} chars)")
+    if c.get("max") is not None and not (_finite(c["max"]) and c["max"] > 0):
+        errs.append("max: positive number")
+    return errs
 
 
 def validate_components(components: Any) -> list[str]:

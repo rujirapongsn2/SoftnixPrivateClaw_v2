@@ -7,7 +7,8 @@ A2UI_SKILL_NAME = "a2ui-cards"
 A2UI_SKILL_DESCRIPTION = (
     "READ FIRST whenever a request is too broad to act on well (e.g. 'สร้างรายงาน', 'ทำสไลด์ให้หน่อย' with no topic, "
     "audience or format) — ask with a clickable A2UI choice card instead of a text question. Also how to show "
-    "structured results as cards (present_ui) and OpenRouter price comparisons (openrouter_price_watch)."
+    "structured results as cards (present_ui), any chart/graph/กราฟ of data (chart_from_data, shown in the chat) and OpenRouter price "
+    "comparisons (openrouter_price_watch)."
 )
 
 A2UI_SKILL_CONTENT = f"""\
@@ -15,7 +16,7 @@ A2UI_SKILL_CONTENT = f"""\
 
 The chat renders A2UI v0.9 JSON as real UI built from the Softnix design system. Use it to
 1. **Clarify** a broad request with clickable choices (preferred over asking in prose), and
-2. **Present structured results** (stats with up/down arrows, tables, a price chart).
+2. **Present structured results** (stats with up/down arrows, tables, charts).
 
 ## When
 - The request is ambiguous/too broad to do well (missing format, tone, audience, scope) -> ONE clarify card, then STOP.
@@ -23,7 +24,28 @@ The chat renders A2UI v0.9 JSON as real UI built from the Softnix design system.
 - Do NOT use a card for simple questions, chit-chat, or when the user already gave enough detail.
 - OpenRouter "new models / price comparison" -> call tool `openrouter_price_watch` (it builds the chart and computes every
   number in code). Never compute prices, percentages or arrows yourself.
+- Chart / graph / "show me the trend/share/ranking" of data -> tool `chart_from_data` (see "Charts" below).
 - Never put credentials/password fields, links or HTML in a card. All text is plain text.
+
+## Charts (`chart_from_data`)
+The tool reads the file, aggregates and computes every number and ▲▼ % IN CODE and shows the chart card with a
+data-table toggle. You only choose WHAT to chart. Never type chart numbers yourself.
+- `source` = workspace path of a .csv/.tsv/.xlsx/.json file (or `rows` = records you got from another tool's output).
+  If unsure of the column names, look first (read_excel / read_file a few lines) — the error lists the columns too.
+- `chart_type`: line / area = trend over time (set `x_grain` day|week|month|quarter|year on a date column);
+  bar = compare categories or periods; stackedBar = parts of each period (`series_by` = the part column);
+  hbar = ranking or long labels (top N with `limit`); pie / donut = share of a whole (one `y`, <= 12 slices, the
+  rest merge into "อื่น ๆ"/"Other"); progress = each value against `max`/the largest.
+- `agg` sum (default, needs `y`) | avg | count (set agg "count" and omit `y` to count rows, e.g. events per day) | min | max.
+  Several `y` columns -> several series.
+- `delta: "previous"` adds ▲▼ % vs the previous period (use with time axes). `good_direction: "down"` for costs,
+  expenses, errors, failures, latency, so a drop shows green.
+- `title`, `x_label`, `y_label`, `series_labels`, `unit` and `lang` in the user's language ("th" for Thai, else "en").
+- After the card: 2-4 sentences in the user's language; quote only numbers exactly as the tool returned them.
+- Never write a `Chart` component yourself and never pre-compute the numbers with exec: call `chart_from_data` on
+  the file. present_ui rejects Chart, and a Chart typed in a fenced block is shown with a "numbers typed by the AI,
+  not verified" warning. If the numbers come from another tool's output, pass them as
+  `rows` with `source: "inline"`.
 
 ## Language (always)
 - Use the language of the user's latest message for EVERYTHING you write around and inside a card: the sentence before
@@ -50,7 +72,9 @@ Components: Text(text, variant h1-h5|body|caption) · Column(children[]) · Row(
 · ChoicePicker(label, options[{{label,value}}], value = {{"path":"/x"}}, variant mutuallyExclusive|multipleSelection,
 displayStyle chips|checkbox) · TextField(label, value = {{"path":"/y"}}, variant shortText|longText)
 · DeltaStat(label, value:number, unit, direction up|down|flat|new, deltaPct:number, baseline)
-· DataTable(columns[{{key,label,align}}], rows[{{key: value}}]) · PriceChart(title, unit, seriesLabels[2], items[{{label,a,b}}]).
+· DataTable(columns[{{key,label,align}}], rows[{{key: value}}])
+· Chart (written only by chart_from_data; shown here so you can read its cards)(chartType bar|line|area|pie|donut|stackedBar|hbar|progress, categories[string], series[{{label, values[number|null],
+deltas?[{{pct, direction up|down|flat|new}}|null]}}], title, unit, decimals, xLabel, yLabel, goodDirection up|down, max).
 
 Button action: {{"event": {{"name": "<snake_case>", "context": {{"<key>": {{"path": "/<field>"}}}}}}}}.
 When clicked the user sends a normal message that starts with "[การ์ด]" (Thai card) or "[Card]" (any other
