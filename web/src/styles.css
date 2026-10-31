@@ -5024,6 +5024,8 @@ html[data-chat-bg="grid"] .claw-chat {
   border: 1px solid var(--color-border-subtle, #e8e7e4); border-radius: 6px;
   background: transparent; color: inherit; cursor: pointer;
 }
+a.claw-preview-action { text-decoration: none; }
+.claw-artifact-with-download { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
 .claw-preview-action:disabled { opacity: .5; cursor: wait; }
 .claw-preview-action:focus-visible { outline: 2px solid #278bc2; outline-offset: 2px; }
 
