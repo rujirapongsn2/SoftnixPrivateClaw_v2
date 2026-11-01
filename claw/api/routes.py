@@ -19,7 +19,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from claw.api.deps import AppState, current_user, current_user_ws, get_state
-from claw.api.file_preview import PreviewError, preview_html, preview_table
+from claw.api.file_preview import PreviewError, preview_fingerprint, preview_html, preview_table
 from claw.core.events import SessionStateSnapshot
 from claw.core.loop import visible_artifacts
 from claw.db.models import User
@@ -644,6 +644,16 @@ async def get_workspace_html_preview(
     where _ACTIVE_CONTENT_CSP contains it instead.
     """
     return await _bounded_preview(state, user, session_id, path, preview_html, response)
+
+
+@router.get("/api/sessions/{session_id}/file-preview/fingerprint")
+async def get_workspace_fingerprint(
+    session_id: str, path: str, response: Response,
+    user: User = Depends(current_user), state: AppState = Depends(get_state),
+) -> dict:
+    """sha256 of an owned workspace file, so the chat can show a working file and
+    its identical .deliveries/<hash> published copy as one card (same route as sbot)."""
+    return await _bounded_preview(state, user, session_id, path, preview_fingerprint, response)
 
 
 # --- Public share links -------------------------------------------------------

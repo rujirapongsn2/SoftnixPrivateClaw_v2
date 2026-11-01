@@ -714,3 +714,21 @@ def test_html_preview_rejects_other_file_types(tmp_path):
 
     with pytest.raises(PreviewError):
         preview_html(path)
+
+
+def test_xlsx_preview_shows_numbers_the_way_their_number_format_says(tmp_path):
+    # A pivot "Sum of amount" stores 3647010.889999999 with "#,##0.00"; Excel
+    # shows 3,647,010.89 and so must the preview, not the raw binary float.
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.append(["label", "amount", "share", "count", "plain", "currency"])
+    sheet.append(["a", 3647010.889999999, 0.1234, 1234.5, 0.1 + 0.2, 1.5])
+    for cell, fmt in (("B2", "#,##0.00"), ("C2", "0.0%"), ("D2", "#,##0"), ("F2", '"$"#,##0.00')):
+        sheet[cell].number_format = fmt
+    path = tmp_path / "formatted.xlsx"
+    wb.save(path)
+
+    result = preview_table(path)
+    # Unsupported formats (currency here) fall back to the noise-free raw value.
+    assert result["rows"] == [["a", "3,647,010.89", "12.3%", "1,235", "0.3", "1.5"]]

@@ -1708,6 +1708,15 @@ export function shareFileUrl(token: string, name: string): string {
   return `/api/share/${encodeURIComponent(token)}/files/${encodeURIComponent(name)}`;
 }
 
+/** sha256 of a workspace file (null when too large), used to show a working file
+ * and its identical published `.deliveries/` copy as one artifact card. */
+export function fileFingerprint(sessionId: string, path: string, signal?: AbortSignal) {
+  return request<{ sha256: string | null }>(
+    `/api/sessions/${sessionId}/file-preview/fingerprint?path=${encodeURIComponent(path)}`,
+    { signal },
+  );
+}
+
 export function filePngExport(sessionId: string, path: string): Promise<{path: string; warnings: string[]}> {
   return request(`/api/sessions/${sessionId}/file-preview/png?path=${encodeURIComponent(path)}`, {method: "POST"});
 }

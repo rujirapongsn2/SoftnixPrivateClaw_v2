@@ -662,3 +662,33 @@ async def test_preview_admits_on_an_idle_gate_with_no_time_budget_left(db_factor
         )
     assert res.status_code == 200
     assert "<p>x</p>" in res.json()["html"]
+
+
+
+async def test_fingerprint_matches_a_published_copy_and_stays_owner_scoped(db_factory, tmp_path):
+    """Chat collapses a workspace file and its identical .deliveries/<hash> copy into
+    one card by comparing these digests; another user's session must still 404."""
+    import hashlib
+
+    app = build_api_app(db_factory, workspaces_root=tmp_path / "ws")
+    async with client(app) as c:
+        token, uid = await _register(c, "fp@x.io")
+        other, _ = await _register(c, "fp-other@x.io")
+        sid = await _session(c, token)
+        ws = _workspace(tmp_path, uid)
+        (ws / ".deliveries" / "abc").mkdir(parents=True)
+        (ws / "r.xlsx").write_bytes(b"same-bytes")
+        (ws / ".deliveries" / "abc" / "r.xlsx").write_bytes(b"same-bytes")
+        hdr = {"Authorization": f"Bearer {token}"}
+        url = f"/api/sessions/{sid}/file-preview/fingerprint"
+
+        a = await c.get(url, params={"path": "r.xlsx"}, headers=hdr)
+        b = await c.get(url, params={"path": ".deliveries/abc/r.xlsx"}, headers=hdr)
+        assert a.status_code == b.status_code == 200
+        assert a.headers["x-content-type-options"] == "nosniff"
+        assert a.json() == b.json() == {"sha256": hashlib.sha256(b"same-bytes").hexdigest()}
+
+        assert (await c.get(url, params={"path": "/etc/passwd"}, headers=hdr)).status_code == 404
+        assert (await c.get(url, params={"path": "../x"}, headers=hdr)).status_code == 404
+        resp = await c.get(url, params={"path": "r.xlsx"}, headers={"Authorization": f"Bearer {other}"})
+        assert resp.status_code == 404
