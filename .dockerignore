@@ -15,6 +15,7 @@ web/tsconfig.tsbuildinfo
 
 # Runtime data + secrets — must never end up in an image layer
 .env
+.env.*
 workspaces/
 knowledge/
 

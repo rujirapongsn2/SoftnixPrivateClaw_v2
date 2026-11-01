@@ -215,13 +215,18 @@ build_web
 
 # 3) Sandbox image (the agent's tools run inside this)
 step "Building the tool-sandbox image ($SANDBOX_IMAGE)"
-if docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1 && [[ $ASSUME_YES -eq 0 ]] && ! confirm "Sandbox image exists — rebuild it?"; then
+# The sandbox runs with network=none, so it cannot pip/apt-install at run time:
+# an image built before the packages were baked in must be rebuilt, no prompt.
+SANDBOX_PROBE="python -c 'import reportlab, docx, openpyxl, pptx, pandas, matplotlib' && command -v tesseract >/dev/null"
+if docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1 \
+   && docker run --rm --network none "$SANDBOX_IMAGE" /bin/sh -c "$SANDBOX_PROBE" >/dev/null 2>&1 \
+   && [[ $ASSUME_YES -eq 0 ]] && ! confirm "Sandbox image exists — rebuild it?"; then
   ok "reusing existing $SANDBOX_IMAGE"
 else
   docker build -f docker/sandbox.Dockerfile -t "$SANDBOX_IMAGE" "$PROJECT_DIR"
   ok "$SANDBOX_IMAGE built"
 fi
-docker run --rm "$SANDBOX_IMAGE" python -c "import reportlab, docx, openpyxl, pptx, pandas" \
+docker run --rm --network none "$SANDBOX_IMAGE" /bin/sh -c "$SANDBOX_PROBE" \
   && ok "sandbox document stack verified" || warn "sandbox libraries failed to import — check docker/sandbox.Dockerfile"
 
 # 4) Postgres container
@@ -252,8 +257,12 @@ done
 step "Writing configuration (.env)"
 DB_URL="postgresql+asyncpg://claw:${PG_PASSWORD}@localhost:${PG_PORT}/claw"
 if [[ -f .env ]]; then
-  warn ".env already exists — leaving it untouched"
+  warn ".env already exists — leaving it untouched (except the sandbox network below)"
   info "if you change ports/password, update CLAW_DATABASE_URL / CLAW_PORT by hand"
+  # An older install wrote CLAW_SANDBOX__NETWORK=bridge; move it to none
+  # (timestamped backup; '# claw:keep-network' on the line opts out).
+  uv run python -m claw.sandbox.network_migration .env \
+    || warn "could not update CLAW_SANDBOX__NETWORK in .env — set it to none by hand"
 else
   LLM_KEY="${CLAW_LLM__API_KEY:-}"
   LLM_MODEL="${CLAW_LLM__MODEL:-openrouter/anthropic/claude-sonnet-5}"
@@ -280,11 +289,11 @@ CLAW_WEB_BASE_URL=http://localhost:${APP_PORT}
 CLAW_LLM__MODEL=${LLM_MODEL}
 CLAW_LLM__API_KEY=${LLM_KEY}
 
-# Tool-sandbox (runs on the host Docker daemon). bridge = agent can pip-install
-# on demand (every exec is audit-logged); set none to isolate to the image.
+# Tool-sandbox (runs on the host Docker daemon). none = no internet and no
+# access to host services; the agent uses what's baked into the image.
 CLAW_SANDBOX__ENABLED=true
 CLAW_SANDBOX__IMAGE=${SANDBOX_IMAGE}
-CLAW_SANDBOX__NETWORK=bridge
+CLAW_SANDBOX__NETWORK=none
 CLAW_SANDBOX__TIMEOUT_SECONDS=120
 
 # Per-user workspace limits (2 GB / 50,000 files) and automatic deletion of old scratch

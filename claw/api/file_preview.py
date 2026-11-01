@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import hashlib
 import io
 import itertools
+import math
 import re
 import zipfile
 import zlib
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
 MAX_ROWS = 200
@@ -46,6 +49,9 @@ PREVIEWABLE_SUFFIXES = (".csv", ".tsv", ".xlsx")
 # wrote": the read stops here, the card says it was cut, and the untruncated
 # file stays one click away on the download link.
 HTML_MAX_BYTES = 2 * 1024 * 1024
+# Content identity for collapsing duplicate artifact cards (a workspace file and
+# its .deliveries/<hash> published copy). Bigger files just keep both cards.
+FINGERPRINT_MAX_BYTES = 32 * 1024 * 1024
 
 PREVIEWABLE_HTML_SUFFIXES = (".html", ".htm", ".svg")
 
@@ -261,14 +267,42 @@ def decode_text_bytes(raw: bytes) -> str:
 # --- Shared shaping -----------------------------------------------------------
 
 
-def _cell(value: object) -> str:
+def _cell(value: object, number_format: str | None = None) -> str:
     if value is None:
         return ""
     if isinstance(value, (dt.datetime, dt.date, dt.time)):
         text = value.isoformat()
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        text = _format_number(value, number_format)
     else:
         text = str(value)
     return text[:MAX_CELL_CHARS]
+
+
+# The plain number formats worth honouring in a preview: optional thousands
+# separator, fixed decimals, optional percent ("#,##0.00", "0.0", "#,##0", "0.00%").
+# Anything else (currency, dates, conditions, text sections) falls back to the
+# raw value without binary noise — a preview, not a spreadsheet renderer.
+_SIMPLE_NUMBER_FORMAT = re.compile(r"^(#,##)?0(?:\.(0+))?(%?)$")
+
+
+def _format_number(value: int | float, number_format: str | None) -> str:
+    match = _SIMPLE_NUMBER_FORMAT.match((number_format or "").split(";")[0].strip())
+    if match and math.isfinite(value):
+        decimals = len(match.group(2) or "")
+        scaled = Decimal(repr(value)) * (100 if match.group(3) else 1)
+        try:
+            # Excel rounds half away from zero (1234.5 under "#,##0" is 1,235).
+            rounded = scaled.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
+        except InvalidOperation:
+            # Needs more than Decimal's 28 digits (e.g. 1e30): fall through to the raw value.
+            rounded = None
+        if rounded is not None:
+            return f"{rounded:{',' if match.group(1) else ''}.{decimals}f}" + match.group(3)
+    if isinstance(value, float):
+        # 3647010.889999999 -> 3647010.89: drop float noise past 15 significant digits.
+        return f"{value:.15g}" if math.isfinite(value) else str(value)
+    return str(value)
 
 
 def _shape(
@@ -451,9 +485,10 @@ def _preview_xlsx(path: Path) -> dict:
             raise PreviewError("workbook has no sheets")
         sheet = workbook.worksheets[0]
         raw_rows: list[tuple] = []
+        formats: list[tuple] = []
         truncated = False
         truncated_columns = False
-        for row in sheet.iter_rows(values_only=True):
+        for cells in sheet.iter_rows():
             if len(raw_rows) > MAX_ROWS:
                 truncated = True
                 break
@@ -461,8 +496,10 @@ def _preview_xlsx(path: Path) -> dict:
             # ~1M _cell() calls to return a 40-column preview, and these parses
             # run in a shared thread pool where that CPU is stolen from every
             # other tenant.
-            truncated_columns = truncated_columns or len(row) > MAX_COLS
-            raw_rows.append(row[:MAX_COLS])
+            truncated_columns = truncated_columns or len(cells) > MAX_COLS
+            cells = cells[:MAX_COLS]
+            raw_rows.append(tuple(c.value for c in cells))
+            formats.append(tuple(getattr(c, "number_format", None) for c in cells))
         # Only pay for the second pass when the first one can actually have lost
         # something. A formula with no cached result reads as None here, so no
         # None in the preview window means no formula to recover — and that pass
@@ -472,8 +509,8 @@ def _preview_xlsx(path: Path) -> dict:
             formula_rows = _formula_fallback_rows(path, sheet.title, len(raw_rows))
         rows: list[list[str]] = [
             [
-                _cell(c)
-                for c in _with_formula_fallback(row, formula_rows[i] if i < len(formula_rows) else None)
+                _cell(c, formats[i][j] if j < len(formats[i]) else None)
+                for j, c in enumerate(_with_formula_fallback(row, formula_rows[i] if i < len(formula_rows) else None))
             ]
             for i, row in enumerate(raw_rows)
         ]
@@ -550,3 +587,17 @@ def preview_table(path: str | Path) -> dict:
     if suffix in (".csv", ".tsv"):
         return _preview_csv(resolved, "\t" if suffix == ".tsv" else ",")
     raise PreviewError("preview is not supported for this file type")
+
+
+def preview_fingerprint(path: str | Path) -> dict:
+    """Bounded content identity for collapsing duplicate attachment cards
+    (mirrors sbot.api.file_preview.preview_fingerprint)."""
+    digest = hashlib.sha256()
+    size = 0
+    with Path(path).open("rb") as stream:
+        while chunk := stream.read(64 * 1024):
+            size += len(chunk)
+            if size > FINGERPRINT_MAX_BYTES:
+                return {"sha256": None}
+            digest.update(chunk)
+    return {"sha256": digest.hexdigest()}

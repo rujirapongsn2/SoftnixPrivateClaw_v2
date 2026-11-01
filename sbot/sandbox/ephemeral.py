@@ -11,6 +11,7 @@ from pathlib import Path
 from claw.sandbox.ephemeral import (
     EphemeralSandbox as SharedSandbox,
     SandboxResult as SandboxResult,
+    hardening_flags,
     shell_quote as shell_quote,
 )
 from sbot.config import SandboxSettings
@@ -31,6 +32,7 @@ class EphemeralSandbox(SharedSandbox):
             "--cpus", str(s.cpu_limit),
             "--memory", s.memory_limit,
             "--pids-limit", str(s.pids_limit),
+            *hardening_flags(s, workspace),
             "--workdir", "/workspace",
             "--mount", f"type=bind,source={workspace.resolve()},target=/workspace",
             *(['--mount', f'type=bind,source={workspace.resolve() / "inputs"},target=/workspace/inputs,readonly']

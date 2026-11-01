@@ -7,7 +7,7 @@
 - ตัวแปรทั้งหมดขึ้นต้นด้วย `CLAW_` ตัวแปรซ้อนใช้ `__` คั่น เช่น `CLAW_LLM__MODEL` คือ `llm.model`
   ข้อยกเว้นคือกลุ่ม **เสียงพูดเป็นข้อความ** ที่ใช้ชื่อ `QROQ_*` (ไม่มี `CLAW_`)
 - **ติดตั้งด้วย `./install.sh` ไม่ต้องแก้ไฟล์นี้เอง** ตัวติดตั้งสร้าง `.env` ให้ (secret key สุ่ม, URL ของ Postgres, โหมดล็อกอินด้วยรหัสผ่าน)
-  และ **จะไม่เขียนทับ `.env` ที่มีอยู่แล้ว** ตอนรัน `claw update`
+  และ **จะไม่เขียนทับ `.env` ที่มีอยู่แล้ว** ตอนรัน `claw update` ยกเว้นบรรทัด `CLAW_SANDBOX__NETWORK` (ดู [Sandbox network](#sandbox-network-none-เป็นค่าเริ่มต้น))
 - ตัวแปรที่เป็นบรรทัดขึ้นต้นด้วย `#` คือตัวเลือก: ถ้าไม่เปิดใช้ ระบบใช้ค่าเริ่มต้นในโค้ด
   ปล่อยไว้แบบนั้นจะทำให้ติดตั้งตามค่าเริ่มต้นใหม่ได้เมื่ออัปเดต ไม่ถูกตรึงไว้กับค่าเก่า
 - ค่าที่ผู้ดูแลตั้งใน Control Plane (LLM providers, guardrails, OAuth apps ฯลฯ) มีผลเหนือค่าเหล่านี้ตอนแชต
@@ -102,10 +102,40 @@ docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .
 | `CLAW_SANDBOX__IMAGE` | `claw-sandbox:latest` | image ที่มีเครื่องมือเอกสาร (reportlab, python-docx, python-pptx, openpyxl, pandas, zip/unzip) |
 | `CLAW_SANDBOX__CPU_LIMIT` | `1.0` | จำนวน CPU ต่อคำสั่ง |
 | `CLAW_SANDBOX__MEMORY_LIMIT` | `1g` | หน่วยความจำต่อคำสั่ง |
-| `CLAW_SANDBOX__NETWORK` | `bridge` | `bridge` = มีอินเทอร์เน็ต (ติดตั้ง pip เพิ่มได้ และทุกคำสั่งมี audit log) `none` = แยกขาด ใช้ได้เฉพาะสิ่งที่อยู่ใน image |
+| `CLAW_SANDBOX__NETWORK` | `none` | `none` (ค่าเริ่มต้น) = ไม่มีอินเทอร์เน็ต และเข้าถึงบริการบนเครื่อง host ไม่ได้ ใช้ได้เฉพาะสิ่งที่ติดตั้งไว้ใน image `bridge` = มีอินเทอร์เน็ตและเข้าถึงพอร์ตบน host ได้ (pip install เพิ่มได้ ทุกคำสั่งมี audit log) |
 | `CLAW_SANDBOX__TIMEOUT_SECONDS` | `120` | เวลาสูงสุดต่อหนึ่งคำสั่ง เกินแล้วถูกฆ่า (ค่าเริ่มต้นในโค้ดคือ 90) |
 
 > คำสั่งที่ค้นทั้งระบบไฟล์ เช่น `find /` หรือ `grep -r … /` ถูกปฏิเสธโดยอัตโนมัติ และให้ค้นใน `/workspace` แทน
+
+#### Sandbox network: `none` เป็นค่าเริ่มต้น
+
+ตั้งแต่ patch นี้ sandbox ไม่มีเครือข่าย ทั้งค่าเริ่มต้นในโค้ด (`claw/config.py`, `sbot/config.py`), `.env.example`,
+`.env` ที่ `install.sh` สร้างใหม่ และ `docker-compose.prod.yml` เป็น `none` ทั้งหมด
+แพ็กเกจที่ agent เคย `pip install`/`apt install` ตอนรัน (matplotlib, tesseract + ภาษาไทย, ffmpeg ฯลฯ) ถูกติดตั้งไว้ใน
+`docker/sandbox.Dockerfile` แล้ว
+
+เครื่องที่อัปเดตจากเวอร์ชันเก่า `.env` มักเขียน `CLAW_SANDBOX__NETWORK=bridge` ไว้ชัด ๆ ซึ่งชนะค่าเริ่มต้น จึงมีตัวย้ายค่าให้อัตโนมัติ
+(`python -m claw.sandbox.network_migration`):
+
+- `claw update` เรียกหลัง `uv sync` และ `scripts/claw-serve.sh` เรียกทุกครั้งก่อนสตาร์ต (`--quiet`)
+  ต้องมีที่ serve ด้วย เพราะ `claw update` รอบแรกที่ดึง patch นี้ยังรัน `scripts/claw` ตัวเก่าอยู่
+  `install.sh` ก็เรียกเมื่อเจอ `.env` เดิม
+- เปลี่ยนทุกบรรทัด `CLAW_SANDBOX__NETWORK=` ที่ยังไม่เป็น `none` ให้เป็น `none` ถ้าไม่มีบรรทัดนี้ก็เพิ่มให้
+  สำรองไฟล์เดิมเป็น `.env.bak-YYYYmmdd-HHMMSS-sandbox-network` (สิทธิ์ไฟล์เดิม เช่น 600) แล้วพิมพ์แจ้ง 1 บรรทัด
+  รันซ้ำได้ ถ้าเป็น `none` อยู่แล้วจะไม่ทำอะไร
+- **ไม่ต้องการให้ย้าย:** ต่อท้ายบรรทัดด้วย `# claw:keep-network` เช่น `CLAW_SANDBOX__NETWORK=bridge  # claw:keep-network`
+- ตรวจก่อนโดยไม่เขียนไฟล์: `uv run python -m claw.sandbox.network_migration .env --check`
+
+`none` ต้องใช้ image ที่ build ใหม่ `claw update` จะ build `claw-sandbox:latest` ใหม่เมื่อ `docker/sandbox.Dockerfile` เปลี่ยน
+หรือเมื่อ image ที่มีอยู่ไม่มี matplotlib/openpyxl/tesseract และตอนสตาร์ต แอปจะตรวจ image ในเบื้องหลัง
+ถ้าไม่ครบจะ log คำเตือน `Sandbox self-check (network=none): …` พร้อมคำสั่ง build (แอปยังทำงานต่อ ไม่ล้ม)
+
+**ย้อนกลับ:** คัดลอกไฟล์ `.env.bak-…-sandbox-network` กลับเป็น `.env` หรือแก้เป็น
+`CLAW_SANDBOX__NETWORK=bridge  # claw:keep-network` แล้ว `./scripts/claw restart`
+(ต้องมี marker ไม่อย่างนั้นสตาร์ตครั้งถัดไปจะเปลี่ยนกลับเป็น `none`)
+
+Docker Compose (`docker-compose.prod.yml`) ไม่ผ่านตัวย้ายค่านี้: ถ้า `.env` ของ compose ตั้ง `bridge` ไว้ ต้องแก้เอง
+และ build image ใหม่ด้วย `docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .`
 
 ### Project containers (โหมด Sbot)
 

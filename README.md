@@ -167,10 +167,15 @@ This runs, in order:
    history has diverged).
 2. `uv sync --frozen --no-dev` — updates Python dependencies to match the committed
    lockfile.
-3. `install.sh --web-only` — rebuilds the web frontend only; does **not** touch
-   Docker, Postgres, or the system service.
-4. `alembic upgrade head` — applies any new database migrations.
-5. Restarts the app via whichever supervisor manages this install (auto-detected:
+3. Sandbox network — an explicit `CLAW_SANDBOX__NETWORK=bridge` in `.env` is moved to
+   `none` (timestamped backup; `# claw:keep-network` on that line opts out). See
+   [docs/environment.md](docs/environment.md#sandbox-network-none-เป็นค่าเริ่มต้น).
+4. `install.sh --web-only` — rebuilds the web frontend only; does **not** touch
+   Postgres or the system service. The sandbox image (`claw-sandbox:latest`) is
+   rebuilt when `docker/sandbox.Dockerfile` changed or the image lacks the packages a
+   network=none sandbox needs.
+5. `alembic upgrade head` — applies any new database migrations.
+6. Restarts the app via whichever supervisor manages this install (auto-detected:
    `systemd`, `launchd`, or a plain background process — see `scripts/claw status`).
 
 Don't re-run the full `./install.sh` just to pick up new code — it never runs

@@ -9,6 +9,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
+# The sandbox network default is none; an older .env that says bridge
+# explicitly is moved to none once (timestamped backup, one-line notice; a
+# line ending in '# claw:keep-network' opts out). Done here as well as in
+# `claw update` because the update that brings this change still runs the old
+# scripts/claw. Never blocks startup.
+if [[ -f "$PROJECT_DIR/.env" && -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+  "$PROJECT_DIR/.venv/bin/python" -m claw.sandbox.network_migration --quiet "$PROJECT_DIR/.env" || true
+fi
+
 # Load .env (KEY=VALUE lines). `set -a` exports everything sourced.
 if [[ -f "$PROJECT_DIR/.env" ]]; then
   set -a

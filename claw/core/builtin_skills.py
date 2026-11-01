@@ -1831,13 +1831,33 @@ def _a2ui_skills() -> tuple[BuiltinSkill, ...]:
     return (BuiltinSkill(name=A2UI_SKILL_NAME, description=A2UI_SKILL_DESCRIPTION, content=A2UI_SKILL_CONTENT),)
 
 
+def _spreadsheet_aware(skills: tuple[BuiltinSkill, ...]) -> tuple[BuiltinSkill, ...]:
+    """While CLAW_SPREADSHEET_ENABLED is on, the xlsx skill points the model at the `spreadsheet` tool first."""
+    from claw.tools import spreadsheet
+
+    if not spreadsheet.is_enabled():
+        return skills
+    import dataclasses
+
+    return tuple(
+        dataclasses.replace(
+            s,
+            description="Use the `spreadsheet` tool first. " + s.description,
+            content=spreadsheet.XLSX_SKILL_NOTE + s.content,
+        )
+        if s.name == "xlsx"
+        else s
+        for s in skills
+    )
+
+
 def builtin_skills() -> list[BuiltinSkill]:
     """All built-in skills (always enabled)."""
-    return [*_BUILTIN_SKILLS, *_a2ui_skills()]
+    return [*_spreadsheet_aware(_BUILTIN_SKILLS), *_a2ui_skills()]
 
 
 def get_builtin_skill(name: str) -> BuiltinSkill | None:
-    for skill in (*_BUILTIN_SKILLS, *_a2ui_skills()):
+    for skill in (*_spreadsheet_aware(_BUILTIN_SKILLS), *_a2ui_skills()):
         if skill.name == name:
             return skill
     return None

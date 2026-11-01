@@ -68,9 +68,9 @@ services:
       # the HOST daemon: docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .
       CLAW_SANDBOX__ENABLED: "true"
       CLAW_SANDBOX__IMAGE: ${CLAW_SANDBOX__IMAGE:-claw-sandbox:latest}
-      # "bridge" lets the agent pip-install on demand (every exec is audit-logged);
-      # set "none" to fully isolate it to what's baked into the sandbox image.
-      CLAW_SANDBOX__NETWORK: ${CLAW_SANDBOX__NETWORK:-bridge}
+      # "none" (default) isolates the sandbox to what's baked into the image (no
+      # internet, no host services). "bridge" lets the agent pip-install on demand.
+      CLAW_SANDBOX__NETWORK: ${CLAW_SANDBOX__NETWORK:-none}
       # Optional speech-to-text (composer mic). Un-prefixed by design.
       QROQ_KEY: ${QROQ_KEY:-}
       QROQ_URL: ${QROQ_URL:-https://api.groq.com/openai/v1}

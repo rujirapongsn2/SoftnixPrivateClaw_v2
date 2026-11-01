@@ -89,6 +89,7 @@ import { SoftnixLogo } from "./Logo";
 import { ModeSwitcher } from "./ModeSwitcher";
 import { ArchivedArtifactCard } from "./ArchivedArtifactCard";
 import { TablePreview } from "./TablePreview";
+import { DedupedArtifacts } from "./DedupedArtifacts";
 import { A2uiArtifact, A2UI_ARTIFACT_RE } from "./a2ui/A2uiArtifact";
 import { makeA2uiCodeRenderer } from "./a2ui/A2uiCard";
 import { SaveToBlueprintButton } from "./SaveToBlueprintButton";
@@ -2642,7 +2643,7 @@ export function Chat({
                           leaves an empty, still-margined div behind. */}
                       {sessionId && visibleArtifacts(item.artifacts).length > 0 && (
                         <div className="claw-artifacts">
-                          {visibleArtifacts(item.artifacts).map((p) => {
+                          <DedupedArtifacts sessionId={sessionId} paths={visibleArtifacts(item.artifacts)} render={(p) => {
                             const trashId = item.archived?.[p];
                             if (trashId) {
                               return (
@@ -2742,7 +2743,7 @@ export function Chat({
                                 <SaveToBlueprintButton sessionId={sessionId} path={p} />
                               </div>
                             );
-                          })}
+                          }} />
                         </div>
                       )}
                       <ChatMessageMetadata

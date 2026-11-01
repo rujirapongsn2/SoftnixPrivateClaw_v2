@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 .venv/
 .env
+# claw.sandbox.network_migration backups and other local env copies hold secrets
+.env.*
+!.env.example
 *.swp
 *.egg-info/
 .pytest_cache/
