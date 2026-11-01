@@ -870,7 +870,41 @@ html[data-font-size="large"] {
   margin-top: 6px;
 }
 
-/* Search box above the Recents list. */
+/* New chat / Search chats / Files rows under the brand. Search opens into an
+   input in place of its row, so it takes no room until it is wanted. */
+.claw-sidenav-top {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.claw-sidenav-search {
+  padding: 2px 4px;
+}
+/* The global :focus-visible ring would outline the inner input as well as
+   the field's own focus border. */
+[data-astryx-theme] .claw-sidenav-search input:focus-visible {
+  outline: none;
+}
+.claw-sidenav-kbd {
+  font: inherit;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b6760);
+  opacity: 0.8;
+}
+@media (hover: none) {
+  .claw-sidenav-kbd {
+    display: none;
+  }
+}
+/* iOS zooms the page into any focused input under 16px. Matches
+   MOBILE_QUERY, where the sidebar becomes a drawer. */
+@media (max-width: 1024px) {
+  .claw-sidenav-search input {
+    font-size: 16px;
+  }
+}
+
+/* Search box inside the collapsed rail's Recents flyout. */
 .claw-recents-search {
   padding: 4px 8px 8px;
 }
