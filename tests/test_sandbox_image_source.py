@@ -99,8 +99,10 @@ def test_a_pulled_image_that_is_not_ready_is_never_tagged(monkeypatch):
     probed = _fake(monkeypatch, docker, Readiness(missing={"module": ["cv2"]}))
     code = image_source.pull("registry.softnix.co.th/privateclaw", "claw-sandbox:latest", SandboxSettings())
     assert code == image_source.EXIT_NOT_READY
-    assert [c[0] for c in docker.calls] == ["pull"]
-    assert probed == [image_source.remote_ref("registry.softnix.co.th/privateclaw")]
+    ref = image_source.remote_ref("registry.softnix.co.th/privateclaw")
+    # The registry name goes, so a rejected image does not sit on disk under a name prune skips.
+    assert docker.calls == [("pull", ref), ("rmi", ref)]
+    assert probed == [ref]
 
 
 def test_a_verified_image_takes_the_local_name(monkeypatch):
@@ -112,6 +114,25 @@ def test_a_verified_image_takes_the_local_name(monkeypatch):
     # The registry name is dropped so the superseded image can be pruned later.
     assert docker.calls == [("pull", ref), ("tag", ref, "claw-sandbox:latest"), ("rmi", ref)]
     assert probed == [ref]
+
+
+def test_a_bare_host_is_rejected_before_any_pull(monkeypatch, capsys):
+    docker = _Docker()
+    _fake(monkeypatch, docker, Readiness())
+    for registry in ("registry.softnix.co.th", "https://registry.softnix.co.th/"):
+        code = image_source.pull(registry, "claw-sandbox:latest", SandboxSettings())
+        assert code == image_source.EXIT_PULL_FAILED
+    assert docker.calls == []
+    assert "host/project" in capsys.readouterr().err
+
+
+def test_a_failed_tag_also_drops_the_registry_name(monkeypatch):
+    docker = _Docker(tag_code=1)
+    _fake(monkeypatch, docker, Readiness())
+    ref = image_source.remote_ref("registry.softnix.co.th/privateclaw")
+    code = image_source.pull("registry.softnix.co.th/privateclaw", "claw-sandbox:latest", SandboxSettings())
+    assert code == image_source.EXIT_PULL_FAILED
+    assert docker.calls[-1] == ("rmi", ref)
 
 
 def test_a_broken_env_falls_back_to_building_instead_of_crashing(monkeypatch):
@@ -225,7 +246,7 @@ def test_install_pulls_before_it_builds_and_records_the_registry():
 
 def _record_registry(tmp_path, env_text, registry):
     install = (REPO / "install.sh").read_text()
-    start = install.index('  if [[ -n "$SANDBOX_REGISTRY" ]]; then\n    if ! grep')
+    start = install.index('  if [[ -n "$SANDBOX_REGISTRY" ]]; then\n    if grep -qE')
     block = install[start:install.index("\n  fi\n", start) + 6]
     (tmp_path / ".env").write_text(env_text)
     script = 'ok() { echo "ok $*"; }; warn() { echo "warn $*"; }\n' + block
@@ -238,6 +259,14 @@ def test_install_records_the_registry_in_an_existing_env(tmp_path):
     env, out = _record_registry(tmp_path, "CLAW_PORT=8700\n", "registry.softnix.co.th/privateclaw")
     assert env.startswith("CLAW_PORT=8700\n")
     assert env.endswith("CLAW_SANDBOX__REGISTRY=registry.softnix.co.th/privateclaw\n")
+    assert out.startswith("ok ")
+
+
+def test_install_fills_in_an_empty_registry_line(tmp_path):
+    # A fresh install writes `CLAW_SANDBOX__REGISTRY=` (empty); that is the default, not a choice.
+    env, out = _record_registry(tmp_path, "CLAW_PORT=8700\nCLAW_SANDBOX__REGISTRY=\nCLAW_X=1\n",
+                                "registry.softnix.co.th/privateclaw")
+    assert env == "CLAW_PORT=8700\nCLAW_SANDBOX__REGISTRY=registry.softnix.co.th/privateclaw\nCLAW_X=1\n"
     assert out.startswith("ok ")
 
 

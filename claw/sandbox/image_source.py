@@ -58,6 +58,14 @@ def _docker(*args: str, timeout: float) -> subprocess.CompletedProcess:
     return subprocess.run(["docker", *args], timeout=timeout, check=False)
 
 
+def _drop(ref: str) -> None:
+    """Remove the registry name (never the local one); best effort."""
+    try:
+        _docker("rmi", ref, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def pull(registry: str, local_image: str, settings, workspaces_root: Path | None = None) -> int:
     """Pull the prebuilt image for this checkout, probe it, then name it `local_image`."""
     from claw.sandbox.capabilities import check_image
@@ -65,6 +73,13 @@ def pull(registry: str, local_image: str, settings, workspaces_root: Path | None
     if not registry.strip():
         print("no sandbox registry configured (CLAW_SANDBOX__REGISTRY); building locally", file=sys.stderr)
         return EXIT_NO_REGISTRY
+    if "/" not in registry.strip().removeprefix("https://").removeprefix("http://").strip("/"):
+        # CI publishes under <host>/<project>/claw-sandbox; a bare host (as in the
+        # HARBOR_URL secret) points at a path that does not exist, and the pull error
+        # would then read like a login problem.
+        print(f"CLAW_SANDBOX__REGISTRY must be host/project (e.g. registry.softnix.co.th/privateclaw), "
+              f"got {registry.strip()!r}; building locally", file=sys.stderr)
+        return EXIT_PULL_FAILED
     ref = remote_ref(registry)
     print(f"==> pulling prebuilt sandbox image {ref}")
     try:
@@ -80,6 +95,7 @@ def pull(registry: str, local_image: str, settings, workspaces_root: Path | None
     if not readiness.ok:
         print(f"pulled {ref} is not ready, keeping {local_image} as it was: {readiness.describe()}",
               file=sys.stderr)
+        _drop(ref)  # not dangling, so prune would never reclaim ~2.5 GB under this name
         return EXIT_NOT_READY
     try:
         tagged = _docker("tag", ref, local_image, timeout=60)
@@ -88,11 +104,12 @@ def pull(registry: str, local_image: str, settings, workspaces_root: Path | None
         return EXIT_PULL_FAILED
     if tagged.returncode != 0:
         print(f"could not tag {ref} as {local_image}", file=sys.stderr)
+        _drop(ref)
         return EXIT_PULL_FAILED
     # The local name keeps the layers. Leaving the registry name on the image
     # would keep every superseded df-<hash> image (~2.5 GB each) from becoming
     # dangling and prunable.
-    _docker("rmi", ref, timeout=60)
+    _drop(ref)
     print(f"==> {local_image} is now {ref} (offline capabilities verified)")
     return EXIT_PULLED
 
