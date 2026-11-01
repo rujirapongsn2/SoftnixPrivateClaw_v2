@@ -70,10 +70,22 @@ class SandboxSettings(BaseModel):
     cpu_limit: float = 1.0
     memory_limit: str = "1g"
     pids_limit: int = 256
-    # bridge gives the sandbox internet (pip install, downloads); none isolates
-    # it. bridge is more capable but riskier — exec runs are audit-logged.
-    network: str = "bridge"  # none | bridge
+    # none (default) isolates the sandbox: no internet and no route to services
+    # on the host. Everything the agent needs is baked into
+    # docker/sandbox.Dockerfile. bridge gives it internet (pip install,
+    # downloads) and reaches host ports — opt-in only; exec runs are audit-logged.
+    network: str = "none"  # none | bridge
     timeout_seconds: int = 90
+    # Container hardening for ephemeral exec runs: read-only root filesystem with
+    # a fresh tmpfs /tmp, all capabilities dropped, no-new-privileges, and a
+    # non-root user. Turn off only to debug an image.
+    hardened: bool = True
+    # "auto" runs as the server's own uid:gid (so files written to the bind-mounted
+    # workspace keep the owner they have on the host, on Linux and on Docker
+    # Desktop alike); when the server itself runs as root it falls back to
+    # 65534:65534 (nobody). "" keeps the image's default user (root).
+    user: str = "auto"
+    tmp_size: str = "512m"
     # Persistent development is opt-in; ordinary document execution is unchanged.
     projects_enabled: bool = False
     project_image: str = "sbot-developer:latest"

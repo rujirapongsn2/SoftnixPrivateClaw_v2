@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from claw.tools.scan_guard import blocked_message
+from claw.tools.system_path_guard import blocked_message as system_path_blocked
 from sbot.sandbox.ephemeral import EphemeralSandbox
 from sbot.tools.base import Tool
 
@@ -14,7 +15,11 @@ class ExecTool(Tool):
         "Execute a shell command. Commands run inside an isolated ephemeral sandbox "
         "with the workspace mounted at /workspace. Search and list within /workspace; "
         "scanning the whole filesystem (`find /`, `grep -r ... /`) is refused because it "
-        "holds only system files and times out. Connector/MCP data is not on this "
+        "holds only system files and times out. "
+        "System files are off limits: commands that read, list, copy or export paths outside "
+        "/workspace such as /etc, /proc, /sys, /root, /home, /var or ~ are refused; if the user asks "
+        "for one, decline in the user's language instead of trying. "
+        "Connector/MCP data is not on this "
         "filesystem: fetch it with that connector's tools."
     )
     parameters = {
@@ -28,7 +33,7 @@ class ExecTool(Tool):
         self.workspace = workspace
 
     async def execute(self, command: str, **_: Any) -> str:
-        refused = blocked_message(command)
+        refused = system_path_blocked(command) or blocked_message(command)
         if refused is not None:
             return refused
         result = await self.sandbox.run(command, self.workspace)

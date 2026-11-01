@@ -300,11 +300,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "enabled" if browser_mgr is not None else "disabled",
             "enabled" if settings.tts.api_key else "disabled (CLAW_TTS__API_KEY not set)",
         )
+        # network=none needs the packages baked into the sandbox image. Probe in
+        # the background (a docker run takes seconds) and only warn: the service
+        # still serves chat, and the operator gets the rebuild command.
+        async def _check_sandbox_image() -> None:
+            from claw.sandbox.ephemeral import image_readiness_problem
+
+            try:
+                problem = await image_readiness_problem(settings.sandbox)
+            except Exception:
+                logger.exception("Sandbox image self-check failed")
+                return
+            if problem:
+                logger.warning("Sandbox self-check (network=none): {}", problem)
+            elif settings.sandbox.enabled and settings.sandbox.network == "none":
+                logger.info("Sandbox self-check passed: {} has the baked packages", settings.sandbox.image)
+
+        import asyncio as _asyncio
+
+        sandbox_check = _asyncio.create_task(_check_sandbox_image())
         if sbot_app is not None:
             async with sbot_app.router.lifespan_context(sbot_app):
                 yield
         else:
             yield
+        sandbox_check.cancel()
         # Stop intake, then let in-flight turns finish before tearing down.
         await scheduler.stop()
         await model_health.stop()

@@ -83,9 +83,11 @@ class SandboxSettings(SbotSandboxSettings):
     cpu_limit: float = 1.0
     memory_limit: str = "1g"
     pids_limit: int = 256
-    # bridge gives the sandbox internet (pip install, downloads); none isolates
-    # it. bridge is more capable but riskier — exec runs are audit-logged.
-    network: str = "bridge"  # none | bridge
+    # none (default) isolates the sandbox: no internet and no route to services
+    # on the host. Everything the agent needs is baked into
+    # docker/sandbox.Dockerfile. bridge gives it internet (pip install,
+    # downloads) and reaches host ports — opt-in only; exec runs are audit-logged.
+    network: str = "none"  # none | bridge
     timeout_seconds: int = 90
     # Longer default: pip install / network fetches can be slow.
     # (kept modest to bound worst-case; raise if agents do heavy builds)
