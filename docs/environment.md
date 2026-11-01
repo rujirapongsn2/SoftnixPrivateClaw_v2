@@ -127,8 +127,25 @@ docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .
 - ตรวจก่อนโดยไม่เขียนไฟล์: `uv run python -m claw.sandbox.network_migration .env --check`
 
 `none` ต้องใช้ image ที่ build ใหม่ `claw update` จะ build `claw-sandbox:latest` ใหม่เมื่อ `docker/sandbox.Dockerfile` เปลี่ยน
-หรือเมื่อ image ที่มีอยู่ไม่มี matplotlib/openpyxl/tesseract และตอนสตาร์ต แอปจะตรวจ image ในเบื้องหลัง
+หรือเมื่อ image ที่มีอยู่ขาดความสามารถ offline ข้อใดข้อหนึ่ง และตอนสตาร์ต แอปจะตรวจ image ในเบื้องหลัง
 ถ้าไม่ครบจะ log คำเตือน `Sandbox self-check (network=none): …` พร้อมคำสั่ง build (แอปยังทำงานต่อ ไม่ล้ม)
+
+รายการความสามารถ offline อยู่ที่เดียวคือ `claw/sandbox/capabilities.py` ได้แก่ เอกสาร (PDF/Word/Excel/PowerPoint),
+Poppler (`pdftoppm`/`pdftotext`), OCR ด้วย tesseract + `pytesseract` (ไทย/อังกฤษ), RapidOCR พร้อม model ใน image
+(อ่านอังกฤษ/จีน ไม่รองรับไทย), OpenCV headless, SVG → PNG (CairoSVG, `rsvg-convert`), ฟอนต์ไทย TLWG, pythainlp
+และ uharfbuzz รวมถึง ffmpeg การตรวจแยกบอกว่าขาด Python package, executable, model/data หรือโฟลเดอร์ที่เขียนไม่ได้
+และรันภายใต้ network=none กับ hardening เดียวกับคำสั่งจริง ตรวจเองได้ด้วย
+
+```bash
+uv run python -m claw.sandbox.capabilities claw-sandbox:latest
+CLAW_SANDBOX_TEST_IMAGE=claw-sandbox:latest uv run pytest tests/test_sandbox_offline_image.py   # ทดสอบงานจริงใน image
+```
+
+เมื่อ network เป็น `none` คำอธิบาย `exec` และ system prompt จะบอก agent ว่าไม่มี internet และให้ใช้แพ็กเกจที่ติดตั้งไว้
+คำสั่งที่ต้องใช้เครือข่าย (`pip`/`apt-get`/`npm install`, `playwright install`, `git clone` จาก URL) ถูกปฏิเสธก่อนรันพร้อมคำแนะนำ
+(`pip install --no-index` จากไฟล์ในเครื่องและ `git clone` จาก path ในเครื่องยังทำได้)
+Playwright/Chromium ไม่ได้อยู่ใน sandbox image: การใช้เบราว์เซอร์ทำผ่าน browser tool ฝั่ง host
+ส่วน HTML → ภาพใน sandbox ใช้ weasyprint (HTML → PDF) แล้ว `pdftoppm` หรือ PyMuPDF (PDF → PNG)
 
 **ย้อนกลับ:** คัดลอกไฟล์ `.env.bak-…-sandbox-network` กลับเป็น `.env` หรือแก้เป็น
 `CLAW_SANDBOX__NETWORK=bridge  # claw:keep-network` แล้ว `./scripts/claw restart`

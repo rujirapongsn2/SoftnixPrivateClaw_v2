@@ -470,8 +470,14 @@ cmd_logs() {
 }
 
 # What a network=none sandbox needs baked into the image (it cannot pip/apt
-# install at run time). Keep in step with _IMAGE_PROBE in claw/sandbox/ephemeral.py.
-SANDBOX_PROBE="python -c 'import matplotlib, openpyxl' && command -v tesseract >/dev/null"
+# install at run time) is listed once, in claw/sandbox/capabilities.py; this
+# runs that probe under the same confinement as a real exec command.
+# --no-sync: keep the .venv exactly as `uv sync --frozen --no-dev` left it.
+# Exit 0 ready, 3 the image lacks something (rebuild), anything else is a
+# problem a rebuild cannot fix.
+sandbox_image_ready() {
+  uv run --no-sync --quiet python -m claw.sandbox.capabilities "$1"
+}
 
 # Rebuild the tool-sandbox image when the pull changed how it is built, or
 # when the current image lacks the packages a network=none sandbox needs.
@@ -494,8 +500,15 @@ update_sandbox_image() {
     echo "    docker build -f docker/sandbox.Dockerfile -t $image $PROJECT_DIR"
     return 0
   fi
-  if [[ -z "$reason" ]] && ! docker run --rm --pull=never --network none "$image" /bin/sh -c "$SANDBOX_PROBE" >/dev/null 2>&1; then
-    reason="$image is missing or lacks matplotlib/openpyxl/tesseract"
+  local probe rc=0
+  if [[ -z "$reason" ]]; then
+    probe="$(sandbox_image_ready "$image" 2>&1)" || rc=$?
+    if [[ $rc -eq 3 ]]; then
+      reason="$image is missing or lacks offline capabilities ($(printf '%s\n' "$probe" | tail -n 1))"
+    elif [[ $rc -ne 0 ]]; then
+      echo "==> WARNING: sandbox image check failed for a reason a rebuild cannot fix — not rebuilding:"
+      printf '    %s\n' "$(printf '%s\n' "$probe" | tail -n 1)"
+    fi
   fi
   [[ -n "$reason" ]] || return 0
   echo "==> rebuild sandbox image ($image): $reason"

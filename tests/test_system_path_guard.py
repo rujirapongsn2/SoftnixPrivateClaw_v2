@@ -138,12 +138,15 @@ def test_sbot_argv_carries_the_hardening(tmp_path):
     assert "--read-only" in argv and "ALL" in argv and "--user" in argv
 
 
+DOCKER_IMAGE = os.environ.get("CLAW_SANDBOX_TEST_IMAGE", "claw-sandbox:latest")
+
+
 def _docker_ready() -> bool:
     if os.environ.get("CLAW_TEST_DOCKER") != "1":
         return False
     try:
         return subprocess.run(
-            ["docker", "image", "inspect", "claw-sandbox:latest"], capture_output=True, timeout=20
+            ["docker", "image", "inspect", DOCKER_IMAGE], capture_output=True, timeout=20
         ).returncode == 0
     except Exception:
         return False
@@ -163,7 +166,7 @@ async def test_hardened_container_still_does_document_work(tmp_path):
         "touch /etc/probe 2>/dev/null && echo ROOTFS-WRITABLE || echo rootfs-readonly; "
         "cat /etc/shadow >/dev/null 2>&1 && echo SHADOW-READ || echo shadow-denied"
     )
-    result = await EphemeralSandbox(SandboxSettings(network="none", timeout_seconds=60)).run(script, tmp_path)
+    result = await EphemeralSandbox(SandboxSettings(image=DOCKER_IMAGE, network="none", timeout_seconds=60)).run(script, tmp_path)
     assert result.exit_code == 0, result.render()
     assert result.stdout.splitlines()[0] != "0"
     assert "rootfs-readonly" in result.stdout and "shadow-denied" in result.stdout

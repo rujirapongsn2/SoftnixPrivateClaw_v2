@@ -76,6 +76,7 @@ from sbot.i18n import classify_error_reason, is_no_tool_support_error, is_no_vis
 from sbot.providers.base import LLMProvider, ProviderError
 from sbot.providers.registry import supports_vision as model_supports_vision
 from sbot.sandbox.ephemeral import EphemeralSandbox
+from claw.sandbox.capabilities import OFFLINE_PROMPT, is_offline
 from sbot.security.policy import PolicyEngine
 from sbot.tools.blueprint import SaveBlueprintTool
 from sbot.tools.browser import BrowserTool
@@ -255,6 +256,7 @@ class ClawAgent:
         # Network mode of the sandbox exec runs, recorded in the security audit
         # trail so admins can see when a command had internet access.
         self._sandbox_network = settings.sandbox.network
+        self._sandbox_offline = is_offline(settings.sandbox)
         for tool_cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(tool_cls(workspace))
         self.tools.register(ExecTool(sandbox, workspace))
@@ -577,7 +579,8 @@ class ClawAgent:
             f"## Runtime\n{runtime}\n\n"
             f"## Workspace\nYour workspace is mounted for file tools; shell commands run "
             f"in an isolated sandbox with the same workspace at /workspace.\n"
-            "For software development use project, which keeps packages and services across calls. "
+            + (f"{OFFLINE_PROMPT}\n" if self._sandbox_offline else "")
+            + "For software development use project, which keeps packages and services across calls. "
             "Its /workspace maps to projects/<slug>/ in file tools. A slug belongs to one application: "
             "give teammates the same slug only while continuing that application, and choose a new slug "
             "for every new application. Create new applications with project action=create; it rejects an "

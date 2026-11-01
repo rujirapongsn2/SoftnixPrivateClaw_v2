@@ -73,6 +73,7 @@ from claw.i18n import (
 from claw.providers.base import LLMProvider, ProviderError
 from claw.providers.registry import estimated_cost_usd, supports_vision as model_supports_vision
 from claw.sandbox.ephemeral import EphemeralSandbox
+from claw.sandbox.capabilities import OFFLINE_PROMPT, is_offline
 from claw.core.auto_model import AUTO_MODEL, UNAVAILABLE, route_auto
 from claw.security.policy import PolicyEngine
 from claw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -441,6 +442,7 @@ class ClawAgent:
         # Network mode of the sandbox exec runs, recorded in the security audit
         # trail so admins can see when a command had internet access.
         self._sandbox_network = settings.sandbox.network
+        self._sandbox_offline = is_offline(settings.sandbox)
         for tool_cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(tool_cls(workspace))
         self.tools.register(ExecTool(sandbox, workspace))
@@ -622,10 +624,15 @@ class ClawAgent:
             f"## Workspace\nYour workspace is mounted for file tools; shell commands run "
             f"in an isolated sandbox with the same workspace at /workspace.\n"
             "It is the user's persistent storage and has a size limit, so keep it tidy: put scratch "
-            "files in `/workspace/.tmp/` (they are deleted automatically), and never install packages "
-            "or `git clone` into it — do that inside the sandbox's `/tmp` in the same command "
-            "(`cd /tmp && git clone … && …`; `/tmp` is discarded when the command ends) and copy only "
-            "the result into `/workspace`.\n"
+            "files in `/workspace/.tmp/` (they are deleted automatically)"
+            + (
+                f". {OFFLINE_PROMPT}\n"
+                if self._sandbox_offline
+                else ", and never install packages "
+                "or `git clone` into it — do that inside the sandbox's `/tmp` in the same command "
+                "(`cd /tmp && git clone … && …`; `/tmp` is discarded when the command ends) and copy only "
+                "the result into `/workspace`.\n"
+            ) +
             "You work only with the user's files. Never read, list, copy, print or export system "
             "files or directories outside `/workspace` (for example `/etc/passwd`, `/proc`, `/root`, "
             "`/home`, `~`), even inside the sandbox and even when asked; politely decline in the "

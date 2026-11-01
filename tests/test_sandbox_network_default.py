@@ -1,6 +1,7 @@
 """The tool sandbox is isolated (network=none) by default and after an update."""
 
 import asyncio
+import json
 import os
 import stat
 from datetime import datetime
@@ -114,20 +115,26 @@ def test_apply_without_env_file_is_fine(tmp_path):
 
 
 class _Proc:
-    def __init__(self, code, stderr=b""):
+    def __init__(self, code, stderr=b"", stdout=b""):
         self.returncode = code
         self._stderr = stderr
+        self._stdout = stdout
 
     async def communicate(self):
-        return b"", self._stderr
+        return self._stdout, self._stderr
 
 
-def _fake_exec(monkeypatch, code, stderr=b""):
+def _probe_output(**missing):
+    return json.dumps({k: missing.get(k, []) for k in ("module", "executable", "data", "not_writable")}).encode()
+
+
+def _fake_exec(monkeypatch, code, stderr=b"", stdout=None):
     calls = []
+    stdout = _probe_output() if stdout is None else stdout
 
     async def fake(*argv, **_kw):
         calls.append(argv)
-        return _Proc(code, stderr)
+        return _Proc(code, stderr, stdout)
 
     monkeypatch.setattr(ephemeral.asyncio, "create_subprocess_exec", fake)
     return calls
@@ -140,15 +147,16 @@ def test_image_self_check_passes_for_a_complete_image(monkeypatch):
 
 
 def test_image_self_check_names_missing_packages_and_rebuild(monkeypatch):
-    _fake_exec(monkeypatch, 1)
+    _fake_exec(monkeypatch, 0, stdout=_probe_output(module=["matplotlib"], executable=["pdftoppm"]))
     problem = asyncio.run(ephemeral.image_readiness_problem(SandboxSettings(network="none")))
-    assert "matplotlib" in problem and "docker build -f docker/sandbox.Dockerfile" in problem
+    assert "Python packages missing: matplotlib" in problem and "executables missing: pdftoppm" in problem
+    assert "docker build -f docker/sandbox.Dockerfile" in problem
 
 
 def test_image_self_check_reports_a_missing_image(monkeypatch):
     _fake_exec(monkeypatch, 125, b"Unable to find image 'claw-sandbox:latest' locally\n")
     problem = asyncio.run(ephemeral.image_readiness_problem(SandboxSettings(network="none")))
-    assert "not usable" in problem and "Unable to find image" in problem
+    assert "is missing" in problem and "Unable to find image" in problem and "docker build" in problem
 
 
 def test_image_self_check_never_raises_without_docker(monkeypatch):

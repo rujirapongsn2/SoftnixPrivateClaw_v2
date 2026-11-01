@@ -22,10 +22,13 @@ FROM python:3.12-slim
 #  - tesseract-ocr + tesseract-ocr-tha: OCR incl. Thai (agents apt-installed it
 #    at run time before the sandbox lost network)
 #  - ffmpeg: audio/video conversion (yt-dlp post-processing, clips)
+#  - poppler-utils: pdftoppm/pdftotext/pdfinfo (PDF → image/text, pdf2image)
+#  - librsvg2-bin: rsvg-convert (SVG → PNG/PDF from the command line)
 #  - curl/git: common CLIs the agent reaches for; harmless with network=none
 RUN apt-get update && apt-get install -y --no-install-recommends \
         zip unzip \
         tesseract-ocr tesseract-ocr-tha ffmpeg curl git ca-certificates \
+        poppler-utils librsvg2-bin \
         fonts-dejavu-core fonts-liberation fonts-thai-tlwg \
         libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
         libjpeg62-turbo zlib1g \
@@ -72,6 +75,47 @@ RUN pip install --no-cache-dir \
         "uvicorn>=0.29" \
         "pydantic>=2.6" \
         "sqlalchemy>=2.0" \
-        "pytest>=8.0"
+        "pytest>=8.0" \
+        "fpdf2>=2.8"
+
+# OCR, Thai text and vector graphics, all usable with network=none.
+#  - pytesseract: Python wrapper over the tesseract CLI above (tha + eng).
+#  - opencv-python-headless: cv2 without the GUI/libGL stack.
+#  - rapidocr-onnxruntime: its wheel ships its ONNX models (det/cls/rec), so
+#    nothing is fetched on first use. It declares the GUI `opencv-python`; it is
+#    installed --no-deps so only the headless build is present, and its other
+#    requirements are listed here instead. Its stock models read Chinese and
+#    Latin text, not Thai: use tesseract for Thai.
+#  - uharfbuzz: HarfBuzz text shaping (Thai glyph clusters, font tooling).
+#  - pythainlp: Thai word/sentence tokenizing with its bundled dictionary.
+#    Engines that download a model on first use cannot work offline.
+#  - CairoSVG: SVG → PNG/PDF in Python (uses libcairo2 above).
+# NumPy stays on 2.x, which OpenCV, ONNX Runtime and pandas are all built for.
+# onnxruntime, tqdm and xlsxwriter are named here although other packages pull
+# them in today, so a capability does not vanish when an unrelated dependency
+# drops them. `set -e` makes a failed install, model check or `pip check` fail
+# the build instead of shipping an image without OCR or Thai support.
+RUN set -e; \
+    pip install --no-cache-dir \
+        "numpy>=2,<3" \
+        "onnxruntime>=1.17,<2" \
+        "tqdm>=4.66" \
+        "xlsxwriter>=3.2" \
+        "pytesseract>=0.3.13" \
+        "opencv-python-headless>=4.10,<5" \
+        "pyclipper>=1.3" \
+        "shapely>=2.0" \
+        "PyYAML>=6.0" \
+        "six>=1.16" \
+        "uharfbuzz>=0.41" \
+        "pythainlp>=5.0" \
+        "CairoSVG>=2.7"; \
+    pip install --no-cache-dir --no-deps "rapidocr-onnxruntime==1.4.4"; \
+    python -c "import pathlib, rapidocr_onnxruntime as r; \
+models = list((pathlib.Path(r.__file__).parent / 'models').glob('*.onnx')); \
+assert len(models) >= 3, models"; \
+    out="$(pip check 2>&1)" || true; \
+    left="$(printf '%s\n' "$out" | grep -v -e '^No broken requirements' -e 'requires opencv-python, which is not installed' || true)"; \
+    if [ -n "$left" ]; then echo "$left"; exit 1; fi
 
 WORKDIR /workspace
