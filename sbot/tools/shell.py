@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Any
 
+from claw.sandbox.capabilities import is_offline, offline_guidance
+from claw.tools.install_guard import offline_blocked_message as offline_blocked
 from claw.tools.scan_guard import blocked_message
 from claw.tools.system_path_guard import blocked_message as system_path_blocked
 from sbot.sandbox.ephemeral import EphemeralSandbox
@@ -22,6 +24,7 @@ class ExecTool(Tool):
         "Connector/MCP data is not on this "
         "filesystem: fetch it with that connector's tools."
     )
+    offline_description = description + " " + offline_guidance()
     parameters = {
         "type": "object",
         "properties": {"command": {"type": "string", "description": "Shell command to run"}},
@@ -31,9 +34,16 @@ class ExecTool(Tool):
     def __init__(self, sandbox: EphemeralSandbox, workspace: Path):
         self.sandbox = sandbox
         self.workspace = workspace
+        self.offline = is_offline(getattr(sandbox, "settings", None))
+        if self.offline:
+            self.description = self.offline_description
 
     async def execute(self, command: str, **_: Any) -> str:
-        refused = system_path_blocked(command) or blocked_message(command)
+        refused = (
+            system_path_blocked(command)
+            or (offline_blocked(command) if self.offline else None)
+            or blocked_message(command)
+        )
         if refused is not None:
             return refused
         result = await self.sandbox.run(command, self.workspace)

@@ -310,14 +310,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from claw.sandbox.ephemeral import image_readiness_problem
 
             try:
-                problem = await image_readiness_problem(settings.sandbox)
+                problem = await image_readiness_problem(settings.sandbox, settings.workspaces_root)
             except Exception:
                 logger.exception("Sandbox image self-check failed")
                 return
             if problem:
                 logger.warning("Sandbox self-check (network=none): {}", problem)
             elif settings.sandbox.enabled and settings.sandbox.network == "none":
-                logger.info("Sandbox self-check passed: {} has the baked packages", settings.sandbox.image)
+                logger.info("Sandbox self-check passed: {} has every offline capability", settings.sandbox.image)
 
         import asyncio as _asyncio
 

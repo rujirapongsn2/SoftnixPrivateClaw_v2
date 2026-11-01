@@ -165,53 +165,26 @@ class EphemeralSandbox:
         )
 
 
-# Baked into docker/sandbox.Dockerfile because a network=none sandbox cannot
-# install them at run time. An image built before that change lacks them.
-_IMAGE_PROBE = "python -c 'import matplotlib, openpyxl' && command -v tesseract >/dev/null"
-
-
-async def image_readiness_problem(settings: SandboxSettings, timeout: float = 60.0) -> str | None:
+async def image_readiness_problem(settings: SandboxSettings, workspaces_root: Path | None = None) -> str | None:
     """Why the sandbox image can't serve a network=none sandbox, or None if it can.
 
-    Only meaningful when the sandbox is enabled with network=none; returns None
-    otherwise. Never raises: a probe that cannot run is itself the problem.
+    Checks every offline capability in claw.sandbox.capabilities. Only
+    meaningful when the sandbox is enabled with network=none; returns None
+    otherwise. Never raises. Advises a rebuild only when one would help.
     """
     if not settings.enabled or settings.network != "none":
         return None
-    rebuild = f"rebuild it: docker build -f docker/sandbox.Dockerfile -t {settings.image} ."
-    argv = [
-        "docker", "run", "--rm", "--pull=never", "--network", "none",
-        # Same confinement as a real exec run, so a read-only root or non-root
-        # user problem shows up here rather than on the first command.
-        *hardening_flags(settings),
-        settings.image, "/bin/sh", "-c", _IMAGE_PROBE,
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-        )
-    except OSError as exc:
-        return f"docker is unavailable ({exc}); sandbox commands will fail"
-    try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        return f"probing {settings.image} timed out after {timeout:.0f}s"
-    except asyncio.CancelledError:
-        if proc.returncode is None:
-            proc.kill()
-        await proc.communicate()
-        raise
-    if proc.returncode == 0:
+    from claw.sandbox.capabilities import check_image
+
+    result = await check_image(settings, workspaces_root)
+    if result.ok:
         return None
-    if proc.returncode == 125:
-        detail = (stderr.decode("utf-8", "replace").strip().splitlines() or [""])[0]
-        return f"image {settings.image} is not usable ({detail}); {rebuild}"
-    return (
-        f"image {settings.image} lacks matplotlib/openpyxl/tesseract, which a network=none "
-        f"sandbox cannot install at run time; {rebuild}"
-    )
+    if result.needs_rebuild:
+        return (
+            f"{result.describe()}. A network=none sandbox cannot install these at run time; rebuild the image: "
+            f"docker build -f docker/sandbox.Dockerfile -t {settings.image} ."
+        )
+    return f"{result.describe()}. Rebuilding the image will not fix this; check docker, the sandbox user and permissions."
 
 
 def shell_quote(command: str) -> str:

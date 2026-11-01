@@ -217,17 +217,20 @@ build_web
 step "Building the tool-sandbox image ($SANDBOX_IMAGE)"
 # The sandbox runs with network=none, so it cannot pip/apt-install at run time:
 # an image built before the packages were baked in must be rebuilt, no prompt.
-SANDBOX_PROBE="python -c 'import reportlab, docx, openpyxl, pptx, pandas, matplotlib' && command -v tesseract >/dev/null"
+# The capability list lives in claw/sandbox/capabilities.py (modules,
+# executables, models/fonts/data, writable dirs), probed under exec confinement.
+# --no-sync keeps the .venv as `uv sync --frozen --no-dev` left it.
+sandbox_image_ready() { uv run --no-sync --quiet python -m claw.sandbox.capabilities "$SANDBOX_IMAGE"; }
 if docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1 \
-   && docker run --rm --network none "$SANDBOX_IMAGE" /bin/sh -c "$SANDBOX_PROBE" >/dev/null 2>&1 \
+   && sandbox_image_ready >/dev/null 2>&1 \
    && [[ $ASSUME_YES -eq 0 ]] && ! confirm "Sandbox image exists — rebuild it?"; then
-  ok "reusing existing $SANDBOX_IMAGE"
+  ok "reusing existing $SANDBOX_IMAGE (offline capabilities verified)"
 else
   docker build -f docker/sandbox.Dockerfile -t "$SANDBOX_IMAGE" "$PROJECT_DIR"
   ok "$SANDBOX_IMAGE built"
+  sandbox_image_ready \
+    && ok "sandbox offline capabilities verified" || warn "sandbox image is not ready for offline work (see above) — check docker/sandbox.Dockerfile"
 fi
-docker run --rm --network none "$SANDBOX_IMAGE" /bin/sh -c "$SANDBOX_PROBE" \
-  && ok "sandbox document stack verified" || warn "sandbox libraries failed to import — check docker/sandbox.Dockerfile"
 
 # 4) Postgres container
 step "Setting up Postgres (Docker container '$PG_CONTAINER')"
