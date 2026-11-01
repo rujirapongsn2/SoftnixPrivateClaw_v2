@@ -19,8 +19,11 @@
 #                                  # pull the prebuilt tool-sandbox image (log in first:
 #                                  # docker login registry.softnix.co.th); builds locally if that fails
 #
+#     ./install.sh --spreadsheet   # install the pinned GridCraft engine and turn the `spreadsheet`
+#                                  # tool on (CLAW_SPREADSHEET_ENABLED=true). Needs github.com once.
+#
 # Config via env (all optional): CLAW_LLM__API_KEY, CLAW_LLM__MODEL, CLAW_PORT,
-#     CLAW_PG_PORT, CLAW_DATA_DIR, CLAW_SANDBOX__REGISTRY.
+#     CLAW_PG_PORT, CLAW_DATA_DIR, CLAW_SANDBOX__REGISTRY, CLAW_SPREADSHEET_ENABLED.
 #
 set -euo pipefail
 
@@ -53,6 +56,8 @@ PG_VOLUME="claw-pgdata"
 PG_PASSWORD="${POSTGRES_PASSWORD:-claw}"
 SANDBOX_IMAGE="claw-sandbox:latest"
 SANDBOX_REGISTRY="${CLAW_SANDBOX__REGISTRY:-}"
+SPREADSHEET=0
+case "$(printf '%s' "${CLAW_SPREADSHEET_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" in true|1|yes|on) SPREADSHEET=1 ;; esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -65,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --pg-port) PG_PORT="$2"; shift ;;
     --data-dir) DATA_DIR="$2"; shift ;;
     --sandbox-registry) SANDBOX_REGISTRY="$2"; shift ;;
+    --spreadsheet) SPREADSHEET=1 ;;
     -h|--help) awk 'NR==1&&/^#!/{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
@@ -251,6 +257,27 @@ else
     && ok "sandbox offline capabilities verified" || warn "sandbox image is not ready for offline work (see above) — check docker/sandbox.Dockerfile"
 fi
 
+# 3b) GridCraft engine for the `spreadsheet` tool (opt-in: --spreadsheet, or a .env that
+# already turns it on, so a re-run keeps the binary in step with the pinned version).
+# Never fatal: without the binary the tool stays off and the agent uses openpyxl.
+SPREADSHEET_ENABLED_VALUE=false
+# A fresh .env gets an active line only when it is installed. A commented default keeps a
+# later `install.sh --spreadsheet` able to add the key (an active =false would block it).
+SPREADSHEET_ENV_LINE="# CLAW_SPREADSHEET_ENABLED=false"
+if [[ -f .env ]] && grep -qiE '^[[:space:]]*CLAW_SPREADSHEET_ENABLED=[[:space:]]*(true|1|yes|on)' .env; then SPREADSHEET=1; fi
+if [[ $SPREADSHEET -eq 1 ]]; then
+  step "Installing the GridCraft spreadsheet engine"
+  # Same location the service will read: the vendor dir from .env, else the script's default.
+  GRIDCRAFT_DIR="$(sed -n 's/^[[:space:]]*CLAW_SPREADSHEET_VENDOR_DIR=[[:space:]]*//p' .env 2>/dev/null | tail -1)"
+  if CLAW_SPREADSHEET_VENDOR_DIR="$GRIDCRAFT_DIR" bash scripts/install-gridcraft.sh; then
+    ok "GridCraft installed"
+    SPREADSHEET_ENABLED_VALUE=true
+    SPREADSHEET_ENV_LINE="CLAW_SPREADSHEET_ENABLED=true"
+  else
+    warn "GridCraft install failed (needs github.com) — the spreadsheet tool stays off; retry: scripts/install-gridcraft.sh"
+  fi
+fi
+
 # 4) Postgres container
 step "Setting up Postgres (Docker container '$PG_CONTAINER')"
 mkdir -p "$DATA_DIR/workspaces" "$DATA_DIR/knowledge" "$DATA_DIR/branding"
@@ -295,6 +322,12 @@ if [[ -f .env ]]; then
       warn ".env sets a different CLAW_SANDBOX__REGISTRY — leaving it; edit it by hand to use $SANDBOX_REGISTRY"
     fi
   fi
+  # GridCraft installed above: turn the tool on. Appended only when the key is absent;
+  # an explicit value (including false) is the operator's and is never rewritten.
+  if [[ "$SPREADSHEET_ENABLED_VALUE" == "true" ]] && ! grep -q '^[[:space:]]*CLAW_SPREADSHEET_ENABLED=' .env; then
+    printf '\n# Spreadsheet tool (GridCraft engine installed by install.sh / claw update).\nCLAW_SPREADSHEET_ENABLED=true\n' >> .env
+    ok "added CLAW_SPREADSHEET_ENABLED=true to .env"
+  fi
 else
   LLM_KEY="${CLAW_LLM__API_KEY:-}"
   LLM_MODEL="${CLAW_LLM__MODEL:-openrouter/anthropic/claude-sonnet-5}"
@@ -329,6 +362,9 @@ CLAW_SANDBOX__IMAGE=${SANDBOX_IMAGE}
 CLAW_SANDBOX__REGISTRY=${SANDBOX_REGISTRY}
 CLAW_SANDBOX__NETWORK=none
 CLAW_SANDBOX__TIMEOUT_SECONDS=120
+
+# Spreadsheet tool (GridCraft engine; true only when install.sh installed it).
+${SPREADSHEET_ENV_LINE}
 
 # Per-user workspace limits (2 GB / 50,000 files) and automatic deletion of old scratch
 # files and attachments (7 days). A new installation enforces them from the start; an
