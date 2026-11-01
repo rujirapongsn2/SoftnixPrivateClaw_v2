@@ -132,6 +132,8 @@ _INFORMATION_REQUEST_RE = re.compile(
 )
 _ARTIFACT_CORE_TOOLS = {
     "generate_workbook",
+    # Only offered when CLAW_SPREADSHEET_ENABLED registered it (the scope intersects the registry).
+    "spreadsheet",
     "read_skill", "read_file", "read_excel", "read_csv", "read_pdf", "read_docx",
     "list_dir", "write_file", "edit_file", "exec", "update_plan", "save_connector_file", "publish_artifact",
 }
@@ -485,6 +487,10 @@ class ClawAgent:
             self.tools.register(PresentUiTool(workspace))
             self.tools.register(ChartFromDataTool(workspace))
             self.tools.register(OpenRouterPriceWatchTool(workspace))
+        if getattr(settings, "spreadsheet_enabled", False):
+            from claw.tools.spreadsheet import SpreadsheetTool
+
+            self.tools.register(SpreadsheetTool(workspace, settings.sandbox, getattr(settings, "spreadsheet_vendor_dir", None)))
         if skills is not None:
             self.tools.register(ReadSkillTool(skills, user_id, workspace=workspace))
             self.tools.register(ManageSkillTool(skills, user_id, workspace=workspace))
@@ -571,7 +577,7 @@ class ClawAgent:
         """Keep the cached usage honest after a tool that may have written files."""
         if name == "write_file" and not result.startswith("Error"):
             self.quota.note_written(self.user_id, len(str(params.get("content") or "").encode("utf-8")))
-        elif name in {"exec", "edit_file", "generate_workbook", "render_diagram", "save_connector_file", "publish_artifact"}:
+        elif name in {"exec", "edit_file", "generate_workbook", "spreadsheet", "render_diagram", "save_connector_file", "publish_artifact"}:
             # A command that only deletes/lists files has just freed space: measure again at once.
             self.quota.forget(self.user_id, now=name == "exec" and is_cleanup_command(str(params.get("command") or "")))
 
@@ -1940,7 +1946,7 @@ class AgentRuntime:
                         execution = current_execution.get()
                         if (scoped_tools is not None and execution is not None
                                 and execution.lease.spec.acceptance.get('kind') == 'research'):
-                            scoped_tools -= {'write_file', 'edit_file', 'exec', 'generate_workbook'}
+                            scoped_tools -= {'write_file', 'edit_file', 'exec', 'generate_workbook', 'spreadsheet'}
                         current_turn_deadline.set(
                             time.monotonic() + budget if budget > 0 else None
                         )

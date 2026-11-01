@@ -354,6 +354,13 @@ class Settings(BaseSettings):
     # the present_ui / openrouter_price_watch tools and the a2ui-cards skill).
     # Off: tools and skill are not offered and the chat shows the JSON as code.
     a2ui_enabled: bool = True
+    # Spreadsheet tool (claw mode): create/edit/convert/read workbooks with the pinned
+    # GridCraft engine (docs/spreadsheet-gridcraft-spec.md). Needs the binary from
+    # scripts/install-gridcraft.sh; runs inside the sandbox container when enabled.
+    spreadsheet_enabled: bool = False
+    # Where install-gridcraft.sh put the pinned binaries (default
+    # ~/.softnix/claw/vendor/gridcraft/<version>).
+    spreadsheet_vendor_dir: Path | None = None
     sbot_workspaces_root: Path | None = None
     blueprints_root: Path = Path("blueprints")
     # Root directory holding knowledge-base OKF bundles (one subdir per base).

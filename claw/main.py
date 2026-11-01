@@ -73,6 +73,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from claw import a2ui as _a2ui
 
     _a2ui.configure(settings.a2ui_enabled)
+    from claw.tools import spreadsheet as _spreadsheet
+
+    _spreadsheet.configure(settings.spreadsheet_enabled)
     # Before anything that can raise: an unconfigured loguru dumps local
     # variables (database URL, prompts, message text) into every traceback.
     configure_logging(settings.log)
