@@ -1,0 +1,236 @@
+name: Sandbox image
+
+# Build docker/sandbox.Dockerfile once, test that exact image offline, then
+# publish it for `claw update` / install.sh to pull instead of building
+# (claw/sandbox/image_source.py).
+#
+# The tag is derived from the Dockerfile's bytes: df-<first 12 hex of sha256>.
+# The Dockerfile copies nothing from the repo, so those bytes decide the image,
+# and every checkout can work out which tag matches its code. An unchanged
+# Dockerfile keeps its tag, so this workflow only runs when the file changes.
+#
+# build    → push df-<hash>-beta (amd64 + arm64), skipped if df-<hash> already exists
+# test     → pull that digest, run the readiness probe and the offline tests in it
+# promote  → tag the SAME digest df-<hash> (imagetools create, no rebuild), so the
+#            image hosts pull is the one that passed the tests
+#
+# Secrets (GitHub Environment "CICD"): HARBOR_URL (host[:port], no scheme),
+# HARBOR_USERNAME / HARBOR_PASSWORD of a push robot for the privateclaw project.
+on:
+  push:
+    branches: [main]
+    paths: ['docker/sandbox.Dockerfile']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-image
+  cancel-in-progress: false
+
+env:
+  # Must match the host documented for CLAW_SANDBOX__REGISTRY in .env.example
+  # (tests/test_sandbox_image_source.py checks both), so CI cannot push to one
+  # registry while hosts pull from another.
+  REGISTRY_HOST: registry.softnix.co.th
+  IMAGE_PATH: privateclaw/claw-sandbox
+
+jobs:
+  build:
+    # Hosts trust whatever is published under df-<hash>, so only main may
+    # publish: a manual run from another branch would hand the push robot to
+    # unreviewed workflow code. test and promote need build, so they stop too.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: CICD
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      registry: ${{ steps.reg.outputs.registry }}
+      exists: ${{ steps.exists.outputs.exists }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      # First step of every job, before buildx and before login: credentials
+      # stay out of the workspace (and so out of any build context), and
+      # buildx keeps its builder in the same DOCKER_CONFIG it was created with.
+      - name: Keep docker credentials per job
+        run: |
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/.docker"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Same rule as claw/sandbox/image_source.py:dockerfile_tag.
+      - name: Tag from the Dockerfile content
+        id: tag
+        run: |
+          TAG="df-$(sha256sum docker/sandbox.Dockerfile | cut -c1-12)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Sandbox image tag: $TAG"
+
+      - name: Resolve and verify registry
+        id: reg
+        env:
+          HARBOR_URL: ${{ secrets.HARBOR_URL }}
+        run: |
+          if [ -z "$HARBOR_URL" ]; then
+            echo "::error::secrets.HARBOR_URL is empty — set it in the CICD environment"
+            exit 1
+          fi
+          REG=$(printf '%s' "$HARBOR_URL" | sed -E 's#^[a-zA-Z]+://##; s#/+$##')
+          if [ "$REG" != "$REGISTRY_HOST" ]; then
+            echo "::error::HARBOR_URL is not $REGISTRY_HOST, the registry hosts pull from (.env.example)."
+            echo "::error::Fix the secret, or move both REGISTRY_HOST here and CLAW_SANDBOX__REGISTRY in .env.example."
+            exit 1
+          fi
+          echo "registry=$REG" >> "$GITHUB_OUTPUT"
+          echo "registry matches ✓"
+
+      - name: Set up QEMU (arm64)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Harbor
+        env:
+          REG: ${{ steps.reg.outputs.registry }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          for i in 1 2 3; do
+            if printf '%s' "$HARBOR_PASSWORD" | docker login "$REG" -u "$HARBOR_USERNAME" --password-stdin; then
+              exit 0
+            fi
+            echo "registry login failed ($i/3), retrying in $((i*15))s"
+            sleep $((i*15))
+          done
+          echo "::error::could not log in to $REG after 3 attempts"
+          exit 1
+
+      # Published tags are immutable: rebuilding the same Dockerfile later would
+      # give a different image under the same name.
+      - name: Skip if this Dockerfile is already published
+        id: exists
+        run: |
+          REF="${{ steps.reg.outputs.registry }}/$IMAGE_PATH:${{ steps.tag.outputs.tag }}"
+          if docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$REF is already published — nothing to build"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push (beta)
+        id: push
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          tags: ${{ steps.reg.outputs.registry }}/${{ env.IMAGE_PATH }}:${{ steps.tag.outputs.tag }}-beta
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          # mode=min: the final layers only. The full ~2.5 GB two-platform
+          # layer set would crowd everything else out of the 10 GB Actions cache.
+          cache-to: type=gha,mode=min
+
+  test:
+    needs: build
+    if: needs.build.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    environment: CICD
+    timeout-minutes: 30
+    steps:
+      - name: Keep docker credentials per job
+        run: |
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/.docker"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to Harbor
+        env:
+          REG: ${{ needs.build.outputs.registry }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          for i in 1 2 3; do
+            if printf '%s' "$HARBOR_PASSWORD" | docker login "$REG" -u "$HARBOR_USERNAME" --password-stdin; then
+              exit 0
+            fi
+            echo "registry login failed ($i/3), retrying in $((i*15))s"
+            sleep $((i*15))
+          done
+          echo "::error::could not log in to $REG after 3 attempts"
+          exit 1
+
+      # By digest, so the test sees exactly what promote will publish.
+      - name: Pull the built image
+        id: image
+        run: |
+          IMG="${{ needs.build.outputs.registry }}/$IMAGE_PATH@${{ needs.build.outputs.digest }}"
+          docker pull "$IMG"
+          echo "ref=$IMG" >> "$GITHUB_OUTPUT"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install the app and test dependencies
+        run: uv sync --frozen
+
+      # Runs under the exec confinement (network=none, read-only root, cap-drop ALL,
+      # no-new-privileges, non-root) and fails unless every capability is present.
+      - name: Readiness probe
+        run: uv run --no-sync python -m claw.sandbox.capabilities "${{ steps.image.outputs.ref }}"
+
+      - name: Offline work inside the image
+        env:
+          CLAW_TEST_DOCKER: "1"
+          CLAW_SANDBOX_TEST_IMAGE: ${{ steps.image.outputs.ref }}
+        run: uv run --no-sync pytest tests/test_sandbox_offline_image.py tests/test_system_path_guard.py -q
+
+  promote:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    environment: CICD
+    steps:
+      - name: Keep docker credentials per job
+        run: |
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/.docker"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Harbor
+        env:
+          REG: ${{ needs.build.outputs.registry }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          for i in 1 2 3; do
+            if printf '%s' "$HARBOR_PASSWORD" | docker login "$REG" -u "$HARBOR_USERNAME" --password-stdin; then
+              exit 0
+            fi
+            echo "registry login failed ($i/3), retrying in $((i*15))s"
+            sleep $((i*15))
+          done
+          echo "::error::could not log in to $REG after 3 attempts"
+          exit 1
+
+      # The tested digest gets the name hosts pull. No rebuild.
+      - name: Promote the tested digest
+        run: |
+          REPO="${{ needs.build.outputs.registry }}/$IMAGE_PATH"
+          docker buildx imagetools create \
+            -t "$REPO:${{ needs.build.outputs.tag }}" \
+            "$REPO@${{ needs.build.outputs.digest }}"
+          docker buildx imagetools inspect "$REPO:${{ needs.build.outputs.tag }}"
