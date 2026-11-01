@@ -175,7 +175,11 @@ exit code: 0 สำเร็จ, 5 ไม่ได้ตั้ง registry, 6 �
 **ตั้งค่าครั้งแรก**
 1. ผู้ดูแล Harbor สร้าง robot ใน project `privateclaw` สองตัว: ตัว push (Pull + Push) สำหรับ GitHub Actions
    และตัว pull (Pull อย่างเดียว) สำหรับเครื่องที่รันบริการ อย่าใช้บัญชี admin ของ Harbor
-2. ใน Harbor เปิด tag immutability สำหรับ tag `df-*` โดยยกเว้น `*-beta` (CI ต้องเขียนทับ beta ได้เมื่อรันซ้ำ) และเปิด vulnerability scan ของ project
+2. ใน Harbor (Policy → Tag Immutability) สร้างกฎ**ข้อเดียว**: repositories matching `claw-sandbox`, tags **excluding** `*-beta`
+   ผลคือ `df-<hash>` แก้ไม่ได้ แต่ `df-<hash>-beta` เขียนทับได้เมื่อ CI รันซ้ำ อย่าเพิ่มกฎ `matching df-*` แยกอีกข้อ
+   เพราะ Harbor ใช้กฎแต่ละข้อแยกกัน (ตรงข้อใดข้อหนึ่งก็ล็อก) กฎนั้นจะล็อก `-beta` ไปด้วย
+   เปิด "Automatically scan images on push" แต่ยังไม่ต้องเปิด "Prevent vulnerable images from running"
+   (ถ้าเปิด เครื่องจะดึงไม่ได้และกลับไป build เอง)
 3. ตั้ง secrets ใน GitHub Environment `CICD`: `HARBOR_URL` (`registry.softnix.co.th` ไม่มี `https://`),
    `HARBOR_USERNAME`, `HARBOR_PASSWORD` (ของ robot ตัว push)
 4. รัน workflow "Sandbox image" (Actions → Run workflow) หรือ push การแก้ Dockerfile เข้า `main`
