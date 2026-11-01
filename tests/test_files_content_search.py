@@ -32,6 +32,12 @@ def test_extract_reads_text_html_and_xlsx_and_survives_a_broken_file(tmp_path):
     assert extract(tmp_path / "d.docx") == ""
 
 
+def test_extract_drops_nul_bytes_postgres_text_cannot_store(tmp_path):
+    (tmp_path / "a.txt").write_bytes(b"inv\x00oice 42")
+
+    assert extract(tmp_path / "a.txt") == "invoice 42"
+
+
 def test_indexable_skips_images_scratch_and_large_files():
     assert indexable(_entry("report.pdf"))
     assert not indexable(_entry("chart.png"))

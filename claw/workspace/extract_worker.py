@@ -65,7 +65,9 @@ def extract(source: Path) -> str:
             text, _error = extract_text(source.read_bytes(), source.name, mime)
     except Exception:  # noqa: BLE001 - an unreadable file is indexed as empty
         return ""
-    return text[:MAX_TEXT_CHARS]
+    # Postgres text cannot hold NUL, and PDFs often yield it: a row that fails
+    # to insert would be re-queued first on every sync.
+    return text.replace("\x00", "")[:MAX_TEXT_CHARS]
 
 
 def main() -> None:
