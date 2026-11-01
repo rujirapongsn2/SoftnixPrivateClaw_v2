@@ -15,7 +15,8 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useToast } from "@astryxdesign/core/Toast";
 import { AlarmClock, ChevronDown, Loader2, LogOut, Menu, MessageCircle, MessageSquare, Pin, PinOff, Plus, Search, Settings as SettingsIcon, Shield, User as UserIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { ADMIN_SECTIONS, AdminPanel, type AdminSection } from "./Admin";
 import { Chat } from "./Chat";
 import { ErrorText } from "./ErrorText";
@@ -63,15 +64,106 @@ function saveLastRead(map: Record<string, number>) {
   }
 }
 
-/** "New chat" trigger that collapses to an icon-only button in the rail — a
- * plain full-width Button would overflow the collapsed sidenav's narrow rail. */
-function NewChatButton({ onClick }: { onClick: () => void }) {
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+const SEARCH_SHORTCUT = IS_MAC ? "⌘K" : "Ctrl K";
+
+/** ⌘K on a Mac, where Ctrl+K deletes to the end of the line; Ctrl+K elsewhere. */
+function isSearchShortcut(e: KeyboardEvent): boolean {
+  const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  return mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k";
+}
+
+/** A dialog (Files, a confirm) owns the keyboard while it is open. Closed
+ * popovers stay mounted with aria-modal, so only a rendered one counts. */
+function modalIsOpen(): boolean {
+  return [...document.querySelectorAll('[aria-modal="true"]')].some((el) => el.getClientRects().length > 0);
+}
+
+/** The chat search field, shared by the sidebar row and the rail's flyout.
+ * Clearing it keeps focus in the field, so it still folds back on blur. */
+function ChatSearchInput({
+  query,
+  onQueryChange,
+  inputRef,
+  onKeyDown,
+}: {
+  query: string;
+  onQueryChange: (q: string) => void;
+  inputRef?: RefObject<HTMLInputElement | null>;
+  onKeyDown?: (e: ReactKeyboardEvent<HTMLInputElement>) => void;
+}) {
+  const t = useT();
+  const ownRef = useRef<HTMLInputElement>(null);
+  const ref = inputRef ?? ownRef;
+  return (
+    <TextInput
+      ref={ref}
+      label={t("nav.searchChats")}
+      isLabelHidden
+      size="sm"
+      startIcon={<Icon icon={Search} size="sm" color="secondary" />}
+      placeholder={t("nav.searchChats")}
+      value={query}
+      onChange={(value) => {
+        onQueryChange(value);
+        if (!value) ref.current?.focus();
+      }}
+      onKeyDown={onKeyDown}
+      hasClear
+    />
+  );
+}
+
+/** "Search chats" as a nav row that opens into an input in place, so the box
+ * takes no room until it is wanted. It folds back on Escape, or on blur while
+ * empty; a search in progress keeps it open. */
+function SidebarSearch({
+  query,
+  onQueryChange,
+  isOpen,
+  onOpen,
+  onClose,
+  inputRef,
+}: {
+  query: string;
+  onQueryChange: (q: string) => void;
+  isOpen: boolean;
+  onOpen: () => void;
+  onClose: () => void;
+  inputRef: RefObject<HTMLInputElement | null>;
+}) {
   const { isCollapsed } = useSideNavCollapse();
   const t = useT();
-  if (isCollapsed) {
-    return <IconButton label={t("nav.newChat")} icon={<Icon icon={Plus} size="sm" />} clickAction={onClick} />;
+  if (!isOpen || isCollapsed) {
+    return (
+      <SideNavItem
+        label={t("nav.searchChats")}
+        icon={Search}
+        endContent={isCollapsed ? undefined : <kbd className="claw-sidenav-kbd">{SEARCH_SHORTCUT}</kbd>}
+        onClick={onOpen}
+      />
+    );
   }
-  return <Button label={t("nav.newChat")} icon={<Icon icon={Plus} size="sm" />} size="sm" clickAction={onClick} />;
+  return (
+    <div
+      className="claw-sidenav-search"
+      onBlur={(e) => {
+        if (!query.trim() && !e.currentTarget.contains(e.relatedTarget as Node | null)) onClose();
+      }}
+    >
+      <ChatSearchInput
+        query={query}
+        onQueryChange={onQueryChange}
+        inputRef={inputRef}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            onQueryChange("");
+            onClose();
+          }
+        }}
+      />
+    </div>
+  );
 }
 
 /** Brand lockup that drops the wordmark in the collapsed rail, keeping just the
@@ -172,6 +264,8 @@ function RecentsNav({
   onSelect,
   onDelete,
   onTogglePin,
+  query,
+  onQueryChange,
 }: {
   sessions: SessionInfo[];
   active: string | null;
@@ -179,11 +273,12 @@ function RecentsNav({
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onTogglePin: (id: string, pinned: boolean) => void;
+  query: string;
+  onQueryChange: (q: string) => void;
 }) {
   const { isCollapsed } = useSideNavCollapse();
   const t = useT();
   const [isOpen, setIsOpen] = useState(false);
-  const [query, setQuery] = useState("");
   const [visible, setVisible] = useState(RECENTS_INITIAL);
 
   // A new search starts from the top of its (usually short) result set.
@@ -212,18 +307,10 @@ function RecentsNav({
       <span className="claw-recent-status claw-recent-status--done" title="New response" />
     ) : null;
 
+  // The rail's flyout carries its own search box; expanded, it is a nav row.
   const search = (
     <div className="claw-recents-search">
-      <TextInput
-        label={t("nav.searchChats")}
-        isLabelHidden
-        size="sm"
-        startIcon={<Icon icon={Search} size="sm" color="secondary" />}
-        placeholder={t("nav.searchChats")}
-        value={query}
-        onChange={setQuery}
-        hasClear
-      />
+      <ChatSearchInput query={query} onQueryChange={onQueryChange} />
     </div>
   );
 
@@ -302,7 +389,6 @@ function RecentsNav({
   if (!isCollapsed) {
     return (
       <>
-        {search}
         {groups.length === 0 && pinned.length === 0 ? (
           <div className="claw-recents-empty">
             <Text size="sm" color="secondary">
@@ -674,6 +760,28 @@ export default function App() {
   const isMobile = useMediaQuery(MOBILE_QUERY);
   const [navOpen, setNavOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [chatQuery, setChatQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const openSearch = useCallback(() => {
+    if (isMobile) setNavOpen(true);
+    else setCollapsed(false);
+    // Render the input now and focus it inside the tap: iOS raises the
+    // keyboard only for a focus() made during the user's gesture.
+    flushSync(() => setSearchOpen(true));
+    searchInputRef.current?.focus();
+  }, [isMobile]);
+  const signedIn = Boolean(user);
+  useEffect(() => {
+    if (!signedIn) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!isSearchShortcut(e) || modalIsOpen()) return;
+      e.preventDefault();
+      openSearch();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openSearch, signedIn]);
   // Per-session "last read" timestamps (id -> epoch ms), persisted to
   // localStorage — see LAST_READ_KEY above for why this replaced an
   // in-memory-only heuristic.
@@ -901,13 +1009,22 @@ export default function App() {
         header={<SidebarBrand />}
         topContent={
           <div className="claw-sidenav-top">
-            <NewChatButton onClick={() => { newChat(); closeDrawer(); }} />
+            <SideNavItem label={t("nav.newChat")} icon={Plus} onClick={() => { newChat(); closeDrawer(); }} />
+            <SidebarSearch
+              query={chatQuery}
+              onQueryChange={setChatQuery}
+              // A search typed in the rail's flyout stays visible once expanded.
+              isOpen={searchOpen || chatQuery.trim() !== ""}
+              onOpen={openSearch}
+              onClose={() => setSearchOpen(false)}
+              inputRef={searchInputRef}
+            />
+            <SideNavItem label={t("nav.files")} icon={HardDrive} isSelected={filesOpen} onClick={() => { setFilesOpen(true); closeDrawer(); }} />
           </div>
         }
         footer={
           <div className="claw-sidenav-footer">
             <SideNavItem label={user.display_name || user.email} icon={UserIcon}>
-              <SideNavItem label={t("nav.files")} icon={HardDrive} onClick={() => { setFilesOpen(true); closeDrawer(); }} />
               <SideNavItem
                 label={t("nav.settings")}
                 icon={SettingsIcon}
@@ -968,6 +1085,8 @@ export default function App() {
           onTogglePin={(id, pinned) => {
             void (pinned ? api.pinSession(id) : api.unpinSession(id)).then(() => void refresh());
           }}
+          query={chatQuery}
+          onQueryChange={setChatQuery}
         />
       </SideNav>
 
