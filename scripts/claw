@@ -526,6 +526,29 @@ update_sandbox_image() {
   fi
 }
 
+# GridCraft (the `spreadsheet` tool's engine) is a pinned binary outside the repo
+# and the venv, so neither `git pull` nor `uv sync` brings it. The tool checks the
+# binary's version against the pin on first use and refuses a mismatch, so a pin
+# bump pulled by an update would leave spreadsheet calls failing until the
+# installer ran again. Runs only when the operator turned the tool on; the
+# installer is idempotent and checksum-verified, so an unchanged pin is a no-op.
+update_gridcraft() {
+  local enabled vendor
+  enabled="$(env_value CLAW_SPREADSHEET_ENABLED)" || enabled=""
+  case "$(printf '%s' "$enabled" | tr '[:upper:]' '[:lower:]')" in
+    true|1|yes|on) ;;
+    *) return 0 ;;
+  esac
+  vendor="$(env_value CLAW_SPREADSHEET_VENDOR_DIR)" || vendor=""
+  echo "==> GridCraft (spreadsheet tool)"
+  if ! CLAW_SPREADSHEET_VENDOR_DIR="$vendor" "$PROJECT_DIR/scripts/install-gridcraft.sh"; then
+    # Not fatal: code and web are already updated. The tool stays registered, so
+    # say what will happen instead of leaving it to the first failed call.
+    echo "==> WARNING: GridCraft install failed — spreadsheet calls will report it is not installed"
+    echo "    and the agent falls back to openpyxl. Re-run: $PROJECT_DIR/scripts/install-gridcraft.sh"
+  fi
+}
+
 cmd_update() {
   cd "$PROJECT_DIR"
   local before after
@@ -543,6 +566,7 @@ cmd_update() {
   "$PROJECT_DIR/install.sh" --browsers-only
   echo "==> rebuild web"; "$PROJECT_DIR/install.sh" --web-only
   update_sandbox_image "$before" "$after"
+  update_gridcraft
   echo "==> migrate"; uv run alembic upgrade head
   echo "==> restart"
   if cmd_restart; then

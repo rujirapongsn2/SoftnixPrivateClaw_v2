@@ -203,6 +203,24 @@ image ใน CI ทำทั้ง `linux/amd64` และ `linux/arm64` แต�
 - ต้องการ build เองแม้ตั้ง registry ไว้: เว้นค่า `CLAW_SANDBOX__REGISTRY` ให้ว่างชั่วคราว
 - `install.sh --sandbox-registry ...` บนเครื่องที่มี `.env` อยู่แล้ว จะเพิ่มบรรทัดนี้ให้ถ้ายังไม่มี และไม่แก้ค่าที่มีอยู่
 
+### Spreadsheet tool (GridCraft, `CLAW_SPREADSHEET_ENABLED`)
+
+เมื่อเปิด Agent จะสร้าง/แก้/อ่านไฟล์ `.xlsx` ด้วย tool `spreadsheet` ก่อน (ตัวเลขและสูตรคำนวณโดย engine ไม่ใช่โมเดล)
+ถ้าปิด จะใช้ Python (openpyxl/pandas) ใน sandbox แทน ค่าเริ่มต้นคือ**ปิด** และมีผลเฉพาะโหมด claw (sbot ไม่มี tool นี้)
+
+| วิธี | ผล |
+|---|---|
+| `./install.sh --spreadsheet` | ดาวน์โหลด GridCraft ตาม version ที่ pin ไว้ (ตรวจ SHA-256) แล้วใส่ `CLAW_SPREADSHEET_ENABLED=true` ใน `.env` |
+| `.env` ที่มี `CLAW_SPREADSHEET_ENABLED=true` อยู่แล้ว | `claw update` และ `install.sh` ติดตั้ง/ปรับ binary ให้ตรง version ที่ pin ทุกครั้ง (ถ้าตรงอยู่แล้วจะไม่ทำอะไร) |
+| ไม่ใส่ค่า หรือ `false` | ไม่ติดตั้ง ไม่แตะ |
+
+- ต้องออก `github.com` ได้ตอนติดตั้ง ส่วนตอนใช้งาน tool รันใน sandbox ที่ `network=none` ตามปกติ
+- ติดตั้งไม่สำเร็จ `claw update` ไม่ล้ม แต่แสดงคำเตือน และ tool จะแจ้งว่ายังไม่ได้ติดตั้ง (Agent จึงกลับไปใช้ openpyxl)
+  ติดตั้งซ้ำด้วย `scripts/install-gridcraft.sh`
+- `install.sh` ไม่เขียนทับค่า `CLAW_SPREADSHEET_ENABLED` ที่มีอยู่ใน `.env` (รวมถึง `false`)
+- เครื่องที่มี `.env` อยู่แล้วและต้องการเปิด: `./install.sh --spreadsheet` (เพิ่มบรรทัดให้ถ้ายังไม่มี) แล้ว `./scripts/claw restart`
+- ตรวจ: `ls ~/.softnix/claw/vendor/gridcraft/` ต้องเห็น `0.14.2` และ `~/.softnix/claw/vendor/gridcraft/0.14.2/linux-*/gridcraft-cli version` ต้องได้ `gridcraft-cli 0.14.2`
+
 ### Project containers (โหมด Sbot)
 
 ปิดอยู่เป็นค่าเริ่มต้น เปิดเมื่อต้องการให้ผู้ใช้รันโปรเจกต์ที่พัฒนาต่อเนื่องในคอนเทนเนอร์ของตัวเอง
