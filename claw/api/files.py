@@ -1,5 +1,6 @@
 """Authenticated owner workspace files, independent of conversation existence."""
 import asyncio
+import time
 
 from typing import Literal
 
@@ -8,7 +9,9 @@ from fastapi.responses import FileResponse
 from loguru import logger
 from pydantic import BaseModel
 
-from claw.workspace.browse import KINDS, OTHER, ListingCache, browse, kind_of
+from claw.db.stores import WorkspaceFileTextStore
+from claw.workspace.browse import KINDS, OTHER, ListingCache, browse, kind_of, search_terms
+from claw.workspace.content_index import ContentIndexer
 from claw.workspace.lifecycle import FileConflict, FileLifecycle, safe_path
 from claw.workspace.policy import WorkspacePolicyStore
 
@@ -16,6 +19,7 @@ from claw.workspace.policy import WorkspacePolicyStore
 # Upper bound on one walk of a workspace; the view says when it was reached.
 WALK_LIMIT = 20_000
 _listings = ListingCache()
+_indexer = ContentIndexer()
 
 
 class FileRequest(BaseModel):
@@ -30,6 +34,11 @@ class PurgeRequest(BaseModel):
 def _policy(state):
     store = getattr(state, "workspace_policy", None) or WorkspacePolicyStore(state.sessions.factory, state.settings)
     return store.effective()
+
+
+async def shutdown_content_index() -> None:
+    """Stop in-flight index syncs before the database engine goes away."""
+    await _indexer.shutdown()
 
 
 def create_files_router(get_state, current_user, mode):
@@ -69,17 +78,32 @@ def create_files_router(get_state, current_user, mode):
             listing = FileLifecycle(state, mode).list_files(user.id, policy, limit=WALK_LIMIT)
             for entry in listing["files"]:
                 entry["kind"] = kind_of(entry["path"])
+            listing["walked_at"] = time.monotonic()
             return listing
 
-        def page():
-            listing = _listings.get((mode, user.id), walk, fresh=refresh)
-            return {
-                **browse(listing["files"], q=q, kind=kind, sort=sort, offset=offset, limit=limit, since=since, zone=zone),
-                "truncated": listing["truncated"],
-                "walk_limit": WALK_LIMIT,
-            }
-
-        return await asyncio.to_thread(page)
+        texts = WorkspaceFileTextStore(state.sessions.factory, is_postgres=state.sessions.is_postgres)
+        listing = await asyncio.to_thread(_listings.get, (mode, user.id), walk, fresh=refresh)
+        _indexer.schedule(texts, mode, user.id, FileLifecycle(state, mode).workspace(user.id), listing)
+        content: dict[str, str] = {}
+        content_capped = False
+        if terms := search_terms(q):
+            try:
+                content, content_capped = await texts.search(user.id, mode, terms)
+            except Exception:  # noqa: BLE001 - content search is an extra; names still match
+                logger.exception("Files content search failed")
+        result = await asyncio.to_thread(
+            lambda: browse(
+                listing["files"], q=q, kind=kind, sort=sort, offset=offset, limit=limit,
+                since=since, zone=zone, content=content,
+            )
+        )
+        return {
+            **result,
+            "truncated": listing["truncated"],
+            "walk_limit": WALK_LIMIT,
+            "indexing": _indexer.indexing(mode, user.id),
+            "content_capped": content_capped,
+        }
 
     @router.get("/download/{path:path}")
     async def download(path: str, user=Depends(current_user), state=Depends(get_state)):
