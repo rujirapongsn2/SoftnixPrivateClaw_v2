@@ -144,6 +144,17 @@ def test_workflow_runs_when_the_dockerfile_changes(workflow):
     assert "workflow_dispatch" in triggers
 
 
+def test_no_job_output_carries_the_registry_secret(workflow):
+    # GitHub drops job outputs that contain a secret, so the next job would see
+    # an empty registry and log in to Docker Hub (seen on the first real run).
+    text = WORKFLOW.read_text()
+    assert "outputs.registry" not in text
+    assert "registry" not in workflow["jobs"]["build"]["outputs"]
+    for name in ("test", "promote"):
+        runs = " ".join(str(s.get("env", "")) + s.get("run", "") for s in workflow["jobs"][name]["steps"])
+        assert "env.REGISTRY_HOST" in runs, name
+
+
 def test_only_main_can_publish(workflow):
     jobs = workflow["jobs"]
     assert jobs["build"]["if"] == "github.ref == 'refs/heads/main'"

@@ -46,7 +46,6 @@ jobs:
     environment: CICD
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
-      registry: ${{ steps.reg.outputs.registry }}
       exists: ${{ steps.exists.outputs.exists }}
       digest: ${{ steps.push.outputs.digest }}
     steps:
@@ -69,8 +68,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Sandbox image tag: $TAG"
 
-      - name: Resolve and verify registry
-        id: reg
+      - name: Verify the registry secret
         env:
           HARBOR_URL: ${{ secrets.HARBOR_URL }}
         run: |
@@ -84,7 +82,10 @@ jobs:
             echo "::error::Fix the secret, or move both REGISTRY_HOST here and CLAW_SANDBOX__REGISTRY in .env.example."
             exit 1
           fi
-          echo "registry=$REG" >> "$GITHUB_OUTPUT"
+          # Later steps and jobs use env.REGISTRY_HOST, never a value derived
+          # from the secret: GitHub drops job outputs that contain a secret, so
+          # a `registry` output arrives empty in the next job and docker login
+          # falls through to Docker Hub.
           echo "registry matches ✓"
 
       - name: Set up QEMU (arm64)
@@ -95,7 +96,7 @@ jobs:
 
       - name: Log in to Harbor
         env:
-          REG: ${{ steps.reg.outputs.registry }}
+          REG: ${{ env.REGISTRY_HOST }}
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
         run: |
@@ -114,7 +115,7 @@ jobs:
       - name: Skip if this Dockerfile is already published
         id: exists
         run: |
-          REF="${{ steps.reg.outputs.registry }}/$IMAGE_PATH:${{ steps.tag.outputs.tag }}"
+          REF="${{ env.REGISTRY_HOST }}/$IMAGE_PATH:${{ steps.tag.outputs.tag }}"
           if docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "$REF is already published — nothing to build"
@@ -132,7 +133,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           provenance: false
-          tags: ${{ steps.reg.outputs.registry }}/${{ env.IMAGE_PATH }}:${{ steps.tag.outputs.tag }}-beta
+          tags: ${{ env.REGISTRY_HOST }}/${{ env.IMAGE_PATH }}:${{ steps.tag.outputs.tag }}-beta
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -158,7 +159,7 @@ jobs:
 
       - name: Log in to Harbor
         env:
-          REG: ${{ needs.build.outputs.registry }}
+          REG: ${{ env.REGISTRY_HOST }}
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
         run: |
@@ -176,7 +177,7 @@ jobs:
       - name: Pull the built image
         id: image
         run: |
-          IMG="${{ needs.build.outputs.registry }}/$IMAGE_PATH@${{ needs.build.outputs.digest }}"
+          IMG="${{ env.REGISTRY_HOST }}/$IMAGE_PATH@${{ needs.build.outputs.digest }}"
           docker pull "$IMG"
           echo "ref=$IMG" >> "$GITHUB_OUTPUT"
 
@@ -212,7 +213,7 @@ jobs:
 
       - name: Log in to Harbor
         env:
-          REG: ${{ needs.build.outputs.registry }}
+          REG: ${{ env.REGISTRY_HOST }}
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
         run: |
@@ -229,7 +230,7 @@ jobs:
       # The tested digest gets the name hosts pull. No rebuild.
       - name: Promote the tested digest
         run: |
-          REPO="${{ needs.build.outputs.registry }}/$IMAGE_PATH"
+          REPO="${{ env.REGISTRY_HOST }}/$IMAGE_PATH"
           docker buildx imagetools create \
             -t "$REPO:${{ needs.build.outputs.tag }}" \
             "$REPO@${{ needs.build.outputs.digest }}"
