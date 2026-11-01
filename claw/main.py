@@ -316,6 +316,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await connectors_mgr.shutdown()
         if browser_mgr is not None:
             await browser_mgr.close()
+        from claw.api.files import shutdown_content_index
+
+        await shutdown_content_index()
         await engine.dispose()
 
     app = FastAPI(title="Softnix PrivateClaw", lifespan=lifespan)
