@@ -174,6 +174,9 @@ This runs, in order:
    Postgres or the system service. The sandbox image (`claw-sandbox:latest`) is
    rebuilt when `docker/sandbox.Dockerfile` changed or the image lacks a capability a
    network=none sandbox needs (checked by `python -m claw.sandbox.capabilities`).
+   With `CLAW_SANDBOX__REGISTRY` set, it first pulls the image CI built and tested
+   for this Dockerfile from Harbor and builds locally only if that fails
+   ([docs/environment.md](docs/environment.md)).
 5. `alembic upgrade head` — applies any new database migrations.
 6. Restarts the app via whichever supervisor manages this install (auto-detected:
    `systemd`, `launchd`, or a plain background process — see `scripts/claw status`).

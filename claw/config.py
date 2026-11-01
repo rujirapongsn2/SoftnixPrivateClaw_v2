@@ -80,6 +80,12 @@ class SandboxSettings(SbotSandboxSettings):
     # weasyprint, openpyxl, python-docx, python-pptx, pandas, zip/unzip).
     # Build with: docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .
     image: str = "claw-sandbox:latest"
+    # Optional registry path (host[:port]/project) that CI publishes the
+    # prebuilt image to, e.g. registry.softnix.co.th/privateclaw. When set,
+    # `claw update` and install.sh pull the image matching this checkout's
+    # Dockerfile and name it `image`, building locally only if that fails.
+    # The running service never pulls; it always runs the local `image`.
+    registry: str = ""
     cpu_limit: float = 1.0
     memory_limit: str = "1g"
     pids_limit: int = 256

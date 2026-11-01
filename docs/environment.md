@@ -154,6 +154,51 @@ Playwright/Chromium ไม่ได้อยู่ใน sandbox image: กา�
 Docker Compose (`docker-compose.prod.yml`) ไม่ผ่านตัวย้ายค่านี้: ถ้า `.env` ของ compose ตั้ง `bridge` ไว้ ต้องแก้เอง
 และ build image ใหม่ด้วย `docker build -f docker/sandbox.Dockerfile -t claw-sandbox:latest .`
 
+#### Sandbox image สำเร็จรูปจาก Harbor (`CLAW_SANDBOX__REGISTRY`)
+
+image ของ sandbox ใหญ่ (ราว 2.5 GB) การ build เองตอน `claw update` จึงใช้เวลานาน
+CI (`.github/workflows/sandbox-image.yml`) build `docker/sandbox.Dockerfile` ครั้งเดียว ทดสอบ image ตัวนั้นแบบ offline
+แล้วเผยแพร่ที่ `registry.softnix.co.th/privateclaw/claw-sandbox:df-<hash>`
+`<hash>` คือ 12 ตัวแรกของ sha256 ของไฟล์ Dockerfile (Dockerfile ไม่ได้ COPY อะไรจาก repo จึงเป็นตัวกำหนดเนื้อหา image ทั้งหมด)
+โค้ดแต่ละ commit จึงรู้เองว่าต้องใช้ image ตัวไหน และถ้า Dockerfile ไม่เปลี่ยนก็ไม่มีอะไรต้องดึงใหม่
+
+| ค่า | ความหมาย |
+|---|---|
+| `CLAW_SANDBOX__REGISTRY=` (ว่าง, ค่าเริ่มต้น) | build เองในเครื่องเหมือนเดิม |
+| `CLAW_SANDBOX__REGISTRY=registry.softnix.co.th/privateclaw` | `claw update` และ `install.sh` ดึง image ที่ตรงกับ Dockerfile ก่อน ถ้าดึงไม่ได้จึง build เอง |
+
+ลำดับที่ `python -m claw.sandbox.image_source pull` ทำ: `docker pull` → ตรวจ image ที่ดึงมาด้วยตัวตรวจความพร้อม
+(ภายใต้ network=none และ hardening เดียวกับคำสั่งจริง) → ผ่านแล้วจึง `docker tag` เป็นชื่อที่บริการใช้ (`CLAW_SANDBOX__IMAGE`)
+image ที่ดึงมาแต่ไม่ผ่านการตรวจจะไม่ถูกนำไปแทนตัวเดิม ตัวบริการเองไม่ดึง image เลย (`--pull=never`)
+exit code: 0 สำเร็จ, 5 ไม่ได้ตั้ง registry, 6 ดึงไม่ได้, 7 image ที่ดึงมาไม่พร้อม ทุกกรณีที่ไม่ใช่ 0 จะ build เองแทน
+
+**ตั้งค่าครั้งแรก**
+1. ผู้ดูแล Harbor สร้าง robot ใน project `privateclaw` สองตัว: ตัว push (Pull + Push) สำหรับ GitHub Actions
+   และตัว pull (Pull อย่างเดียว) สำหรับเครื่องที่รันบริการ อย่าใช้บัญชี admin ของ Harbor
+2. ใน Harbor เปิด tag immutability สำหรับ tag `df-*` โดยยกเว้น `*-beta` (CI ต้องเขียนทับ beta ได้เมื่อรันซ้ำ) และเปิด vulnerability scan ของ project
+3. ตั้ง secrets ใน GitHub Environment `CICD`: `HARBOR_URL` (`registry.softnix.co.th` ไม่มี `https://`),
+   `HARBOR_USERNAME`, `HARBOR_PASSWORD` (ของ robot ตัว push)
+4. รัน workflow "Sandbox image" (Actions → Run workflow) หรือ push การแก้ Dockerfile เข้า `main`
+   ต้องเห็นครบ 3 job: `build` → `test` → `promote`
+5. บนเครื่องที่รันบริการ login ด้วย robot ตัว pull **ด้วย user เดียวกับที่รัน `claw update`**
+   ใช้ชื่อเต็มตามที่ Harbor แสดงตอนสร้าง robot และใส่ใน single quote เพราะมี `$` เช่น
+   `docker login registry.softnix.co.th -u 'robot$privateclaw+claw-sandbox-pull' --password-stdin`
+6. ใส่ `CLAW_SANDBOX__REGISTRY=registry.softnix.co.th/privateclaw` ใน `.env` ที่บริการใช้ แล้ว `claw update`
+   ตรวจด้วย `uv run python -m claw.sandbox.image_source tag` (ชื่อ tag ที่ต้องมีใน Harbor) และ
+   `uv run python -m claw.sandbox.capabilities` (ต้องได้ exit 0)
+
+image ใน CI ทำทั้ง `linux/amd64` และ `linux/arm64` แต่ทดสอบใน CI เฉพาะ amd64 ส่วน arm64 ถูกตรวจตอนดึงลงเครื่อง
+(ตัวตรวจความพร้อม) ก่อนนำไปใช้ เครื่องที่ไม่มีอินเทอร์เน็ตหรือไม่มีสิทธิ์ Harbor ยัง build เองได้ตามเดิม
+หรือรับไฟล์จาก `docker save` แล้ว `docker load` + `docker tag` เอง
+
+ข้อควรรู้
+- workflow เผยแพร่ได้เฉพาะจาก `main` ควรตั้ง Deployment branches ของ environment `CICD` ให้เป็น `main` เท่านั้นด้วย
+  เพื่อไม่ให้ branch อื่นได้ secret ของ robot ตัว push
+- ถ้า `claw update` รันระหว่างที่ CI ยัง build Dockerfile ใหม่ไม่เสร็จ เครื่องจะ build เองและใช้ตัวนั้นต่อไป
+  (ตัวตรวจผ่าน จึงไม่ดึงซ้ำ) เมื่อ CI เสร็จแล้วสั่ง `uv run --no-sync python -m claw.sandbox.image_source pull` เพื่อเปลี่ยนเป็นตัวที่ผ่านเทสต์
+- ต้องการ build เองแม้ตั้ง registry ไว้: เว้นค่า `CLAW_SANDBOX__REGISTRY` ให้ว่างชั่วคราว
+- `install.sh --sandbox-registry ...` บนเครื่องที่มี `.env` อยู่แล้ว จะเพิ่มบรรทัดนี้ให้ถ้ายังไม่มี และไม่แก้ค่าที่มีอยู่
+
 ### Project containers (โหมด Sbot)
 
 ปิดอยู่เป็นค่าเริ่มต้น เปิดเมื่อต้องการให้ผู้ใช้รันโปรเจกต์ที่พัฒนาต่อเนื่องในคอนเทนเนอร์ของตัวเอง

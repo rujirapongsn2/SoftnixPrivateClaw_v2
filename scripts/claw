@@ -511,7 +511,13 @@ update_sandbox_image() {
     fi
   fi
   [[ -n "$reason" ]] || return 0
-  echo "==> rebuild sandbox image ($image): $reason"
+  echo "==> sandbox image needs updating ($image): $reason"
+  # Prefer the image CI built and tested for this Dockerfile (CLAW_SANDBOX__REGISTRY);
+  # it is probed before it replaces $image. No registry or any failure: build here.
+  if uv run --no-sync --quiet python -m claw.sandbox.image_source pull "$image"; then
+    return 0
+  fi
+  echo "==> building the sandbox image locally"
   if ! docker build -f docker/sandbox.Dockerfile -t "$image" "$PROJECT_DIR"; then
     # Not fatal: the previous image is still there and still runs. Say so
     # loudly instead of failing the whole update after code+web are already in.

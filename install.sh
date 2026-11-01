@@ -15,9 +15,12 @@
 #                                  # instead of the default per-login LaunchAgent
 #     ./install.sh --web-only      # just rebuild the web frontend (used by `claw update`)
 #     ./install.sh --browsers-only # just install the matching Playwright Chromium (used by `claw update`)
+#     ./install.sh --sandbox-registry registry.softnix.co.th/privateclaw
+#                                  # pull the prebuilt tool-sandbox image (log in first:
+#                                  # docker login registry.softnix.co.th); builds locally if that fails
 #
 # Config via env (all optional): CLAW_LLM__API_KEY, CLAW_LLM__MODEL, CLAW_PORT,
-#     CLAW_PG_PORT, CLAW_DATA_DIR.
+#     CLAW_PG_PORT, CLAW_DATA_DIR, CLAW_SANDBOX__REGISTRY.
 #
 set -euo pipefail
 
@@ -49,6 +52,7 @@ PG_CONTAINER="claw-postgres"
 PG_VOLUME="claw-pgdata"
 PG_PASSWORD="${POSTGRES_PASSWORD:-claw}"
 SANDBOX_IMAGE="claw-sandbox:latest"
+SANDBOX_REGISTRY="${CLAW_SANDBOX__REGISTRY:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --port) APP_PORT="$2"; shift ;;
     --pg-port) PG_PORT="$2"; shift ;;
     --data-dir) DATA_DIR="$2"; shift ;;
+    --sandbox-registry) SANDBOX_REGISTRY="$2"; shift ;;
     -h|--help) awk 'NR==1&&/^#!/{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
@@ -221,11 +226,25 @@ step "Building the tool-sandbox image ($SANDBOX_IMAGE)"
 # executables, models/fonts/data, writable dirs), probed under exec confinement.
 # --no-sync keeps the .venv as `uv sync --frozen --no-dev` left it.
 sandbox_image_ready() { uv run --no-sync --quiet python -m claw.sandbox.capabilities "$SANDBOX_IMAGE"; }
+# Pull the image CI built and tested for this Dockerfile (claw/sandbox/image_source.py)
+# when a registry is configured here or in an existing .env; any failure falls back
+# to a local build. The registry is passed only when set, so an empty flag cannot
+# override the value in .env.
+sandbox_image_pull() {
+  if [[ -n "$SANDBOX_REGISTRY" ]]; then
+    CLAW_SANDBOX__REGISTRY="$SANDBOX_REGISTRY" uv run --no-sync --quiet python -m claw.sandbox.image_source pull "$SANDBOX_IMAGE"
+  else
+    uv run --no-sync --quiet python -m claw.sandbox.image_source pull "$SANDBOX_IMAGE"
+  fi
+}
 if docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1 \
    && sandbox_image_ready >/dev/null 2>&1 \
    && [[ $ASSUME_YES -eq 0 ]] && ! confirm "Sandbox image exists — rebuild it?"; then
   ok "reusing existing $SANDBOX_IMAGE (offline capabilities verified)"
+elif sandbox_image_pull; then
+  ok "$SANDBOX_IMAGE pulled from the registry (offline capabilities verified)"
 else
+  info "building $SANDBOX_IMAGE locally"
   docker build -f docker/sandbox.Dockerfile -t "$SANDBOX_IMAGE" "$PROJECT_DIR"
   ok "$SANDBOX_IMAGE built"
   sandbox_image_ready \
@@ -266,6 +285,16 @@ if [[ -f .env ]]; then
   # (timestamped backup; '# claw:keep-network' on the line opts out).
   uv run python -m claw.sandbox.network_migration .env \
     || warn "could not update CLAW_SANDBOX__NETWORK in .env — set it to none by hand"
+  # --sandbox-registry on an existing install: record it so claw update keeps
+  # pulling. Appended only when the key is absent, never rewritten.
+  if [[ -n "$SANDBOX_REGISTRY" ]]; then
+    if ! grep -q '^CLAW_SANDBOX__REGISTRY=' .env; then
+      printf '\n# Prebuilt image source for claw update and install.sh (empty = build locally).\nCLAW_SANDBOX__REGISTRY=%s\n' "$SANDBOX_REGISTRY" >> .env
+      ok "added CLAW_SANDBOX__REGISTRY to .env"
+    elif ! grep -qxF "CLAW_SANDBOX__REGISTRY=$SANDBOX_REGISTRY" .env; then
+      warn ".env sets a different CLAW_SANDBOX__REGISTRY — leaving it; edit it by hand to use $SANDBOX_REGISTRY"
+    fi
+  fi
 else
   LLM_KEY="${CLAW_LLM__API_KEY:-}"
   LLM_MODEL="${CLAW_LLM__MODEL:-openrouter/anthropic/claude-sonnet-5}"
@@ -296,6 +325,8 @@ CLAW_LLM__API_KEY=${LLM_KEY}
 # access to host services; the agent uses what's baked into the image.
 CLAW_SANDBOX__ENABLED=true
 CLAW_SANDBOX__IMAGE=${SANDBOX_IMAGE}
+# Prebuilt image source for claw update and install.sh (empty = build locally).
+CLAW_SANDBOX__REGISTRY=${SANDBOX_REGISTRY}
 CLAW_SANDBOX__NETWORK=none
 CLAW_SANDBOX__TIMEOUT_SECONDS=120
 
