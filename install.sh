@@ -288,7 +288,12 @@ if [[ -f .env ]]; then
   # --sandbox-registry on an existing install: record it so claw update keeps
   # pulling. Appended only when the key is absent, never rewritten.
   if [[ -n "$SANDBOX_REGISTRY" ]]; then
-    if ! grep -q '^CLAW_SANDBOX__REGISTRY=' .env; then
+    if grep -qE '^CLAW_SANDBOX__REGISTRY=[[:space:]]*$' .env; then
+      # An empty value is the default a fresh install writes, not a choice: fill it in.
+      awk -v v="$SANDBOX_REGISTRY" '/^CLAW_SANDBOX__REGISTRY=[[:space:]]*$/ { print "CLAW_SANDBOX__REGISTRY=" v; next } { print }' .env > .env.tmp \
+        && cat .env.tmp > .env && rm -f .env.tmp
+      ok "set CLAW_SANDBOX__REGISTRY in .env"
+    elif ! grep -q '^CLAW_SANDBOX__REGISTRY=' .env; then
       printf '\n# Prebuilt image source for claw update and install.sh (empty = build locally).\nCLAW_SANDBOX__REGISTRY=%s\n' "$SANDBOX_REGISTRY" >> .env
       ok "added CLAW_SANDBOX__REGISTRY to .env"
     elif ! grep -qxF "CLAW_SANDBOX__REGISTRY=$SANDBOX_REGISTRY" .env; then
