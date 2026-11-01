@@ -7,6 +7,7 @@ worked and looked like a breach to anyone watching. This guard refuses any
 the container starts, and tells the model to decline in the user's language.
 
 It works on the command text, so it catches the direct forms: `cat /etc/passwd`,
+`cat /"etc"/passwd`,
 `cd /etc && cat passwd`, `open('/etc/hostname')`, `ls ~`, `cd ../..`,
 `os.path.join('/', 'etc')`. It cannot see a path that is built at run time
 (base64, hex, `chr()` arithmetic, string slicing). The container hardening in
@@ -53,7 +54,9 @@ _TRAVERSAL_RE = re.compile(rf"(?:\.\./)+(?:{_DIRS_RE})(?=$|[/\s'\"`;|&)<>,\]}}])
 # The home directory (/root in the container), spelled `~`, `$HOME` or via the
 # password database. `~` as awk's match operator (`$4 ~ /re/`, `!~`) is not a path.
 _HOME_RE = re.compile(
-    r"(?<![\w/.\-!~=$])~(?!/\.fonts\b|/\.local/share/fonts\b)(?=/|$|[;|&)'\"`]|\s+(?![/\"]))"
+    # A lone quoted `"~"` / `'~'` is a literal string (pandas `.str.replace("~", "")`),
+    # unless it is expanduser's argument.
+    r"(?<![\w/.\-!~=$])(?!(?<=\")(?<!expanduser\(\")~\")(?!(?<=')(?<!expanduser\(')~')~(?!/\.fonts\b|/\.local/share/fonts\b)(?=/|$|[;|&)'\"`]|\s+(?![/\"]))"
     r"|\$\{?HOME\b|Path\.home\(\)|getpwnam|getpwuid|\bpwd\.getpw|\bspwd\b"
 )
 _ROOT_JOIN_RE = re.compile(
@@ -97,10 +100,13 @@ def _cd_escape(command: str) -> str | None:
 def system_path_reference(command: str) -> str | None:
     """The offending part of `command` when it touches system files, else None."""
     text = command or ""
-    for match in _ABS_RE.finditer(text):
-        full = match.group(1) + match.group(2)
-        if not _allowed(full):
-            return full[:120]
+    # Also look at the text with shell quotes removed, so `/"etc"/passwd` or
+    # `/e""tc/passwd` read as the path the shell actually opens.
+    for candidate in (text, text.replace('"', "").replace("'", "")):
+        for match in _ABS_RE.finditer(candidate):
+            full = match.group(1) + match.group(2)
+            if not _allowed(full):
+                return full[:120]
     for regex in (_TRAVERSAL_RE, _HOME_RE, _ROOT_JOIN_RE, _CHDIR_ROOT_RE):
         match = regex.search(text)
         if match:

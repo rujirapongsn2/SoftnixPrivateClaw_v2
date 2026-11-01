@@ -211,6 +211,10 @@ def test_container_argv_is_confined(tmp_path, monkeypatch):
     assert "--network none" in joined and "--read-only" in joined and "--cap-drop ALL" in joined
     assert f"source={tmp_path.resolve()},target=/workspace,readonly" in joined
     assert "/bin/sh" not in argv
+    # Same uid as exec runs, so the files it writes stay editable by them.
+    from claw.sandbox.ephemeral import sandbox_user
+
+    assert argv[argv.index("--user") + 1] == sandbox_user("auto", tmp_path)
 
 
 # ---- real engine ------------------------------------------------------------------------

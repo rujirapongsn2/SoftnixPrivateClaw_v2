@@ -181,3 +181,35 @@ def test_serve_wrapper_and_update_run_the_migration():
     assert "claw.sandbox.network_migration --quiet" in serve
     assert serve.index("network_migration") < serve.index('. "$PROJECT_DIR/.env"')
     assert "claw.sandbox.network_migration" in update
+
+
+def test_apply_rewrites_the_target_of_a_symlinked_env_and_keeps_the_link(tmp_path, capsys):
+    real = tmp_path / "etc-claw.env"
+    real.write_text("SECRET=x\nCLAW_SANDBOX__NETWORK=bridge\n")
+    os.chmod(real, 0o600)
+    link = tmp_path / ".env"
+    link.symlink_to(real)
+
+    assert apply(link, now=datetime(2026, 11, 1, 12, 0, 0)) == 0
+
+    assert link.is_symlink()
+    assert real.read_text() == "SECRET=x\nCLAW_SANDBOX__NETWORK=none\n"
+    assert stat.S_IMODE(real.stat().st_mode) == 0o600
+    backup = tmp_path / ".env.bak-20261101-120000-sandbox-network"
+    assert backup.read_text() == "SECRET=x\nCLAW_SANDBOX__NETWORK=bridge\n"
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert backup.stat().st_uid == real.stat().st_uid
+
+
+def test_quiet_apply_is_silent_for_a_kept_value(tmp_path, capsys):
+    env = tmp_path / ".env"
+    env.write_text("CLAW_SANDBOX__NETWORK=bridge  # claw:keep-network\n")
+    assert apply(env, quiet=True) == 0
+    assert capsys.readouterr().out == ""
+    assert "kept" in (apply(env) == 0 and capsys.readouterr().out)
+
+
+def test_env_backups_are_ignored_by_git_and_docker():
+    assert ".env.*" in (REPO / ".gitignore").read_text().splitlines()
+    assert "!.env.example" in (REPO / ".gitignore").read_text().splitlines()
+    assert ".env.*" in (REPO / ".dockerignore").read_text().splitlines()

@@ -732,3 +732,11 @@ def test_xlsx_preview_shows_numbers_the_way_their_number_format_says(tmp_path):
     result = preview_table(path)
     # Unsupported formats (currency here) fall back to the noise-free raw value.
     assert result["rows"] == [["a", "3,647,010.89", "12.3%", "1,235", "0.3", "1.5"]]
+
+
+def test_number_format_never_breaks_on_huge_values():
+    from claw.api.file_preview import _format_number
+
+    assert _format_number(1e30, "#,##0") == "1e+30"
+    assert _format_number(1.23e26, "0.00") == "1.23e+26"
+    assert _format_number(1234.5, "#,##0") == "1,235"

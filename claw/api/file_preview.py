@@ -18,7 +18,7 @@ import math
 import re
 import zipfile
 import zlib
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
 MAX_ROWS = 200
@@ -291,9 +291,14 @@ def _format_number(value: int | float, number_format: str | None) -> str:
     if match and math.isfinite(value):
         decimals = len(match.group(2) or "")
         scaled = Decimal(repr(value)) * (100 if match.group(3) else 1)
-        # Excel rounds half away from zero (1234.5 under "#,##0" is 1,235).
-        rounded = scaled.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
-        return f"{rounded:{',' if match.group(1) else ''}.{decimals}f}" + match.group(3)
+        try:
+            # Excel rounds half away from zero (1234.5 under "#,##0" is 1,235).
+            rounded = scaled.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
+        except InvalidOperation:
+            # Needs more than Decimal's 28 digits (e.g. 1e30): fall through to the raw value.
+            rounded = None
+        if rounded is not None:
+            return f"{rounded:{',' if match.group(1) else ''}.{decimals}f}" + match.group(3)
     if isinstance(value, float):
         # 3647010.889999999 -> 3647010.89: drop float noise past 15 significant digits.
         return f"{value:.15g}" if math.isfinite(value) else str(value)

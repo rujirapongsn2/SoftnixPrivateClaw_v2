@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -83,6 +82,27 @@ def migrate_sandbox_network(text: str) -> Migration:
     return Migration("".join(lines), changed=changed, previous=previous)
 
 
+def _write_like(dest: Path, data: bytes, like: os.stat_result) -> None:
+    """Write ``data`` to ``dest`` with the mode and (when allowed) owner of ``like``.
+
+    The file is created with the final mode, so a secrets file is never
+    world-readable, not even for a moment; and `sudo ./install.sh` leaves the
+    service user's .env owned by that user.
+    """
+    mode = like.st_mode & 0o777
+    dest.unlink(missing_ok=True)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        os.fchmod(fd, mode)
+        try:
+            os.fchown(fd, like.st_uid, like.st_gid)
+        except PermissionError:
+            pass
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
 def apply(path: Path, *, check: bool = False, quiet: bool = False, now: datetime | None = None) -> int:
     """Migrate ``path`` in place (with a timestamped backup). Returns an exit code."""
     if not path.is_file():
@@ -90,8 +110,13 @@ def apply(path: Path, *, check: bool = False, quiet: bool = False, now: datetime
             return 0
         print(f"==> sandbox network: {path} not found — the code default ({TARGET}) applies")
         return 0
-    result = migrate_sandbox_network(path.read_text(encoding="utf-8"))
+    # A symlinked env file (e.g. .env -> /etc/claw/env): rewrite the real file
+    # and keep the link.
+    target = path.resolve()
+    result = migrate_sandbox_network(target.read_text(encoding="utf-8"))
     if result.kept:
+        if quiet:
+            return 0
         print(f"==> sandbox network: {KEY}={result.previous} kept ({KEEP_MARKER} marker in {path})")
         return 0
     if not result.changed:
@@ -105,11 +130,11 @@ def apply(path: Path, *, check: bool = False, quiet: bool = False, now: datetime
         return 0
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
     backup = path.with_name(f"{path.name}.bak-{stamp}-sandbox-network")
-    shutil.copy2(path, backup)  # keeps the 0600 mode of a secrets file
-    tmp = path.with_name(f".{path.name}.sandbox-network.tmp")
-    tmp.write_text(result.text, encoding="utf-8")
-    os.chmod(tmp, path.stat().st_mode & 0o777)
-    os.replace(tmp, path)
+    original = target.stat()
+    _write_like(backup, target.read_bytes(), original)
+    tmp = target.with_name(f".{target.name}.sandbox-network.tmp")
+    _write_like(tmp, result.text.encode("utf-8"), original)
+    os.replace(tmp, target)
     print(
         f"==> sandbox network: {KEY} {before} -> {TARGET} in {path} (backup {backup.name}; "
         f"to keep the old value add '# {KEEP_MARKER}' to that line)"

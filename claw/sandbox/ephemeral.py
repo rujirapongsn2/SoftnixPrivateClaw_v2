@@ -22,15 +22,31 @@ _OUTPUT_CAP = 20_000
 WORKSPACE_MOUNT = "/workspace"
 
 
-def sandbox_user(setting: str) -> str:
-    """The `--user` value for a setting of "auto", "" or an explicit uid[:gid]."""
+def sandbox_user(setting: str, workspace: Path | None = None) -> str:
+    """The `--user` value for a setting of "auto", "" or an explicit uid[:gid].
+
+    "auto" runs as the server's own uid:gid. A server running as root (the
+    docker-compose app image, a root systemd unit) creates root-owned
+    workspaces, and `nobody` could not write to them, so it runs as the owner
+    of the mounted workspace instead (capabilities are still dropped). Without
+    a workspace (image probes) a root server uses 65534:65534 (nobody).
+    """
     if setting != "auto":
         return setting
     uid, gid = os.getuid(), os.getgid()
-    return "65534:65534" if uid == 0 else f"{uid}:{gid}"
+    if uid != 0:
+        return f"{uid}:{gid}"
+    if workspace is not None:
+        try:
+            st = workspace.stat()
+        except OSError:
+            pass
+        else:
+            return f"{st.st_uid}:{st.st_gid}"
+    return "65534:65534"
 
 
-def hardening_flags(settings: SandboxSettings) -> list[str]:
+def hardening_flags(settings: SandboxSettings, workspace: Path | None = None) -> list[str]:
     """`docker run` flags that confine an ephemeral exec container.
 
     Read-only root filesystem (only /workspace and a fresh tmpfs /tmp are
@@ -52,7 +68,7 @@ def hardening_flags(settings: SandboxSettings) -> list[str]:
         "-e", "MPLCONFIGDIR=/tmp/.matplotlib",
         "-e", "XDG_CACHE_HOME=/tmp/.cache",
     ]
-    user = sandbox_user(getattr(settings, "user", "auto"))
+    user = sandbox_user(getattr(settings, "user", "auto"), workspace)
     if user:
         flags += ["--user", user]
     return flags
@@ -133,7 +149,7 @@ class EphemeralSandbox:
             "--cpus", str(s.cpu_limit),
             "--memory", s.memory_limit,
             "--pids-limit", str(s.pids_limit),
-            *hardening_flags(s),
+            *hardening_flags(s, workspace),
             "--workdir", WORKSPACE_MOUNT,
             "--mount", f"type=bind,source={workspace.resolve()},target={WORKSPACE_MOUNT}",
             s.image,
@@ -165,6 +181,9 @@ async def image_readiness_problem(settings: SandboxSettings, timeout: float = 60
     rebuild = f"rebuild it: docker build -f docker/sandbox.Dockerfile -t {settings.image} ."
     argv = [
         "docker", "run", "--rm", "--pull=never", "--network", "none",
+        # Same confinement as a real exec run, so a read-only root or non-root
+        # user problem shows up here rather than on the first command.
+        *hardening_flags(settings),
         settings.image, "/bin/sh", "-c", _IMAGE_PROBE,
     ]
     try:

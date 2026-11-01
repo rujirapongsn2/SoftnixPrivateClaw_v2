@@ -169,3 +169,27 @@ async def test_hardened_container_still_does_document_work(tmp_path):
     assert "rootfs-readonly" in result.stdout and "shadow-denied" in result.stdout
     for name in ("new.txt", "c.png", "o.xlsx"):
         assert (tmp_path / name).stat().st_size > 0
+
+
+@pytest.mark.parametrize("command", ['cat /"etc"/passwd', 'cat /e""tc/passwd', "cat '/etc'/hosts",
+                                     "python -c \"import os; print(os.listdir(os.path.expanduser('~')))\""])
+def test_quoted_and_expanduser_spellings_are_refused(command):
+    assert system_path_reference(command) is not None
+
+
+def test_a_lone_quoted_tilde_is_just_a_string():
+    assert system_path_reference('python -c "df.columns = df.columns.str.replace(\'~\', \'\')"') is None
+    assert system_path_reference('python -c \'s = s.replace("~", "-")\'') is None
+
+
+def test_a_root_server_runs_exec_as_the_workspace_owner(monkeypatch, tmp_path):
+    from claw.sandbox import ephemeral
+
+    monkeypatch.setattr(ephemeral.os, "getuid", lambda: 0)
+    monkeypatch.setattr(ephemeral.os, "getgid", lambda: 0)
+    st = tmp_path.stat()
+    assert sandbox_user("auto", tmp_path) == f"{st.st_uid}:{st.st_gid}"
+    assert sandbox_user("auto") == "65534:65534"
+    assert sandbox_user("auto", tmp_path / "missing") == "65534:65534"
+    flags = hardening_flags(SandboxSettings(), tmp_path)
+    assert flags[flags.index("--user") + 1] == f"{st.st_uid}:{st.st_gid}"

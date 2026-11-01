@@ -32,7 +32,7 @@ class EphemeralSandbox(SharedSandbox):
             "--cpus", str(s.cpu_limit),
             "--memory", s.memory_limit,
             "--pids-limit", str(s.pids_limit),
-            *hardening_flags(s),
+            *hardening_flags(s, workspace),
             "--workdir", "/workspace",
             "--mount", f"type=bind,source={workspace.resolve()},target=/workspace",
             *(['--mount', f'type=bind,source={workspace.resolve() / "inputs"},target=/workspace/inputs,readonly']

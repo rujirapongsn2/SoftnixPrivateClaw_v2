@@ -82,8 +82,8 @@ class SandboxSettings(BaseModel):
     hardened: bool = True
     # "auto" runs as the server's own uid:gid (so files written to the bind-mounted
     # workspace keep the owner they have on the host, on Linux and on Docker
-    # Desktop alike); when the server itself runs as root it falls back to
-    # 65534:65534 (nobody). "" keeps the image's default user (root).
+    # Desktop alike); when the server itself runs as root it runs as the owner of
+    # the mounted workspace. "" keeps the image's default user (root).
     user: str = "auto"
     tmp_size: str = "512m"
     # Persistent development is opt-in; ordinary document execution is unchanged.

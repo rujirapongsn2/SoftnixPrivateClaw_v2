@@ -25,6 +25,7 @@ from typing import Any
 
 from loguru import logger
 
+from claw.sandbox.ephemeral import sandbox_user
 from claw.tools.base import Tool
 
 GRIDCRAFT_VERSION = "0.14.2"
@@ -363,6 +364,8 @@ class GridcraftRunner:
             str(getattr(s, "memory_limit", "1g")),
             "--pids-limit",
             str(getattr(s, "pids_limit", 256)),
+            # Same uid as exec runs, so files GridCraft writes stay editable by them.
+            *(["--user", user] if (user := sandbox_user(getattr(s, "user", "auto"), workspace)) else []),
             "-e",
             "GRIDCRAFT_NO_PREFS=1",
             "-e",
@@ -776,6 +779,11 @@ class SpreadsheetTool(Tool):
             (job / "steps.jsonl").write_text(
                 "\n".join(json.dumps(s, ensure_ascii=False) for s in steps) + "\n", encoding="utf-8"
             )
+            if os.getuid() == 0:
+                # A root server runs GridCraft as the workspace owner (sandbox_user),
+                # who must be able to read the root-owned 0700 job dir.
+                job.chmod(0o755)
+                (job / "steps.jsonl").chmod(0o644)
             args = ["run"]
             if src:
                 args += ["--in", self.runner.workspace_arg(self.workspace, src)]
