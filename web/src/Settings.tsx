@@ -1,6 +1,7 @@
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
+import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Divider } from "@astryxdesign/core/Divider";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -16,6 +17,7 @@ import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useToast } from "@astryxdesign/core/Toast";
 import {
+  Bot,
   Brain,
   Puzzle,
   ChevronDown,
@@ -62,6 +64,8 @@ import { PasswordField } from "./PasswordField";
 import {
   ApiOperation,
   ApiOperationParam,
+  AgentClientInfo,
+  AgentConnectorOption,
   AuthUser,
   BlueprintInfo,
   BlueprintVersion,
@@ -102,6 +106,7 @@ export type SettingsSection =
   | "schedules"
   | "heartbeat"
   | "telegram"
+  | "agents"
   | "browser-extension";
 
 export type SettingsGroup = "account" | "agent" | "automation" | "channels" | "workspace";
@@ -130,6 +135,7 @@ export const SETTINGS_SECTIONS: {
   { key: "schedules", labelKey: "settings.nav.schedules", icon: "calendar", group: "automation" },
   { key: "heartbeat", labelKey: "settings.nav.heartbeat", icon: HeartPulse, group: "automation" },
   { key: "telegram", labelKey: "settings.nav.telegram", icon: Send, group: "channels" },
+  { key: "agents", labelKey: "settings.nav.agents", icon: Bot, group: "channels" },
   { key: "browser-extension", labelKey: "settings.nav.browserExt", icon: Puzzle, group: "channels" },
 ];
 
@@ -188,6 +194,7 @@ export function SettingsPanel({
           {section === "schedules" && <SchedulesPanel />}
           {section === "heartbeat" && <HeartbeatPanel />}
           {section === "telegram" && <TelegramPanel />}
+          {section === "agents" && <AgentAccessPanel />}
           {section === "browser-extension" && <><LocalAgentPanel /><BrowserExtensionPanel /></>}
         </div>
       </div>
@@ -3791,6 +3798,194 @@ function HeartbeatPanel() {
 }
 
 // ---------------------------------------------------------------- Telegram
+
+// Keys an external agent (e.g. a Grok bot) uses to chat as this user through
+// the Agent Channel, each limited to the connectors picked here.
+function AgentAccessPanel() {
+  const t = useT();
+  const [data, setData] = useState<{
+    enabled: boolean;
+    clients: AgentClientInfo[];
+    connectors: AgentConnectorOption[];
+  } | null>(null);
+  const [name, setName] = useState("Grok bot");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [expiry, setExpiry] = useState("90");
+  const [newKey, setNewKey] = useState("");
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editPicked, setEditPicked] = useState<string[]>([]);
+  const { error, guard } = useAsyncError();
+
+  const reload = useCallback(() => api.listAgentClients().then(setData), []);
+  useEffect(() => {
+    void guard(reload);
+  }, [guard, reload]);
+
+  if (!data) return error ? <ErrorText>{error}</ErrorText> : <Text color="secondary">{t("settings.common.loading")}</Text>;
+  if (!data.enabled) return <Text color="secondary">{t("settings.agents.off")}</Text>;
+
+  const endpoint = `${window.location.origin}/api/agent/v1/messages`;
+  const connectorName = (id: string) => data.connectors.find((c) => c.id === id)?.name ?? t("settings.agents.unavailable");
+  const toggle = (list: string[], id: string) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
+  const connectorPicker = (selected: string[], onChange: (next: string[]) => void) =>
+    data.connectors.length === 0 ? (
+      <Text size="sm" color="secondary">{t("settings.agents.noConnectors")}</Text>
+    ) : (
+      <div className="claw-agent-connectors">
+        {data.connectors.map((c) => (
+          <CheckboxInput
+            key={c.id}
+            label={c.scope === "global" ? `${c.name} (${t("settings.agents.shared")})` : c.name}
+            value={selected.includes(c.id)}
+            onChange={() => onChange(toggle(selected, c.id))}
+          />
+        ))}
+      </div>
+    );
+
+  return (
+    <div className="claw-panel">
+      <Text color="secondary">{t("settings.agents.intro")}</Text>
+      {error && <ErrorText>{error}</ErrorText>}
+
+      {newKey && (
+        <Card padding={2} variant="muted">
+          <Text weight="semibold">{t("settings.agents.keyOnce")}</Text>
+          <pre className="claw-agent-snippet">{newKey}</pre>
+          <div className="claw-row">
+            <Button
+              label={t("settings.agents.copyKey")}
+              icon={<Icon icon={Copy} size="sm" />}
+              variant="secondary"
+              clickAction={() => void navigator.clipboard.writeText(newKey)}
+            />
+            <Button label={t("settings.agents.done")} variant="secondary" clickAction={() => setNewKey("")} />
+          </div>
+        </Card>
+      )}
+
+      <Card padding={2}>
+        <div className="claw-panel">
+          <Text weight="semibold">{t("settings.agents.createTitle")}</Text>
+          <TextInput label={t("settings.agents.name")} value={name} onChange={setName} />
+          <Text size="sm" weight="semibold">{t("settings.agents.connectors")}</Text>
+          {connectorPicker(picked, setPicked)}
+          <SegmentedControl value={expiry} onChange={setExpiry} label={t("settings.agents.expires")}>
+            <SegmentedControlItem value="30" label={t("settings.agents.days", { n: "30" })} />
+            <SegmentedControlItem value="90" label={t("settings.agents.days", { n: "90" })} />
+            <SegmentedControlItem value="365" label={t("settings.agents.days", { n: "365" })} />
+            <SegmentedControlItem value="never" label={t("settings.agents.never")} />
+          </SegmentedControl>
+          <div className="claw-row">
+            <Button
+              label={t("settings.agents.create")}
+              variant="primary"
+              icon={<Icon icon={Plus} size="sm" />}
+              isDisabled={!name.trim()}
+              clickAction={() =>
+                guard(async () => {
+                  const res = await api.createAgentClient({
+                    name: name.trim(),
+                    connector_ids: picked,
+                    expires_in_days: expiry === "never" ? null : Number(expiry),
+                  });
+                  setNewKey(res.key);
+                  setPicked([]);
+                  await reload();
+                })
+              }
+            />
+          </div>
+        </div>
+      </Card>
+
+      {data.clients.length > 0 && (
+        <div className="claw-panel">
+          <Text weight="semibold">{t("settings.agents.yourKeys")}</Text>
+          {data.clients.map((c) => (
+            <Card key={c.id} padding={2}>
+              <div className="claw-panel">
+                <div className="claw-row">
+                  <Text weight="semibold">{c.name}</Text>
+                  <Badge
+                    variant={c.status === "active" ? "success" : "neutral"}
+                    label={t(`settings.agents.status.${c.status}`)}
+                  />
+                  <Text size="sm" color="secondary" type="code">{c.key_prefix}</Text>
+                </div>
+                <Text size="sm" color="secondary">
+                  {t("settings.agents.lastUsed")}: {c.last_used_at ? new Date(c.last_used_at).toLocaleString() : t("settings.agents.neverUsed")}
+                  {" · "}
+                  {t("settings.agents.expiresOn")}: {c.expires_at ? new Date(c.expires_at).toLocaleDateString() : t("settings.agents.never")}
+                </Text>
+                {editing === c.id ? (
+                  <>
+                    {connectorPicker(editPicked, setEditPicked)}
+                    <div className="claw-row">
+                      <Button
+                        label={t("admin.oauth.save")}
+                        variant="primary"
+                        clickAction={() =>
+                          guard(async () => {
+                            await api.updateAgentClient(c.id, editPicked);
+                            setEditing(null);
+                            await reload();
+                          })
+                        }
+                      />
+                      <Button label={t("settings.agents.cancel")} variant="secondary" clickAction={() => setEditing(null)} />
+                    </div>
+                  </>
+                ) : (
+                  <Text size="sm">
+                    {t("settings.agents.connectors")}:{" "}
+                    {c.connector_ids.length ? c.connector_ids.map(connectorName).join(", ") : t("settings.agents.none")}
+                  </Text>
+                )}
+                {c.status === "active" && editing !== c.id && (
+                  <div className="claw-row">
+                    <Button
+                      label={t("settings.agents.editConnectors")}
+                      icon={<Icon icon={Pencil} size="sm" />}
+                      variant="secondary"
+                      clickAction={() => {
+                        setEditing(c.id);
+                        // A connector that is gone cannot be ticked or saved; start without it.
+                        setEditPicked(c.connector_ids.filter((id) => data.connectors.some((x) => x.id === id)));
+                      }}
+                    />
+                    <Button
+                      label={t("settings.agents.revoke")}
+                      icon={<Icon icon={Trash2} size="sm" />}
+                      variant="destructive"
+                      clickAction={() =>
+                        guard(async () => {
+                          if (!window.confirm(t("settings.agents.revokeConfirm", { name: c.name }))) return;
+                          await api.revokeAgentClient(c.id);
+                          await reload();
+                        })
+                      }
+                    />
+                  </div>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      <Card padding={2} variant="muted">
+        <Text weight="semibold">{t("settings.agents.howTitle")}</Text>
+        <Text size="sm" color="secondary">{t("settings.agents.how")}</Text>
+        <pre className="claw-agent-snippet">{`curl -X POST ${endpoint} \\
+  -H "Authorization: Bearer <API key>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"conversation_id": "grok-main", "message": "..."}'`}</pre>
+        <Text size="sm" color="secondary">{t("settings.agents.howReply")}</Text>
+      </Card>
+    </div>
+  );
+}
 
 function TelegramPanel() {
   const t = useT();

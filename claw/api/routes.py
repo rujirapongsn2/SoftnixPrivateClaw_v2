@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from claw.api.deps import AppState, current_user, current_user_ws, get_state
 from claw.api.file_preview import PreviewError, preview_fingerprint, preview_html, preview_table
-from claw.core.events import SessionStateSnapshot
+from claw.core.events import SessionStateSnapshot, TurnError
 from claw.core.loop import visible_artifacts
 from claw.db.models import User
 
@@ -181,6 +181,7 @@ async def features(user: User = Depends(current_user), state: AppState = Depends
         "speech_to_text": bool(state.settings.speech_api_key),
         "text_to_speech": bool(state.settings.tts.api_key),
         "a2ui": bool(state.settings.a2ui_enabled),
+        "agent_channel": state.agent_channel_store is not None and await state.agent_channel_store.enabled(),
     }
 
 
@@ -1138,6 +1139,10 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
         await websocket.send_text(json.dumps(snapshot.to_dict(), ensure_ascii=False))
         forwarder = asyncio.create_task(forward_events(queue))
         turns: set[asyncio.Task] = set()
+        # An Agent Channel chat was written by an external agent. A web turn here
+        # would run with every tool and the owner's memory on that history, so
+        # such a chat is read-only from the web.
+        agent_chat = session.channel == "agent"
 
         def _turn_done(task: asyncio.Task) -> None:
             turns.discard(task)
@@ -1174,6 +1179,14 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
                     if p
                 ]
                 if not content and not media:
+                    continue
+                if agent_chat:
+                    refusal = TurnError(
+                        turn_id=uuid.uuid4().hex[:12],
+                        message="This chat belongs to an external agent and is read-only. Start a new chat to continue.",
+                        code="agent_chat_read_only",
+                    )
+                    await websocket.send_text(json.dumps(refusal.to_dict(), ensure_ascii=False))
                     continue
                 # Re-read the language preference for every turn so changes
                 # from another tab take effect without reconnecting.

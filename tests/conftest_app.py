@@ -7,6 +7,7 @@ import httpx
 from fastapi import FastAPI
 
 from claw.api.admin import router as admin_router
+from claw.api.agent_channel import router as agent_channel_router
 from claw.api.auth import router as auth_router
 from claw.api.browser_ext import router as browser_ext_router
 from claw.api.deps import AppState
@@ -25,6 +26,7 @@ from claw.config import Settings
 from claw.core.connectors import ConnectorManager
 from claw.core.limits import RateLimiter
 from claw.db.stores import (
+    AgentChannelStore,
     AuditStore,
     BrandingStore,
     ConnectorStore,
@@ -64,6 +66,7 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
     app.include_router(telegram_router)
     app.include_router(core_router)
     app.include_router(knowledge_router)
+    app.include_router(agent_channel_router)
     # Per-app temp root so browser-broker state never leaks across tests.
     broker_root = Path(tempfile.mkdtemp(prefix="claw-broker-")) / "_browser_broker"
     knowledge_store = KnowledgeStore(db_factory, is_postgres=False)
@@ -110,6 +113,7 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
         mcp_oauth=McpOAuth(
             McpAuthStore(db_factory, SecretBox(settings.secret_key)), public_base_url=settings.public_base_url
         ),
+        agent_channel_store=AgentChannelStore(db_factory, settings.secret_key),
     )
     from claw.api.files import create_files_router
     from claw.api.deps import current_user, get_state

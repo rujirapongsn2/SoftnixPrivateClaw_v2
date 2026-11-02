@@ -28,3 +28,10 @@ class RateLimiter:
         if len(self._windows) > 10_000:
             self._windows = {u: v for u, v in self._windows.items() if v[0] == minute}
         return True
+
+    def exhausted(self, user_id: str) -> bool:
+        """Whether `user_id` has no slot left this minute, without consuming one."""
+        if self.per_minute <= 0:
+            return False
+        start, count = self._windows.get(user_id, (-1, 0))
+        return start == int(time.time() // 60) and count >= self.per_minute

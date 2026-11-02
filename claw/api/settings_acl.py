@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 # visible: it holds password change, and hiding it could strand a user.
 SETTINGS_SECTION_KEYS = [
     "profile", "projects", "blueprints", "skills", "knowledge", "memory",
-    "models", "connectors", "schedules", "heartbeat", "telegram", "browser-extension",
+    "models", "connectors", "schedules", "heartbeat", "telegram", "agents", "browser-extension",
 ]
 LOCKED_SECTIONS = {"profile"}
 
@@ -58,7 +58,12 @@ async def acl_update(state, body: SettingsAclBody) -> dict:
 
 async def acl_for_user(state, user) -> dict:
     hidden = await state.settings_acl.hidden_for(user.id, await state.users.group_ids_for(user.id))
-    return {"hidden": [k for k in hidden if k not in LOCKED_SECTIONS]}
+    hidden = [k for k in hidden if k not in LOCKED_SECTIONS]
+    # Agent access only means something while the admin has the channel on.
+    store = getattr(state, "agent_channel_store", None)
+    if "agents" not in hidden and (store is None or not await store.enabled()):
+        hidden.append("agents")
+    return {"hidden": hidden}
 
 
 async def acl_search_users(state, q: str) -> list[dict]:

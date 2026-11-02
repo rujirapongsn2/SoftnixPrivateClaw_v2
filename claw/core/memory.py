@@ -657,6 +657,12 @@ class MemoryService:
         # session cannot interleave into the middle of it.
         if user_id in self._in_flight or self._backing_off(session_id):
             return False
+        # An external agent wrote half of an Agent Channel chat. Folding it into
+        # the owner's long-term memory would let that agent plant instructions
+        # that later web turns, with every tool, act on.
+        session = await self.sessions.get(session_id)
+        if getattr(session, "channel", None) == "agent":
+            return False
         self._in_flight.add(user_id)
         ran = False
         try:

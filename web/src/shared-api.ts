@@ -1190,6 +1190,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return resp.json();
 }
 
+export type AgentClientInfo = {
+  id: string;
+  name: string;
+  key_prefix: string;
+  connector_ids: string[];
+  status: "active" | "revoked" | "expired";
+  expires_at: string | null;
+  last_used_at: string | null;
+  created_at: string | null;
+  owner_email?: string;
+};
+
+export type AgentConnectorOption = { id: string; name: string; scope: "own" | "global" };
+
 export const api = {
   adminWorkspacePolicy: () => request<import("./api").WorkspacePolicyResponse>("/api/admin/workspace-policy"),
   adminSaveWorkspacePolicy: (policy: import("./api").WorkspacePolicy) => request<import("./api").WorkspacePolicyResponse>("/api/admin/workspace-policy", {method: "PUT", body: JSON.stringify(policy)}),
@@ -1837,6 +1851,23 @@ export const api = {
       method: "POST",
     }),
   unlinkTelegram: () => request<{ linked: boolean }>("/api/telegram/link", { method: "DELETE" }),
+  listAgentClients: () =>
+    request<{ enabled: boolean; clients: AgentClientInfo[]; connectors: AgentConnectorOption[] }>("/api/agent-clients"),
+  createAgentClient: (body: { name: string; connector_ids: string[]; expires_in_days: number | null }) =>
+    request<{ client: AgentClientInfo; key: string }>("/api/agent-clients", { method: "POST", body: JSON.stringify(body) }),
+  updateAgentClient: (id: string, connector_ids: string[]) =>
+    request<AgentClientInfo>(`/api/agent-clients/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ connector_ids }),
+    }),
+  revokeAgentClient: (id: string) =>
+    request<{ revoked: boolean }>(`/api/agent-clients/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  adminAgentChannel: () =>
+    request<{ enabled: boolean; clients: AgentClientInfo[]; total: number }>("/api/admin/agent-channel"),
+  adminSetAgentChannel: (enabled: boolean) =>
+    request<{ enabled: boolean }>("/api/admin/agent-channel", { method: "PUT", body: JSON.stringify({ enabled }) }),
+  adminRevokeAgentClient: (id: string) =>
+    request<{ revoked: boolean }>(`/api/admin/agent-channel/clients/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   browserExtensionStatus: () =>
     request<BrowserExtensionStatus>("/api/browser-extension/status"),

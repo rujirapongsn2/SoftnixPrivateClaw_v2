@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import secrets
+import time
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -46,6 +49,9 @@ from claw.auth.mcp_oauth_discovery import (
 )
 from claw.security.crypto import UndecryptableSecret
 from claw.db.models import (
+    AgentClient,
+    AgentConversation,
+    AgentTurn,
     AppSetting,
     WorkspaceFileText,
     AuditEvent,
@@ -785,6 +791,16 @@ class ConnectorStore:
                 .order_by(McpConnector.name)
             )
             return [self._decrypt(r) for r in rows]
+
+    async def names_by_id(self, connector_ids: list[str]) -> dict[str, str]:
+        """id -> current name, without decrypting anything; missing ids are left out."""
+        if not connector_ids:
+            return {}
+        async with self.factory() as db:
+            rows = await db.execute(
+                select(McpConnector.id, McpConnector.name).where(McpConnector.id.in_(connector_ids))
+            )
+            return {cid: name for cid, name in rows.all()}
 
     async def list_for_global(self) -> list[McpConnector]:
         async with self.factory() as db:
@@ -4763,3 +4779,256 @@ class WorkspaceFileTextStore:
             rows = (await db.execute(query)).all()
         found = {path: " ".join((snippet or "").split()) for path, snippet in rows[:limit]}
         return found, len(rows) > limit
+
+
+def agent_client_status(client: AgentClient, now: datetime | None = None) -> str:
+    """active | revoked | expired: the one rule both key checks and the UI use."""
+    if client.revoked_at is not None:
+        return "revoked"
+    now = now or datetime.now(timezone.utc)
+    if client.expires_at is not None and _as_utc(client.expires_at) <= now:
+        return "expired"
+    return "active"
+
+
+class AgentChannelStore:
+    """Agent Channel state: the admin on/off switch, agent clients and their
+    API keys, conversation-to-session bindings, and per-message turns.
+
+    A key is `pcak_<prefix>_<secret>`. Only the prefix (to find the row) and an
+    HMAC of the whole key under the server secret are stored, so a database
+    leak does not yield usable keys."""
+
+    _KEY = "agent_channel"
+    # last_used_at is display-only; writing it on every message would turn each
+    # read-mostly request into a write.
+    _TOUCH_EVERY = timedelta(minutes=1)
+    # Live keys one user may hold; revoked and expired ones do not count.
+    MAX_ACTIVE_PER_OWNER = 10
+
+    # The switch is read on every agent request and page load; a short-lived
+    # copy saves those reads. set_enabled refreshes it at once in this process.
+    _ENABLED_TTL = 5.0
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], key_secret: str):
+        self.factory = factory
+        self._key_secret = key_secret.encode()
+        self._enabled_cache: tuple[float, bool] | None = None
+
+    def _hash(self, key: str) -> str:
+        return hmac.new(self._key_secret, key.encode(), hashlib.sha256).hexdigest()
+
+    async def enabled(self) -> bool:
+        now = time.monotonic()
+        if self._enabled_cache is not None and now - self._enabled_cache[0] < self._ENABLED_TTL:
+            return self._enabled_cache[1]
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+        value = bool(row and (row.value or {}).get("enabled"))
+        self._enabled_cache = (now, value)
+        return value
+
+    async def set_enabled(self, enabled: bool) -> None:
+        async with self.factory() as db:
+            row = await db.get(AppSetting, self._KEY)
+            if row is None:
+                db.add(AppSetting(key=self._KEY, value={"enabled": enabled}))
+            else:
+                row.value = {**(row.value or {}), "enabled": enabled}
+            await db.commit()
+        self._enabled_cache = (time.monotonic(), enabled)
+
+    async def create_client(
+        self, owner_id: str, name: str, connector_ids: list[str], expires_at: datetime | None
+    ) -> tuple[AgentClient, str]:
+        """Returns the row and the full key, which is never readable again."""
+        prefix = secrets.token_hex(6)
+        key = f"pcak_{prefix}_{secrets.token_urlsafe(32)}"
+        async with self.factory() as db:
+            row = AgentClient(
+                owner_id=owner_id,
+                name=name,
+                key_prefix=prefix,
+                key_hash=self._hash(key),
+                connector_ids=list(connector_ids),
+                expires_at=expires_at,
+            )
+            db.add(row)
+            await db.commit()
+            return row, key
+
+    async def authenticate(self, key: str) -> AgentClient | None:
+        """The live client for a presented key, or None for a wrong, revoked or expired one."""
+        parts = (key or "").split("_", 2)
+        if len(parts) != 3 or parts[0] != "pcak":
+            return None
+        now = datetime.now(timezone.utc)
+        async with self.factory() as db:
+            row = await db.scalar(select(AgentClient).where(AgentClient.key_prefix == parts[1]))
+            if row is None or not hmac.compare_digest(row.key_hash, self._hash(key)):
+                return None
+            if agent_client_status(row, now) != "active":
+                return None
+            if row.last_used_at is None or now - _as_utc(row.last_used_at) >= self._TOUCH_EVERY:
+                row.last_used_at = now
+                await db.commit()
+            return row
+
+    async def count_active(self, owner_id: str) -> int:
+        now = datetime.now(timezone.utc)
+        async with self.factory() as db:
+            return int(
+                await db.scalar(
+                    select(func.count())
+                    .select_from(AgentClient)
+                    .where(
+                        AgentClient.owner_id == owner_id,
+                        AgentClient.revoked_at.is_(None),
+                        or_(AgentClient.expires_at.is_(None), AgentClient.expires_at > now),
+                    )
+                )
+                or 0
+            )
+
+    async def list_for_owner(self, owner_id: str, limit: int = 100) -> list[AgentClient]:
+        """Unrevoked keys first, then newest; bounded because revoked keys accumulate."""
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(AgentClient)
+                .where(AgentClient.owner_id == owner_id)
+                .order_by(AgentClient.revoked_at.is_not(None), AgentClient.created_at.desc())
+                .limit(limit)
+            )
+            return list(rows)
+
+    async def list_all(self, limit: int = 500) -> tuple[list[tuple[AgentClient, str]], int]:
+        """Clients with their owner's email, unrevoked first, plus the total count, for the Control Plane."""
+        async with self.factory() as db:
+            rows = await db.execute(
+                select(AgentClient, User.email)
+                .join(User, User.id == AgentClient.owner_id)
+                .order_by(AgentClient.revoked_at.is_not(None), AgentClient.created_at.desc())
+                .limit(limit)
+            )
+            total = await db.scalar(select(func.count()).select_from(AgentClient))
+            return [(client, email) for client, email in rows.all()], int(total or 0)
+
+    async def set_connectors(self, owner_id: str, client_id: str, connector_ids: list[str]) -> AgentClient | None:
+        async with self.factory() as db:
+            row = await db.get(AgentClient, client_id)
+            if row is None or row.owner_id != owner_id:
+                return None
+            row.connector_ids = list(connector_ids)
+            await db.commit()
+            return row
+
+    async def revoke(self, client_id: str, owner_id: str | None = None) -> bool:
+        """Revoke a key; `owner_id` None is the admin path, which may revoke any."""
+        async with self.factory() as db:
+            row = await db.get(AgentClient, client_id)
+            if row is None or (owner_id is not None and row.owner_id != owner_id):
+                return False
+            if row.revoked_at is None:
+                row.revoked_at = datetime.now(timezone.utc)
+                await db.commit()
+            return True
+
+    async def session_for(self, client_id: str, conversation_id: str) -> str | None:
+        async with self.factory() as db:
+            row = await db.get(AgentConversation, (client_id, conversation_id))
+            return row.session_id if row else None
+
+    async def count_conversations(self, client_id: str) -> int:
+        async with self.factory() as db:
+            return int(
+                await db.scalar(
+                    select(func.count()).select_from(AgentConversation).where(AgentConversation.client_id == client_id)
+                )
+                or 0
+            )
+
+    async def bind_session(self, client_id: str, conversation_id: str, session_id: str) -> None:
+        """Point a conversation at a session, replacing a binding whose chat was deleted."""
+        async with self.factory() as db:
+            row = await db.get(AgentConversation, (client_id, conversation_id))
+            if row is None:
+                db.add(AgentConversation(client_id=client_id, conversation_id=conversation_id, session_id=session_id))
+            else:
+                row.session_id = session_id
+            await db.commit()
+
+    async def start_turn(
+        self, client_id: str, conversation_id: str, idempotency_key: str | None
+    ) -> tuple[AgentTurn, bool]:
+        """A new turn, or the existing one for a repeated idempotency key (created=False)."""
+        async with self.factory() as db:
+            row = AgentTurn(client_id=client_id, conversation_id=conversation_id, idempotency_key=idempotency_key)
+            db.add(row)
+            try:
+                await db.commit()
+                return row, True
+            except IntegrityError:
+                await db.rollback()
+                # Only a repeated idempotency key is an expected conflict; anything
+                # else (e.g. the client row deleted meanwhile) is a real failure.
+                if not idempotency_key:
+                    raise
+        existing = await self.find_turn(client_id, idempotency_key)
+        if existing is None:
+            raise LookupError("agent turn could not be recorded")
+        return existing, False
+
+    async def find_turn(self, client_id: str, idempotency_key: str) -> AgentTurn | None:
+        async with self.factory() as db:
+            return await db.scalar(
+                select(AgentTurn).where(
+                    AgentTurn.client_id == client_id, AgentTurn.idempotency_key == idempotency_key
+                )
+            )
+
+    async def get_turn(self, client_id: str, turn_id: str) -> AgentTurn | None:
+        async with self.factory() as db:
+            row = await db.get(AgentTurn, turn_id)
+            return row if row is not None and row.client_id == client_id else None
+
+    async def finish_turn(self, turn_id: str, status: str, reply: str) -> None:
+        async with self.factory() as db:
+            row = await db.get(AgentTurn, turn_id)
+            if row is not None:
+                row.status = status
+                row.reply = reply
+                row.finished_at = datetime.now(timezone.utc)
+                await db.commit()
+
+    async def fail_stale_turns(self, older_than: datetime, client_id: str | None = None) -> int:
+        """Fail turns still `working` since before `older_than`: their process is gone.
+
+        Judged by age, not at startup, because several processes can share the
+        database and a restart of one must not fail another's live turns.
+        """
+        conditions = [AgentTurn.status == "working", AgentTurn.created_at < older_than]
+        if client_id is not None:
+            conditions.append(AgentTurn.client_id == client_id)
+        async with self.factory() as db:
+            result = await db.execute(
+                update(AgentTurn)
+                .where(*conditions)
+                .values(status="failed", reply="The turn was interrupted.", finished_at=datetime.now(timezone.utc))
+            )
+            await db.commit()
+            return result.rowcount or 0
+
+    async def has_running_turn(self, client_id: str) -> bool:
+        async with self.factory() as db:
+            return (
+                await db.scalar(
+                    select(AgentTurn.id)
+                    .where(AgentTurn.client_id == client_id, AgentTurn.status == "working")
+                    .limit(1)
+                )
+            ) is not None
+
+    async def prune_turns(self, older_than: datetime) -> None:
+        async with self.factory() as db:
+            await db.execute(sa_delete(AgentTurn).where(AgentTurn.created_at < older_than))
+            await db.commit()
