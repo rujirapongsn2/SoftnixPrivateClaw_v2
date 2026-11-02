@@ -150,6 +150,79 @@ export function visibleSettingsSections(hidden: readonly string[], options: { sb
   );
 }
 
+// Settings navigation shared by both shells: the open section, and the Menu ACL
+// that decides which sections may open. The ACL is re-read whenever Settings is
+// opened and when the window regains focus, so an admin's change (or switching
+// on the agent channel) shows up without a page reload.
+export function useSettingsNav(userId: string | undefined, sbot: boolean) {
+  const [section, setSection] = useState<SettingsSection | null>(null);
+  const [hidden, setHidden] = useState<string[]>([]);
+  const latest = useRef<string[]>([]);
+  const loaded = useRef(false);
+  // Only the newest request may write: responses can return out of order, and
+  // one from a previous sign-in must not land on the next user.
+  const seq = useRef(0);
+
+  const refresh = useCallback(async (): Promise<string[]> => {
+    const mine = ++seq.current;
+    try {
+      const r = await api.mySettingsAcl();
+      if (mine === seq.current) {
+        loaded.current = true;
+        latest.current = r.hidden;
+        setHidden(r.hidden);
+      }
+    } catch {
+      // Fails open only before the first load; later a blip keeps the known list
+      // instead of revealing every hidden menu.
+      if (mine === seq.current && !loaded.current) {
+        latest.current = [];
+        setHidden([]);
+      }
+    }
+    return latest.current;
+  }, []);
+
+  useEffect(() => {
+    seq.current += 1;
+    loaded.current = false;
+    latest.current = [];
+    setHidden([]);
+    if (!userId) return;
+    void refresh();
+    const onFocus = () => void refresh();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [userId, refresh]);
+
+  const sections = useMemo(() => visibleSettingsSections(hidden, { sbot }), [hidden, sbot]);
+  const shown = section && sections.includes(section) ? section : null;
+
+  // A section the ACL now hides moves to the first visible one, rather than
+  // silently dropping the user out of Settings.
+  useEffect(() => {
+    if (section && !sections.includes(section)) setSection(sections[0] ?? null);
+  }, [section, sections]);
+
+  // Opens Settings once the ACL is current, so a section hidden since page load
+  // never renders first and then vanishes.
+  const open = useCallback(
+    async (preferred?: SettingsSection) => {
+      const visible = visibleSettingsSections(await refresh(), { sbot });
+      setSection((current) =>
+        preferred && visible.includes(preferred)
+          ? preferred
+          : current && visible.includes(current)
+            ? current
+            : (visible[0] ?? null),
+      );
+    },
+    [refresh, sbot],
+  );
+
+  return { section, setSection, shown, sections, open };
+}
+
 // The section nav lives in the page, not the sidebar, so the chat list keeps
 // the sidebar however many sections there are. Same layout as the Control Plane.
 export function SettingsPanel({
