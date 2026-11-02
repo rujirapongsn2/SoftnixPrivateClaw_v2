@@ -24,7 +24,7 @@ import { Brand, EleMark, SoftnixLogo, SoftnixMark } from "./Logo";
 import { useBranding, useT } from "./branding";
 import { connectorCallbackToast } from "./connectorCallbackToast";
 import { PasswordField } from "./PasswordField";
-import { SETTINGS_SECTIONS, SettingsPanel, visibleSettingsSections, type SettingsSection } from "./Settings";
+import { SETTINGS_SECTIONS, SettingsPanel, useSettingsNav } from "./Settings";
 import { ApiError, AuthUser, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
 import { useAutoHideScrollbar } from "./useAutoHideScrollbar";
@@ -744,13 +744,10 @@ export default function App() {
   }, [active]);
   // Menus the admin has hidden for this user (Control Plane → Menu ACL). Fails
   // open: an error leaves every menu visible rather than locking the user out.
-  const [hiddenSettings, setHiddenSettings] = useState<string[]>([]);
-  useEffect(() => {
-    if (!user) return;
-    void api.mySettingsAcl().then((r) => setHiddenSettings(r.hidden)).catch(() => setHiddenSettings([]));
-  }, [user?.id]);
   const [filesOpen, setFilesOpen] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
+  const settingsNav = useSettingsNav(user?.id, sbotEnabled);
+  const { section: settingsSection, setSection: setSettingsSection, shown: shownSettings, sections: settingsSections } =
+    settingsNav;
   const [adminSection, setAdminSection] = useState<AdminSection | null>(null);
   const [authError, setAuthError] = useState("");
   const [activationToken, setActivationToken] = useState("");
@@ -981,8 +978,6 @@ export default function App() {
   // Selecting anything in the drawer should close it on mobile.
   const closeDrawer = () => setNavOpen(false);
   const showAdmin = user.is_admin;
-  const settingsSections = visibleSettingsSections(hiddenSettings, { sbot: sbotEnabled });
-  const shownSettings = settingsSection && settingsSections.includes(settingsSection) ? settingsSection : null;
   const settingsSectionMeta = shownSettings
     ? SETTINGS_SECTIONS.find((s) => s.key === shownSettings)
     : undefined;
@@ -1032,7 +1027,7 @@ export default function App() {
                 icon={SettingsIcon}
                 isSelected={shownSettings !== null}
                 onClick={() => {
-                  setSettingsSection(shownSettings ?? settingsSections[0] ?? null);
+                  void settingsNav.open();
                   setAdminSection(null);
                   setActive(null);
                   closeDrawer();
@@ -1115,7 +1110,7 @@ export default function App() {
             running={active ? (sessions.find((s) => s.id === active)?.running ?? false) : false}
             initialModel={active ? sessions.find((s) => s.id === active)?.model ?? null : null}
             onOpenSettings={(section) => {
-              setSettingsSection(section);
+              void settingsNav.open(section);
               setAdminSection(null);
             }}
           />
