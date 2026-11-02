@@ -59,6 +59,7 @@ import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useM
 import { ProvidersPanel } from "./Admin";
 import { useBranding, useT } from "./branding";
 import { GroupedPageNav } from "./GroupedPageNav";
+import { writeClipboard } from "./clipboard";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
 import {
@@ -3884,7 +3885,11 @@ function AgentAccessPanel() {
   const [name, setName] = useState("Grok bot");
   const [picked, setPicked] = useState<string[]>([]);
   const [expiry, setExpiry] = useState("90");
-  const [newKey, setNewKey] = useState("");
+  // The key just created, shown once in its own card at the top of "Your agent
+  // keys", right below the Create button. Kept with the client the create call
+  // returned, so it shows even if reloading the list fails.
+  const [newKey, setNewKey] = useState<{ client: AgentClientInfo; key: string } | null>(null);
+  const toast = useToast();
   const [editing, setEditing] = useState<string | null>(null);
   const [editPicked, setEditPicked] = useState<string[]>([]);
   const { error, guard } = useAsyncError();
@@ -3898,6 +3903,13 @@ function AgentAccessPanel() {
   if (!data.enabled) return <Text color="secondary">{t("settings.agents.off")}</Text>;
 
   const endpoint = `${window.location.origin}/api/agent/v1/messages`;
+  // The new key's card always comes first, whatever order the list arrives in.
+  const clients = newKey
+    ? [
+        data.clients.find((c) => c.id === newKey.client.id) ?? newKey.client,
+        ...data.clients.filter((c) => c.id !== newKey.client.id),
+      ]
+    : data.clients;
   const connectorName = (id: string) => data.connectors.find((c) => c.id === id)?.name ?? t("settings.agents.unavailable");
   const toggle = (list: string[], id: string) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
   const connectorPicker = (selected: string[], onChange: (next: string[]) => void) =>
@@ -3921,22 +3933,6 @@ function AgentAccessPanel() {
       <Text color="secondary">{t("settings.agents.intro")}</Text>
       {error && <ErrorText>{error}</ErrorText>}
 
-      {newKey && (
-        <Card padding={2} variant="muted">
-          <Text weight="semibold">{t("settings.agents.keyOnce")}</Text>
-          <pre className="claw-agent-snippet">{newKey}</pre>
-          <div className="claw-row">
-            <Button
-              label={t("settings.agents.copyKey")}
-              icon={<Icon icon={Copy} size="sm" />}
-              variant="secondary"
-              clickAction={() => void navigator.clipboard.writeText(newKey)}
-            />
-            <Button label={t("settings.agents.done")} variant="secondary" clickAction={() => setNewKey("")} />
-          </div>
-        </Card>
-      )}
-
       <Card padding={2}>
         <div className="claw-panel">
           <Text weight="semibold">{t("settings.agents.createTitle")}</Text>
@@ -3954,7 +3950,7 @@ function AgentAccessPanel() {
               label={t("settings.agents.create")}
               variant="primary"
               icon={<Icon icon={Plus} size="sm" />}
-              isDisabled={!name.trim()}
+              isDisabled={!name.trim() || newKey !== null}
               clickAction={() =>
                 guard(async () => {
                   const res = await api.createAgentClient({
@@ -3962,20 +3958,21 @@ function AgentAccessPanel() {
                     connector_ids: picked,
                     expires_in_days: expiry === "never" ? null : Number(expiry),
                   });
-                  setNewKey(res.key);
+                  setNewKey({ client: res.client, key: res.key });
                   setPicked([]);
                   await reload();
                 })
               }
             />
+            {newKey && <Text size="sm" color="secondary">{t("settings.agents.finishFirst")}</Text>}
           </div>
         </div>
       </Card>
 
-      {data.clients.length > 0 && (
+      {clients.length > 0 && (
         <div className="claw-panel">
           <Text weight="semibold">{t("settings.agents.yourKeys")}</Text>
-          {data.clients.map((c) => (
+          {clients.map((c) => (
             <Card key={c.id} padding={2}>
               <div className="claw-panel">
                 <div className="claw-row">
@@ -3986,6 +3983,28 @@ function AgentAccessPanel() {
                   />
                   <Text size="sm" color="secondary" type="code">{c.key_prefix}</Text>
                 </div>
+                {newKey?.client.id === c.id && c.status === "active" && (
+                  <Card padding={2} variant="muted">
+                    <Text weight="semibold">{t("settings.agents.keyOnce")}</Text>
+                    <pre className="claw-agent-snippet">{newKey.key}</pre>
+                    <div className="claw-row">
+                      <Button
+                        label={t("settings.agents.copyKey")}
+                        icon={<Icon icon={Copy} size="sm" />}
+                        variant="primary"
+                        clickAction={async () => {
+                          const ok = await writeClipboard(newKey.key);
+                          toast(
+                            ok
+                              ? { body: t("chat.info.copied"), type: "info", autoHideDuration: 2500 }
+                              : { body: t("chat.error.copyFailed"), type: "error", autoHideDuration: 4000 },
+                          );
+                        }}
+                      />
+                      <Button label={t("settings.agents.done")} variant="secondary" clickAction={() => setNewKey(null)} />
+                    </div>
+                  </Card>
+                )}
                 <Text size="sm" color="secondary">
                   {t("settings.agents.lastUsed")}: {c.last_used_at ? new Date(c.last_used_at).toLocaleString() : t("settings.agents.neverUsed")}
                   {" · "}
@@ -4035,6 +4054,7 @@ function AgentAccessPanel() {
                         guard(async () => {
                           if (!window.confirm(t("settings.agents.revokeConfirm", { name: c.name }))) return;
                           await api.revokeAgentClient(c.id);
+                          if (newKey?.client.id === c.id) setNewKey(null);
                           await reload();
                         })
                       }
