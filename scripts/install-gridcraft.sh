@@ -28,7 +28,7 @@ fetch() {  # fetch <asset> <dir>
   want="$(sha_for "$asset")"
   if [ ! -f "$dir/$asset" ] || [ "$(sha256 "$dir/$asset")" != "$want" ]; then
     echo "downloading $asset"
-    curl -fsSL -o "$dir/$asset.part" "$BASE/$asset"
+    curl -fsSL --connect-timeout 15 --max-time 600 -o "$dir/$asset.part" "$BASE/$asset"
     mv "$dir/$asset.part" "$dir/$asset"
   fi
   got="$(sha256 "$dir/$asset")"

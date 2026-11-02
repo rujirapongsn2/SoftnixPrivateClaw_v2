@@ -5,7 +5,16 @@
 set -euo pipefail
 
 # Resolve the project root from this script's location (scripts/ -> repo root).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Follow symlinks to the real file: install.sh links this script into /usr/local/bin, and
+# dirname of the link would make PROJECT_DIR /usr/local (`claw update` then fails with
+# "not a git repository"). readlink without -f, which older macOS lacks.
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  LINK_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" == /* ]] || SOURCE="$LINK_DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 

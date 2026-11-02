@@ -249,7 +249,9 @@ def _record_registry(tmp_path, env_text, registry):
     start = install.index('  if [[ -n "$SANDBOX_REGISTRY" ]]; then\n    if grep -qE')
     block = install[start:install.index("\n  fi\n", start) + 6]
     (tmp_path / ".env").write_text(env_text)
-    script = 'ok() { echo "ok $*"; }; warn() { echo "warn $*"; }\n' + block
+    helper = install[install.index("env_fill_empty() {"):]
+    helper = helper[:helper.index("\n}\n") + 3]
+    script = 'set -euo pipefail\nok() { echo "ok $*"; }; warn() { echo "warn $*"; }\n' + helper + block
     out = subprocess.run(["bash", "-c", script], cwd=tmp_path, env={"SANDBOX_REGISTRY": registry, "PATH": "/usr/bin:/bin"},
                          capture_output=True, text=True, check=True).stdout
     return (tmp_path / ".env").read_text(), out

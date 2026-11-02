@@ -7,7 +7,16 @@
 # Falls back to a plain background process (nohup) when no service is set up.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Follow symlinks to the real file: install.sh links this script into /usr/local/bin, and
+# dirname of the link would make PROJECT_DIR /usr/local (`claw update` then fails with
+# "not a git repository"). readlink without -f, which older macOS lacks.
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  LINK_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" == /* ]] || SOURCE="$LINK_DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVE="$SCRIPT_DIR/claw-serve.sh"
 
@@ -526,29 +535,6 @@ update_sandbox_image() {
   fi
 }
 
-# GridCraft (the `spreadsheet` tool's engine) is a pinned binary outside the repo
-# and the venv, so neither `git pull` nor `uv sync` brings it. The tool checks the
-# binary's version against the pin on first use and refuses a mismatch, so a pin
-# bump pulled by an update would leave spreadsheet calls failing until the
-# installer ran again. Runs only when the operator turned the tool on; the
-# installer is idempotent and checksum-verified, so an unchanged pin is a no-op.
-update_gridcraft() {
-  local enabled vendor
-  enabled="$(env_value CLAW_SPREADSHEET_ENABLED)" || enabled=""
-  case "$(printf '%s' "$enabled" | tr '[:upper:]' '[:lower:]')" in
-    true|1|yes|on) ;;
-    *) return 0 ;;
-  esac
-  vendor="$(env_value CLAW_SPREADSHEET_VENDOR_DIR)" || vendor=""
-  echo "==> GridCraft (spreadsheet tool)"
-  if ! CLAW_SPREADSHEET_VENDOR_DIR="$vendor" "$PROJECT_DIR/scripts/install-gridcraft.sh"; then
-    # Not fatal: code and web are already updated. The tool stays registered, so
-    # say what will happen instead of leaving it to the first failed call.
-    echo "==> WARNING: GridCraft install failed — spreadsheet calls will report it is not installed"
-    echo "    and the agent falls back to openpyxl. Re-run: $PROJECT_DIR/scripts/install-gridcraft.sh"
-  fi
-}
-
 cmd_update() {
   cd "$PROJECT_DIR"
   local before after
@@ -564,9 +550,11 @@ cmd_update() {
   # A Playwright bump in uv.lock needs its matching Chromium, or every
   # render_diagram launch fails against the old cached revision.
   "$PROJECT_DIR/install.sh" --browsers-only
+  # --web-only also keeps the GridCraft spreadsheet engine installed at the pinned version
+  # (ensure_gridcraft in install.sh); it lives there so that an update which is pulling
+  # that change, still running this older script, reaches it as well.
   echo "==> rebuild web"; "$PROJECT_DIR/install.sh" --web-only
   update_sandbox_image "$before" "$after"
-  update_gridcraft
   echo "==> migrate"; uv run alembic upgrade head
   echo "==> restart"
   if cmd_restart; then

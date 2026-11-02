@@ -19,11 +19,11 @@
 #                                  # pull the prebuilt tool-sandbox image (log in first:
 #                                  # docker login registry.softnix.co.th); builds locally if that fails
 #
-#     ./install.sh --spreadsheet   # install the pinned GridCraft engine and turn the `spreadsheet`
-#                                  # tool on (CLAW_SPREADSHEET_ENABLED=true). Needs github.com once.
+#     ./install.sh --no-spreadsheet # skip the GridCraft spreadsheet engine (installed and turned on
+#                                  # by default; needs github.com once, never fatal)
 #
 # Config via env (all optional): CLAW_LLM__API_KEY, CLAW_LLM__MODEL, CLAW_PORT,
-#     CLAW_PG_PORT, CLAW_DATA_DIR, CLAW_SANDBOX__REGISTRY, CLAW_SPREADSHEET_ENABLED.
+#     CLAW_PG_PORT, CLAW_DATA_DIR, CLAW_SANDBOX__REGISTRY, CLAW_SPREADSHEET_ENABLED=false (same as --no-spreadsheet).
 #
 set -euo pipefail
 
@@ -38,6 +38,25 @@ step()  { printf "\n${B}${CYN}==>${R} ${B}%s${R}\n" "$*"; }
 ok()    { printf "  ${GRN}✓${R} %s\n" "$*"; }
 info()  { printf "  ${DIM}%s${R}\n" "$*"; }
 warn()  { printf "  ${YEL}!${R} %s\n" "$*"; }
+
+# Value of KEY in .env the way pydantic reads it: last occurrence, inline comment and
+# surrounding quotes/blanks removed. Empty (and no error) when .env or the key is missing,
+# so it is safe under `set -e` on a fresh install.
+env_get() {
+  local v=""
+  if [[ -f .env ]]; then v="$(sed -n "s/^[[:space:]]*$1=//p" .env | tail -1)"; fi
+  v="${v%%#*}"
+  printf '%s' "$v" | sed -e "s/^[[:space:]\"']*//" -e "s/[[:space:]\"']*$//"
+}
+
+# Fill in an empty `KEY=` line of .env. The value goes through ENVIRON, so awk does not
+# interpret backslashes in it, and the file is replaced with mv (never truncated in place:
+# .env holds secrets) after cp -p, which keeps its mode and owner.
+env_fill_empty() {
+  cp -p .env .env.tmp \
+    && KEY="$1" VALUE="$2" awk '{ if ($0 ~ "^[[:space:]]*" ENVIRON["KEY"] "=[[:space:]]*$") print ENVIRON["KEY"] "=" ENVIRON["VALUE"]; else print }' .env > .env.tmp \
+    && mv .env.tmp .env
+}
 die()   { printf "\n${RED}✗ %s${R}\n" "$*" >&2; exit 1; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
@@ -56,8 +75,8 @@ PG_VOLUME="claw-pgdata"
 PG_PASSWORD="${POSTGRES_PASSWORD:-claw}"
 SANDBOX_IMAGE="claw-sandbox:latest"
 SANDBOX_REGISTRY="${CLAW_SANDBOX__REGISTRY:-}"
-SPREADSHEET=0
-case "$(printf '%s' "${CLAW_SPREADSHEET_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" in true|1|yes|on) SPREADSHEET=1 ;; esac
+SPREADSHEET_OPT=auto
+case "$(printf '%s' "${CLAW_SPREADSHEET_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" in false|0|no|off) SPREADSHEET_OPT=off ;; esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -70,7 +89,8 @@ while [[ $# -gt 0 ]]; do
     --pg-port) PG_PORT="$2"; shift ;;
     --data-dir) DATA_DIR="$2"; shift ;;
     --sandbox-registry) SANDBOX_REGISTRY="$2"; shift ;;
-    --spreadsheet) SPREADSHEET=1 ;;
+    --spreadsheet) SPREADSHEET_OPT=on ;;
+    --no-spreadsheet) SPREADSHEET_OPT=off ;;
     -h|--help) awk 'NR==1&&/^#!/{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
@@ -161,8 +181,55 @@ install_browsers() {
     || warn "Chromium install failed — diagram PNG export is unavailable until: uv run playwright install chromium"
 }
 
+# GridCraft, the engine behind the `spreadsheet` tool: a pinned binary outside the repo and
+# the venv, so neither `git pull` nor `uv sync` brings it, and the tool refuses a binary
+# whose version differs from the pin. Hence every update and install runs this: the
+# installer is idempotent and checksum-verified (an unchanged pin does nothing), and on
+# success the tool is turned on in .env unless the operator set it to false. Never fatal:
+# without the binary the tool stays off and the agent falls back to openpyxl.
+# Sets GRIDCRAFT_RESULT (off|installed|failed) and SPREADSHEET_ENV_LINE, the line a fresh
+# .env gets. An unset key is filled in, an explicit value is never rewritten.
+ensure_gridcraft() {
+  GRIDCRAFT_RESULT=off
+  SPREADSHEET_ENV_LINE="# CLAW_SPREADSHEET_ENABLED=false"
+  local cur dir
+  cur="$(env_get CLAW_SPREADSHEET_ENABLED | tr '[:upper:]' '[:lower:]')"
+  dir="$(env_get CLAW_SPREADSHEET_VENDOR_DIR)"
+  if [[ "$SPREADSHEET_OPT" == "off" ]]; then
+    SPREADSHEET_ENV_LINE="CLAW_SPREADSHEET_ENABLED=false"
+    return 0
+  fi
+  case "$cur" in
+    false|0|no|off)
+      [[ "$SPREADSHEET_OPT" == "on" ]] && warn ".env sets CLAW_SPREADSHEET_ENABLED=false — leaving it; edit it by hand to turn the tool on"
+      return 0 ;;
+  esac
+  step "GridCraft (spreadsheet tool)"
+  # The vendor dir is the one the service reads (.env), else the installer's default.
+  if CLAW_SPREADSHEET_VENDOR_DIR="$dir" bash "$PROJECT_DIR/scripts/install-gridcraft.sh"; then
+    GRIDCRAFT_RESULT=installed
+    SPREADSHEET_ENV_LINE="CLAW_SPREADSHEET_ENABLED=true"
+    ok "GridCraft ready"
+    if [[ -f .env ]]; then
+      if grep -qE '^[[:space:]]*CLAW_SPREADSHEET_ENABLED=[[:space:]]*$' .env; then
+        env_fill_empty CLAW_SPREADSHEET_ENABLED true
+        ok "set CLAW_SPREADSHEET_ENABLED=true in .env"
+      elif ! grep -qE '^[[:space:]]*CLAW_SPREADSHEET_ENABLED=' .env; then
+        printf '\n# Spreadsheet tool (GridCraft engine; kept at the pinned version by install.sh / claw update).\nCLAW_SPREADSHEET_ENABLED=true\n' >> .env
+        ok "added CLAW_SPREADSHEET_ENABLED=true to .env"
+      fi
+    fi
+  else
+    GRIDCRAFT_RESULT=failed
+    warn "GridCraft install failed (needs github.com) — the spreadsheet tool stays off; retry: scripts/install-gridcraft.sh"
+  fi
+}
+
 # `claw update --web-only` shortcut: rebuild and exit.
-if [[ $WEB_ONLY -eq 1 ]]; then build_web; exit 0; fi
+# `claw update` reaches this file only through --web-only and --browsers-only, and an update
+# that is pulling this very change still runs the OLD scripts/claw, so GridCraft hangs off
+# --web-only too: that is what makes the first update on every host install it, unattended.
+if [[ $WEB_ONLY -eq 1 ]]; then build_web; ensure_gridcraft; exit 0; fi
 # `claw update` uses this after uv sync may have moved Playwright.
 if [[ $BROWSERS_ONLY -eq 1 ]]; then install_browsers; exit 0; fi
 
@@ -257,26 +324,8 @@ else
     && ok "sandbox offline capabilities verified" || warn "sandbox image is not ready for offline work (see above) — check docker/sandbox.Dockerfile"
 fi
 
-# 3b) GridCraft engine for the `spreadsheet` tool (opt-in: --spreadsheet, or a .env that
-# already turns it on, so a re-run keeps the binary in step with the pinned version).
-# Never fatal: without the binary the tool stays off and the agent uses openpyxl.
-SPREADSHEET_ENABLED_VALUE=false
-# A fresh .env gets an active line only when it is installed. A commented default keeps a
-# later `install.sh --spreadsheet` able to add the key (an active =false would block it).
-SPREADSHEET_ENV_LINE="# CLAW_SPREADSHEET_ENABLED=false"
-if [[ -f .env ]] && grep -qiE '^[[:space:]]*CLAW_SPREADSHEET_ENABLED=[[:space:]]*(true|1|yes|on)' .env; then SPREADSHEET=1; fi
-if [[ $SPREADSHEET -eq 1 ]]; then
-  step "Installing the GridCraft spreadsheet engine"
-  # Same location the service will read: the vendor dir from .env, else the script's default.
-  GRIDCRAFT_DIR="$(sed -n 's/^[[:space:]]*CLAW_SPREADSHEET_VENDOR_DIR=[[:space:]]*//p' .env 2>/dev/null | tail -1)"
-  if CLAW_SPREADSHEET_VENDOR_DIR="$GRIDCRAFT_DIR" bash scripts/install-gridcraft.sh; then
-    ok "GridCraft installed"
-    SPREADSHEET_ENABLED_VALUE=true
-    SPREADSHEET_ENV_LINE="CLAW_SPREADSHEET_ENABLED=true"
-  else
-    warn "GridCraft install failed (needs github.com) — the spreadsheet tool stays off; retry: scripts/install-gridcraft.sh"
-  fi
-fi
+# 3b) GridCraft engine for the `spreadsheet` tool (on by default, --no-spreadsheet to skip).
+ensure_gridcraft
 
 # 4) Postgres container
 step "Setting up Postgres (Docker container '$PG_CONTAINER')"
@@ -317,8 +366,7 @@ if [[ -f .env ]]; then
   if [[ -n "$SANDBOX_REGISTRY" ]]; then
     if grep -qE '^CLAW_SANDBOX__REGISTRY=[[:space:]]*$' .env; then
       # An empty value is the default a fresh install writes, not a choice: fill it in.
-      awk -v v="$SANDBOX_REGISTRY" '/^CLAW_SANDBOX__REGISTRY=[[:space:]]*$/ { print "CLAW_SANDBOX__REGISTRY=" v; next } { print }' .env > .env.tmp \
-        && cat .env.tmp > .env && rm -f .env.tmp
+      env_fill_empty CLAW_SANDBOX__REGISTRY "$SANDBOX_REGISTRY"
       ok "set CLAW_SANDBOX__REGISTRY in .env"
     elif ! grep -q '^CLAW_SANDBOX__REGISTRY=' .env; then
       printf '\n# Prebuilt image source for claw update and install.sh (empty = build locally).\nCLAW_SANDBOX__REGISTRY=%s\n' "$SANDBOX_REGISTRY" >> .env
@@ -326,12 +374,6 @@ if [[ -f .env ]]; then
     elif ! grep -qxF "CLAW_SANDBOX__REGISTRY=$SANDBOX_REGISTRY" .env; then
       warn ".env sets a different CLAW_SANDBOX__REGISTRY — leaving it; edit it by hand to use $SANDBOX_REGISTRY"
     fi
-  fi
-  # GridCraft installed above: turn the tool on. Appended only when the key is absent;
-  # an explicit value (including false) is the operator's and is never rewritten.
-  if [[ "$SPREADSHEET_ENABLED_VALUE" == "true" ]] && ! grep -q '^[[:space:]]*CLAW_SPREADSHEET_ENABLED=' .env; then
-    printf '\n# Spreadsheet tool (GridCraft engine installed by install.sh / claw update).\nCLAW_SPREADSHEET_ENABLED=true\n' >> .env
-    ok "added CLAW_SPREADSHEET_ENABLED=true to .env"
   fi
 else
   LLM_KEY="${CLAW_LLM__API_KEY:-}"
