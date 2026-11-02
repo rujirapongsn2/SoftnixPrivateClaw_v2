@@ -36,6 +36,7 @@ from claw.db.stores import (
     SkillStore,
     SmtpConfigStore,
     TelegramConfigStore,
+    AgentChannelStore,
     UsageStore,
     UserStore,
 )
@@ -92,6 +93,9 @@ class AppState:
     workspace_policy: WorkspacePolicyStore | None = None
     # OAuth grants for per-user remote MCP connectors (claw/auth/mcp_oauth.py).
     mcp_oauth: McpOAuth | None = None
+    # Agent Channel (claw/channels/agent.py): external agents keyed to a user.
+    agent_channel_store: AgentChannelStore | None = None
+    agent_channel: "AgentChannelService | None" = None
 
 
 def get_state(request: Request) -> AppState:

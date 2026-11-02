@@ -5307,3 +5307,21 @@ a.claw-preview-action { text-decoration: none; }
 .a2ui-table [data-align="end"] { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .a2ui-badge-ai { font-size: 11px; color: var(--color-text-secondary, #a1a1aa); align-self: flex-end; }
 .a2ui-fallback { margin: 6px 0; }
+
+/* Agent access (Settings): the one-time key and the curl example, and the connector checklist. */
+.claw-agent-snippet {
+  margin: 8px 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #e5e7eb);
+  font-size: 12px;
+  white-space: pre;
+  word-break: normal;
+}
+.claw-agent-connectors {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}

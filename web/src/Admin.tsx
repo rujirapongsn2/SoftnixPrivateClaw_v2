@@ -19,6 +19,7 @@ import { useToast } from "@astryxdesign/core/Toast";
 import {
   Asterisk,
   Ban,
+  Bot,
   ChevronDown,
   ChevronRight,
   Cloud,
@@ -97,6 +98,7 @@ import {
   GuardrailTestResult,
   LLMModelCfg,
   LLMProviderCfg,
+  type AgentClientInfo,
   ModelCost,
   ModelLocality,
   ModelPurpose,
@@ -134,6 +136,7 @@ export type AdminSection =
   | "guardrails"
   | "oauth"
   | "telegram"
+  | "agents"
   | "email"
   | "projects"
   | "preferences"
@@ -164,6 +167,7 @@ export const ADMIN_SECTIONS: { key: AdminSection; group: AdminGroup; labelKey: s
   { key: "plans", group: "ai", labelKey: "admin.nav.plans", icon: Gauge },
   { key: "connectors", group: "integrations", labelKey: "admin.nav.connectors", icon: Plug },
   { key: "telegram", group: "integrations", labelKey: "admin.nav.telegram", icon: Send },
+  { key: "agents", group: "integrations", labelKey: "admin.nav.agents", icon: Bot },
   { key: "email", group: "integrations", labelKey: "admin.nav.email", icon: Mail },
   { key: "oauth", group: "integrations", labelKey: "admin.nav.oauth", icon: KeyRound },
   { key: "projects", group: "integrations", labelKey: "admin.nav.projects", icon: Server },
@@ -216,6 +220,7 @@ export function AdminPanel({
         {section === "projects" && <ProjectContainersAdminPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
+        {section === "agents" && <AgentChannelAdminPanel />}
         {section === "email" && <EmailConfigPanel />}
         {section === "preferences" && <PreferencesSection />}
         {section === "audit" && <AuditPanel />}
@@ -4524,6 +4529,84 @@ function TelegramConfigPanel() {
           </div>
         </div>
       </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Agent channel
+// The switch for the whole channel, and every key users have issued, so an
+// admin can see who lets which agent in and revoke any of them.
+
+function AgentChannelAdminPanel() {
+  const t = useT();
+  const [data, setData] = useState<{ enabled: boolean; clients: AgentClientInfo[]; total: number } | null>(null);
+  const { error, guard } = useAsyncError();
+  const reload = useCallback(() => api.adminAgentChannel().then(setData), []);
+  useEffect(() => {
+    void guard(reload);
+  }, [guard, reload]);
+
+  if (!data) return error ? <ErrorText>{error}</ErrorText> : <Text color="secondary">{t("admin.common.loading")}</Text>;
+
+  return (
+    <div className="claw-panel">
+      <Text color="secondary">{t("admin.agents.intro")}</Text>
+      {error && <ErrorText>{error}</ErrorText>}
+      <Card padding={2}>
+        <label className="claw-kb-visibility">
+          <Switch
+            value={data.enabled}
+            label={t("admin.agents.enabled")}
+            changeAction={(enabled) =>
+              guard(async () => {
+                await api.adminSetAgentChannel(enabled);
+                await reload();
+              })
+            }
+          />
+          <Text size="sm" color="secondary">
+            {data.enabled ? t("admin.agents.on") : t("admin.agents.off")}
+          </Text>
+        </label>
+      </Card>
+      <Text weight="semibold">{t("admin.agents.keys")}</Text>
+      {data.total > data.clients.length && (
+        <Text size="sm" color="secondary">
+          {t("admin.agents.truncated", { shown: String(data.clients.length), total: String(data.total) })}
+        </Text>
+      )}
+      {data.clients.length === 0 ? (
+        <Text color="secondary">{t("admin.agents.noKeys")}</Text>
+      ) : (
+        <div className="claw-panel">
+          {data.clients.map((c) => (
+            <Card key={c.id} padding={2}>
+              <div className="claw-row">
+                <Text weight="semibold">{c.name}</Text>
+                <Badge variant={c.status === "active" ? "success" : "neutral"} label={t(`settings.agents.status.${c.status}`)} />
+                <Text size="sm" color="secondary">{c.owner_email}</Text>
+                <Text size="sm" color="secondary">
+                  {t("admin.agents.lastUsed")}: {c.last_used_at ? new Date(c.last_used_at).toLocaleString() : "—"}
+                </Text>
+                {c.status === "active" && (
+                  <Button
+                    label={t("settings.agents.revoke")}
+                    size="sm"
+                    variant="destructive"
+                    clickAction={() =>
+                      guard(async () => {
+                        if (!window.confirm(t("settings.agents.revokeConfirm", { name: c.name }))) return;
+                        await api.adminRevokeAgentClient(c.id);
+                        await reload();
+                      })
+                    }
+                  />
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -829,3 +829,58 @@ class WorkspaceFileText(Base):
     mtime: Mapped[float] = mapped_column(Float)
     size: Mapped[int] = mapped_column(BigInteger)
     text: Mapped[str] = mapped_column(Text, default="")
+
+
+class AgentClient(Base):
+    """An external agent (e.g. a Grok bot) allowed to chat as its owner through
+    the Agent Channel. Only a keyed hash of the API key is stored, and the
+    agent may call only the tools of `connector_ids` (see claw/channels/agent.py)."""
+
+    __tablename__ = "agent_clients"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    # Public part of the key, used to find the row; the secret part is only hashed.
+    key_prefix: Mapped[str] = mapped_column(String(16), unique=True)
+    key_hash: Mapped[str] = mapped_column(String(64))
+    # Stable connector ids (survive a rename), resolved to tool names per turn.
+    connector_ids: Mapped[list] = mapped_column(JSON, default=list)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class AgentConversation(Base):
+    """One chat session per conversation id an agent client sends."""
+
+    __tablename__ = "agent_conversations"
+
+    client_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_clients.id", ondelete="CASCADE"), primary_key=True
+    )
+    conversation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class AgentTurn(Base):
+    """A message an agent client sent: its status and reply, so a turn that
+    outlives the request can be polled, and a retried request with the same
+    Idempotency-Key gets the same turn instead of running twice."""
+
+    __tablename__ = "agent_turns"
+    __table_args__ = (
+        UniqueConstraint("client_id", "idempotency_key", name="uq_agent_turns_idempotency"),
+        Index("ix_agent_turns_created", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    client_id: Mapped[str] = mapped_column(ForeignKey("agent_clients.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[str] = mapped_column(String(128))
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="working")  # working|completed|failed
+    reply: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

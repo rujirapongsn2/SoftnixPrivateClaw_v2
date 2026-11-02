@@ -18,6 +18,9 @@ async def test_acl_resolution_and_validation(db_factory):
         admin_h, _ = await _register(c, "admin@x.io")
         user_h, user = await _register(c, "u@x.io")
 
+        # Agent access stays hidden until the admin turns the agent channel on.
+        assert (await c.get("/api/auth/settings-acl", headers=user_h)).json() == {"hidden": ["agents"]}
+        await c.put("/api/admin/agent-channel", json={"enabled": True}, headers=admin_h)
         assert (await c.get("/api/auth/settings-acl", headers=user_h)).json() == {"hidden": []}
 
         # Global hides two menus; group re-shows one; user hides another.

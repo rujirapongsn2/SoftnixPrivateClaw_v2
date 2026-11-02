@@ -212,6 +212,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     telegram_config = TelegramConfigStore(factory, secret_box=secret_box)
     telegram_mgr = TelegramManager(runtime, users, sessions, telegram_link)
 
+    from claw.channels.agent import AgentChannelService
+    from claw.db.stores import AgentChannelStore
+
+    agent_channel_store = AgentChannelStore(factory, settings.secret_key)
+    agent_channel = AgentChannelService(runtime, agent_channel_store, sessions, users, connectors, audit)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if settings.auto_migrate:
@@ -379,6 +385,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         telegram=None,
         telegram_config=telegram_config,
         telegram_mgr=telegram_mgr,
+        agent_channel_store=agent_channel_store,
+        agent_channel=agent_channel,
         smtp_config=smtp_config,
         plans=plans,
         settings_acl=settings_acl,
@@ -480,6 +488,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(manage_router)
     app.include_router(telegram_router)
+    from claw.api.agent_channel import router as agent_channel_router
+
+    app.include_router(agent_channel_router)
 
     # Serve the built web frontend from the same origin when present (prod image).
     # Mounted last so /api and /ws routes always take precedence.

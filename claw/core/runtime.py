@@ -1018,13 +1018,18 @@ class AgentRuntime:
         model: str | None = None,
         permission_mode: str = "auto",
         artifact_job_id: str | None = None,
+        allowed_tools: frozenset[str] | None = None,
     ) -> str | None:
-        """Process one user message; tracks in-flight count for graceful shutdown."""
+        """Process one user message; tracks in-flight count for graceful shutdown.
+
+        `allowed_tools` limits the turn to those tools (see AgentLoop._run_turn);
+        None leaves every registered tool available.
+        """
         locale = locale_for_text(locale, content)
         artifact_job: dict | None = None
         # A continuation is tied to this user's session and the retained job,
         # rather than classified as a fresh, ordinary 600-second chat turn.
-        if self.artifact_jobs is not None and artifact_job_id is None and re.fullmatch(
+        if self.artifact_jobs is not None and artifact_job_id is None and allowed_tools is None and re.fullmatch(
             r"\s*(?:continue|resume|ทำต่อ(?:ให้จบ)?|ต่อเลย)\s*[.!]?", content, re.IGNORECASE
         ):
             previous = await self.artifact_jobs.resumable(user_id, session_id)
@@ -1132,7 +1137,7 @@ class AgentRuntime:
                 self.bus.publish(session_id, self._artifact_event(artifact_job, t("artifact.started", locale)))
             result = await self._process_turn(
                 user_id, session_id, content, channel, locale, media, model, permission_mode,
-                artifact_job=artifact_job, promoted_jobs=promoted_jobs,
+                artifact_job=artifact_job, promoted_jobs=promoted_jobs, allowed_tools=allowed_tools,
             )
             artifact_job_id = artifact_job_id or (promoted_jobs[0] if promoted_jobs else None)
             # Policy/rate/model-gating failures return before the segmented loop
@@ -1279,6 +1284,7 @@ class AgentRuntime:
         permission_mode: str = "auto",
         artifact_job: dict | None = None,
         promoted_jobs: list[str] | None = None,
+        allowed_tools: frozenset[str] | None = None,
     ) -> str | None:
         """Process one user message; events stream to the bus, messages persist to DB.
 
@@ -1584,6 +1590,10 @@ class AgentRuntime:
                     )
                 finally:
                     await sync_task
+                if allowed_tools is not None:
+                    # A tool-limited caller is an external agent: it must not read
+                    # the owner's long-term memory back out through the reply.
+                    memory_context = ""
                 # Built-in skills are always offered; user skills are merged in,
                 # and one of the same name SHADOWS the built-in instead of
                 # joining it. Both other readers already resolve it that way —
@@ -1974,6 +1984,7 @@ class AgentRuntime:
                             permission_mode=permission_mode,
                             confirm=_confirm,
                             tool_names=scoped_tools,
+                            allowed_tools=allowed_tools,
                             resume_messages=checkpoint_messages,
                             resume_tool_results=resume_tool_results,
                             resume_written=resume_written,

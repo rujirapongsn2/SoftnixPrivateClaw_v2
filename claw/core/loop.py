@@ -574,6 +574,7 @@ class AgentLoop:
         permission_mode: str = "auto",
         confirm: ConfirmFn | None = None,
         tool_names: set[str] | None = None,
+        allowed_tools: frozenset[str] | None = None,
         resume_messages: list[dict[str, Any]] | None = None,
         resume_tool_results: dict[str, str] | None = None,
         resume_written: list[str] | None = None,
@@ -590,8 +591,14 @@ class AgentLoop:
         A configured fallback is adopted for the rest of the turn when an
         upstream call fails before emitting user-visible text. Transport-only
         events (usage metadata or hidden thinking) do not block recovery.
+
+        `tool_names` narrows what the model is shown, to save tokens.
+        `allowed_tools` is a hard limit for an untrusted caller: tools outside
+        it are neither shown nor run, even if the model names one anyway.
         """
         working = [*messages, *(resume_messages or [])]
+        if allowed_tools is not None:
+            tool_names = set(allowed_tools) if tool_names is None else tool_names & allowed_tools
         base_len = len(working)
         usage_total: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         effective_model = model or self.model
@@ -1022,6 +1029,8 @@ class AgentLoop:
                         tool=tc.name,
                         tool_call_id=tc.id,
                     ).warning("Reused successful tool result during provider recovery")
+                elif allowed_tools is not None and tc.name not in allowed_tools:
+                    tool_result = f"Error: the tool '{tc.name}' is not available to this caller."
                 elif (refusal := failures.refused_repeat(tc.name, tc.arguments)) is not None:
                     tool_result = refusal
                 else:
