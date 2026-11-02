@@ -205,21 +205,27 @@ image ใน CI ทำทั้ง `linux/amd64` และ `linux/arm64` แต�
 
 ### Spreadsheet tool (GridCraft, `CLAW_SPREADSHEET_ENABLED`)
 
-เมื่อเปิด Agent จะสร้าง/แก้/อ่านไฟล์ `.xlsx` ด้วย tool `spreadsheet` ก่อน (ตัวเลขและสูตรคำนวณโดย engine ไม่ใช่โมเดล)
-ถ้าปิด จะใช้ Python (openpyxl/pandas) ใน sandbox แทน ค่าเริ่มต้นคือ**ปิด** และมีผลเฉพาะโหมด claw (sbot ไม่มี tool นี้)
+Agent สร้าง/แก้/อ่านไฟล์ `.xlsx` ด้วย tool `spreadsheet` ก่อน (ตัวเลขและสูตรคำนวณโดย engine ไม่ใช่โมเดล)
+ถ้าปิดหรือยังไม่ได้ติดตั้ง จะใช้ Python (openpyxl/pandas) ใน sandbox แทน มีผลเฉพาะโหมด claw (sbot ไม่มี tool นี้)
 
-| วิธี | ผล |
+**ติดตั้งและเปิดให้อัตโนมัติ ไม่ต้องรันอะไรเพิ่ม** ทั้ง `claw update` และ `install.sh`
+- ดาวน์โหลด GridCraft ตาม version ที่ pin ไว้ (ตรวจ SHA-256) ลง `~/.softnix/claw/vendor/gridcraft/<version>`
+  ถ้ามีอยู่แล้วและตรงกับ pin จะไม่ดาวน์โหลดซ้ำ
+- ถ้า `.env` ยังไม่มี `CLAW_SPREADSHEET_ENABLED` (หรือเป็นบรรทัดว่าง/comment) จะเพิ่ม `CLAW_SPREADSHEET_ENABLED=true` ให้
+  แล้ว `claw update` restart บริการต่อจากนั้น จึงใช้ได้ทันทีหลัง update รอบเดียว
+- ค่าที่ตั้งไว้แล้วไม่ถูกเขียนทับ
+
+**ปิดหรือข้าม**
+| ต้องการ | ทำ |
 |---|---|
-| `./install.sh --spreadsheet` | ดาวน์โหลด GridCraft ตาม version ที่ pin ไว้ (ตรวจ SHA-256) แล้วใส่ `CLAW_SPREADSHEET_ENABLED=true` ใน `.env` |
-| `.env` ที่มี `CLAW_SPREADSHEET_ENABLED=true` อยู่แล้ว | `claw update` และ `install.sh` ติดตั้ง/ปรับ binary ให้ตรง version ที่ pin ทุกครั้ง (ถ้าตรงอยู่แล้วจะไม่ทำอะไร) |
-| ไม่ใส่ค่า หรือ `false` | ไม่ติดตั้ง ไม่แตะ |
+| ไม่ใช้ tool นี้บนเครื่องนี้ | ใส่ `CLAW_SPREADSHEET_ENABLED=false` ใน `.env` (`claw update` จะไม่ดาวน์โหลดและไม่แตะ) |
+| ติดตั้งใหม่แต่ไม่เอา | `./install.sh --no-spreadsheet` (เขียน `false` ลง `.env` ที่สร้างใหม่) |
 
-- ต้องออก `github.com` ได้ตอนติดตั้ง ส่วนตอนใช้งาน tool รันใน sandbox ที่ `network=none` ตามปกติ
-- ติดตั้งไม่สำเร็จ `claw update` ไม่ล้ม แต่แสดงคำเตือน และ tool จะแจ้งว่ายังไม่ได้ติดตั้ง (Agent จึงกลับไปใช้ openpyxl)
-  ติดตั้งซ้ำด้วย `scripts/install-gridcraft.sh`
-- `install.sh` ไม่เขียนทับค่า `CLAW_SPREADSHEET_ENABLED` ที่มีอยู่ใน `.env` (รวมถึง `false`)
-- เครื่องที่มี `.env` อยู่แล้วและต้องการเปิด: `./install.sh --spreadsheet` (เพิ่มบรรทัดให้ถ้ายังไม่มี) แล้ว `./scripts/claw restart`
-- ตรวจ: `ls ~/.softnix/claw/vendor/gridcraft/` ต้องเห็น `0.14.2` และ `~/.softnix/claw/vendor/gridcraft/0.14.2/linux-*/gridcraft-cli version` ต้องได้ `gridcraft-cli 0.14.2`
+- ต้องออก `github.com` ได้ตอน update (ตัวดาวน์โหลดมี timeout ไม่ค้าง) ส่วนตอนใช้งาน tool รันใน sandbox ที่ `network=none` ตามปกติ
+- ดาวน์โหลดไม่สำเร็จ `claw update` ไม่ล้ม แต่แสดงคำเตือน และไม่เปิด tool (Agent ใช้ openpyxl) เครื่องที่ออกอินเทอร์เน็ตไม่ได้
+  ควรตั้ง `false` เพื่อไม่ให้เห็นคำเตือนทุกครั้ง หรือคัดลอกโฟลเดอร์ vendor มาเอง
+- ตรวจ: `~/.softnix/claw/vendor/gridcraft/0.14.2/linux-*/gridcraft-cli version` ต้องได้ `gridcraft-cli 0.14.2`
+  และ `grep CLAW_SPREADSHEET_ENABLED .env` ต้องได้ `true`
 
 ### Project containers (โหมด Sbot)
 

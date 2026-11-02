@@ -1,10 +1,11 @@
-"""Installers keep the pinned GridCraft binary in place (docs/spreadsheet-gridcraft-spec.md).
+"""GridCraft is installed and turned on by install.sh / claw update without a manual step.
 
-The shell blocks are cut out of the real scripts and run against a fake
-install-gridcraft.sh, so a change to either script that breaks the behaviour fails here.
+The real `ensure_gridcraft` is cut out of install.sh and run against a fake
+scripts/install-gridcraft.sh, so a change that breaks the behaviour fails here.
 """
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -18,108 +19,132 @@ exit ${FAKE_EXIT:-0}
 """
 
 
-def _project(tmp_path, env_text=None, fake_exit=0):
+def _function(name):
+    start = INSTALL.index(f"{name}() {{")
+    return INSTALL[start:INSTALL.index("\n}\n", start) + 3]
+
+
+def _ensure(tmp_path, env_text=None, opt="auto", fake_exit=0):
+    """Run ensure_gridcraft in tmp_path; returns (stdout, .env text or None, installer calls)."""
     (tmp_path / "scripts").mkdir(exist_ok=True)
     fake = tmp_path / "scripts" / "install-gridcraft.sh"
     fake.write_text(FAKE_INSTALLER)
     fake.chmod(0o755)
+    env_file = tmp_path / ".env"
+    env_file.unlink(missing_ok=True)
+    (tmp_path / "calls").unlink(missing_ok=True)
     if env_text is not None:
-        (tmp_path / ".env").write_text(env_text)
-    return {"CALLS": str(tmp_path / "calls"), "FAKE_EXIT": str(fake_exit), "PATH": "/usr/bin:/bin"}
-
-
-def _calls(tmp_path):
-    f = tmp_path / "calls"
-    return f.read_text().splitlines() if f.exists() else []
-
-
-def _update(tmp_path, env_text, fake_exit=0):
-    env = _project(tmp_path, env_text, fake_exit)
-    start = CLAW.index("env_value() {")
-    helpers = CLAW[start:CLAW.index("\n}\n", start) + 3]
-    block = CLAW[CLAW.index("update_gridcraft() {"):CLAW.index("cmd_update() {")]
-    script = f'PROJECT_DIR="{tmp_path}"\n{helpers}\n{block}\nupdate_gridcraft; echo "rc=$?"'
-    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True).stdout
-
-
-def test_update_installs_when_the_tool_is_on(tmp_path):
-    out = _update(tmp_path, "CLAW_SPREADSHEET_ENABLED=true\n")
-    assert _calls(tmp_path) == ["installer vendor=[]"] and out.endswith("rc=0\n")
-
-
-def test_update_passes_the_vendor_dir_from_env(tmp_path):
-    _update(tmp_path, "CLAW_SPREADSHEET_ENABLED=True\nCLAW_SPREADSHEET_VENDOR_DIR=/opt/gc\n")
-    assert _calls(tmp_path) == ["installer vendor=[/opt/gc]"]
-
-
-def test_update_leaves_a_disabled_tool_alone(tmp_path):
-    for env_text in ("CLAW_SPREADSHEET_ENABLED=false\n", "# CLAW_SPREADSHEET_ENABLED=true\n", "CLAW_PORT=8700\n"):
-        out = _update(tmp_path, env_text)
-        assert _calls(tmp_path) == [] and out == "rc=0\n", env_text
-
-
-def test_update_survives_a_failed_install_and_says_so(tmp_path):
-    out = _update(tmp_path, "CLAW_SPREADSHEET_ENABLED=true\n", fake_exit=1)
-    assert out.endswith("rc=0\n") and "WARNING: GridCraft install failed" in out
-
-
-def test_update_runs_the_install_before_the_restart():
-    body = CLAW[CLAW.index("cmd_update() {"):]
-    assert body.index("update_sandbox_image") < body.index("update_gridcraft") < body.index("cmd_restart")
-
-
-def _step_3b(tmp_path, env_text, spreadsheet, fake_exit=0):
-    env = _project(tmp_path, env_text, fake_exit)
-    start = INSTALL.index("# 3b) GridCraft")
-    block = INSTALL[start:INSTALL.index("# 4) Postgres container")]
+        env_file.write_text(env_text)
+    fn = "".join(_function(name) for name in ("env_get", "env_fill_empty", "ensure_gridcraft"))
     script = (
-        'step() { :; }; ok() { echo "ok $*"; }; warn() { echo "warn $*"; }\n'
-        f"SPREADSHEET={spreadsheet}\n{block}\necho \"value=$SPREADSHEET_ENABLED_VALUE\""
+        "set -euo pipefail\n"  # install.sh's own options: a failing sed/grep must not abort it
+        'step() { echo "step $*"; }; ok() { echo "ok $*"; }; warn() { echo "warn $*"; }\n'
+        f'PROJECT_DIR="{tmp_path}"; SPREADSHEET_OPT={opt}\n{fn}\n'
+        'ensure_gridcraft; echo "rc=$? result=$GRIDCRAFT_RESULT line=$SPREADSHEET_ENV_LINE"'
     )
-    return subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True).stdout
+    env = {"CALLS": str(tmp_path / "calls"), "FAKE_EXIT": str(fake_exit), "PATH": "/usr/bin:/bin"}
+    out = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True).stdout
+    calls = (tmp_path / "calls").read_text().splitlines() if (tmp_path / "calls").exists() else []
+    return out, (env_file.read_text() if env_file.exists() else None), calls
 
 
-def test_install_is_opt_in(tmp_path):
-    assert _step_3b(tmp_path, None, 0).strip() == "value=false" and _calls(tmp_path) == []
+def test_an_env_without_the_key_gets_gridcraft_and_the_key(tmp_path):
+    out, env, calls = _ensure(tmp_path, "CLAW_PORT=8700\n")
+    assert calls == ["installer vendor=[]"]
+    assert env.startswith("CLAW_PORT=8700\n") and env.endswith("CLAW_SPREADSHEET_ENABLED=true\n")
+    assert "result=installed" in out and "rc=0" in out
 
 
-def test_install_flag_installs_and_turns_the_tool_on(tmp_path):
-    out = _step_3b(tmp_path, None, 1)
-    assert _calls(tmp_path) == ["installer vendor=[]"] and out.strip().endswith("value=true")
+def test_a_commented_default_counts_as_unset(tmp_path):
+    _, env, calls = _ensure(tmp_path, "# CLAW_SPREADSHEET_ENABLED=false\nCLAW_PORT=8700\n")
+    assert calls and env.endswith("CLAW_SPREADSHEET_ENABLED=true\n")
 
 
-def test_install_rerun_follows_an_env_that_already_enables_it(tmp_path):
-    out = _step_3b(tmp_path, "CLAW_SPREADSHEET_ENABLED=true\nCLAW_SPREADSHEET_VENDOR_DIR=/opt/gc\n", 0)
-    assert _calls(tmp_path) == ["installer vendor=[/opt/gc]"] and out.strip().endswith("value=true")
+def test_an_empty_key_is_filled_in(tmp_path):
+    _, env, _ = _ensure(tmp_path, "CLAW_PORT=8700\nCLAW_SPREADSHEET_ENABLED=\nCLAW_X=1\n")
+    assert env == "CLAW_PORT=8700\nCLAW_SPREADSHEET_ENABLED=true\nCLAW_X=1\n"
 
 
-def test_a_failed_install_keeps_the_tool_off(tmp_path):
-    out = _step_3b(tmp_path, None, 1, fake_exit=1)
-    assert "warn GridCraft install failed" in out and out.strip().endswith("value=false")
+def test_an_enabled_env_keeps_the_binary_current_and_is_not_rewritten(tmp_path):
+    before = "CLAW_SPREADSHEET_ENABLED=True  # on\nCLAW_SPREADSHEET_VENDOR_DIR=/opt/gc\n"
+    _, env, calls = _ensure(tmp_path, before)
+    assert calls == ["installer vendor=[/opt/gc]"] and env == before
 
 
-def _record(tmp_path, env_text, value):
-    start = INSTALL.index("  # GridCraft installed above: turn the tool on.")
-    block = INSTALL[start:INSTALL.index("else\n  LLM_KEY=", start)]
-    (tmp_path / ".env").write_text(env_text)
-    script = f'ok() {{ echo "ok $*"; }}\nSPREADSHEET_ENABLED_VALUE={value}\n{block}'
-    subprocess.run(["bash", "-c", script], cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, check=True)
-    return (tmp_path / ".env").read_text()
+def test_an_explicit_false_is_respected(tmp_path):
+    for value in ("false", "False", "0", "no", "off", '"false"'):
+        before = f"CLAW_SPREADSHEET_ENABLED={value}\n"
+        out, env, calls = _ensure(tmp_path, before)
+        assert calls == [] and env == before and "result=off" in out, value
 
 
-def test_existing_env_gets_the_key_only_when_absent(tmp_path):
-    assert _record(tmp_path, "CLAW_PORT=8700\n", "true").endswith("CLAW_SPREADSHEET_ENABLED=true\n")
-    explicit = "CLAW_SPREADSHEET_ENABLED=false\n"
-    assert _record(tmp_path, explicit, "true") == explicit
-    assert _record(tmp_path, "CLAW_PORT=8700\n", "false") == "CLAW_PORT=8700\n"
+def test_the_flag_does_not_override_an_explicit_false(tmp_path):
+    before = "CLAW_SPREADSHEET_ENABLED=false\n"
+    out, env, calls = _ensure(tmp_path, before, opt="on")
+    assert calls == [] and env == before and "warn .env sets CLAW_SPREADSHEET_ENABLED=false" in out
 
 
-def test_fresh_env_writes_the_install_result():
+def test_no_spreadsheet_skips_everything_and_a_fresh_env_records_it(tmp_path):
+    out, env, calls = _ensure(tmp_path, "CLAW_PORT=8700\n", opt="off")
+    assert calls == [] and env == "CLAW_PORT=8700\n"
+    assert "line=CLAW_SPREADSHEET_ENABLED=false" in out
+
+
+def test_a_failed_install_warns_and_leaves_env_alone(tmp_path):
+    out, env, calls = _ensure(tmp_path, "CLAW_PORT=8700\n", fake_exit=1)
+    assert calls and env == "CLAW_PORT=8700\n"
+    assert "warn GridCraft install failed" in out and "rc=0" in out and "result=failed" in out
+    # a commented default, so a later run can still add the active key
+    assert "line=# CLAW_SPREADSHEET_ENABLED=false" in out
+
+
+def test_a_fresh_install_without_an_env_yet(tmp_path):
+    out, env, calls = _ensure(tmp_path, None)
+    assert calls == ["installer vendor=[]"] and env is None
+    assert "result=installed line=CLAW_SPREADSHEET_ENABLED=true" in out
+
+
+def test_the_vendor_dir_is_read_without_quotes_or_comments(tmp_path):
+    for raw in ('"/opt/gc"', "'/opt/gc'", "/opt/gc  # note", '"/opt/gc" # note'):
+        _, _, calls = _ensure(tmp_path, f"CLAW_SPREADSHEET_VENDOR_DIR={raw}\n")
+        assert calls == ["installer vendor=[/opt/gc]"], raw
+
+
+def test_filling_a_key_keeps_the_file_mode_and_survives_backslashes(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("SECRET=abc\nCLAW_SANDBOX__REGISTRY=\n")
+    env_file.chmod(0o600)
+    value = "reg.example/a\\b"  # one backslash; awk -v would turn it into an escape
+    script = "set -euo pipefail\n" + _function("env_fill_empty") + 'env_fill_empty CLAW_SANDBOX__REGISTRY "$V"\n'
+    subprocess.run(["bash", "-c", script], cwd=tmp_path, env={"PATH": "/usr/bin:/bin", "V": value}, check=True)
+    assert env_file.read_text() == f"SECRET=abc\nCLAW_SANDBOX__REGISTRY={value}\n"
+    assert env_file.stat().st_mode & 0o777 == 0o600
+    assert not (tmp_path / ".env.tmp").exists()
+
+
+def test_the_old_update_script_reaches_it_through_web_only():
+    # An update that pulls this change still runs the previous scripts/claw, which only
+    # calls install.sh --web-only and --browsers-only. That is the one path that makes the
+    # first update install GridCraft with no manual step.
+    web_only = re.search(r"if \[\[ \$WEB_ONLY -eq 1 \]\]; then (.*?); exit 0; fi", INSTALL).group(1)
+    assert web_only == "build_web; ensure_gridcraft"
+    body = CLAW[CLAW.index("cmd_update() {"):]
+    assert body.index('install.sh" --web-only') < body.index("cmd_restart")
+
+
+def test_a_full_install_runs_it_before_the_env_is_written():
+    assert INSTALL.index("\nensure_gridcraft\n") < INSTALL.index("cat > .env <<EOF")
     assert "${SPREADSHEET_ENV_LINE}" in INSTALL
-    assert 'SPREADSHEET_ENV_LINE="# CLAW_SPREADSHEET_ENABLED=false"' in INSTALL  # commented unless installed
-    assert 'SPREADSHEET_ENV_LINE="CLAW_SPREADSHEET_ENABLED=true"' in INSTALL
-    assert INSTALL.index("# 3b) GridCraft") < INSTALL.index("cat > .env <<EOF")
-    assert "--spreadsheet) SPREADSHEET=1" in INSTALL
+
+
+def test_the_opt_out_flag_and_env_exist():
+    assert "--no-spreadsheet) SPREADSHEET_OPT=off" in INSTALL
+    assert "--spreadsheet) SPREADSHEET_OPT=on" in INSTALL
+    assert "false|0|no|off) SPREADSHEET_OPT=off" in INSTALL
+
+
+def test_the_installer_cannot_hang_an_update():
+    assert "--connect-timeout" in (REPO / "scripts" / "install-gridcraft.sh").read_text()
 
 
 def test_install_script_pin_matches_the_tool():
@@ -127,16 +152,3 @@ def test_install_script_pin_matches_the_tool():
 
     assert f'VERSION="{GRIDCRAFT_VERSION}"' in (REPO / "scripts" / "install-gridcraft.sh").read_text()
     assert os.access(REPO / "scripts" / "install-gridcraft.sh", os.X_OK)
-
-
-def test_a_fresh_env_without_the_flag_still_lets_a_later_run_enable_it(tmp_path):
-    # Fresh install, no flag: the line must not be an active key.
-    out = _step_3b(tmp_path, None, 0)
-    assert out.strip() == "value=false"
-    line = subprocess.run(
-        ["bash", "-c", INSTALL[INSTALL.index("# 3b) GridCraft"):INSTALL.index("if [[ -f .env ]]")] + 'echo "$SPREADSHEET_ENV_LINE"'],
-        capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"},
-    ).stdout.strip()
-    assert line.startswith("#")
-    # ...and the later --spreadsheet run on that .env adds the active key.
-    assert _record(tmp_path, line + "\nCLAW_PORT=8700\n", "true").endswith("CLAW_SPREADSHEET_ENABLED=true\n")
