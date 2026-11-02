@@ -77,6 +77,7 @@ import {
   slugifyConnectorName,
 } from "./Settings";
 import { useBranding, useT } from "./branding";
+import { GroupedPageNav } from "./GroupedPageNav";
 import {
   ActivityPoint,
   AdminBranding,
@@ -197,22 +198,14 @@ export function AdminPanel({
         <Text type="display-3">{t("nav.controlPlane")}</Text>
       </div>
       <div className="claw-cp-layout">
-        <nav className="claw-cp-nav" aria-label={t("nav.controlPlane")}>
-          {ADMIN_GROUPS.map((group) => (
-            <div className="claw-cp-group" key={group}>
-              <div className="claw-cp-group-title">{t(`admin.navGroup.${group}`)}</div>
-              {ADMIN_SECTIONS.filter((item) => item.group === group).map((item) => (
-                <button key={item.key} type="button"
-                  className={section === item.key ? "is-selected" : undefined}
-                  aria-current={section === item.key ? "page" : undefined}
-                  onClick={() => onSectionChange(item.key)}>
-                  <Icon icon={item.icon} size="sm" />
-                  <span>{t(item.labelKey)}</span>
-                </button>
-              ))}
-            </div>
-          ))}
-        </nav>
+        <GroupedPageNav
+          label={t("nav.controlPlane")}
+          groups={ADMIN_GROUPS}
+          groupLabelPrefix="admin.navGroup."
+          items={ADMIN_SECTIONS}
+          selected={section}
+          onSelect={onSectionChange}
+        />
         <div className={`claw-panel claw-cp-content${isWide ? " claw-panel-wide" : ""}`}>
         {section === "overview" && <OverviewPanel />}
         {section === "providers" && <ProvidersPanel llmApi={ADMIN_LLM_API} scope="admin" />}

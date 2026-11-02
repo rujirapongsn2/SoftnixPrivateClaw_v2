@@ -56,6 +56,7 @@ import {
 import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ProvidersPanel } from "./Admin";
 import { useBranding, useT } from "./branding";
+import { GroupedPageNav } from "./GroupedPageNav";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
 import {
@@ -103,26 +104,57 @@ export type SettingsSection =
   | "telegram"
   | "browser-extension";
 
+export type SettingsGroup = "account" | "agent" | "automation" | "channels" | "workspace";
+
+// Display order of the groups in the Settings page nav (labels: settings.navGroup.*).
+export const SETTINGS_GROUPS: SettingsGroup[] = ["account", "agent", "automation", "channels", "workspace"];
+
 // `labelKey` (not a pre-resolved label) because this array is built at module
 // scope, outside any component — it can't call the `useT()` hook itself.
-// Consumers (this file's SettingsPanel, and App.tsx's nav) resolve it via
+// Consumers (the Settings page nav, the ACL editor) resolve it via
 // `t(s.labelKey)` at render time so the label follows the current language.
-export const SETTINGS_SECTIONS: { key: SettingsSection; labelKey: string; icon: IconType | IconName }[] = [
-  { key: "profile", labelKey: "settings.nav.profile", icon: UserIcon },
-  { key: "projects", labelKey: "settings.nav.projects", icon: Server },
-  { key: "blueprints", labelKey: "settings.nav.blueprints", icon: FileType },
-  { key: "skills", labelKey: "settings.nav.skills", icon: Sparkles },
-  { key: "knowledge", labelKey: "settings.nav.knowledge", icon: Library },
-  { key: "memory", labelKey: "settings.nav.memory", icon: Brain },
-  { key: "models", labelKey: "settings.nav.models", icon: Cpu },
-  { key: "connectors", labelKey: "settings.nav.connectors", icon: Plug },
-  { key: "schedules", labelKey: "settings.nav.schedules", icon: "calendar" },
-  { key: "heartbeat", labelKey: "settings.nav.heartbeat", icon: HeartPulse },
-  { key: "telegram", labelKey: "settings.nav.telegram", icon: Send },
-  { key: "browser-extension", labelKey: "settings.nav.browserExt", icon: Puzzle },
+export const SETTINGS_SECTIONS: {
+  key: SettingsSection;
+  labelKey: string;
+  icon: IconType | IconName;
+  group: SettingsGroup;
+}[] = [
+  { key: "profile", labelKey: "settings.nav.profile", icon: UserIcon, group: "account" },
+  { key: "projects", labelKey: "settings.nav.projects", icon: Server, group: "workspace" },
+  { key: "blueprints", labelKey: "settings.nav.blueprints", icon: FileType, group: "workspace" },
+  { key: "skills", labelKey: "settings.nav.skills", icon: Sparkles, group: "agent" },
+  { key: "knowledge", labelKey: "settings.nav.knowledge", icon: Library, group: "agent" },
+  { key: "memory", labelKey: "settings.nav.memory", icon: Brain, group: "agent" },
+  { key: "models", labelKey: "settings.nav.models", icon: Cpu, group: "account" },
+  { key: "connectors", labelKey: "settings.nav.connectors", icon: Plug, group: "agent" },
+  { key: "schedules", labelKey: "settings.nav.schedules", icon: "calendar", group: "automation" },
+  { key: "heartbeat", labelKey: "settings.nav.heartbeat", icon: HeartPulse, group: "automation" },
+  { key: "telegram", labelKey: "settings.nav.telegram", icon: Send, group: "channels" },
+  { key: "browser-extension", labelKey: "settings.nav.browserExt", icon: Puzzle, group: "channels" },
 ];
 
-export function SettingsPanel({ section }: { section: SettingsSection }) {
+// The sections a user can open, in page-nav order. The one place that decides
+// visibility: the sidebar's Settings entry, the page nav and the render guard
+// all read it, so they cannot disagree.
+export function visibleSettingsSections(hidden: readonly string[], options: { sbot: boolean }): SettingsSection[] {
+  return SETTINGS_GROUPS.flatMap((group) =>
+    SETTINGS_SECTIONS.filter(
+      (s) => s.group === group && !hidden.includes(s.key) && (options.sbot || s.key !== "projects"),
+    ).map((s) => s.key),
+  );
+}
+
+// The section nav lives in the page, not the sidebar, so the chat list keeps
+// the sidebar however many sections there are. Same layout as the Control Plane.
+export function SettingsPanel({
+  section,
+  sections,
+  onSectionChange,
+}: {
+  section: SettingsSection;
+  sections: SettingsSection[];
+  onSectionChange: (section: SettingsSection) => void;
+}) {
   const t = useT();
   const meta = SETTINGS_SECTIONS.find((s) => s.key === section);
   // My Models is a data table, same reasoning as the admin LLM Providers page
@@ -131,23 +163,33 @@ export function SettingsPanel({ section }: { section: SettingsSection }) {
   const isWide = section === "models";
   return (
     <div className="claw-settings-panel">
-      <div className={`claw-settings-panel-header${isWide ? " claw-panel-wide" : ""}`}>
+      <div className="claw-settings-panel-header claw-cp-header">
         <Icon icon={meta?.icon ?? "check"} size="lg" color="secondary" />
         <Text type="display-3">{meta ? t(meta.labelKey) : ""}</Text>
       </div>
-      <div className={`claw-panel${isWide ? " claw-panel-wide" : ""}`}>
-        {section === "profile" && <ProfilePanel />}
-        {section === "projects" && <ProjectsPanel />}
-        {section === "blueprints" && <BlueprintsPanel />}
-        {section === "skills" && <SkillsPanel />}
-        {section === "knowledge" && <KnowledgePanel />}
-        {section === "memory" && <MemoryPanel />}
-        {section === "models" && <ProvidersPanel llmApi={USER_LLM_API} scope="user" />}
-        {section === "connectors" && <ConnectorsPanel />}
-        {section === "schedules" && <SchedulesPanel />}
-        {section === "heartbeat" && <HeartbeatPanel />}
-        {section === "telegram" && <TelegramPanel />}
-        {section === "browser-extension" && <><LocalAgentPanel /><BrowserExtensionPanel /></>}
+      <div className="claw-cp-layout">
+        <GroupedPageNav
+          label={t("nav.settings")}
+          groups={SETTINGS_GROUPS}
+          groupLabelPrefix="settings.navGroup."
+          items={SETTINGS_SECTIONS.filter((item) => sections.includes(item.key))}
+          selected={section}
+          onSelect={onSectionChange}
+        />
+        <div className={`claw-panel claw-cp-content${isWide ? " claw-panel-wide" : ""}`}>
+          {section === "profile" && <ProfilePanel />}
+          {section === "projects" && <ProjectsPanel />}
+          {section === "blueprints" && <BlueprintsPanel />}
+          {section === "skills" && <SkillsPanel />}
+          {section === "knowledge" && <KnowledgePanel />}
+          {section === "memory" && <MemoryPanel />}
+          {section === "models" && <ProvidersPanel llmApi={USER_LLM_API} scope="user" />}
+          {section === "connectors" && <ConnectorsPanel />}
+          {section === "schedules" && <SchedulesPanel />}
+          {section === "heartbeat" && <HeartbeatPanel />}
+          {section === "telegram" && <TelegramPanel />}
+          {section === "browser-extension" && <><LocalAgentPanel /><BrowserExtensionPanel /></>}
+        </div>
       </div>
     </div>
   );

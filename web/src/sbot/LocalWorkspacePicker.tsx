@@ -189,7 +189,7 @@ export function LocalWorkspacePicker({ sessionId, ensureSession, disabled }: {
     {open && <div className="sbot-local-workspace-menu" role="dialog" aria-label="Choose workspace">
       {pairing ? <div className="sbot-local-pairing">
         <div className="sbot-local-menu-heading"><span role="status">Choose a folder in Local Agent…</span><button type="button" aria-label="Cancel connection" onClick={() => setPairing(null)}><X size={16} /></button></div>
-        <small>App not installed? Go to Settings → Client & Extention.</small>
+        <small>App not installed? Go to Settings → Client & Extension.</small>
       </div> : <>
         <div className="sbot-local-menu-heading">Workspace</div>
         <button type="button" className="sbot-local-workspace-option" disabled={saving || disabled} onClick={() => void select('')}>

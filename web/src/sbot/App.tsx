@@ -27,7 +27,7 @@ import { useBranding, useT } from "../branding";
 import { connectorCallbackToast } from "../connectorCallbackToast";
 import { PasswordField } from "./PasswordField";
 import { botDisplayName } from "./botLabels";
-import { SETTINGS_SECTIONS, SettingsPanel, type SettingsSection } from "../Settings";
+import { SETTINGS_SECTIONS, SettingsPanel, visibleSettingsSections, type SettingsSection } from "../Settings";
 import { ActiveMission, ApiError, AuthUser, BotGroupInfo, BotInfo, SessionInfo, api, clearToken, getToken, setToken } from "./api";
 import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
 import { useAutoHideScrollbar } from "../useAutoHideScrollbar";
@@ -1056,8 +1056,10 @@ export default function App() {
   // Selecting anything in the drawer should close it on mobile.
   const closeDrawer = () => setNavOpen(false);
   const showAdmin = user.is_admin;
-  const settingsSectionMeta = settingsSection
-    ? SETTINGS_SECTIONS.find((s) => s.key === settingsSection)
+  const settingsSections = visibleSettingsSections(hiddenSettings, { sbot: true });
+  const shownSettings = settingsSection && settingsSections.includes(settingsSection) ? settingsSection : null;
+  const settingsSectionMeta = shownSettings
+    ? SETTINGS_SECTIONS.find((s) => s.key === shownSettings)
     : undefined;
   const adminSectionMeta = adminSection ? ADMIN_SECTIONS.find((s) => s.key === adminSection) : undefined;
   const currentTitle = adminSectionMeta
@@ -1089,23 +1091,14 @@ export default function App() {
               <SideNavItem
                 label={t("nav.settings")}
                 icon={SettingsIcon}
-                collapsible={{ defaultIsCollapsed: true }}
-              >
-                {SETTINGS_SECTIONS.filter((s) => !hiddenSettings.includes(s.key)).map((s) => (
-                  <SideNavItem
-                    key={s.key}
-                    label={t(s.labelKey)}
-                    icon={s.icon}
-                    isSelected={settingsSection === s.key}
-                    onClick={() => {
-                      setSettingsSection(s.key);
-                      setAdminSection(null);
-                      setActive(null);
-                      closeDrawer();
-                    }}
-                  />
-                ))}
-              </SideNavItem>
+                isSelected={shownSettings !== null}
+                onClick={() => {
+                  setSettingsSection(shownSettings ?? settingsSections[0] ?? null);
+                  setAdminSection(null);
+                  setActive(null);
+                  closeDrawer();
+                }}
+              />
               {showAdmin && (
                 <div className="claw-nav-admin">
                   <SideNavItem
@@ -1189,8 +1182,12 @@ export default function App() {
             selfId={user.id}
             onSectionChange={(section) => setAdminSection(section)}
           />
-        ) : settingsSection && !hiddenSettings.includes(settingsSection) ? (
-          <SettingsPanel section={settingsSection} />
+        ) : shownSettings ? (
+          <SettingsPanel
+            section={shownSettings}
+            sections={settingsSections}
+            onSectionChange={(section) => setSettingsSection(section)}
+          />
         ) : openingBotId ? (
           <div className="sbot-transcript-opening" role="status" aria-live="polite">
             <Icon icon={Loader2} size="sm" className="sbot-bot-spin" />
