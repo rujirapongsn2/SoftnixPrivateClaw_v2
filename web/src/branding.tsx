@@ -494,7 +494,12 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.nav.schedules": "Schedule",
     "settings.nav.heartbeat": "Heartbeat",
     "settings.nav.telegram": "Telegram",
-    "settings.nav.browserExt": "Client & Extention",
+    "settings.nav.browserExt": "Client & Extension",
+    "settings.navGroup.account": "Account",
+    "settings.navGroup.agent": "Agent",
+    "settings.navGroup.automation": "Automation",
+    "settings.navGroup.channels": "Channels",
+    "settings.navGroup.workspace": "Workspace",
 
     "settings.common.loading": "Loading…",
     "settings.common.cancel": "Cancel",
@@ -842,7 +847,7 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.telegram.expires": "Expires in a few minutes. Once sent, come back and refresh this page.",
 
     "settings.browserExt.mobileNotice":
-      "The browser extension pairs Sbot with Chrome on your computer, so it's set up on a desktop — not on a phone or tablet. Open Softnix Sbot on your computer, then go to Settings → Client & Extention.",
+      "The browser extension pairs Sbot with Chrome on your computer, so it's set up on a desktop — not on a phone or tablet. Open Softnix Sbot on your computer, then go to Settings → Client & Extension.",
     "settings.browserExt.notEnabled":
       "The browser extension is not enabled on this server. An administrator must set CLAW_BROWSER__CLIENT_EXTENSION_ENABLED=true to allow pairing.",
     "settings.browserExt.title": "Chrome extension",
@@ -2143,7 +2148,12 @@ const TRANSLATIONS: Record<BrandingLanguage, Dict> = {
     "settings.nav.schedules": "กำหนดเวลา",
     "settings.nav.heartbeat": "ฮาร์ตบีต",
     "settings.nav.telegram": "Telegram",
-    "settings.nav.browserExt": "Client & Extention",
+    "settings.nav.browserExt": "Client & Extension",
+    "settings.navGroup.account": "บัญชี",
+    "settings.navGroup.agent": "Agent",
+    "settings.navGroup.automation": "งานอัตโนมัติ",
+    "settings.navGroup.channels": "ช่องทาง",
+    "settings.navGroup.workspace": "พื้นที่ทำงาน",
 
     "settings.common.loading": "กำลังโหลด…",
     "settings.common.cancel": "ยกเลิก",
