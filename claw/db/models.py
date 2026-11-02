@@ -222,6 +222,9 @@ class ChatSession(Base):
     # list regardless of updated_at. Deliberately not touched by anything else
     # that mutates the session, so pinning never happens as a side effect.
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # The schedule whose run opened this chat. Each run gets its own chat, and the
+    # scheduler prunes a schedule's oldest unpinned run chats by this key.
+    schedule_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
 
 class Message(Base):

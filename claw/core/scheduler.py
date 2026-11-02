@@ -71,11 +71,15 @@ class SchedulerService:
         sessions: SessionStore,
         handler: TurnHandler,
         timezone: str = "UTC",
+        keep_run_chats: int = 7,
+        busy_sessions: Callable[[], set[str]] = set,
     ):
         self.schedules = schedules
         self.sessions = sessions
         self.handler = handler
         self.timezone = timezone
+        self.keep_run_chats = keep_run_chats
+        self.busy_sessions = busy_sessions
         self._wake = asyncio.Event()
         self._running = False
         self._task: asyncio.Task | None = None
@@ -175,22 +179,40 @@ class SchedulerService:
                     session_id,
                 )
                 session_id = None
-        if not session_id:
+        opened = not session_id
+        if opened:
+            # Every run opens its own chat, so each starts from an empty history.
             # channel "schedule" tags it so the UI shows an alarm-clock marker
-            # and can flag it unread; the title stays clean (no emoji prefix).
-            # The id is written back so later runs reuse this chat instead of
-            # leaving a fresh orphan session behind on every pass.
-            created = await self.sessions.create(job.user_id, title=job.name, channel="schedule")
+            # and can flag it unread. The run time in the title tells runs apart.
+            stamp = datetime.now(resolve_tz(self.timezone)).strftime("%Y-%m-%d %H:%M")
+            created = await self.sessions.create(
+                job.user_id, title=f"{job.name} ({stamp})", channel="schedule", schedule_id=job.id
+            )
             session_id = created.id
-            await self.schedules.update(job.user_id, job_id, session_id=session_id)
 
         try:
             logger.info("Schedule {} firing into session {}", job.name, session_id)
             result = await self.handler(job.user_id, session_id, job.prompt)
-            return ("ok" if result else "ok (no content)", job.next_run_at)
         except Exception as exc:
             logger.exception("Schedule {} failed", job_id)
             return f"error: {exc}", job.next_run_at
+        if opened:
+            # Only after a run succeeds: a failing run must not push out the
+            # reports that came before it.
+            await self._prune_runs(job)
+        return ("ok" if result else "ok (no content)", job.next_run_at)
+
+    async def _prune_runs(self, job) -> None:
+        if self.keep_run_chats <= 0:
+            return
+        try:
+            pruned = await self.sessions.prune_schedule_runs(
+                job.id, self.keep_run_chats, skip=self.busy_sessions()
+            )
+            if pruned:
+                logger.info("Schedule {} removed {} old run chats", job.name, len(pruned))
+        except Exception:
+            logger.exception("Schedule {} could not prune old run chats", job.id)
 
     async def _settle(self, job_id: str, status: str, expected_next_run_at: datetime) -> None:
         # Reschedule from the row as it stands now, not as it stood when the run

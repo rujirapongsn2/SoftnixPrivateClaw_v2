@@ -286,9 +286,11 @@ class SessionStore:
         self.factory = factory
         self.is_postgres = is_postgres
 
-    async def create(self, user_id: str, title: str = "New chat", channel: str = "web") -> ChatSession:
+    async def create(
+        self, user_id: str, title: str = "New chat", channel: str = "web", schedule_id: str | None = None
+    ) -> ChatSession:
         async with self.factory() as db:
-            session = ChatSession(user_id=user_id, title=title, channel=channel)
+            session = ChatSession(user_id=user_id, title=title, channel=channel, schedule_id=schedule_id)
             db.add(session)
             await db.commit()
             return session
@@ -313,13 +315,34 @@ class SessionStore:
                 session.title = title[:255]
                 await db.commit()
 
+    @staticmethod
+    async def _delete_sessions(db: AsyncSession, ids: Sequence[str]) -> None:
+        await db.execute(Message.__table__.delete().where(Message.session_id.in_(ids)))
+        await db.execute(ChatSession.__table__.delete().where(ChatSession.id.in_(ids)))
+
     async def delete(self, session_id: str) -> None:
         async with self.factory() as db:
-            await db.execute(Message.__table__.delete().where(Message.session_id == session_id))
-            session = await db.get(ChatSession, session_id)
-            if session is not None:
-                await db.delete(session)
+            await self._delete_sessions(db, [session_id])
             await db.commit()
+
+    async def prune_schedule_runs(self, schedule_id: str, keep: int, skip: set[str] = frozenset()) -> list[str]:
+        """Delete a schedule's run chats beyond the `keep` most recently active.
+
+        Recency is the last activity, not creation, so a run chat the user is
+        still talking in counts as new. Pinned chats and `skip` are never touched.
+        """
+        async with self.factory() as db:
+            older = await db.scalars(
+                select(ChatSession.id)
+                .where(ChatSession.schedule_id == schedule_id, ChatSession.pinned.is_(False))
+                .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
+                .offset(keep)
+            )
+            ids = [sid for sid in older if sid not in skip]
+            if ids:
+                await self._delete_sessions(db, ids)
+                await db.commit()
+            return ids
 
     async def count_by_user(self) -> dict[str, int]:
         async with self.factory() as db:
