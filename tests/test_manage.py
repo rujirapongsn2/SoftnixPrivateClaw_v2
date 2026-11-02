@@ -280,39 +280,10 @@ async def test_scheduler_creates_session_when_none_given(db_factory, stores):
     assert seen_sessions
     created = await stores["sessions"].list_for_user(user.id)
     # A scheduled run tags its session with channel="schedule" (for the UI's
-    # alarm-clock marker) and uses the job name as the clean title (no emoji).
+    # alarm-clock marker) and titles it with the job name and run time (no emoji).
     sess = next(s for s in created if s.id == seen_sessions[0])
     assert sess.channel == "schedule"
-    assert sess.title == "autosess"
-
-
-async def test_scheduler_reuses_the_chat_it_opened(db_factory, stores):
-    """A task with no chat of its own opens one on its first run and writes the
-    id back. Opening a new one every run left ~144 orphan sessions a day on a
-    ten-minute job, and nothing collects them."""
-    schedules = ScheduleStore(db_factory)
-    user = await stores["users"].get_or_create_by_email("recur@x.y")
-    seen: list[str] = []
-
-    async def handler(user_id: str, session_id: str, prompt: str) -> str:
-        seen.append(session_id)
-        return "ok"
-
-    job = await schedules.create(
-        user.id, name="daily", prompt="hi", interval_seconds=3600,
-        next_run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-    )
-    service = SchedulerService(schedules, stores["sessions"], handler)
-    await service._fire(job)
-    await schedules.update(
-        user.id, job.id, next_run_at=datetime.now(timezone.utc) - timedelta(seconds=1)
-    )
-    await service._fire((await schedules.list_for_user(user.id))[0])
-
-    assert len(seen) == 2 and seen[0] == seen[1]
-    created = await stores["sessions"].list_for_user(user.id)
-    assert len([s for s in created if s.channel == "schedule"]) == 1
-    assert (await schedules.get(job.id)).session_id == seen[0]
+    assert sess.title.startswith("autosess (") and sess.title.endswith(")")
 
 
 # ---------------------------------------------------------------- connectors store

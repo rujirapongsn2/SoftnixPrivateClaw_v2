@@ -277,6 +277,9 @@ class SchedulerSettings(BaseModel):
     # local users get the wall-clock time they expect without configuring it.
     # Override with CLAW_SCHEDULER__TIMEZONE (e.g. UTC, America/New_York).
     timezone: str = "Asia/Bangkok"
+    # Each run of a schedule opens a new chat. Only the newest N run chats per
+    # schedule are kept; older unpinned ones are deleted. 0 keeps every run.
+    keep_run_chats: int = Field(default=7, ge=0)
 
 
 class LogSettings(BaseModel):

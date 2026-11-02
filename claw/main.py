@@ -182,7 +182,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _scheduled_turn(user_id: str, session_id: str, prompt: str) -> str | None:
         return await runtime.handle_message(user_id, session_id, prompt, channel="schedule")
 
-    scheduler = SchedulerService(schedules, sessions, _scheduled_turn, timezone=settings.scheduler.timezone)
+    scheduler = SchedulerService(
+        schedules,
+        sessions,
+        _scheduled_turn,
+        timezone=settings.scheduler.timezone,
+        keep_run_chats=settings.scheduler.keep_run_chats,
+        busy_sessions=runtime.active_sessions,
+    )
     # The schedule tool needs the scheduler to wake it on changes; wire it back now
     # that both exist (scheduler depends on the runtime's turn handler).
     runtime.scheduler = scheduler
