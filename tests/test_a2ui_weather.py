@@ -1,7 +1,9 @@
 """weather_now / WeatherCard: values come from Open-Meteo (faked here), never the model."""
 
 import json
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -340,7 +342,6 @@ async def test_default_fetch_caps_the_response_size(tmp_path, monkeypatch):
 
 
 def test_browser_fixture_is_the_card_the_tool_writes():
-    from pathlib import Path
 
     fixture = Path(__file__).parent.parent / "web/test/browser/a2ui-location.fixture.json"
     assert json.loads(fixture.read_text(encoding="utf-8")) == weather.build_location_request("th")
@@ -407,3 +408,105 @@ async def test_reverse_calls_are_spaced_for_the_public_server(tmp_path, monkeypa
     )
     assert sum(url == REVERSE_URL for url, _ in fake.calls) == 2
     assert time.monotonic() - t0 >= 0.2
+
+
+def hourly(chances=None, mm=None, n=48):
+    """Two days of hours from 2026-11-02 00:00, as Open-Meteo returns them with forecast_days=2."""
+    times = [(datetime(2026, 11, 2) + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M") for i in range(n)]
+    chances = chances if chances is not None else [0] * n
+    return {"time": times, "precipitation_probability": chances, "precipitation": mm if mm is not None else [0.0] * n}
+
+
+def rainy_day():
+    chances = [0] * 14 + [45, 55, 65, 70, 60, 60, 20, 10, 5, 0] + [0] * 24
+    mm = [0.0] * 15 + [1.3, 1.8] + [0.0] * 31
+    return {**current(), "hourly": hourly(chances=chances, mm=mm)}
+
+
+async def test_rain_question_adds_the_next_twelve_hours(tmp_path):
+    fake = FakeOpenMeteo(cur=rainy_day())
+    out = await WeatherNowTool(tmp_path, fetch=fake).execute(location="Din Daeng", lang="th", hourly=True)
+    messages, card = card_of(tmp_path, out)
+    assert [h["time"] for h in card["hours"]] == [f"{h % 24:02d}:00" for h in range(14, 26)]
+    assert [h["chance"] for h in card["hours"]][:5] == [45, 55, 65, 70, 60]
+    assert card["outlook"] == "โอกาสฝนสูงสุด 70% ราว 17:00"
+    assert normalize(messages)[1] == []
+    assert "15:00 55% 1.3 mm" in out and "do not add anything beyond these hours" in out
+    params = fake.calls[1][1]
+    assert params["hourly"] == "precipitation_probability,precipitation" and params["forecast_days"] == 2
+
+
+async def test_dry_hours_say_rain_is_unlikely_in_english(tmp_path):
+    fake = FakeOpenMeteo(cur={**current(), "hourly": hourly(chances=[10] * 48)})
+    out = await WeatherNowTool(tmp_path, fetch=fake).execute(location="Bangkok", lang="en", hourly=True)
+    _, card = card_of(tmp_path, out)
+    assert card["outlook"] == "Rain unlikely in the next 12 hours" and len(card["hours"]) == 12
+
+
+async def test_hours_stay_off_the_card_unless_asked(tmp_path):
+    fake = FakeOpenMeteo(cur=rainy_day())
+    out = await WeatherNowTool(tmp_path, fetch=fake).execute(location="Bangkok", lang="th")
+    _, card = card_of(tmp_path, out)
+    assert "hours" not in card and "outlook" not in card and "Do not add a forecast" in out
+
+
+@pytest.mark.parametrize(
+    "block",
+    [None, "x", {"time": ["2026-11-02T14:00"], "precipitation_probability": []}, {"time": ["noon"], "precipitation_probability": [5]}],
+)
+async def test_a_broken_hourly_block_keeps_the_current_card(tmp_path, block):
+    fake = FakeOpenMeteo(cur={**current(), "hourly": block})
+    out = await WeatherNowTool(tmp_path, fetch=fake).execute(location="Bangkok", lang="th", hourly=True)
+    _, card = card_of(tmp_path, out)
+    assert card["temperature"] == 30 and "hours" not in card and "do not guess whether it will rain" in out
+
+
+def test_bad_hour_values_are_dropped_not_shown():
+    block = hourly(chances=[None, 150, -1, float("nan")] + [40] * 44, mm=["x"] * 48)
+    hours = weather.parse_hours({"hourly": block}, datetime(2026, 11, 2, 0, 10))
+    assert hours[0].time.hour == 4 and hours[0].chance == 40 and hours[0].mm == 0.0 and len(hours) == 24
+
+
+async def test_a_cached_forecast_starts_at_the_current_hour(tmp_path, monkeypatch):
+    cur = {**current(when="2026-11-02T14:55"), "hourly": hourly(chances=[0] * 14 + [80] + [10] * 33)}
+    fake = FakeOpenMeteo(cur=cur)
+    await WeatherNowTool(tmp_path, fetch=fake).execute(location="Bangkok", hourly=True)
+    clock = [weather.time.monotonic() + 9 * 60]
+    monkeypatch.setattr(weather.time, "monotonic", lambda: clock[0])
+    out = await WeatherNowTool(tmp_path, fetch=fake).execute(location="Bangkok", lang="en", hourly=True)
+    _, card = card_of(tmp_path, out)
+    assert [url for url, _ in fake.calls].count(FORECAST_URL) == 1, "the forecast came from the cache"
+    assert card["hours"][0]["time"] == "15:00" and len(card["hours"]) == 12
+    assert card["outlook"] == "Rain unlikely in the next 12 hours" and "14:00" not in out
+
+
+@pytest.mark.parametrize(("value", "shown"), [("true", True), (" TRUE ", True), ("1", True), ("false", False), (1, False)])
+async def test_hourly_given_as_a_string(tmp_path, value, shown):
+    fake = FakeOpenMeteo(cur=rainy_day())
+    out = await WeatherNowTool(tmp_path, fetch=fake).execute(location="Bangkok", hourly=value)
+    _, card = card_of(tmp_path, out)
+    assert ("hours" in card) is shown
+
+
+@pytest.mark.parametrize(
+    ("hours", "needle"),
+    [
+        ("x", "hours:"),
+        ([{"time": "14:00", "chance": 101}], "hours:"),
+        ([{"time": "14:00", "chance": 5, "mm": 1}], "hours:"),
+        ([{"time": "14:00", "chance": 5}] * 25, "hours:"),
+    ],
+)
+def test_validator_rejects_malformed_hours(hours, needle):
+    errs = normalize(weather_payload(hours=hours))[1]
+    assert any(needle in e for e in errs)
+
+
+def test_browser_rain_fixture_is_the_card_the_tool_builds():
+    cur = weather.parse_current(rainy_day())
+    cur = replace(cur, hours=weather.upcoming(cur.hours, cur.time))
+    fixture = Path(__file__).parent.parent / "web/test/browser/a2ui-rain.fixture.json"
+    assert json.loads(fixture.read_text(encoding="utf-8")) == weather.build_messages(GEO_PLACE, cur, "th", hourly=True)
+
+
+GEO_PLACE = weather.Place(name="ดินแดง", country="กรุงเทพมหานคร", latitude=13.77, longitude=100.55)

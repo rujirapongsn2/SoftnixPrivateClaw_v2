@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from dataclasses import replace
 import os
 import time
 from pathlib import Path
@@ -208,8 +209,10 @@ class WeatherNowTool(Tool):
         "'Bangkok', 'Chiang Mai'), or 'lat,lon'. If the user named no place and you do not know where they are, call "
         "it with NO location: it shows a card where they share their current location or type a city, and their "
         f"answer arrives as a card message ('{weather.LOCATION_EVENT}' with `location`); then call weather_now again with "
-        "that `location` exactly. It gives only the current conditions, no forecast. Set `lang` to the language of the "
-        "user's latest message ('th' or 'en'; 'en' for any other language) and reply in that language."
+        "that `location` exactly. Set `hourly`=true when the user asks whether or when it will rain (ฝนจะตกไหม, พยากรณ์ฝน) "
+        "or about the next few hours: the card then adds the hourly chance of rain for the next 12 hours. It has no "
+        "forecast beyond that. Set `lang` to the language of the user's latest message ('th' or 'en'; 'en' for any "
+        "other language) and reply in that language."
     )
     writes_workspace = True
     parameters = {
@@ -222,6 +225,10 @@ class WeatherNowTool(Tool):
             },
             "lang": {"type": "string", "enum": ["th", "en"], "description": "Language of the user's latest message."},
             "unit": {"type": "string", "enum": list(weather.UNITS), "description": "Default celsius."},
+            "hourly": {
+                "type": "boolean",
+                "description": "Add the chance of rain for the next 12 hours (questions about rain or later today).",
+            },
         },
     }
 
@@ -312,23 +319,31 @@ class WeatherNowTool(Tool):
     async def _current(self, fetch: Any, place: weather.Place, unit: str) -> weather.Current:
         key = (round(place.latitude, 2), round(place.longitude, 2), unit)
         hit = weather.conditions.get(key)
-        if hit is not None:
-            return hit
+        if hit is None:
+            hit = (await self._fetch_current(fetch, place, unit), time.monotonic())
+            weather.conditions.put(key, hit)
+        cur, fetched_at = hit
+        now = weather.local_now(cur, time.monotonic() - fetched_at)
+        return replace(cur, hours=weather.upcoming(cur.hours, now))
+
+    async def _fetch_current(self, fetch: Any, place: weather.Place, unit: str) -> weather.Current:
         payload = await fetch(
             self.settings.forecast_url,
             {
                 "latitude": place.latitude,
                 "longitude": place.longitude,
                 "current": "temperature_2m,weather_code,is_day",
+                "hourly": "precipitation_probability,precipitation",
+                "forecast_days": 2,
                 "temperature_unit": unit,
                 "timezone": "auto",
             },
         )
-        cur = weather.parse_current(payload)
-        weather.conditions.put(key, cur)
-        return cur
+        return weather.parse_current(payload)
 
-    async def execute(self, location: str = "", lang: str = "th", unit: str = "celsius", **_: Any) -> str:
+    async def execute(
+        self, location: str = "", lang: str = "th", unit: str = "celsius", hourly: bool = False, **_: Any
+    ) -> str:
         query = " ".join(str(location or "").split())
         if len(query) > 100:
             return "Error: `location` must be a place name of at most 100 characters."
@@ -367,9 +382,11 @@ class WeatherNowTool(Tool):
             logger.warning("weather_now fetch failed: {} (HTTP {})", type(exc).__name__, status)
             return f"Error: could not reach {weather.SOURCE} ({type(exc).__name__}). Tell the user; do not guess the weather."
         self._asked.pop(session, None)
-        messages = weather.build_messages(place, cur, lang, unit)
+        # Some providers send booleans as strings.
+        hourly = hourly is True or (isinstance(hourly, str) and hourly.strip().lower() in ("true", "1", "yes"))
+        messages = weather.build_messages(place, cur, lang, unit, hourly)
         rel = await asyncio.to_thread(write_artifact, self.workspace, messages, "weather")
-        return weather.summary_for_model(place, cur, lang, unit, rel)
+        return weather.summary_for_model(place, cur, lang, unit, rel, hourly)
 
 
 _CHART_DESCRIPTION = (

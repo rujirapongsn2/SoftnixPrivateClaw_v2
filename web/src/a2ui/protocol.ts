@@ -192,19 +192,19 @@ export const CARD_PREFIX: Record<CardLang, string> = { th: "[การ์ด]", 
 /** Fixed UI strings around a card, in the card's language. */
 export const CARD_UI: Record<
   CardLang,
-  { badge: string; sent: string; ok: string; isNew: string; flat: string; showTable: string; hideTable: string; total: string; category: string; change: string; chart: string; unverified: string; weatherToolOnly: string; degrees: string; locating: string; locationDenied: string; locationUnavailable: string; locationToolOnly: string }
+  { badge: string; sent: string; ok: string; isNew: string; flat: string; showTable: string; hideTable: string; total: string; category: string; change: string; chart: string; unverified: string; weatherToolOnly: string; degrees: string; locating: string; locationDenied: string; locationUnavailable: string; locationToolOnly: string; rainChance: string }
 > = {
   th: {
     badge: "การ์ดสร้างโดย AI", sent: "ส่งคำตอบแล้ว", ok: "ตกลง", isNew: "ใหม่", flat: "คงที่",
     showTable: "ดูเป็นตาราง", unverified: "⚠ ตัวเลขในกราฟนี้ AI พิมพ์เอง ยังไม่ได้คำนวณจากไฟล์โดยระบบ", hideTable: "ซ่อนตาราง", total: "รวม", category: "หมวด", change: "เปลี่ยนแปลง", chart: "กราฟ",
     weatherToolOnly: "⚠ การ์ดสภาพอากาศนี้ AI พิมพ์เอง ระบบจึงไม่แสดง ข้อมูลสภาพอากาศต้องมาจากเครื่องมือ weather_now", degrees: "องศา",
-    locating: "กำลังหาตำแหน่ง…", locationDenied: "ไม่ได้รับอนุญาตให้ใช้ตำแหน่ง พิมพ์ชื่อเมืองแทนได้", locationUnavailable: "หาตำแหน่งปัจจุบันไม่ได้ พิมพ์ชื่อเมืองแทนได้", locationToolOnly: "⚠ ปุ่มส่งตำแหน่งนี้ AI พิมพ์เอง ระบบจึงไม่แสดง",
+    locating: "กำลังหาตำแหน่ง…", locationDenied: "ไม่ได้รับอนุญาตให้ใช้ตำแหน่ง พิมพ์ชื่อเมืองแทนได้", locationUnavailable: "หาตำแหน่งปัจจุบันไม่ได้ พิมพ์ชื่อเมืองแทนได้", locationToolOnly: "⚠ ปุ่มส่งตำแหน่งนี้ AI พิมพ์เอง ระบบจึงไม่แสดง", rainChance: "โอกาสฝนตก",
   },
   en: {
     badge: "AI-generated card", sent: "Answer sent", ok: "OK", isNew: "new", flat: "flat",
     showTable: "Show table", unverified: "⚠ The AI typed these numbers itself; they were not computed from the data by the system", hideTable: "Hide table", total: "Total", category: "Category", change: "Change", chart: "Chart",
     weatherToolOnly: "⚠ The AI typed this weather card itself, so it is not shown. Weather must come from the weather_now tool", degrees: "degrees",
-    locating: "Finding your location…", locationDenied: "Location permission was denied. Type a city instead.", locationUnavailable: "Your location is not available. Type a city instead.", locationToolOnly: "⚠ The AI typed this location button itself, so it is not shown",
+    locating: "Finding your location…", locationDenied: "Location permission was denied. Type a city instead.", locationUnavailable: "Your location is not available. Type a city instead.", locationToolOnly: "⚠ The AI typed this location button itself, so it is not shown", rainChance: "chance of rain",
   },
 };
 

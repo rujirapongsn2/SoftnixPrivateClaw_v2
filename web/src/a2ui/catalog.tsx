@@ -348,6 +348,11 @@ const WeatherCardApi = {
       date: z.string().max(80).optional(),
       location: z.string().max(120),
       updated: z.string().max(80).optional(),
+      outlook: z.string().max(100).optional(),
+      hours: z
+        .array(z.object({ time: z.string().max(8), chance: z.number().finite().min(0).max(100) }).strict())
+        .max(24)
+        .optional(),
       weight: z.number().optional(),
     })
     .strict(),
@@ -369,6 +374,8 @@ const SWeatherCard = createComponentImplementation(WeatherCardApi, ({ props }) =
       date={props.date}
       location={props.location}
       updated={props.updated}
+      outlook={props.outlook}
+      hours={props.hours}
       lang={lang}
     />
   );
