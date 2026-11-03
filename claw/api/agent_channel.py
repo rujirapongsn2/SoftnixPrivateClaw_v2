@@ -267,7 +267,7 @@ async def update_agent_client(
     if client is None:
         raise HTTPException(status_code=404, detail="No such agent key.")
     await state.audit.log(
-        "agent_channel.key_connectors_changed",
+        "agent_channel.key_connectors",
         {"client_id": client.id, "client": client.name, "connector_ids": connector_ids},
         user_id=user.id,
     )
@@ -303,7 +303,7 @@ async def set_agent_callback(
         raise HTTPException(status_code=404, detail="No such agent key.")
     client, secret = result
     await state.audit.log(
-        "agent_channel.key_callback_changed",
+        "agent_channel.key_callback",
         {
             "client_id": client.id,
             "client": client.name,
