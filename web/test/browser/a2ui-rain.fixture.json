@@ -1,0 +1,80 @@
+[
+  {
+    "version": "v0.9",
+    "createSurface": {
+      "surfaceId": "weather",
+      "catalogId": "https://softnix.ai/a2ui/catalogs/privateclaw/v0.9.json"
+    }
+  },
+  {
+    "version": "v0.9",
+    "updateComponents": {
+      "surfaceId": "weather",
+      "components": [
+        {
+          "id": "root",
+          "component": "WeatherCard",
+          "condition": "partlyCloudy",
+          "isDay": true,
+          "temperature": 30,
+          "unit": "C",
+          "label": "มีเมฆบางส่วน",
+          "date": "วันจันทร์ที่ 2 พฤศจิกายน 2569",
+          "location": "ดินแดง, กรุงเทพมหานคร",
+          "updated": "อัปเดต 14:30 · ข้อมูลจาก Open-Meteo",
+          "outlook": "โอกาสฝนสูงสุด 70% ราว 17:00",
+          "hours": [
+            {
+              "time": "14:00",
+              "chance": 45
+            },
+            {
+              "time": "15:00",
+              "chance": 55
+            },
+            {
+              "time": "16:00",
+              "chance": 65
+            },
+            {
+              "time": "17:00",
+              "chance": 70
+            },
+            {
+              "time": "18:00",
+              "chance": 60
+            },
+            {
+              "time": "19:00",
+              "chance": 60
+            },
+            {
+              "time": "20:00",
+              "chance": 20
+            },
+            {
+              "time": "21:00",
+              "chance": 10
+            },
+            {
+              "time": "22:00",
+              "chance": 5
+            },
+            {
+              "time": "23:00",
+              "chance": 0
+            },
+            {
+              "time": "00:00",
+              "chance": 0
+            },
+            {
+              "time": "01:00",
+              "chance": 0
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

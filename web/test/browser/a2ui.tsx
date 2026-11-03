@@ -7,6 +7,7 @@ import '../../src/styles.css';
 import clarify from './a2ui-clarify.fixture.json';
 import price from './a2ui-price.fixture.json';
 import locationAsk from './a2ui-location.fixture.json';
+import rain from './a2ui-rain.fixture.json';
 
 const record = (t: string) => {
   (window as any).__a2uiActions = [...((window as any).__a2uiActions ?? []), t];
@@ -40,6 +41,8 @@ createRoot(document.getElementById('root')!).render(
     <section id="invalid"><h4>2. invalid JSON</h4><A2uiCard source={'{"components": [ {"id": "root", '} interactive onAction={record} /></section>
     <section id="xss"><h4>3. XSS payload</h4><A2uiCard source={xss} interactive onAction={record} /></section>
     <section id="weather"><h4>5. weather_now artifacts (inside the chat's .claw-artifacts flex row)</h4>{weatherCards.map((w, i) => <div key={i} className="claw-artifacts"><A2uiCard source={wx(w)} interactive={false} language="json" /></div>)}</section>
+    <section id="rain"><h4>10. weather_now hourly=true: rain chance for the next 12 hours</h4><div className="claw-artifacts"><A2uiCard source={JSON.stringify(rain)} interactive={false} language="json" /></div></section>
+    <section id="rain-narrow" style={{ maxWidth: 360 }}><h4>11. rain, narrow column</h4><div className="claw-artifacts"><A2uiCard source={JSON.stringify(rain)} interactive={false} language="json" /></div></section>
     <section id="weather-narrow" style={{ maxWidth: 360 }}><h4>6. weather, narrow column</h4><div className="claw-artifacts"><A2uiCard source={wx(weatherCards[0])} interactive={false} language="json" /></div></section>
     <section id="location"><h4>8. weather_now with no location: ask where the user is</h4><A2uiCard source={JSON.stringify(locationAsk)} interactive onAction={record} language="json" /></section>
     <section id="location-inline"><h4>9. location button typed inline by the model</h4><A2uiCard source={JSON.stringify(locationAsk)} interactive onAction={record} /></section>

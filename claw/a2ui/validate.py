@@ -207,7 +207,8 @@ def validate_chart(c: dict) -> list[str]:
     return errs
 
 
-_WEATHER_TEXT = {"label": 60, "location": 120, "date": 80, "updated": 80}
+_WEATHER_TEXT = {"label": 60, "location": 120, "date": 80, "updated": 80, "outlook": 100}
+_WEATHER_MAX_HOURS = 24
 _WEATHER_REQUIRED_TEXT = ("label", "location")
 
 
@@ -226,7 +227,22 @@ def validate_weather(c: dict) -> list[str]:
             errs.append(f"{key}: string (max {cap} chars)")
     if c.get("unit") not in (None, "C", "F"):
         errs.append("unit: C|F")
-    extra = set(c) - {"id", "component", "condition", "temperature", "isDay", "unit", "weight", *_WEATHER_TEXT}
+    hours = c.get("hours")
+    if hours is not None and not (
+        isinstance(hours, list)
+        and len(hours) <= _WEATHER_MAX_HOURS
+        and all(
+            isinstance(h, dict)
+            and set(h) == {"time", "chance"}
+            and isinstance(h["time"], str)
+            and len(h["time"]) <= 8
+            and is_finite_number(h["chance"])
+            and 0 <= h["chance"] <= 100
+            for h in hours
+        )
+    ):
+        errs.append(f"hours: at most {_WEATHER_MAX_HOURS} of {{time: string, chance: 0-100}}")
+    extra = set(c) - {"id", "component", "condition", "temperature", "isDay", "unit", "hours", "weight", *_WEATHER_TEXT}
     if extra:
         errs.append(f"unknown keys {sorted(extra)}")
     return errs

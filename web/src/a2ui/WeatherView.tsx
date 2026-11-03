@@ -18,6 +18,8 @@ type Props = {
   date?: string;
   location: string;
   updated?: string;
+  outlook?: string;
+  hours?: { time: string; chance: number }[];
   lang: CardLang;
 };
 
@@ -135,7 +137,7 @@ function WeatherIcon({ condition, isDay }: { condition: WeatherCondition; isDay:
   );
 }
 
-export function WeatherView({ condition, isDay, temperature, unit, label, date, location, updated, lang }: Props) {
+export function WeatherView({ condition, isDay, temperature, unit, label, date, location, updated, outlook, hours, lang }: Props) {
   const temp = Math.round(temperature);
   const unitWord = unit === "F" ? "Fahrenheit" : lang === "th" ? "เซลเซียส" : "Celsius";
   return (
@@ -160,6 +162,22 @@ export function WeatherView({ condition, isDay, temperature, unit, label, date, 
           {updated ? <span className="a2ui-weather-updated">{updated}</span> : null}
         </div>
       </div>
+      {hours?.length ? (
+        <div className="a2ui-weather-hours">
+          {outlook ? <span className="a2ui-weather-outlook">{outlook}</span> : null}
+          <ol>
+            {hours.map((h, i) => (
+              <li key={i} aria-label={`${h.time} ${CARD_UI[lang].rainChance} ${Math.round(h.chance)}%`}>
+                <span aria-hidden="true">{Math.round(h.chance)}%</span>
+                <span className="a2ui-weather-bar" aria-hidden="true">
+                  <span style={{ height: `${Math.max(4, h.chance)}%` }} />
+                </span>
+                <span aria-hidden="true">{h.time}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
       <WeatherIcon condition={condition} isDay={isDay} />
     </section>
   );
