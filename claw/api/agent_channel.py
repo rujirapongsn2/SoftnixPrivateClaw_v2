@@ -6,19 +6,22 @@
 """
 
 from datetime import datetime, timedelta, timezone
+from typing import Literal
+from urllib.parse import urlsplit
 
 from sqlalchemy.exc import IntegrityError
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from claw.api.deps import AppState, current_user, get_state, require_admin
 from claw.api.settings_acl import acl_for_user
 from claw.channels.agent import TURN_STALE_AFTER, AgentBusy, ConversationLimit
+from claw.channels.agent_webhook import InvalidCallbackUrl, validate_callback_url
 from claw.core.limits import RateLimiter
 from claw.db.models import AgentClient, AgentTurn, User
-from claw.db.stores import AgentChannelStore, agent_client_status
+from claw.db.stores import AgentChannelStore, AgentKeyInactive, agent_client_status
 
 router = APIRouter()
 
@@ -40,19 +43,37 @@ def _client_json(client: AgentClient, owner_email: str | None = None) -> dict:
         "expires_at": client.expires_at.isoformat() if client.expires_at else None,
         "last_used_at": client.last_used_at.isoformat() if client.last_used_at else None,
         "created_at": client.created_at.isoformat() if client.created_at else None,
+        # The owner sees the full URL; the Control Plane only its host, as a
+        # URL may carry a token of the receiver's in its path or query.
+        "callback_url": client.callback_url if owner_email is None else None,
+        "callback_host": urlsplit(client.callback_url).hostname if client.callback_url else None,
     }
     if owner_email is not None:
         out["owner_email"] = owner_email
     return out
 
 
-def _turn_json(turn: AgentTurn) -> dict:
-    return {
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _turn_json(turn: AgentTurn, listing: bool = False) -> dict:
+    out = {
         "turn_id": turn.id,
         "conversation_id": turn.conversation_id,
         "status": turn.status,
         "reply": turn.reply if turn.status != "working" else None,
+        "created_at": _iso(turn.created_at),
+        "finished_at": _iso(turn.finished_at),
     }
+    if listing:
+        out["message_preview"] = turn.message_preview or ""
+        out["webhook"] = (
+            {"status": turn.webhook_status, "attempts": turn.webhook_attempts, "at": _iso(turn.webhook_at)}
+            if turn.webhook_status
+            else None
+        )
+    return out
 
 
 def _error(status: int, message: str, headers: dict | None = None) -> JSONResponse:
@@ -133,6 +154,56 @@ async def agent_turn(turn_id: str, request: Request, state: AppState = Depends(g
     return _turn_json(turn)
 
 
+_CONVERSATION_ID = r"^[A-Za-z0-9._:-]+$"
+TurnStatus = Literal["working", "completed", "failed"]
+
+
+async def _list_turns(
+    request: Request,
+    state: AppState,
+    conversation_id: str | None,
+    status: str | None,
+    since: datetime | None,
+    limit: int,
+):
+    client = await _agent_client(request, state)
+    if isinstance(client, JSONResponse):
+        return client
+    store = state.agent_channel_store
+    await store.fail_stale_turns(datetime.now(timezone.utc) - TURN_STALE_AFTER, client.id)
+    if since is not None and since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    turns = await store.list_turns(client.id, conversation_id, status, since, limit)
+    return {"turns": [_turn_json(t, listing=True) for t in turns]}
+
+
+@router.get("/api/agent/v1/conversations/{conversation_id}/turns")
+async def agent_conversation_turns(
+    request: Request,
+    conversation_id: str = Path(min_length=1, max_length=128, pattern=_CONVERSATION_ID),
+    status: TurnStatus | None = None,
+    since: datetime | None = None,
+    limit: int = Query(default=5, ge=1, le=AgentChannelStore.MAX_LIST),
+    state: AppState = Depends(get_state),
+):
+    """The newest turns of one of the calling key's conversations: find a turn
+    whose id was lost, e.g. "is my last question done yet?"."""
+    return await _list_turns(request, state, conversation_id, status, since, limit)
+
+
+@router.get("/api/agent/v1/turns")
+async def agent_turns(
+    request: Request,
+    conversation_id: str | None = Query(default=None, min_length=1, max_length=128, pattern=_CONVERSATION_ID),
+    status: TurnStatus | None = None,
+    since: datetime | None = None,
+    limit: int = Query(default=5, ge=1, le=AgentChannelStore.MAX_LIST),
+    state: AppState = Depends(get_state),
+):
+    """The calling key's newest turns, optionally of one conversation or since a time."""
+    return await _list_turns(request, state, conversation_id, status, since, limit)
+
+
 # ------------------------------------------------------------- the owner's keys
 
 class AgentClientBody(BaseModel):
@@ -201,6 +272,50 @@ async def update_agent_client(
         user_id=user.id,
     )
     return _client_json(client)
+
+
+class AgentCallbackBody(BaseModel):
+    # None or "" removes the webhook.
+    callback_url: str | None = Field(default=None, max_length=2048)
+    rotate_secret: bool = False
+
+
+@router.put("/api/agent-clients/{client_id}/callback")
+async def set_agent_callback(
+    client_id: str, body: AgentCallbackBody, user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> dict:
+    """Set, change or remove a key's completion webhook. The signing secret is
+    returned only when a new one is made (first URL, or rotate_secret)."""
+    if not await _may_use_agents(state, user):
+        raise HTTPException(status_code=403, detail="Agent access is not available to you.")
+    url: str | None = None
+    if body.callback_url and body.callback_url.strip():
+        allow_http = bool(getattr(state.agent_channel, "webhook_allow_http", False))
+        try:
+            url = await validate_callback_url(body.callback_url, allow_http=allow_http)
+        except InvalidCallbackUrl as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        result = await state.agent_channel_store.set_callback(user.id, client_id, url, body.rotate_secret)
+    except AgentKeyInactive:
+        raise HTTPException(status_code=409, detail="This agent key is revoked or expired.") from None
+    if result is None:
+        raise HTTPException(status_code=404, detail="No such agent key.")
+    client, secret = result
+    await state.audit.log(
+        "agent_channel.key_callback_changed",
+        {
+            "client_id": client.id,
+            "client": client.name,
+            "callback_host": urlsplit(url).hostname if url else None,
+            "secret_rotated": secret is not None,
+        },
+        user_id=user.id,
+    )
+    out: dict = {"client": _client_json(client)}
+    if secret is not None:
+        out["secret"] = secret
+    return out
 
 
 @router.delete("/api/agent-clients/{client_id}")

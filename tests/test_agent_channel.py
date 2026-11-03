@@ -366,10 +366,16 @@ async def test_connectors_offered_are_the_users_own_and_global_ones(db_factory):
 
 # ---------------------------------------------------------------- migration
 
+def _load_migration(path):
+    spec = importlib.util.spec_from_file_location(path, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_migration_creates_and_drops_the_tables(tmp_path):
-    spec = importlib.util.spec_from_file_location("m", "migrations/versions/f1c4a8e2b7d3_agent_channel.py")
-    migration = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration)
+    migration = _load_migration("migrations/versions/f1c4a8e2b7d3_agent_channel.py")
+    follow_up = _load_migration("migrations/versions/a8d2c6e4f1b9_agent_turns_list_webhook.py")
     engine = sa.create_engine(f"sqlite:///{tmp_path}/m.db")
     legacy = sa.MetaData()
     sa.Table("users", legacy, sa.Column("id", sa.String(32), primary_key=True))
@@ -381,11 +387,17 @@ def test_migration_creates_and_drops_the_tables(tmp_path):
                 step()
 
     run(migration.upgrade)
+    run(follow_up.upgrade)
     tables = set(sa.inspect(engine).get_table_names())
     assert {"agent_clients", "agent_conversations", "agent_turns"} <= tables
     for table in ("agent_clients", "agent_conversations", "agent_turns"):
         model_cols = {c.name for c in Base.metadata.tables[table].columns}
         assert model_cols == {c["name"] for c in sa.inspect(engine).get_columns(table)}, table
+    indexes = {i["name"] for i in sa.inspect(engine).get_indexes("agent_turns")}
+    assert "ix_agent_turns_client_conversation_created" in indexes
+    run(follow_up.downgrade)
+    assert "callback_url" not in {c["name"] for c in sa.inspect(engine).get_columns("agent_clients")}
+    assert "message_preview" not in {c["name"] for c in sa.inspect(engine).get_columns("agent_turns")}
     run(migration.downgrade)
     assert not {"agent_clients", "agent_conversations", "agent_turns"} & set(sa.inspect(engine).get_table_names())
 

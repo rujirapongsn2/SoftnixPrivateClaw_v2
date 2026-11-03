@@ -216,7 +216,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from claw.db.stores import AgentChannelStore
 
     agent_channel_store = AgentChannelStore(factory, settings.secret_key)
-    agent_channel = AgentChannelService(runtime, agent_channel_store, sessions, users, connectors, audit)
+    agent_channel = AgentChannelService(
+        runtime, agent_channel_store, sessions, users, connectors, audit,
+        webhook_allow_http=settings.agent_webhook_allow_http,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -348,6 +351,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await workspace_cleanup.stop()
         await knowledge_service.stop()
         await telegram_mgr.stop()
+        # Agent Channel turns and webhook deliveries are background tasks of
+        # their own: bounded wait, then cancel, before the database goes away.
+        await agent_channel.aclose()
         await runtime.drain()
         await connectors_mgr.shutdown()
         if browser_mgr is not None:

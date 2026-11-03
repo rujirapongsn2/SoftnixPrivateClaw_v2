@@ -850,6 +850,11 @@ class AgentClient(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Optional completion webhook: when a turn finishes, a signed POST goes here
+    # (claw/channels/agent_webhook.py). The signing secret is stored encrypted
+    # (SecretBox) because the server must read it back to sign.
+    callback_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    callback_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AgentConversation(Base):
@@ -874,6 +879,8 @@ class AgentTurn(Base):
     __table_args__ = (
         UniqueConstraint("client_id", "idempotency_key", name="uq_agent_turns_idempotency"),
         Index("ix_agent_turns_created", "created_at"),
+        # Newest turns of one conversation, for GET .../conversations/{id}/turns.
+        Index("ix_agent_turns_client_conversation_created", "client_id", "conversation_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
@@ -884,3 +891,11 @@ class AgentTurn(Base):
     reply: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # First characters of the message, so a caller listing turns can tell them apart.
+    message_preview: Mapped[str] = mapped_column(String(200), default="")
+    # Completion webhook delivery: None when the key has no callback URL,
+    # else pending | delivered | failed.
+    webhook_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    webhook_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    webhook_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    webhook_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

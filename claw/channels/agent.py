@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 
+from claw.channels import agent_webhook
 from claw.core.events import TurnError
 from claw.core.runtime import AgentRuntime, TurnFailed
 from claw.db.models import AgentClient, AgentTurn
@@ -31,6 +32,8 @@ TURN_STALE_AFTER = timedelta(minutes=30)
 # Each new conversation id opens a chat in the owner's list; this bounds it.
 MAX_CONVERSATIONS = 50
 _PRUNE_EVERY = timedelta(hours=1)
+# On shutdown, how long running turns and webhook deliveries may finish before being cancelled.
+SHUTDOWN_GRACE_SECONDS = 10.0
 # How long a client's resolved tool names are reused before resolving again.
 TOOL_CACHE_SECONDS = 60.0
 
@@ -54,8 +57,11 @@ class AgentChannelService:
         users: UserStore,
         connectors: ConnectorStore,
         audit: AuditStore,
+        webhook_allow_http: bool = False,
     ):
         self.runtime = runtime
+        # Dev only: lets a key's callback URL use plain http (still public hosts only).
+        self.webhook_allow_http = webhook_allow_http
         self.store = store
         self.sessions = sessions
         self.users = users
@@ -65,6 +71,8 @@ class AgentChannelService:
         # asyncio keeps only a weak reference to a task; a turn that outlives its
         # request would otherwise be collectable mid-run.
         self._tasks: set[asyncio.Task] = set()
+        # Set once shutdown starts cancelling: no new background work after that.
+        self._cancelling = False
         self._pruned_at: datetime | None = None
         self._tool_cache: dict[tuple, tuple[float, frozenset[str]]] = {}
 
@@ -132,16 +140,18 @@ class AgentChannelService:
                 and await self.store.count_conversations(client.id) >= MAX_CONVERSATIONS
             ):
                 raise ConversationLimit()
-            turn, created = await self.store.start_turn(client.id, conversation_id, idempotency_key)
+            turn, created = await self.store.start_turn(client.id, conversation_id, idempotency_key, message)
         except BaseException:
             self._busy.discard(client.id)
             raise
         if not created:
             self._busy.discard(client.id)
             return turn
-        task = asyncio.create_task(self._run(client, turn.id, conversation_id, message, locale))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task = self._spawn(self._run(client, turn.id, conversation_id, message, locale))
+        if task is None:  # shutting down
+            await self.store.finish_turn(turn.id, "failed", "The server is shutting down. Retry shortly.")
+            self._busy.discard(client.id)
+            return await self.store.get_turn(client.id, turn.id) or turn
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=WAIT_SECONDS)
         except asyncio.TimeoutError:
@@ -204,6 +214,69 @@ class AgentChannelService:
                 user_id=client.owner_id,
                 session_id=session_id,
             )
+            # Its own task, so a slow or failing receiver never holds up the turn.
+            self._spawn(self._notify(client.id, turn_id))
+
+    def _spawn(self, coro) -> asyncio.Task | None:
+        if self._cancelling:
+            coro.close()
+            return None
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    async def aclose(self, timeout: float | None = None) -> None:
+        """Shutdown: let running turns and deliveries finish for a bounded time, then cancel.
+
+        A cancelled turn still records itself as failed (its `finally`), so it
+        is not left `working` for the next process to time out."""
+        grace = SHUTDOWN_GRACE_SECONDS if timeout is None else timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + grace
+        while self._tasks:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.wait(set(self._tasks), timeout=remaining)
+        self._cancelling = True
+        pending = set(self._tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            logger.warning("Agent channel cancelled {} unfinished task(s) at shutdown", len(pending))
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _notify(self, client_id: str, turn_id: str) -> None:
+        """Deliver the finished turn to the key's callback URL, if it has one."""
+        pending = False
+        try:
+            callback = await self.store.callback_for(client_id)
+            if callback is None:
+                return
+            turn = await self.store.get_turn(client_id, turn_id)
+            if turn is None or turn.status == "working":
+                return
+            url, secret = callback
+            if secret is None:
+                logger.warning("Agent webhook secret of client {} cannot be decrypted", client_id)
+                await self.store.record_webhook(
+                    turn_id, "failed", 0, "The signing secret cannot be decrypted; rotate the secret."
+                )
+                return
+            await self.store.record_webhook(turn_id, "pending", 0, None)
+            pending = True
+            status, attempts, error = await agent_webhook.deliver(
+                url, secret, agent_webhook.payload(turn), allow_http=self.webhook_allow_http
+            )
+            await self.store.record_webhook(turn_id, status, attempts, error)
+        except Exception:
+            logger.exception("Agent webhook for turn {} could not be sent", turn_id)
+            if pending:
+                try:
+                    await self.store.record_webhook(turn_id, "failed", 0, "Internal error while sending.")
+                except Exception:
+                    logger.exception("Agent webhook for turn {}: could not record the failure", turn_id)
 
     async def _maybe_prune(self) -> None:
         now = datetime.now(timezone.utc)

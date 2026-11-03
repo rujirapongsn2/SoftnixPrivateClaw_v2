@@ -3892,6 +3892,11 @@ function AgentAccessPanel() {
   const toast = useToast();
   const [editing, setEditing] = useState<string | null>(null);
   const [editPicked, setEditPicked] = useState<string[]>([]);
+  // The key whose webhook URL is being edited, and the draft URL.
+  const [hookEditing, setHookEditing] = useState<string | null>(null);
+  const [hookUrl, setHookUrl] = useState("");
+  // A webhook signing secret just made, shown once like the API key.
+  const [newSecret, setNewSecret] = useState<{ clientId: string; secret: string } | null>(null);
   const { error, guard } = useAsyncError();
 
   const reload = useCallback(() => api.listAgentClients().then(setData), []);
@@ -4034,8 +4039,92 @@ function AgentAccessPanel() {
                     {c.connector_ids.length ? c.connector_ids.map(connectorName).join(", ") : t("settings.agents.none")}
                   </Text>
                 )}
-                {c.status === "active" && editing !== c.id && (
+                {hookEditing === c.id ? (
+                  <>
+                    <TextInput label={t("settings.agents.webhookUrl")} value={hookUrl} onChange={setHookUrl} />
+                    <div className="claw-row">
+                      <Button
+                        label={t("admin.oauth.save")}
+                        variant="primary"
+                        isDisabled={!hookUrl.trim()}
+                        clickAction={() =>
+                          guard(async () => {
+                            const res = await api.setAgentCallback(c.id, hookUrl.trim());
+                            if (res.secret) setNewSecret({ clientId: c.id, secret: res.secret });
+                            setHookEditing(null);
+                            await reload();
+                          })
+                        }
+                      />
+                      {c.callback_url && (
+                        <Button
+                          label={t("settings.agents.webhookRotate")}
+                          variant="secondary"
+                          clickAction={() =>
+                            guard(async () => {
+                              const res = await api.setAgentCallback(c.id, hookUrl.trim() || c.callback_url, true);
+                              if (res.secret) setNewSecret({ clientId: c.id, secret: res.secret });
+                              setHookEditing(null);
+                              await reload();
+                            })
+                          }
+                        />
+                      )}
+                      {c.callback_url && (
+                        <Button
+                          label={t("settings.agents.webhookRemove")}
+                          variant="destructive"
+                          clickAction={() =>
+                            guard(async () => {
+                              await api.setAgentCallback(c.id, null);
+                              if (newSecret?.clientId === c.id) setNewSecret(null);
+                              setHookEditing(null);
+                              await reload();
+                            })
+                          }
+                        />
+                      )}
+                      <Button label={t("settings.agents.cancel")} variant="secondary" clickAction={() => setHookEditing(null)} />
+                    </div>
+                  </>
+                ) : (
+                  <Text size="sm">
+                    {t("settings.agents.webhook")}:{" "}
+                    {c.callback_url ?? t("settings.agents.webhookNone")}
+                  </Text>
+                )}
+                {newSecret?.clientId === c.id && (
+                  <Card padding={2} variant="muted">
+                    <Text weight="semibold">{t("settings.agents.webhookSecretOnce")}</Text>
+                    <pre className="claw-agent-snippet">{newSecret.secret}</pre>
+                    <div className="claw-row">
+                      <Button
+                        label={t("settings.agents.copyKey")}
+                        icon={<Icon icon={Copy} size="sm" />}
+                        variant="primary"
+                        clickAction={async () => {
+                          const ok = await writeClipboard(newSecret.secret);
+                          toast(
+                            ok
+                              ? { body: t("chat.info.copied"), type: "info", autoHideDuration: 2500 }
+                              : { body: t("chat.error.copyFailed"), type: "error", autoHideDuration: 4000 },
+                          );
+                        }}
+                      />
+                      <Button label={t("settings.agents.done")} variant="secondary" clickAction={() => setNewSecret(null)} />
+                    </div>
+                  </Card>
+                )}
+                {c.status === "active" && editing !== c.id && hookEditing !== c.id && (
                   <div className="claw-row">
+                    <Button
+                      label={t("settings.agents.webhookEdit")}
+                      variant="secondary"
+                      clickAction={() => {
+                        setHookEditing(c.id);
+                        setHookUrl(c.callback_url ?? "");
+                      }}
+                    />
                     <Button
                       label={t("settings.agents.editConnectors")}
                       icon={<Icon icon={Pencil} size="sm" />}
@@ -4075,6 +4164,7 @@ function AgentAccessPanel() {
   -H "Content-Type: application/json" \\
   -d '{"conversation_id": "grok-main", "message": "..."}'`}</pre>
         <Text size="sm" color="secondary">{t("settings.agents.howReply")}</Text>
+        <Text size="sm" color="secondary">{t("settings.agents.listHint")}</Text>
       </Card>
     </div>
   );

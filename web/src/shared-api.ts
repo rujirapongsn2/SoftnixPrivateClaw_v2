@@ -1199,6 +1199,8 @@ export type AgentClientInfo = {
   expires_at: string | null;
   last_used_at: string | null;
   created_at: string | null;
+  callback_url: string | null;
+  callback_host: string | null;
   owner_email?: string;
 };
 
@@ -1859,6 +1861,11 @@ export const api = {
     request<AgentClientInfo>(`/api/agent-clients/${encodeURIComponent(id)}`, {
       method: "PUT",
       body: JSON.stringify({ connector_ids }),
+    }),
+  setAgentCallback: (id: string, callback_url: string | null, rotate_secret = false) =>
+    request<{ client: AgentClientInfo; secret?: string }>(`/api/agent-clients/${encodeURIComponent(id)}/callback`, {
+      method: "PUT",
+      body: JSON.stringify({ callback_url, rotate_secret }),
     }),
   revokeAgentClient: (id: string) =>
     request<{ revoked: boolean }>(`/api/agent-clients/${encodeURIComponent(id)}`, { method: "DELETE" }),
