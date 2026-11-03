@@ -386,6 +386,9 @@ class Settings(BaseSettings):
     # Off: tools and skill are not offered and the chat shows the JSON as code.
     a2ui_enabled: bool = True
     a2ui_weather: WeatherSettings = WeatherSettings()
+    # Agent Channel completion webhooks must use https. Dev only: allow plain
+    # http callback URLs (the SSRF guard still requires a public host).
+    agent_webhook_allow_http: bool = False
     # Spreadsheet tool (claw mode): create/edit/convert/read workbooks with the pinned
     # GridCraft engine (docs/spreadsheet-gridcraft-spec.md). Needs the binary from
     # scripts/install-gridcraft.sh; runs inside the sandbox container when enabled.

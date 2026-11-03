@@ -47,7 +47,7 @@ from claw.auth.mcp_oauth_discovery import (
     encode_grant,
     encode_pending,
 )
-from claw.security.crypto import UndecryptableSecret
+from claw.security.crypto import SecretBox, UndecryptableSecret
 from claw.db.models import (
     AgentClient,
     AgentConversation,
@@ -4791,6 +4791,10 @@ def agent_client_status(client: AgentClient, now: datetime | None = None) -> str
     return "active"
 
 
+class AgentKeyInactive(Exception):
+    """The agent key is revoked or expired; its settings can no longer change."""
+
+
 class AgentChannelStore:
     """Agent Channel state: the admin on/off switch, agent clients and their
     API keys, conversation-to-session bindings, and per-message turns.
@@ -4805,6 +4809,10 @@ class AgentChannelStore:
     _TOUCH_EVERY = timedelta(minutes=1)
     # Live keys one user may hold; revoked and expired ones do not count.
     MAX_ACTIVE_PER_OWNER = 10
+    # Characters of each message kept on its turn for listings.
+    PREVIEW_CHARS = 200
+    # Turns one listing may return.
+    MAX_LIST = 50
 
     # The switch is read on every agent request and page load; a short-lived
     # copy saves those reads. set_enabled refreshes it at once in this process.
@@ -4814,6 +4822,9 @@ class AgentChannelStore:
         self.factory = factory
         self._key_secret = key_secret.encode()
         self._enabled_cache: tuple[float, bool] | None = None
+        # Webhook signing secrets must be read back to sign, so they are
+        # encrypted (not hashed) under the same server secret.
+        self._box = SecretBox(key_secret)
 
     def _hash(self, key: str) -> str:
         return hmac.new(self._key_secret, key.encode(), hashlib.sha256).hexdigest()
@@ -4958,11 +4969,16 @@ class AgentChannelStore:
             await db.commit()
 
     async def start_turn(
-        self, client_id: str, conversation_id: str, idempotency_key: str | None
+        self, client_id: str, conversation_id: str, idempotency_key: str | None, message: str = ""
     ) -> tuple[AgentTurn, bool]:
         """A new turn, or the existing one for a repeated idempotency key (created=False)."""
         async with self.factory() as db:
-            row = AgentTurn(client_id=client_id, conversation_id=conversation_id, idempotency_key=idempotency_key)
+            row = AgentTurn(
+                client_id=client_id,
+                conversation_id=conversation_id,
+                idempotency_key=idempotency_key,
+                message_preview=" ".join((message or "").split())[: self.PREVIEW_CHARS],
+            )
             db.add(row)
             try:
                 await db.commit()
@@ -5027,6 +5043,83 @@ class AgentChannelStore:
                     .limit(1)
                 )
             ) is not None
+
+    async def list_turns(
+        self,
+        client_id: str,
+        conversation_id: str | None = None,
+        status: str | None = None,
+        since: datetime | None = None,
+        limit: int = 5,
+    ) -> list[AgentTurn]:
+        """This client's turns, newest first; never another client's."""
+        conditions = [AgentTurn.client_id == client_id]
+        if conversation_id is not None:
+            conditions.append(AgentTurn.conversation_id == conversation_id)
+        if status is not None:
+            conditions.append(AgentTurn.status == status)
+        if since is not None:
+            conditions.append(AgentTurn.created_at >= since)
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(AgentTurn)
+                .where(*conditions)
+                .order_by(AgentTurn.created_at.desc(), AgentTurn.id.desc())
+                .limit(max(1, min(limit, self.MAX_LIST)))
+            )
+            return list(rows)
+
+    async def set_callback(
+        self, owner_id: str, client_id: str, url: str | None, rotate_secret: bool = False
+    ) -> tuple[AgentClient, str | None] | None:
+        """Set or clear a key's completion webhook.
+
+        Returns the client and the signing secret when a new one was made (first
+        URL, or `rotate_secret`); like the API key it is shown only once. None
+        when the key is not the owner's; AgentKeyInactive for a revoked or
+        expired key."""
+        async with self.factory() as db:
+            row = await db.get(AgentClient, client_id)
+            if row is None or row.owner_id != owner_id:
+                return None
+            if agent_client_status(row) != "active":
+                raise AgentKeyInactive()
+            secret: str | None = None
+            if not url:
+                row.callback_url, row.callback_secret = None, None
+            else:
+                row.callback_url = url
+                if rotate_secret or not row.callback_secret:
+                    secret = f"whsec_{secrets.token_urlsafe(32)}"
+                    row.callback_secret = self._box.encrypt(secret)
+            await db.commit()
+            return row, secret
+
+    async def callback_for(self, client_id: str) -> tuple[str, str | None] | None:
+        """(url, signing secret) of a live key's webhook, or None.
+
+        The secret is None when it cannot be decrypted (the server secret_key
+        changed): the owner has to rotate it."""
+        async with self.factory() as db:
+            row = await db.get(AgentClient, client_id)
+        if row is None or not row.callback_url or not row.callback_secret:
+            return None
+        if agent_client_status(row) != "active":
+            return None
+        try:
+            return row.callback_url, self._box.decrypt_strict(row.callback_secret)
+        except UndecryptableSecret:
+            return row.callback_url, None
+
+    async def record_webhook(self, turn_id: str, status: str, attempts: int, error: str | None) -> None:
+        async with self.factory() as db:
+            row = await db.get(AgentTurn, turn_id)
+            if row is not None:
+                row.webhook_status = status
+                row.webhook_attempts = attempts
+                row.webhook_error = (error or None) and error[:255]
+                row.webhook_at = datetime.now(timezone.utc)
+                await db.commit()
 
     async def prune_turns(self, older_than: datetime) -> None:
         async with self.factory() as db:
