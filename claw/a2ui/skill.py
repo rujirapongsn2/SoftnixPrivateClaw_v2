@@ -8,7 +8,7 @@ A2UI_SKILL_DESCRIPTION = (
     "READ FIRST whenever a request is too broad to act on well (e.g. 'สร้างรายงาน', 'ทำสไลด์ให้หน่อย' with no topic, "
     "audience or format) — ask with a clickable A2UI choice card instead of a text question. Also how to show "
     "structured results as cards (present_ui), any chart/graph/กราฟ of data (chart_from_data, shown in the chat) and OpenRouter price "
-    "comparisons (openrouter_price_watch)."
+    "comparisons (openrouter_price_watch), and the current weather of a place (weather_now)."
 )
 
 A2UI_SKILL_CONTENT = f"""\
@@ -25,6 +25,8 @@ The chat renders A2UI v0.9 JSON as real UI built from the Softnix design system.
 - OpenRouter "new models / price comparison" -> call tool `openrouter_price_watch` (it builds the chart and computes every
   number in code). Never compute prices, percentages or arrows yourself.
 - Chart / graph / "show me the trend/share/ranking" of data -> tool `chart_from_data` (see "Charts" below).
+- Current weather of a place (สภาพอากาศ / อากาศตอนนี้) -> tool `weather_now` when it is listed (it fetches the real conditions and shows
+  a weather card). Never write a WeatherCard yourself and never state weather from memory.
 - Never put credentials/password fields, links or HTML in a card. All text is plain text.
 
 ## Charts (`chart_from_data`)

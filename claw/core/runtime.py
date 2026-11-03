@@ -484,11 +484,13 @@ class ClawAgent:
         from claw.tools.diagram import RenderDiagramTool
         self.tools.register(RenderDiagramTool(workspace, user_id))
         if settings.a2ui_enabled:
-            from claw.tools.a2ui import ChartFromDataTool, OpenRouterPriceWatchTool, PresentUiTool
+            from claw.tools.a2ui import ChartFromDataTool, OpenRouterPriceWatchTool, PresentUiTool, WeatherNowTool
 
             self.tools.register(PresentUiTool(workspace))
             self.tools.register(ChartFromDataTool(workspace))
             self.tools.register(OpenRouterPriceWatchTool(workspace))
+            if settings.a2ui_weather.enabled:
+                self.tools.register(WeatherNowTool(workspace, settings.a2ui_weather))
         if getattr(settings, "spreadsheet_enabled", False):
             from claw.tools.spreadsheet import SpreadsheetTool
 

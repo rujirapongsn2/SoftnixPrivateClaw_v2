@@ -5325,3 +5325,63 @@ a.claw-preview-action { text-decoration: none; }
   flex-direction: column;
   gap: 6px;
 }
+
+/* ---- A2UI WeatherCard (web/src/a2ui/WeatherView.tsx) ----
+   Sky-tinted card; the icon overflows the top-right corner, so the card keeps
+   room above it. Stacks vertically when the chat column is narrow.
+   The explicit width matters: container-type: inline-size makes the card's
+   content count as zero width, and its parent (.claw-artifacts, a flex row)
+   sizes items by content, so without it the card collapses to a sliver. */
+.a2ui-weather {
+  --a2ui-sky: linear-gradient(115deg, #3580e0 0%, #2569d6 55%, #1c55c2 100%);
+  container-type: inline-size;
+  width: 640px;
+  max-width: 100%;
+  box-sizing: border-box;
+  position: relative;
+  margin-top: 36px;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 0% 100%, rgba(255, 255, 255, 0.09) 0 110px, transparent 111px),
+    radial-gradient(circle at 72% -30%, rgba(255, 255, 255, 0.07) 0 200px, transparent 201px),
+    var(--a2ui-sky);
+  box-shadow: 0 20px 40px -22px rgba(22, 64, 150, 0.6);
+  color: #ffffff;
+}
+.a2ui-weather[data-sky="overcast"] { --a2ui-sky: linear-gradient(115deg, #5d7ca6 0%, #4b6890 60%, #3e5880 100%); }
+.a2ui-weather[data-sky="rain"] { --a2ui-sky: linear-gradient(115deg, #4f6690 0%, #34476e 60%, #273759 100%); }
+.a2ui-weather[data-sky="storm"] { --a2ui-sky: linear-gradient(115deg, #3f4766 0%, #2a3048 60%, #1d2236 100%); }
+.a2ui-weather[data-sky="night"] { --a2ui-sky: linear-gradient(115deg, #34398a 0%, #232866 60%, #161a45 100%); }
+.a2ui-weather-body {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  min-height: 150px;
+  padding: 24px 200px 24px 32px;
+  box-sizing: border-box;
+}
+.a2ui-weather-now { display: flex; flex-direction: column; gap: 2px; flex: none; }
+.a2ui-weather-label { font-size: 16px; }
+.a2ui-weather-temp { font-size: 64px; font-weight: 300; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.a2ui-weather-unit { font-size: 20px; font-weight: 400; margin-left: 2px; vertical-align: top; opacity: 0.85; }
+.a2ui-weather-sep { align-self: stretch; width: 1px; margin: 12px 0; background: rgba(255, 255, 255, 0.45); flex: none; }
+.a2ui-weather-meta { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.a2ui-weather-date { font-size: 17px; }
+.a2ui-weather-place { display: flex; align-items: center; gap: 6px; font-size: 17px; min-width: 0; }
+.a2ui-weather-place > span { overflow-wrap: anywhere; }
+.a2ui-weather-place > svg { flex: none; }
+.a2ui-weather-updated { font-size: 12px; color: rgba(255, 255, 255, 0.85); }
+.a2ui-weather-icon {
+  position: absolute;
+  right: 0;
+  top: -44px;
+  width: 210px;
+  height: auto;
+  pointer-events: none;
+}
+@container (max-width: 520px) {
+  .a2ui-weather-body { flex-direction: column; align-items: stretch; gap: 12px; padding: 76px 22px 20px; min-height: 0; }
+  .a2ui-weather-sep { width: auto; height: 1px; margin: 0; }
+  .a2ui-weather-icon { width: 160px; top: -36px; }
+}
+.a2ui-location { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }

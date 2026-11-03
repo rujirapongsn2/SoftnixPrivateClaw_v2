@@ -1,5 +1,5 @@
-"""A2UI tools (POC, behind CLAW_A2UI_ENABLED): `present_ui` and
-`openrouter_price_watch`. Both write a `.a2ui` artifact the chat renders as an
+"""A2UI tools (POC, behind CLAW_A2UI_ENABLED): `present_ui`, `chart_from_data`,
+`openrouter_price_watch` and `weather_now`. Each writes a `.a2ui` artifact the chat renders as an
 interactive card (web/src/a2ui/), so the card persists with the transcript.
 """
 
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 import os
 import time
 from pathlib import Path
@@ -15,9 +16,11 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from claw.a2ui import chart_data, price_watch
+from claw.a2ui import chart_data, price_watch, weather
 from claw.a2ui.validate import ALLOWED, normalize
 from claw.a2ui.writer import write_artifact
+from claw.config import WeatherSettings
+from claw.security.ssrf import ResponseTooLarge, read_bounded
 from claw.core.turn_context import current_session_id
 from claw.tools.base import Tool
 
@@ -39,13 +42,24 @@ _PRESENT_UI_DESCRIPTION = (
 )
 
 
-def _has_chart(messages: list[dict]) -> bool:
-    return any(
-        c.get("component") == "Chart"
+# Components whose values must be computed by their own tool, never typed into present_ui.
+_TOOL_ONLY = {
+    "Chart": "charts are made by tool chart_from_data (it computes the numbers from the file, or from `rows` you "
+    "pass with source='inline'); remove the Chart here and call chart_from_data",
+    "WeatherCard": "weather cards are made by tool weather_now (it fetches the real conditions); remove the "
+    "WeatherCard here and call weather_now",
+    "LocationButton": "the location button is shown only by tool weather_now (call it with no location); remove it here",
+}
+
+
+def _tool_only_errors(messages: list[dict]) -> list[str]:
+    found = {
+        c.get("component")
         for m in messages
         for c in (m.get("updateComponents") or {}).get("components", [])
         if isinstance(c, dict)
-    )
+    }
+    return [f"{name}: {why}" for name, why in _TOOL_ONLY.items() if name in found]
 
 
 class PresentUiTool(Tool):
@@ -89,9 +103,8 @@ class PresentUiTool(Tool):
     async def execute(self, messages: Any = None, title: str = "card", **_: Any) -> str:
         key = current_session_id.get() or "-"
         canonical, errors = normalize(messages, fallback_surface_id=(title or "card")[:40])
-        if canonical is not None and not errors and _has_chart(canonical):
-            errors = ["Chart: charts are made by tool chart_from_data (it computes the numbers from the file, or from "
-                      "`rows` you pass with source='inline'); remove the Chart here and call chart_from_data"]
+        if canonical is not None and not errors:
+            errors = _tool_only_errors(canonical)
         if errors or canonical is None:
             return self._fail(key, errors or ["payload: invalid"])
         self._failures.pop(key, None)
@@ -179,6 +192,184 @@ class OpenRouterPriceWatchTool(Tool):
         rel = await asyncio.to_thread(write_artifact, self.workspace, messages, "openrouter-prices")
         await asyncio.to_thread(self._save_snapshot, new_snap)
         return price_watch.summary_for_model(rows, new_snap["fetched_at"], rel, lang)
+
+
+_reverse_gate = asyncio.Lock()
+_reverse_last = [0.0]
+_REVERSE_SPACING_S = 1.0
+
+
+class WeatherNowTool(Tool):
+    name = "weather_now"
+    description = (
+        "Show the current weather (condition, temperature, local date and time) for a place as a weather card in the "
+        "chat, from the public Open-Meteo API (no key). Use it for any 'weather now / today / สภาพอากาศ / อากาศ' "
+        "question; never state weather from memory. Pass `location` = the place name, best in English (e.g. "
+        "'Bangkok', 'Chiang Mai'), or 'lat,lon'. If the user named no place and you do not know where they are, call "
+        "it with NO location: it shows a card where they share their current location or type a city, and their "
+        f"answer arrives as a card message ('{weather.LOCATION_EVENT}' with `location`); then call weather_now again with "
+        "that `location` exactly. It gives only the current conditions, no forecast. Set `lang` to the language of the "
+        "user's latest message ('th' or 'en'; 'en' for any other language) and reply in that language."
+    )
+    writes_workspace = True
+    parameters = {
+        "type": "object",
+        "properties": {
+            "location": {
+                "type": "string",
+                "maxLength": 100,
+                "description": "Place name (e.g. 'Bangkok') or 'lat,lon'. Omit to ask the user where they are.",
+            },
+            "lang": {"type": "string", "enum": ["th", "en"], "description": "Language of the user's latest message."},
+            "unit": {"type": "string", "enum": list(weather.UNITS), "description": "Default celsius."},
+        },
+    }
+
+    ASK_WINDOW_S = 600
+
+    def __init__(self, workspace: Path, settings: WeatherSettings | None = None, fetch: Any = None):
+        self.workspace = workspace
+        self.settings = settings or WeatherSettings()
+        self._fake_fetch = fetch
+        self._asked: dict[str, float] = {}  # session -> when the location card was last shown
+
+    @asynccontextmanager
+    async def _session(self):
+        """One HTTP client for the geocode + forecast pair of a call, so both reuse its connection pool."""
+        if self._fake_fetch is not None:
+            yield self._fake_fetch
+            return
+        async with httpx.AsyncClient(
+            timeout=10, follow_redirects=False, headers={"User-Agent": "SoftnixPrivateClaw/a2ui"}
+        ) as client:
+
+            async def fetch(url: str, params: dict) -> Any:
+                if self.settings.api_key and url in (self.settings.geocode_url, self.settings.forecast_url):
+                    params = {**params, "apikey": self.settings.api_key}
+                async with client.stream("GET", url, params=params) as resp:
+                    resp.raise_for_status()
+                    try:
+                        body = await read_bounded(resp, weather.MAX_RESPONSE_BYTES)
+                    except ResponseTooLarge as exc:
+                        raise weather.WeatherError("response too large") from exc
+                try:
+                    return json.loads(body)
+                except ValueError as exc:
+                    raise weather.WeatherError("response is not JSON") from exc
+
+            yield fetch
+
+    def _recently_asked(self, key: str) -> bool:
+        now = time.monotonic()
+        for k in [k for k, t in self._asked.items() if now - t > self.ASK_WINDOW_S]:
+            del self._asked[k]
+        return key in self._asked
+
+    async def _place(self, fetch: Any, query: str, lang: str) -> weather.Place | None:
+        key = (query.casefold(), lang)
+        hit = weather.places.get(key)
+        if hit is not None:
+            return hit
+        if key in weather.unknown_places:
+            return None
+        payload = await fetch(
+            self.settings.geocode_url, {"name": query, "count": 1, "language": lang, "format": "json"}
+        )
+        place = weather.parse_place(payload)
+        if place is None:
+            weather.unknown_places.put(key, True)
+        else:
+            weather.places.put(key, place)
+        return place
+
+    async def _name(self, fetch: Any, here: weather.Place, lang: str) -> weather.Place:
+        """Name shared coordinates; on any failure keep the coordinates label, the weather still shows."""
+        if not self.settings.reverse_geocode_url:
+            return here
+        key = (here.latitude, here.longitude, lang)
+        hit = weather.place_names.get(key)
+        if hit is not None:
+            return hit
+        try:
+            async with _reverse_gate:  # the public Nominatim allows one request per second
+                wait = _REVERSE_SPACING_S - (time.monotonic() - _reverse_last[0])
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                _reverse_last[0] = time.monotonic()
+                payload = await fetch(
+                    self.settings.reverse_geocode_url,
+                    {"lat": here.latitude, "lon": here.longitude, "format": "jsonv2", "zoom": 10, "accept-language": lang},
+                )
+        except Exception as exc:
+            logger.warning("weather_now reverse geocoding failed: {}", type(exc).__name__)
+            return here
+        named = weather.parse_reverse(payload, here)
+        if named is None:
+            return here
+        weather.place_names.put(key, named)
+        return named
+
+    async def _current(self, fetch: Any, place: weather.Place, unit: str) -> weather.Current:
+        key = (round(place.latitude, 2), round(place.longitude, 2), unit)
+        hit = weather.conditions.get(key)
+        if hit is not None:
+            return hit
+        payload = await fetch(
+            self.settings.forecast_url,
+            {
+                "latitude": place.latitude,
+                "longitude": place.longitude,
+                "current": "temperature_2m,weather_code,is_day",
+                "temperature_unit": unit,
+                "timezone": "auto",
+            },
+        )
+        cur = weather.parse_current(payload)
+        weather.conditions.put(key, cur)
+        return cur
+
+    async def execute(self, location: str = "", lang: str = "th", unit: str = "celsius", **_: Any) -> str:
+        query = " ".join(str(location or "").split())
+        if len(query) > 100:
+            return "Error: `location` must be a place name of at most 100 characters."
+        lang = weather.norm_lang(lang)
+        unit = unit if unit in weather.UNITS else "celsius"
+        session = current_session_id.get() or "-"
+        if not query:
+            if self._recently_asked(session):
+                return (
+                    "Error: the location card was already shown in this chat and came back without a place. Do not "
+                    "show it again: ask the user in plain text, in their language, which city they mean."
+                )
+            self._asked[session] = time.monotonic()
+            rel = await asyncio.to_thread(write_artifact, self.workspace, weather.build_location_request(lang), "weather-location")
+            return (
+                f"OK. A card asking where the user is was shown ({rel}). End your turn now with at most one short sentence "
+                "in the user's language; do not guess a place. Their answer arrives as the next user message "
+                f"('{weather.LOCATION_EVENT}' with `location`): call weather_now with that `location` exactly."
+            )
+        try:
+            async with self._session() as fetch:
+                here = weather.parse_coordinates(query, lang)
+                place = await self._name(fetch, here, lang) if here else await self._place(fetch, query, lang)
+                if place is None:
+                    return (
+                        f"Error: no place named {query!r} was found. Ask the user for a clearer place name (a city "
+                        "name in English works best). Do not guess the weather."
+                    )
+                cur = await self._current(fetch, place, unit)
+        except weather.WeatherError as exc:
+            logger.warning("weather_now got an unusable response: {}", exc)
+            return f"Error: {weather.SOURCE} returned unusable data ({exc}). Tell the user; do not guess the weather."
+        except Exception as exc:  # network/HTTP/JSON problems are the model's to report
+            # Not the exception itself: an httpx error's text carries the request URL, and so the API key.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.warning("weather_now fetch failed: {} (HTTP {})", type(exc).__name__, status)
+            return f"Error: could not reach {weather.SOURCE} ({type(exc).__name__}). Tell the user; do not guess the weather."
+        self._asked.pop(session, None)
+        messages = weather.build_messages(place, cur, lang, unit)
+        rel = await asyncio.to_thread(write_artifact, self.workspace, messages, "weather")
+        return weather.summary_for_model(place, cur, lang, unit, rel)
 
 
 _CHART_DESCRIPTION = (

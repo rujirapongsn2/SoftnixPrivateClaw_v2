@@ -216,3 +216,9 @@ test('chart maths: pie shares, arcs, stacks and ranges', () => {
   assert.deepEqual(valueRange('stackedBar', series, 3), [-1, 4]);
   assert.deepEqual(valueRange('bar', series, 3), [-2, 4]);
 });
+
+test('WeatherCard is in the Softnix catalog', () => {
+  const r = parseA2ui({ components: [{ id: 'root', component: 'WeatherCard', condition: 'rain', temperature: 26, label: 'ฝนตก', location: 'เชียงใหม่' }] });
+  assert.equal(r.ok, true);
+  assert.ok(CARD_UI.th.weatherToolOnly && CARD_UI.en.weatherToolOnly);
+});

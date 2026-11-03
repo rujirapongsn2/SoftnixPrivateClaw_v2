@@ -7,8 +7,8 @@
  * basic catalog's own Lit elements are never registered, so an agent can only
  * produce components that look like the rest of the product.
  *
- * DeltaStat / PriceChart / DataTable are Softnix extensions (A2UI v0.9 has no
- * chart or up/down arrow). Their numbers and directions are computed in code by
+ * DeltaStat / PriceChart / DataTable / Chart / WeatherCard are Softnix extensions
+ * (A2UI v0.9 has no chart, up/down arrow or weather card). Their numbers and directions are computed in code by
  * the tool that emits them, never by the model.
  *
  * Every string is rendered as a React text node — no HTML, no markdown, no URLs.
@@ -29,10 +29,13 @@ import {
   RowApi,
   TextApi,
   TextFieldApi,
+  ActionSchema,
+  DynamicStringSchema,
 } from "@a2ui/web_core/v0_9";
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useRef, useState, type ReactNode } from "react";
 import { z } from "zod";
 import { ChartView } from "./ChartView";
+import { WEATHER_CONDITIONS, WeatherView } from "./WeatherView";
 import { CHART_LIMITS, CHART_TYPES } from "./chartMath";
 import { CARD_UI, type CardLang, SOFTNIX_CATALOG_ID, deltaGlyph } from "./protocol";
 
@@ -333,6 +336,105 @@ const SDataTable = createComponentImplementation(DataTableApi, ({ props }) => (
   </div>
 ));
 
+const WeatherCardApi = {
+  name: "WeatherCard",
+  schema: z
+    .object({
+      condition: z.enum(WEATHER_CONDITIONS),
+      isDay: z.boolean().optional(),
+      temperature: z.number().finite().min(-100).max(150),
+      unit: z.enum(["C", "F"]).optional(),
+      label: z.string().max(60),
+      date: z.string().max(80).optional(),
+      location: z.string().max(120),
+      updated: z.string().max(80).optional(),
+      weight: z.number().optional(),
+    })
+    .strict(),
+};
+
+/** Weather must come from the weather_now tool: a card the model typed inline is not drawn. */
+const SWeatherCard = createComponentImplementation(WeatherCardApi, ({ props }) => {
+  const lang = useContext(A2uiLang);
+  if (useContext(A2uiInline)) {
+    return <Text size="sm" color="secondary">{CARD_UI[lang].weatherToolOnly}</Text>;
+  }
+  return (
+    <WeatherView
+      condition={props.condition}
+      isDay={props.isDay ?? true}
+      temperature={props.temperature}
+      unit={props.unit ?? "C"}
+      label={props.label}
+      date={props.date}
+      location={props.location}
+      updated={props.updated}
+      lang={lang}
+    />
+  );
+});
+
+const LocationButtonApi = {
+  name: "LocationButton",
+  schema: z
+    .object({
+      label: z.string().max(80),
+      // The REF descriptions make the binder treat these as a bound value (it adds setValue) and an action.
+      value: DynamicStringSchema.describe("REF:#/$defs/DynamicString"),
+      action: ActionSchema.describe("REF:#/$defs/Action"),
+      weight: z.number().optional(),
+    })
+    .strict(),
+};
+
+type GeoState = "idle" | "locating" | "denied" | "unavailable";
+
+/** Shares the browser's location only on the user's click, rounded to 2 decimals (~1 km), then
+ * sends the card's action, so the coordinates arrive as an ordinary chat message the user can see. */
+const SLocationButton = createComponentImplementation(LocationButtonApi, ({ props }) => {
+  const interactive = useContext(A2uiInteractive);
+  const inline = useContext(A2uiInline);
+  const ui = CARD_UI[useContext(A2uiLang)];
+  const [state, setState] = useState<GeoState>("idle");
+  // A fix can land seconds later, after the user typed a city and sent the card: then it must do nothing.
+  const liveRef = useRef(interactive);
+  liveRef.current = interactive;
+  if (inline) return <Text size="sm" color="secondary">{ui.locationToolOnly}</Text>;
+  const share = () => {
+    if (!interactive || state === "locating") return;
+    if (!window.isSecureContext || !("geolocation" in navigator)) {
+      setState("unavailable");
+      return;
+    }
+    setState("locating");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setState("idle");
+        if (!liveRef.current) return;
+        (props as { setValue?: (v: string) => void }).setValue?.(
+          `${pos.coords.latitude.toFixed(2)},${pos.coords.longitude.toFixed(2)}`,
+        );
+        void props.action?.();
+      },
+      (err) => setState(err.code === err.PERMISSION_DENIED ? "denied" : "unavailable"),
+      { enableHighAccuracy: false, timeout: 10_000, maximumAge: 600_000 },
+    );
+  };
+  const note = state === "denied" ? ui.locationDenied : state === "unavailable" ? ui.locationUnavailable : "";
+  return (
+    <div className="a2ui-location">
+      <Button
+        label={state === "locating" ? ui.locating : str(props.label)}
+        variant="primary"
+        size="sm"
+        isDisabled={!interactive || state === "locating"}
+        clickAction={share}
+      />
+      {note ? <Text size="sm" color="secondary" role="status">{note}</Text> : null}
+    </div>
+  );
+});
+
 export const softnixCatalog = new Catalog(SOFTNIX_CATALOG_ID, "v0.9", [
   SText,
   SColumn,
@@ -346,4 +448,6 @@ export const softnixCatalog = new Catalog(SOFTNIX_CATALOG_ID, "v0.9", [
   SPriceChart,
   SDataTable,
   SChart,
+  SWeatherCard,
+  SLocationButton,
 ]);
