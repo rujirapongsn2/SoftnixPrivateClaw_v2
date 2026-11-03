@@ -621,7 +621,7 @@ async def test_changing_a_keys_connectors_is_audited(db_factory):
         cid = (await c.post("/api/agent-clients", json={"name": "G"}, headers=_bearer(user))).json()["client"]["id"]
         await c.put(f"/api/agent-clients/{cid}", json={"connector_ids": []}, headers=_bearer(user))
     kinds = [row["kind"] for row in await app.state.claw.audit.list()]
-    assert "agent_channel.key_connectors_changed" in kinds
+    assert "agent_channel.key_connectors" in kinds
 
 
 async def test_failed_keys_are_braked_before_touching_the_database(db_factory, monkeypatch):

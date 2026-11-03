@@ -157,7 +157,7 @@ async def test_callback_url_is_validated_secret_shown_once_and_stored_encrypted(
         admin_view = (await c.get("/api/admin/agent-channel", headers=_bearer(admin))).json()["clients"][0]
         assert admin_view["callback_url"] is None and admin_view["callback_host"] == "hooks.example.com"
         audit = json.dumps(await state.audit.list())
-        assert "agent_channel.key_callback_changed" in audit and rotated["secret"] not in audit
+        assert "agent_channel.key_callback" in audit and rotated["secret"] not in audit
 
         cleared = (await c.put(path, json={"callback_url": None}, headers=_bearer(user))).json()
         assert cleared["client"]["callback_url"] is None
