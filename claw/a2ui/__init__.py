@@ -5,6 +5,9 @@ Feature flag: ``Settings.a2ui_enabled`` (env ``CLAW_A2UI_ENABLED``, default on).
 settings object (the built-in skill list) reads the same switch.
 """
 
+import math
+from typing import Any
+
 A2UI_VERSION = "v0.9"
 SOFTNIX_CATALOG_ID = "https://softnix.ai/a2ui/catalogs/privateclaw/v0.9.json"
 ARTIFACT_SUFFIX = ".a2ui"
@@ -19,3 +22,8 @@ def configure(enabled: bool) -> None:
 
 def is_enabled() -> bool:
     return _enabled
+
+
+def is_finite_number(v: Any) -> bool:
+    """A real int/float (not bool, NaN or infinity)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)

@@ -282,6 +282,28 @@ class SchedulerSettings(BaseModel):
     keep_run_chats: int = Field(default=7, ge=0)
 
 
+class WeatherSettings(BaseModel):
+    """The weather_now tool (A2UI WeatherCard), backed by Open-Meteo.
+
+    It sends the place name the user asked about to Open-Meteo, so turn it off
+    (CLAW_A2UI_WEATHER__ENABLED=false) where no data may leave the network. The
+    free endpoints are for non-commercial use; a commercial plan uses its own
+    customer-* URLs plus an API key (sent to Open-Meteo only).
+
+    A shared location is named by reverse geocoding (OpenStreetMap Nominatim,
+    max 1 request/s on the public server; point it at your own Nominatim for
+    heavier use). Empty: the card shows the coordinates instead.
+    """
+
+    enabled: bool = True
+    geocode_url: str = Field(default="https://geocoding-api.open-meteo.com/v1/search", pattern=r"^https://")
+    forecast_url: str = Field(default="https://api.open-meteo.com/v1/forecast", pattern=r"^https://")
+    api_key: str = ""
+    reverse_geocode_url: str = Field(
+        default="https://nominatim.openstreetmap.org/reverse", pattern=r"^(https://.+)?$"
+    )
+
+
 class LogSettings(BaseModel):
     """Application logging. Left unconfigured, loguru ships a stderr sink with
     `diagnose=True`, which prints the *value* of every local variable in every
@@ -363,6 +385,7 @@ class Settings(BaseSettings):
     # the present_ui / openrouter_price_watch tools and the a2ui-cards skill).
     # Off: tools and skill are not offered and the chat shows the JSON as code.
     a2ui_enabled: bool = True
+    a2ui_weather: WeatherSettings = WeatherSettings()
     # Spreadsheet tool (claw mode): create/edit/convert/read workbooks with the pinned
     # GridCraft engine (docs/spreadsheet-gridcraft-spec.md). Needs the binary from
     # scripts/install-gridcraft.sh; runs inside the sandbox container when enabled.

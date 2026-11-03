@@ -1,0 +1,102 @@
+[
+ {
+  "version": "v0.9",
+  "createSurface": {
+   "surfaceId": "weather-location",
+   "catalogId": "https://softnix.ai/a2ui/catalogs/privateclaw/v0.9.json"
+  }
+ },
+ {
+  "version": "v0.9",
+  "updateComponents": {
+   "surfaceId": "weather-location",
+   "components": [
+    {
+     "id": "root",
+     "component": "Card",
+     "child": "col"
+    },
+    {
+     "id": "col",
+     "component": "Column",
+     "children": [
+      "q",
+      "gps",
+      "city",
+      "actions"
+     ]
+    },
+    {
+     "id": "q",
+     "component": "Text",
+     "variant": "h4",
+     "text": "ขอทราบตำแหน่งเพื่อดูสภาพอากาศ"
+    },
+    {
+     "id": "gps",
+     "component": "LocationButton",
+     "label": "ส่งตำแหน่งปัจจุบัน",
+     "value": {
+      "path": "/location"
+     },
+     "action": {
+      "event": {
+       "name": "weather_location",
+       "context": {
+        "location": {
+         "path": "/location"
+        }
+       }
+      }
+     }
+    },
+    {
+     "id": "city",
+     "component": "TextField",
+     "label": "หรือพิมพ์ชื่อเมือง เช่น เชียงใหม่",
+     "value": {
+      "path": "/location"
+     }
+    },
+    {
+     "id": "actions",
+     "component": "Row",
+     "justify": "end",
+     "children": [
+      "send"
+     ]
+    },
+    {
+     "id": "send",
+     "component": "Button",
+     "child": "send_t",
+     "action": {
+      "event": {
+       "name": "weather_location",
+       "context": {
+        "location": {
+         "path": "/location"
+        }
+       }
+      }
+     }
+    },
+    {
+     "id": "send_t",
+     "component": "Text",
+     "text": "ส่ง"
+    }
+   ]
+  }
+ },
+ {
+  "version": "v0.9",
+  "updateDataModel": {
+   "surfaceId": "weather-location",
+   "path": "/",
+   "value": {
+    "location": ""
+   }
+  }
+ }
+]

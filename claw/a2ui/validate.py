@@ -13,7 +13,8 @@ import json
 import re
 from typing import Any
 
-from claw.a2ui import A2UI_VERSION, SOFTNIX_CATALOG_ID
+from claw.a2ui import A2UI_VERSION, SOFTNIX_CATALOG_ID, is_finite_number
+from claw.a2ui.weather import CONDITIONS as WEATHER_CONDITIONS
 
 MAX_COMPONENTS = 120
 MAX_STRING = 2_000
@@ -34,6 +35,8 @@ REQUIRED: dict[str, tuple[str, ...]] = {
     "PriceChart": ("items",),
     "DataTable": ("columns", "rows"),
     "Chart": ("chartType", "categories", "series"),
+    "WeatherCard": ("condition", "temperature", "label", "location"),
+    "LocationButton": ("label", "value", "action"),
 }
 
 # keep in step with web/src/a2ui/chartMath.ts
@@ -74,7 +77,13 @@ def _check_component(i: int, c: dict, errors: list[str]) -> None:
     for prop in REQUIRED[name]:
         if prop not in c:
             errors.append(f"{where}.{prop}: required for {name}")
-    if name == "Button":
+    if name == "LocationButton":
+        if not (isinstance(c.get("label"), str) and len(c["label"]) <= 80):
+            errors.append(f"{where}.label: string (max 80 chars)")
+        val = c.get("value")
+        if not (isinstance(val, dict) and isinstance(val.get("path"), str)):
+            errors.append(f'{where}.value: a {{"path": "/..."}} binding')
+    if name in ("Button", "LocationButton"):
         action = c.get("action")
         if isinstance(action, dict) and "functionCall" in action:
             errors.append(
@@ -126,12 +135,10 @@ def _check_component(i: int, c: dict, errors: list[str]) -> None:
             errors.append(f"{where}.rows: must be a list of objects")
     elif name == "Chart":
         errors.extend(f"{where}.{e}" for e in validate_chart(c))
+    elif name == "WeatherCard":
+        errors.extend(f"{where}.{e}" for e in validate_weather(c))
     elif name in ("Column", "Row") and not isinstance(c.get("children"), list):
         errors.append(f"{where}.children: must be a list of component ids")
-
-
-def _finite(v: Any) -> bool:
-    return _is_num(v) and v == v and v not in (float("inf"), float("-inf"))
 
 
 def validate_chart(c: dict) -> list[str]:
@@ -161,7 +168,7 @@ def validate_chart(c: dict) -> list[str]:
         vals = s.get("values")
         if not isinstance(vals, list) or len(vals) != len(cats):
             errs.append(f"series[{i}].values: one number (or null) per category")
-        elif not all(v is None or _finite(v) for v in vals):
+        elif not all(v is None or is_finite_number(v) for v in vals):
             errs.append(f"series[{i}].values: numbers or null only")
         elif ctype in ("pie", "donut", "progress") and any(v is not None and v < 0 for v in vals):
             errs.append(f"series[{i}].values: {ctype} values must be >= 0")
@@ -174,7 +181,7 @@ def validate_chart(c: dict) -> list[str]:
                 or (
                     isinstance(d, dict)
                     and d.get("direction") in ("up", "down", "flat", "new")
-                    and (d.get("pct") is None or _finite(d.get("pct")))
+                    and (d.get("pct") is None or is_finite_number(d.get("pct")))
                 )
                 for d in deltas
             )
@@ -195,8 +202,33 @@ def validate_chart(c: dict) -> list[str]:
     for key, cap in (("title", 200), ("unit", 20), ("xLabel", CHART_MAX_LABEL), ("yLabel", CHART_MAX_LABEL)):
         if c.get(key) is not None and not (isinstance(c[key], str) and len(c[key]) <= cap):
             errs.append(f"{key}: string (max {cap} chars)")
-    if c.get("max") is not None and not (_finite(c["max"]) and c["max"] > 0):
+    if c.get("max") is not None and not (is_finite_number(c["max"]) and c["max"] > 0):
         errs.append("max: positive number")
+    return errs
+
+
+_WEATHER_TEXT = {"label": 60, "location": 120, "date": 80, "updated": 80}
+_WEATHER_REQUIRED_TEXT = ("label", "location")
+
+
+def validate_weather(c: dict) -> list[str]:
+    """Structural rules of the Softnix `WeatherCard` component; errors are 'prop: message'."""
+    errs: list[str] = []
+    if c.get("condition") not in WEATHER_CONDITIONS:
+        errs.append(f"condition: one of {'|'.join(WEATHER_CONDITIONS)}")
+    if "temperature" in c and not (is_finite_number(c["temperature"]) and -100 <= c["temperature"] <= 150):
+        errs.append("temperature: a number between -100 and 150")
+    if c.get("isDay") is not None and not isinstance(c["isDay"], bool):
+        errs.append("isDay: boolean")
+    for key, cap in _WEATHER_TEXT.items():
+        present = key in _WEATHER_REQUIRED_TEXT or c.get(key) is not None
+        if present and not (isinstance(c.get(key), str) and len(c[key]) <= cap):
+            errs.append(f"{key}: string (max {cap} chars)")
+    if c.get("unit") not in (None, "C", "F"):
+        errs.append("unit: C|F")
+    extra = set(c) - {"id", "component", "condition", "temperature", "isDay", "unit", "weight", *_WEATHER_TEXT}
+    if extra:
+        errs.append(f"unknown keys {sorted(extra)}")
     return errs
 
 
