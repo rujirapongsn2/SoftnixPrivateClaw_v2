@@ -361,6 +361,25 @@ export interface SkillFinding {
   line: number;
   excerpt: string;
   count: number;
+  // The AI review's reason; absent on pattern findings stored before the AI review existed.
+  detail?: string;
+  source?: "pattern" | "ai";
+}
+
+export type SkillAIStatus = "off" | "pending" | "done" | "failed";
+
+export interface SkillAIReview {
+  status: SkillAIStatus;
+  model: string;
+  checked_at: string | null;
+  outdated: boolean;
+  error: string;
+}
+
+export interface SkillAIReviewSettings {
+  enabled: boolean;
+  model_id: string;
+  max_chars: number;
 }
 
 export interface SkillSecurityDecision {
@@ -378,16 +397,19 @@ export interface SkillAssessmentReport {
   name: string;
   visibility: SkillVisibility;
   source: string | null;
-  platform: Record<string, "platform" | "pattern_only" | "not_applicable">;
+  platform: Record<string, "platform" | "pattern_only" | "pattern_and_ai" | "not_applicable">;
   policy: SkillSecurityVerdict;
   status: "pending" | "current" | "outdated";
   // A pending review that gave up after its retries; a rescan or a save tries again.
   review_failed: boolean;
+  // Blocked as content an admin blocked, possibly in another skill.
+  content_blocked: boolean;
   max_severity?: SkillMaxSeverity;
   sha256?: string;
   scanner_version?: number;
   checked_at?: string;
   findings?: SkillFinding[];
+  ai_review?: SkillAIReview;
   // Owner and admin views only.
   decision?: SkillSecurityDecision;
   // Admin view only.
@@ -403,6 +425,7 @@ export interface SkillSecurityRow {
   subscribers: number;
   checked_at: string | null;
   review_failed: boolean;
+  ai_status: SkillAIStatus | null;
   decision: SkillSecurityDecision["decision"] | null;
   policy: SkillSecurityVerdict;
 }
@@ -1881,7 +1904,11 @@ export const api = {
     request<AdminBranding>(`/api/admin/branding/logo/${slot}`, { method: "DELETE" }),
 
   adminSkillSecuritySummary: () =>
-    request<{ by_severity: Partial<Record<SkillMaxSeverity | "pending", number>>; requested: number }>(
+    request<{
+      by_severity: Partial<Record<SkillMaxSeverity | "pending", number>>;
+      requested: number;
+      ai: Partial<Record<SkillAIStatus, number>>;
+    }>(
       "/api/admin/skill-security/summary",
     ),
   adminSkillSecurityList: (params: SkillSecurityListParams) => {
@@ -1925,6 +1952,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ policy }),
       signal,
+    }),
+  adminSkillSecurityAIReview: () =>
+    request<{
+      settings: SkillAIReviewSettings;
+      models: { model_id: string; label: string; provider: string }[];
+      default_model: string | null;
+      counts: Partial<Record<SkillAIStatus, number>>;
+    }>("/api/admin/skill-security/ai-review"),
+  adminSkillSecuritySaveAIReview: (settings: SkillAIReviewSettings) =>
+    request<{ settings: SkillAIReviewSettings }>("/api/admin/skill-security/ai-review", {
+      method: "PUT",
+      body: JSON.stringify(settings),
     }),
   adminSkillSecuritySavePolicy: (policy: SkillSecurityPolicy) =>
     request<{ policy: SkillSecurityPolicy; impact: SkillPolicyImpact }>("/api/admin/skill-security/policy", {

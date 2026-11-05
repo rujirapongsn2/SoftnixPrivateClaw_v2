@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from typing import Iterable
 
-SCANNER_VERSION = 3
+SCANNER_VERSION = 4
 
 SEVERITIES = ("info", "low", "medium", "high", "critical")
 _RANK = {s: i for i, s in enumerate(SEVERITIES)}
@@ -27,7 +27,7 @@ NONE = "none"  # max_severity of a skill with no findings above info
 # Which AST items the platform covers instead of the skill, or that do not apply to PrivateClaw.
 PLATFORM_STATUS = {
     "AST06": "platform",  # shell runs in a per-command Docker sandbox with network=none
-    "AST08": "pattern_only",  # until the LLM review runs, results come from pattern rules only
+    "AST08": "pattern_only",  # unless the AI review is on (claw/skills/ai_review.py)
     "AST09": "platform",  # owner, sharing scope, subscriptions and audit log exist
     "AST10": "not_applicable",  # one SKILL.md format
 }
@@ -53,6 +53,8 @@ class Finding:
     line: int
     excerpt: str
     count: int = 1  # matches of this rule in this file, the first one is the evidence
+    detail: str = ""  # the AI review's reason; pattern rules have none
+    source: str = "pattern"  # pattern | ai
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -64,6 +66,7 @@ class Assessment:
     scanner_version: int
     max_severity: str
     findings: tuple[Finding, ...]
+    fingerprint: str = ""  # content_fingerprint: what an admin block matches
 
 
 @dataclass(frozen=True)
@@ -215,6 +218,16 @@ def content_digest(content: str, bundle_id: str | None, description: str = "") -
     return h.hexdigest()
 
 
+def content_fingerprint(content: str, description: str, files: dict[str, bytes]) -> str:
+    """The skill's text and files, whatever its id or bundle version: the same skill created again or
+    imported again has the same fingerprint, so an admin block follows it."""
+    h = hashlib.sha256()
+    for path, data in [("SKILL.md", content.replace("\0", "").encode()), ("description", description.replace("\0", "").encode()),
+                       *sorted((k, v) for k, v in files.items() if k != "SKILL.md")]:
+        h.update(len(path.encode()).to_bytes(4, "big") + path.encode() + len(data).to_bytes(8, "big") + data)
+    return h.hexdigest()
+
+
 def _visible(text: str) -> str:
     """An excerpt a reviewer can read: invisible and control characters shown as code points, capped."""
     out = []
@@ -336,6 +349,14 @@ def max_severity(findings: Iterable[Finding]) -> str:
     return SEVERITIES[worst] if worst >= 0 else NONE
 
 
+def combined(findings: Iterable[dict]) -> tuple[str, str]:
+    """max_severity and the ast_codes column of stored findings from both review stages."""
+    findings = list(findings)
+    worst = max((_RANK.get(f.get("severity"), 0) for f in findings), default=0)
+    codes = sorted({f["ast"] for f in findings if _RANK.get(f.get("severity"), 0) > 0})
+    return (SEVERITIES[worst] if worst else NONE), (f",{','.join(codes)}," if codes else "")
+
+
 def _text_of(data: bytes) -> str | None:
     try:
         if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
@@ -371,4 +392,6 @@ def assess(
             )
         findings.extend(_scan_text(path, text if text is not None else _lossy_text_of(files[path]), patterns_only=binary))
     findings.sort(key=lambda f: (-_RANK[f.severity], f.ast, f.rule, f.file, f.line))
-    return Assessment(digest, SCANNER_VERSION, max_severity(findings), tuple(findings))
+    return Assessment(
+        digest, SCANNER_VERSION, max_severity(findings), tuple(findings), content_fingerprint(content, description, files)
+    )

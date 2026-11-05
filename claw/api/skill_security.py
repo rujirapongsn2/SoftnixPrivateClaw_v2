@@ -31,7 +31,8 @@ def verdict_json(security) -> dict:
 
 def report_json(report: dict, *, show_decision: bool) -> dict:
     """A skill's review as the owner and admins see it. `show_decision` adds the request or decision."""
-    from claw.skills.assessment import PLATFORM_STATUS, SCANNER_VERSION
+    from claw.skills.ai_review import AI_REVIEW_VERSION
+    from claw.skills.assessment import PLATFORM_STATUS, SCANNER_VERSION, SEVERITIES
 
     row, decision = report["assessment"], report["decision"]
     out: dict = {
@@ -42,19 +43,34 @@ def report_json(report: dict, *, show_decision: bool) -> dict:
         "platform": PLATFORM_STATUS,
         "policy": verdict_json(report["verdict"]),
         "status": "pending",
-        # The last review gave up after its retries (this process); a rescan or a save tries again.
+        # The last review gave up after its retries; a rescan or a save tries again.
         "review_failed": report["review_failed"],
+        # Blocked as content an admin blocked, possibly under another skill.
+        "content_blocked": report["content_blocked"],
     }
     if row is not None:
         # The report only carries a review of the current content; only a newer scanner makes it outdated.
+        ai_current = row.ai_sha256 == row.content_sha256
+        rank = {s: i for i, s in enumerate(SEVERITIES)}
+        findings = [*row.findings, *(row.ai_findings if ai_current else [])]
+        findings.sort(key=lambda f: -rank.get(f.get("severity"), 0))
         out.update(
             status="current" if row.scanner_version == SCANNER_VERSION else "outdated",
             max_severity=row.max_severity,
             sha256=row.content_sha256,
             scanner_version=row.scanner_version,
             checked_at=row.checked_at.isoformat(),
-            findings=row.findings,
+            findings=findings,
+            ai_review={
+                "status": row.ai_status,
+                "model": row.ai_model if ai_current else "",
+                "checked_at": row.ai_checked_at.isoformat() if ai_current and row.ai_checked_at else None,
+                "outdated": ai_current and row.ai_version != AI_REVIEW_VERSION,
+                "error": row.ai_error,
+            },
         )
+        if row.ai_status == "done" and ai_current:
+            out["platform"] = {**PLATFORM_STATUS, "AST08": "pattern_and_ai"}
     if show_decision and decision is not None:
         out["decision"] = {
             "decision": decision.decision,
@@ -104,6 +120,7 @@ async def list_skills(
                 "subscribers": r["subscribers"],
                 "checked_at": r["checked_at"].isoformat() if r["checked_at"] else None,
                 "review_failed": r["review_failed"],
+                "ai_status": r["ai_status"],
                 "decision": r["decision"],
                 "policy": verdict_json(r["verdict"]),
             }
@@ -195,3 +212,36 @@ async def set_policy(body: PolicyBody, admin: User = Depends(require_admin), sta
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await state.audit.log("skill_sec.policy", {"before": before, "after": after, "impact": impact}, user_id=admin.id)
     return {"policy": after, "impact": impact}
+
+
+class AIReviewBody(BaseModel):
+    enabled: bool
+    model_id: str = Field("", max_length=200)
+    max_chars: int = Field(120_000, ge=20_000, le=400_000)
+
+
+def _ai_json(settings) -> dict:
+    return {"enabled": settings.enabled, "model_id": settings.model_id, "max_chars": settings.max_chars}
+
+
+@router.get("/ai-review")
+async def get_ai_review(_: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
+    """The AI review settings, the admin chat models it can use, and how far it got."""
+    models = await state.llm_config.enabled_models(None) if state.llm_config is not None else []
+    return {
+        "settings": _ai_json(await state.skills.ai_review_settings()),
+        "models": [{"model_id": m["model_id"], "label": m["label"], "provider": m["provider"]} for m in models if m["scope"] == "global"],
+        "default_model": await state.llm_config.default_model() if state.llm_config is not None else None,
+        "counts": (await state.skills.security_summary())["ai"],
+    }
+
+
+@router.put("/ai-review")
+async def set_ai_review(body: AIReviewBody, admin: User = Depends(require_admin), state: AppState = Depends(get_state)) -> dict:
+    model_id = body.model_id.strip()
+    if model_id and (state.llm_config is None or await state.llm_config.resolve(model_id) is None):
+        raise HTTPException(status_code=400, detail="Choose an enabled chat model from the Control Plane")
+    before = _ai_json(await state.skills.ai_review_settings())
+    after = _ai_json(await state.skills.set_ai_review_settings(body.enabled, model_id, body.max_chars))
+    await state.audit.log("skill_sec.ai_review", {"before": before, "after": after}, user_id=admin.id)
+    return {"settings": after}

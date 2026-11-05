@@ -63,6 +63,9 @@ def text_turn(text: str) -> list[ProviderEvent]:
 
 @pytest.fixture
 async def db_factory(tmp_path):
+    from claw.db.stores import set_ai_reviewer
+
+    set_ai_reviewer(None)  # an app built by an earlier test left its own
     engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/test.db")
     await init_db(engine)
     yield factory
