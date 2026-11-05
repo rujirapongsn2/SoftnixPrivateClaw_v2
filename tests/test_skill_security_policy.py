@@ -307,21 +307,29 @@ async def test_a_refused_group_choice_saves_nothing(db_factory, people, stores):
     assert (await store.get_by_name(owner.id, "notes")).content == CLEAN
 
 
-async def test_a_slow_review_refuses_the_share_instead_of_hanging(db_factory, people, monkeypatch):
+async def test_a_slow_review_saves_the_share_but_holds_it_until_the_review_lands(db_factory, people, monkeypatch):
     import time
 
     from claw.db import stores as stores_module
 
-    owner, _, _ = people
+    owner, peer, _ = people
     store = SkillStore(db_factory)
     real = stores_module._decode_and_assess
     monkeypatch.setattr(stores_module, "_decode_and_assess", lambda *a: (time.sleep(0.5), real(*a))[1])
     monkeypatch.setattr(stores_module, "SHARE_REVIEW_TIMEOUT_S", 0.05)
-    with pytest.raises(SkillShareBlocked, match="still running"):
-        await store.upsert(owner.id, "notes", description="d", content=CLEAN, visibility="public")
+    saved = await store.upsert(owner.id, "notes", description="d", content=CLEAN, visibility="public")
+    assert saved.visibility == "public" and saved.security.reason == "pending"
+    assert "notes" not in await _readable_names(store, peer.id)
     await settle_assessments()
-    saved = await store.upsert(owner.id, "notes", visibility="public")
-    assert saved.visibility == "public" and saved.security.reason == "policy" and saved.policy_readable is True
+    assert "notes" in await _readable_names(store, peer.id)
+    # Content the policy keeps to its owner stays held once its review lands.
+    await store.upsert(owner.id, "crit", description="d", content=CRITICAL, visibility="public")
+    await settle_assessments()
+    assert "crit" not in await _readable_names(store, peer.id)
+
+
+async def _readable_names(store, user_id):
+    return {s.name for s in await store.available_for_user(user_id) if s.policy_readable}
 
 
 async def test_a_suspended_share_cannot_be_subscribed_or_read(db_factory, people):

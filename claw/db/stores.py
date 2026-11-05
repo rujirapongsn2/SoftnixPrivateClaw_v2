@@ -33,6 +33,8 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy import event, inspect as sa_inspect
+
+from claw.skills.ai_review import HOLDS as _AI_HOLDS
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -81,6 +83,7 @@ from claw.db.models import (
     Share,
     Skill,
     SkillAssessment,
+    SkillBlockedContent,
     SkillSecurityDecision,
     SkillBundleVersion,
     SkillSubscription,
@@ -606,11 +609,6 @@ def _stamp_skill_digest(_mapper, _connection, skill: Skill) -> None:
     skill.content_sha256 = content_digest(skill.content or "", skill.bundle_id, skill.description or "")
 
 
-def _ast_column(findings) -> str:
-    codes = sorted({f.ast for f in findings if f.severity != "info"})
-    return f",{','.join(codes)}," if codes else ""
-
-
 def _decode_and_assess(content: str, stored: str | None, source: dict | None, digest: str, description: str):
     from claw.skills import assessment
 
@@ -665,23 +663,45 @@ async def assess_skill(
                 values = dict(
                     content_sha256=result.sha256,
                     scanner_version=result.scanner_version,
-                    max_severity=result.max_severity,
                     findings=[f.as_dict() for f in result.findings],
-                    ast_codes=_ast_column(result.findings),
+                    fingerprint=result.fingerprint,
                     checked_at=_now(),
                 )
+                if row is None or row.content_sha256 != result.sha256:
+                    # New content: the AI findings were of other text. With the AI review on, it waits for one.
+                    ai_on = (await _ai_settings(db)).enabled
+                    values.update(
+                        ai_status="pending" if ai_on else "off", ai_sha256="", ai_version=0, ai_model="",
+                        ai_error="", ai_findings=[], ai_checked_at=None,
+                    )
                 if row is None:
                     row = SkillAssessment(skill_id=skill_id, created_at=_now(), **values)
                     db.add(row)
                 else:
                     for key, value in values.items():
                         setattr(row, key, value)
+                row.max_severity, row.ast_codes = _combined(row)
             try:
                 await db.commit()
                 return row
             except IntegrityError:
                 await db.rollback()
     return None
+
+
+def _combined(row: SkillAssessment) -> tuple[str, str]:
+    """max_severity and ast_codes of both stages, the AI findings only while they are of this content."""
+    from claw.skills.assessment import combined
+
+    ai = row.ai_findings if row.ai_sha256 == row.content_sha256 else []
+    return combined([*(row.findings or []), *(ai or [])])
+
+
+async def _ai_settings(db: AsyncSession):
+    from claw.skills.ai_review import SETTINGS_KEY, parse_settings
+
+    row = await db.get(AppSetting, SETTINGS_KEY)
+    return parse_settings(row.value if row else None)
 
 
 # A failed review leaves the skill owner-only, so it is retried after a pause that doubles up to the
@@ -700,8 +720,10 @@ async def _review_until_current(factory: async_sessionmaker[AsyncSession], skill
         _review_forced.discard(skill_id)
         attempts += 1
         try:
-            await assess_skill(factory, skill_id, force=force)
+            row = await assess_skill(factory, skill_id, force=force)
             _review_failed.pop(skill_id, None)
+            if _ai_reviewer is not None and row is not None and (force or row.ai_status == "pending"):
+                _ai_reviewer.schedule(skill_id, force=force)
         except Exception as exc:  # saving a skill never fails because its review did
             if force:
                 _review_forced.add(skill_id)
@@ -736,21 +758,211 @@ def schedule_assessment(factory: async_sessionmaker[AsyncSession], skill_id: str
 
 
 async def settle_assessments(cancel: bool = False, timeout: float | None = None) -> None:
-    """Wait for queued reviews (tests), or cancel them and wait briefly (shutdown)."""
+    """Wait until no review is queued, AI reviews included (tests), or cancel them and wait briefly
+    (shutdown). A review can queue another (a pattern review its AI review), so it waits in rounds."""
     loop = asyncio.get_running_loop()
-    pending = [t for t in _reviews.values() if t.get_loop() is loop and not t.done()]
-    for task in pending if cancel else ():
-        task.cancel()
-    if pending:
-        await asyncio.wait(pending, timeout=timeout)
+    deadline = None if timeout is None else loop.time() + timeout
+
+    def pending() -> list[asyncio.Task]:
+        tasks = [*_reviews.values(), *(_ai_reviewer.tasks() if _ai_reviewer is not None else ())]
+        return [t for t in tasks if t.get_loop() is loop and not t.done()]
+
+    while tasks := pending():
+        for task in tasks if cancel else ():
+            task.cancel()
+        left = None if deadline is None else deadline - loop.time()
+        if left is not None and left <= 0:
+            return
+        await asyncio.wait(tasks, timeout=left)
+        if cancel:
+            return
+
+
+class AIReviewUnavailable(RuntimeError):
+    """No usable model for the AI review: the chosen one is disabled, unhealthy or gone."""
+
+
+class SkillAIReviewer:
+    """The AI review stage (claw/skills/ai_review.py): one model call per new content, at most
+    MAX_CONCURRENT at a time, coalesced per skill like the pattern reviews.
+
+    A review of earlier content is dropped. After ATTEMPTS failures, content that waits for it
+    (`pending`) becomes `failed`: still owner-only, and an admin sees it and can rescan."""
+
+    MAX_CONCURRENT = 2
+    ATTEMPTS = 3
+    RETRY_S = 30.0
+    CALL_TIMEOUT_S = 180.0
+    MAX_TOKENS = 4096
+
+    def __init__(self, factory, provider, llm_config=None, usage=None, redact: Callable[[str], str] | None = None):
+        self.factory, self.provider, self.llm_config, self.usage = factory, provider, llm_config, usage
+        self.redact = redact or (lambda text: text)
+        self._slots = asyncio.Semaphore(self.MAX_CONCURRENT)
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._again: set[str] = set()
+        self._forced: set[str] = set()
+
+    def tasks(self) -> list[asyncio.Task]:
+        return list(self._tasks.values())
+
+    def schedule(self, skill_id: str, force: bool = False) -> asyncio.Task:
+        if force:
+            self._forced.add(skill_id)
+        task = self._tasks.get(skill_id)
+        if task is not None and not task.done() and task.get_loop() is asyncio.get_running_loop():
+            self._again.add(skill_id)
+            return task
+        task = asyncio.create_task(self._until_current(skill_id))
+        self._tasks[skill_id] = task
+        task.add_done_callback(lambda done: self._tasks.pop(skill_id) if self._tasks.get(skill_id) is done else None)
+        return task
+
+    async def _until_current(self, skill_id: str) -> None:
+        attempts, wait = 0, self.RETRY_S
+        while True:
+            self._again.discard(skill_id)
+            force = skill_id in self._forced
+            self._forced.discard(skill_id)
+            attempts += 1
+            try:
+                await self.review(skill_id, force=force)
+            except Exception as exc:
+                reason = "no_model" if isinstance(exc, AIReviewUnavailable) else type(exc).__name__
+                if force:
+                    self._forced.add(skill_id)
+                if attempts >= self.ATTEMPTS:
+                    logger.error("skill AI review of {} gave up after {} attempts: {}", skill_id, attempts, reason)
+                    await self._give_up(skill_id, reason)
+                    return
+                logger.warning("skill AI review failed for {}, retrying in {}s: {}", skill_id, wait, reason)
+                await asyncio.sleep(wait)
+                wait *= 2
+                continue
+            if skill_id not in self._again:
+                return
+
+    async def _give_up(self, skill_id: str, reason: str) -> None:
+        async with self.factory() as db:
+            await db.execute(
+                SkillAssessment.__table__.update()
+                .where(SkillAssessment.skill_id == skill_id, SkillAssessment.ai_status == "pending")
+                .values(ai_status="failed", ai_error=reason[:64])
+            )
+            await db.commit()
+
+    async def _model(self, model_id: str) -> tuple[str | None, str | None, str | None]:
+        """(model, api_key, api_base). An unset model is the admin's default, else the provider's own."""
+        if not model_id and self.llm_config is not None:
+            model_id = await self.llm_config.default_model() or ""
+        if not model_id:
+            return None, None, None
+        found = await self.llm_config.resolve(model_id) if self.llm_config is not None else None
+        if found is None:
+            raise AIReviewUnavailable(model_id)
+        return found["model_id"], found["api_key"] or None, found["api_base"] or None
+
+    async def review(self, skill_id: str, force: bool = False) -> str:
+        """Review the skill's current content with the model and store the findings. Returns what
+        happened: off, stale, current or done."""
+        from claw.skills import ai_review
+
+        async with self.factory() as db:
+            settings = await _ai_settings(db)
+            skill = await db.get(Skill, skill_id)
+            row = await db.get(SkillAssessment, skill_id)
+            if not settings.enabled:
+                if row is not None and row.ai_status in ai_review.HOLDS:
+                    row.ai_status = "off"  # held as the review was turned off: nothing will review it now
+                    await db.commit()
+                return "off"
+            if skill is None or row is None or row.content_sha256 != skill.content_sha256:
+                return "stale"  # the pattern review of this content comes first, and queues this one
+            if not force and row.ai_status == "done" and row.ai_sha256 == row.content_sha256 and row.ai_version == ai_review.AI_REVIEW_VERSION:
+                return "current"
+            digest, owner_id = row.content_sha256, skill.user_id
+            content, description, bundle_id = skill.content or "", skill.description or "", skill.bundle_id
+            stored = await db.scalar(
+                select(cast(SkillBundleVersion.files, Text)).where(SkillBundleVersion.id == bundle_id)
+            ) if bundle_id else None
+        model, api_key, api_base = await self._model(settings.model_id)
+        texts, included, skipped = await asyncio.get_running_loop().run_in_executor(
+            _SCAN_POOL, _review_input, content, description, stored, settings.max_chars, self.redact
+        )
+        async with self._slots:
+            async with asyncio.timeout(self.CALL_TIMEOUT_S):
+                result = await self.provider.chat(
+                    ai_review.build_messages(texts, included), tools=ai_review.TOOL, model=model,
+                    max_tokens=self.MAX_TOKENS, temperature=0.0, api_key=api_key, api_base=api_base,
+                )
+        if self.usage is not None and result.usage:
+            # Background work an admin turned on: billed, but not a turn the owner took.
+            await self.usage.record(owner_id, None, model or "", result.usage, count_turn=False, count_plan_turn=False)
+        call = next((c for c in result.tool_calls if c.name == ai_review.TOOL_NAME), None)
+        if call is None:
+            raise ai_review.InvalidReview("the model did not call report_findings")
+        findings, dropped = ai_review.parse_findings(call.arguments, texts, included)
+        if dropped:
+            logger.info("skill AI review of {} dropped {} unusable finding(s)", skill_id, dropped)
+        if skipped:
+            findings.append(ai_review.coverage_finding(skipped))
+        async with self.factory() as db:
+            saved = await db.scalar(select(Skill.content_sha256).where(Skill.id == skill_id).with_for_update())
+            row = await db.get(SkillAssessment, skill_id)
+            if saved != digest or row is None or row.content_sha256 != digest:
+                return "stale"
+            row.ai_status, row.ai_sha256, row.ai_version = "done", digest, ai_review.AI_REVIEW_VERSION
+            row.ai_model, row.ai_error, row.ai_checked_at = (model or "")[:200], "", _now()
+            row.ai_findings = [f.as_dict() for f in findings]
+            row.max_severity, row.ast_codes = _combined(row)
+            await db.commit()
+        return "done"
+
+
+def _review_input(
+    content: str, description: str, stored: str | None, max_chars: int, redact: Callable[[str], str]
+) -> tuple[dict[str, str], list[str], list[str]]:
+    """(redacted texts, included, skipped): what the model reads within `max_chars` and what it does
+    not. SKILL.md, the description unless SKILL.md carries it, and every bundle file that is clean
+    text, whatever its suffix. A file it cannot read is skipped, so the report says so, except a
+    binary under a binary suffix (an icon), which the pattern rules cover. Off the event loop: the
+    masks are dozens of regexes over the whole bundle. A failed mask raises, so nothing is sent."""
+    from claw.skills.ai_review import DESCRIPTION_PATH, select_files
+    from claw.skills.assessment import BINARY_SUFFIXES, _text_of
+
+    texts = {"SKILL.md": content.replace("\0", "")}
+    if description.strip() and description not in content:
+        texts[DESCRIPTION_PATH] = description.replace("\0", "")
+    unread = []
+    for path, data in (json.loads(stored) if stored else {}).items():
+        if path == "SKILL.md":
+            continue
+        text = _text_of(base64.b64decode(data))
+        if text is not None and path != DESCRIPTION_PATH:
+            texts[path] = text
+        elif text is not None or not path.lower().endswith(tuple(BINARY_SUFFIXES)):
+            unread.append(path)
+    included, skipped = select_files(texts, max_chars)
+    return {path: redact(texts[path]) for path in included}, included, sorted([*skipped, *unread])
+
+
+_ai_reviewer: SkillAIReviewer | None = None
+
+
+def set_ai_reviewer(reviewer: SkillAIReviewer | None) -> None:
+    """The process's AI reviewer (claw/main.py). Without one, content saved with the review on waits."""
+    global _ai_reviewer
+    _ai_reviewer = reviewer
 
 
 class SkillShareBlocked(ValueError):
     """Sharing at `visibility` is beyond what the security policy allows this skill."""
 
-    def __init__(self, visibility: str, found):
+    def __init__(self, visibility: str, found, failed: bool = False):
         self.visibility, self.verdict = visibility, found
-        if found is None or found.reason == "pending":
+        if failed:
+            super().__init__("The security review of this skill failed; ask an administrator to rescan it")
+        elif found is None or found.reason == "pending":
             super().__init__("The security review of this skill is still running; try sharing it again in a moment")
         else:
             super().__init__("This skill cannot be shared that widely under the skill security policy")
@@ -771,24 +983,37 @@ _open_request = (SkillSecurityDecision.decision == "requested") & (
 )
 
 
+# Content waiting for its AI review, or whose AI review failed, reads as not reviewed: owner only.
+_ai_holds = SkillAssessment.ai_status.in_(_AI_HOLDS)
+_shareable_review_sha = case((_ai_holds, None), else_=SkillAssessment.content_sha256)
+# Content an admin blocked, under whatever skill holds it now.
+_blocked_content = (SkillBlockedContent.fingerprint == SkillAssessment.fingerprint) & (SkillAssessment.fingerprint != "")
+
+
 def _with_security(query):
     """Add the review and decision columns a Verdict needs, without loading findings."""
-    return query.add_columns(
-        SkillAssessment.content_sha256,
-        SkillAssessment.max_severity,
-        SkillAssessment.ast_codes,
-        SkillSecurityDecision.decision,
-        SkillSecurityDecision.content_sha256,
-        SkillSecurityDecision.scope,
-    ).outerjoin(SkillAssessment, _current_review).outerjoin(
-        SkillSecurityDecision, SkillSecurityDecision.skill_id == Skill.id
+    return (
+        query.add_columns(
+            _shareable_review_sha,
+            SkillAssessment.max_severity,
+            SkillAssessment.ast_codes,
+            SkillSecurityDecision.decision,
+            SkillSecurityDecision.content_sha256,
+            SkillSecurityDecision.scope,
+            SkillBlockedContent.fingerprint,
+        )
+        .outerjoin(SkillAssessment, _current_review)
+        .outerjoin(SkillSecurityDecision, SkillSecurityDecision.skill_id == Skill.id)
+        .outerjoin(SkillBlockedContent, _blocked_content)
     )
 
 
-def _review_and_decision(sha, severity, codes, decision, decision_sha, scope):
+def _review_and_decision(sha, severity, codes, decision, decision_sha, scope, blocked=None):
     from claw.skills.security_policy import Decision, Review
 
     review = Review(sha, severity, tuple(c for c in (codes or "").split(",") if c)) if sha else None
+    if blocked:
+        return review, Decision("block", "", None)
     return review, (Decision(decision, decision_sha or "", scope) if decision else None)
 
 
@@ -844,6 +1069,7 @@ class SkillStore:
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
         self.factory = factory
         self._policy_cache: tuple[dict[str, str], float] | None = None
+        self._ai_backfill: asyncio.Task | None = None
 
     async def _policy(self, db: AsyncSession) -> dict[str, str]:
         cached = self._policy_cache
@@ -941,7 +1167,12 @@ class SkillStore:
             review = schedule_assessment(self.factory, skill.id)  # the check needs this content's review
             await asyncio.wait({review}, timeout=SHARE_REVIEW_TIMEOUT_S)
             found = await self.share_verdict(skill.id)
-            if found is None or not permits(found.scope, visibility):
+            # Still in review (the AI review takes longer than this wait): the share is saved and read as
+            # owner-only until the review lands, then the policy decides. A review that failed will not
+            # land on its own, so that share is refused and says why.
+            if found is not None and found.reason == "pending" and await self._review_gave_up(skill.id):
+                raise SkillShareBlocked(visibility, found, failed=True)
+            if found is None or (found.reason != "pending" and not permits(found.scope, visibility)):
                 raise SkillShareBlocked(visibility, found)
             # Visibility is not reviewed content. By id: a skill deleted during the wait stays deleted.
             skill = await self._save(user_id, name, held, review=False, skill_id=skill.id)
@@ -951,6 +1182,15 @@ class SkillStore:
         if skill.security is not None:
             skill.policy_readable = readable(skill.security.scope, skill.visibility, True)
         return skill
+
+    async def _review_gave_up(self, skill_id: str) -> bool:
+        if skill_id in _review_failed:
+            return True
+        async with self.factory() as db:
+            status = await db.scalar(
+                select(SkillAssessment.ai_status).join(Skill, _current_review).where(Skill.id == skill_id)
+            )
+        return status == "failed"
 
     async def share_verdict(self, skill_id: str):
         """The security Verdict of one skill under the current policy, or None if it does not exist."""
@@ -1084,10 +1324,11 @@ class SkillStore:
         async with self.factory() as db:
             query = (
                 select(Skill.id, Skill.name, Skill.user_id, Skill.visibility, Skill.updated_at, Skill.bundle_metadata,
-                       SkillAssessment, SkillSecurityDecision)
+                       SkillAssessment, SkillSecurityDecision, SkillBlockedContent.fingerprint.label("blocked"))
                 .join(User, User.id == Skill.user_id)
                 .outerjoin(SkillAssessment, _current_review)
                 .outerjoin(SkillSecurityDecision, SkillSecurityDecision.skill_id == Skill.id)
+                .outerjoin(SkillBlockedContent, _blocked_content)
                 .where(Skill.id == skill_id)
             )
             if viewer_id is not None:
@@ -1097,12 +1338,13 @@ class SkillStore:
                 return None
             policy = await self._policy(db)
         row, decision = found.SkillAssessment, found.SkillSecurityDecision
+        shareable = row is not None and row.ai_status not in _AI_HOLDS
         security = verdict(
             policy,
             *_review_and_decision(
-                row.content_sha256 if row else None, row.max_severity if row else None, row.ast_codes if row else "",
+                row.content_sha256 if shareable else None, row.max_severity if row else None, row.ast_codes if row else "",
                 decision.decision if decision else None, decision.content_sha256 if decision else "",
-                decision.scope if decision else None,
+                decision.scope if decision else None, found.blocked,
             ),
         )
         # The owner always sees the report, including why an admin blocked the skill.
@@ -1111,12 +1353,13 @@ class SkillStore:
         return {
             "id": found.id, "name": found.name, "owner_id": found.user_id, "visibility": found.visibility,
             "saved_at": found.updated_at, "source": (found.bundle_metadata or {}).get("source"),
-            "assessment": row, "decision": decision, "verdict": security,
-            "review_failed": row is None and found.id in _review_failed,
+            "assessment": row, "decision": decision, "verdict": security, "content_blocked": bool(found.blocked),
+            "review_failed": (row is None and found.id in _review_failed) or (row is not None and row.ai_status == "failed"),
         }
 
     async def rescan(self, skill_id: str) -> None:
-        """Review a skill again regardless of its stored review, waiting up to SHARE_REVIEW_TIMEOUT_S."""
+        """Review a skill again regardless of its stored review, waiting up to SHARE_REVIEW_TIMEOUT_S.
+        With the AI review on, that runs again too, in the background."""
         await asyncio.wait({schedule_assessment(self.factory, skill_id, force=True)}, timeout=SHARE_REVIEW_TIMEOUT_S)
 
     async def security_policy(self) -> dict[str, str]:
@@ -1136,6 +1379,78 @@ class SkillStore:
             await db.commit()
         self._policy_cache = None
         return policy
+
+    async def ai_review_settings(self):
+        async with self.factory() as db:
+            return await _ai_settings(db)
+
+    async def set_ai_review_settings(self, enabled: bool, model_id: str, max_chars: int):
+        """Save the AI review settings. Turning it off releases content that waited for it; turning it
+        on queues a review of every skill in the background, without holding their shares meanwhile."""
+        from dataclasses import asdict
+
+        from claw.skills.ai_review import SETTINGS_KEY, parse_settings
+
+        settings = parse_settings({"enabled": enabled, "model_id": model_id.strip(), "max_chars": max_chars})
+        async with self.factory() as db:
+            row = await db.get(AppSetting, SETTINGS_KEY)
+            if row is None:
+                db.add(AppSetting(key=SETTINGS_KEY, value=asdict(settings)))
+            else:
+                row.value = asdict(settings)
+            if not settings.enabled:
+                await db.execute(
+                    SkillAssessment.__table__.update().where(_ai_holds).values(ai_status="off")
+                )
+            await db.commit()
+        if settings.enabled:
+            self.start_ai_backfill()
+        return settings
+
+    def start_ai_backfill(self) -> asyncio.Task | None:
+        """Run backfill_ai_reviews in the background, once at a time."""
+        if self._ai_backfill is not None and not self._ai_backfill.done():
+            return self._ai_backfill
+        if _ai_reviewer is None:
+            return None
+        self._ai_backfill = asyncio.create_task(self.backfill_ai_reviews())
+        return self._ai_backfill
+
+    def stop_ai_backfill(self) -> list[asyncio.Task]:
+        """Cancel the background backfill (shutdown); the task to wait for, if one ran."""
+        if self._ai_backfill is None or self._ai_backfill.done():
+            return []
+        self._ai_backfill.cancel()
+        return [self._ai_backfill]
+
+    async def backfill_ai_reviews(self, batch: int = 20) -> int:
+        """AI-review every skill whose current content has no current AI review, a batch at a time, in
+        one pass by id. Returns how many it queued. Stops when the review is turned off."""
+        from claw.skills.ai_review import AI_REVIEW_VERSION
+
+        queued, after = 0, ""
+        while _ai_reviewer is not None and (await self.ai_review_settings()).enabled:
+            async with self.factory() as db:
+                ids = list(await db.scalars(
+                    select(Skill.id).join(SkillAssessment, _current_review)
+                    .where(
+                        Skill.id > after,
+                        or_(
+                            SkillAssessment.ai_status != "done",
+                            SkillAssessment.ai_sha256 != SkillAssessment.content_sha256,
+                            SkillAssessment.ai_version != AI_REVIEW_VERSION,
+                        ),
+                    )
+                    .order_by(Skill.id).limit(batch)
+                ))
+            if not ids:
+                break
+            await asyncio.wait({_ai_reviewer.schedule(x) for x in ids})  # the reviewer's slots pace them
+            queued += len(ids)
+            after = ids[-1]
+        if queued:
+            logger.info("Skill AI review: backfill went through {} skill(s)", queued)
+        return queued
 
     async def policy_impact(self, new: dict[str, str]) -> dict[str, int]:
         """What saving `new` would change, from one grouped query: skills newly blocked, shares newly
@@ -1166,7 +1481,12 @@ class SkillStore:
                     .join(SkillAssessment, _current_review)  # an unreviewed skill is owner-only whatever the policy
                     .outerjoin(SkillSecurityDecision, SkillSecurityDecision.skill_id == Skill.id)
                     .outerjoin(subscribers, subscribers.c.skill_id == Skill.id)
-                    .where(or_(SkillSecurityDecision.decision.is_(None), SkillSecurityDecision.decision != "block"))
+                    .outerjoin(SkillBlockedContent, _blocked_content)
+                    .where(
+                        or_(SkillSecurityDecision.decision.is_(None), SkillSecurityDecision.decision != "block"),
+                        SkillBlockedContent.fingerprint.is_(None),
+                        ~_ai_holds,
+                    )
                     .group_by(SkillAssessment.max_severity, Skill.visibility, exception)
                 )
             ).all()
@@ -1199,7 +1519,12 @@ class SkillStore:
                 select(func.count()).select_from(SkillSecurityDecision).join(Skill, Skill.id == SkillSecurityDecision.skill_id)
                 .where(_open_request)
             )
-        return {"by_severity": {(k or "pending"): v for k, v in counts.items()}, "requested": requested or 0}
+            ai = dict(
+                (await db.execute(
+                    select(SkillAssessment.ai_status, func.count()).join(Skill, _current_review).group_by(SkillAssessment.ai_status)
+                )).all()
+            )
+        return {"by_severity": {(k or "pending"): v for k, v in counts.items()}, "requested": requested or 0, "ai": ai}
 
     async def security_list(
         self, *, severities: tuple[str, ...] = (), ast: str = "", visibility: str = "", status: str = "",
@@ -1228,7 +1553,7 @@ class SkillStore:
         rank = case({level: i for i, level in enumerate(("none", *SEVERITIES))}, value=SkillAssessment.max_severity, else_=-1)
         base = (
             _with_security(select(Skill.id, Skill.name, Skill.user_id, Skill.visibility, Skill.enabled,
-                                  SkillAssessment.checked_at, Skill.content_sha256))
+                                  SkillAssessment.checked_at, Skill.content_sha256, SkillAssessment.ai_status))
             .join(User, User.id == Skill.user_id)
             .where(*filters)
         )
@@ -1245,14 +1570,15 @@ class SkillStore:
             policy = await _security_policy(db)
         page = []
         for r in rows:
-            sha, severity, codes, decision, decision_sha, scope = r[7:]
-            review, found = _review_and_decision(sha, severity, codes, decision, decision_sha, scope)
+            sha, severity, codes, decision, decision_sha, scope, blocked = r[8:]
+            review, found = _review_and_decision(sha, severity, codes, decision, decision_sha, scope, blocked)
             if decision == "requested" and decision_sha != r.content_sha256:
                 decision = None  # asked for earlier content: not open any more
             page.append({
                 "id": r.id, "name": r.name, "owner_id": r.user_id, "visibility": r.visibility, "enabled": r.enabled,
                 "checked_at": r.checked_at, "subscribers": subscribers.get(r.id, 0),
-                "review_failed": review is None and r.id in _review_failed,
+                "review_failed": (r.ai_status is None and r.id in _review_failed) or r.ai_status == "failed",
+                "ai_status": r.ai_status,
                 "decision": decision, "verdict": verdict(policy, review, found),
             })
         return page, total or 0
@@ -1276,10 +1602,26 @@ class SkillStore:
             if review is not None and review.content_sha256 != skill.content_sha256:
                 review = None  # a review of earlier content
             row = await db.get(SkillSecurityDecision, skill_id)
+            fingerprint = review.fingerprint if review is not None else ""
+            if decision != "block":
+                # A content block belongs to the skill it was placed on. Lifting this skill's block lifts
+                # it for that content wherever it is; a block placed on another skill that still blocks
+                # is lifted there, not here.
+                held = await db.get(SkillBlockedContent, fingerprint) if fingerprint else None
+                if held is not None and held.skill_id != skill_id:
+                    source = await db.get(SkillSecurityDecision, held.skill_id)
+                    if source is not None and source.decision == "block":
+                        if decision == "allow":
+                            raise ValueError("This content is blocked on another skill; lift that block first")
+                        held = None
+                lifted = SkillBlockedContent.skill_id == skill_id
+                if held is not None:
+                    lifted = lifted | (SkillBlockedContent.fingerprint == held.fingerprint)
+                await db.execute(SkillBlockedContent.__table__.delete().where(lifted))
             if decision == "clear":
                 if row is not None:
                     await db.delete(row)
-                    await db.commit()
+                await db.commit()
                 return row
             if decision not in ("allow", "reject", "block"):
                 raise ValueError("decision must be allow, reject, block or clear")
@@ -1299,6 +1641,8 @@ class SkillStore:
             row.scope = (scope or "public") if decision == "allow" else None
             row.admin_note = note.strip()[:2000]
             row.decided_by = admin_id
+            if decision == "block" and fingerprint and await db.get(SkillBlockedContent, fingerprint) is None:
+                db.add(SkillBlockedContent(fingerprint=fingerprint, skill_id=skill_id, blocked_by=admin_id))
             await db.commit()
             return row
 
@@ -1312,7 +1656,9 @@ class SkillStore:
             if review is None or review.content_sha256 != skill.content_sha256:
                 raise ValueError("This skill has not been reviewed yet; try again in a moment")
             row = await db.get(SkillSecurityDecision, skill_id)
-            if row is not None and row.decision == "block":
+            if (row is not None and row.decision == "block") or (
+                review.fingerprint and await db.get(SkillBlockedContent, review.fingerprint) is not None
+            ):
                 raise ValueError("An administrator blocked this skill")
             if row is not None and row.decision == "allow" and row.content_sha256 == review.content_sha256:
                 raise ValueError("An exception for this version is already approved")

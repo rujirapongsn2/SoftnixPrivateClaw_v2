@@ -5442,6 +5442,7 @@ a.claw-preview-action { text-decoration: none; }
 .claw-skillsec-intro { display: flex; align-items: flex-start; gap: 8px; }
 .claw-skillsec-intro svg { flex: none; margin-top: 2px; }
 .claw-skillsec-filters { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.claw-skillsec-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .claw-skillsec-chips { flex-wrap: wrap; }
 /* Server-paged table; collapses to stacked cards at phone width (below). */
 .claw-skillsec-table {

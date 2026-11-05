@@ -132,6 +132,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from claw.security.semantic import SemanticMonitor
     from claw.security.semantic_rules import SemanticRuleStore
     policy.semantic = SemanticMonitor(settings.semantic_guardrails, policy, audit, rule_store=SemanticRuleStore(factory))
+    from claw.db.stores import SkillAIReviewer, set_ai_reviewer
+    set_ai_reviewer(SkillAIReviewer(factory, provider, llm_config, usage, redact=policy.semantic.redact))
 
     browser_mgr = None
     if settings.browser.enabled:
@@ -340,7 +342,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from claw.db.stores import settle_assessments
 
         sandbox_check = _asyncio.create_task(_check_sandbox_image())
-        skill_backfill = _asyncio.create_task(skills.backfill_assessments(retry_s=30))
+        async def _skill_backfill():
+            await skills.backfill_assessments(retry_s=30)
+            if (ai_backfill := skills.start_ai_backfill()) is not None:  # one at a time with an admin's
+                await ai_backfill
+
+        skill_backfill = _asyncio.create_task(_skill_backfill())
         if sbot_app is not None:
             async with sbot_app.router.lifespan_context(sbot_app):
                 yield
@@ -348,7 +355,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         sandbox_check.cancel()
         skill_backfill.cancel()
-        await _asyncio.wait([skill_backfill], timeout=5)
+        await _asyncio.wait([skill_backfill, *skills.stop_ai_backfill()], timeout=5)
         # Stop intake, then let in-flight turns finish before tearing down.
         await scheduler.stop()
         await model_health.stop()

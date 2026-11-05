@@ -155,12 +155,18 @@ class SemanticMonitor:
         other = "laya" if primary == "jev" else "jev"
         return other if getattr(self.settings, other).api_key.get_secret_value().strip() else None
 
-    def _redact(self, text):
+    def redact(self, text):
+        """Mask secrets and PII for the skill AI review: mask rules only, since erasing what a block or
+        monitor rule matches would hide the very injection or exfiltration the review is looking for.
+        Raises if a configured mask cannot be applied."""
+        return self._redact(text, masks_only=True)
+
+    def _redact(self, text, masks_only=False):
         # Apply secret/PII masks even when the deterministic engine is monitor-only.
-        from claw.security.policy import _BUILTINS
+        from claw.security.policy import _BUILTINS, Action
 
         for rule in [*_BUILTINS, *self.policy.rules]:
-            if rule.enabled:
+            if rule.enabled and (not masks_only or rule.action is Action.MASK):
                 text = rule.compiled().sub("[REDACTED]", text)
         return re.sub(r"(?i)bearer\s+[^\s\"']+", "Bearer [REDACTED]", text)
 

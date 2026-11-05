@@ -323,10 +323,22 @@ class SkillAssessment(Base):
     max_severity: Mapped[str] = mapped_column(String(16))  # none|low|medium|high|critical
     # ",AST01,AST04," for the admin filter: AST ids of findings above info
     ast_codes: Mapped[str] = mapped_column(String(128), default="")
-    # [{ast, rule, severity, title, file, line, excerpt, count}], most severe first
+    # Pattern findings [{ast, rule, severity, title, file, line, excerpt, count, detail, source}], most
+    # severe first. max_severity and ast_codes cover these and the AI findings of the same content.
     findings: Mapped[list] = mapped_column(JSON, default=list)
+    # sha256 over the text and files whatever the skill id or bundle version: an admin block matches it.
+    fingerprint: Mapped[str] = mapped_column(String(64), default="", server_default="", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # AI review (claw/skills/ai_review.py): off|pending|done|failed. pending and failed hold the skill
+    # owner-only; off means the review was off when this content was saved.
+    ai_status: Mapped[str] = mapped_column(String(16), default="off", server_default="off")
+    ai_sha256: Mapped[str] = mapped_column(String(64), default="", server_default="")  # content the AI findings are of
+    ai_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    ai_model: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    ai_error: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    ai_findings: Mapped[list] = mapped_column(JSON, default=list)
+    ai_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class SkillSecurityDecision(Base):
@@ -348,6 +360,18 @@ class SkillSecurityDecision(Base):
     requested_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     decided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class SkillBlockedContent(Base):
+    """Content an admin blocked, by SkillAssessment.fingerprint. It outlives the skill, so the same text
+    created or imported again is blocked too. An edit makes new content, which is reviewed as usual."""
+
+    __tablename__ = "skill_blocked_content"
+
+    fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
+    skill_id: Mapped[str] = mapped_column(String(32))  # the skill blocked; may be deleted since
+    blocked_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class SkillSubscription(Base):

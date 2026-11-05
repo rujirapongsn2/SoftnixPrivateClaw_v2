@@ -11,6 +11,7 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
+import { Switch } from "@astryxdesign/core/Switch";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
@@ -23,6 +24,8 @@ import { ErrorText } from "./ErrorText";
 import {
   api,
   apiErrorMessage,
+  type SkillAIReviewSettings,
+  type SkillAIStatus,
   type SkillAssessmentReport,
   type SkillFinding,
   type SkillMaxSeverity,
@@ -108,6 +111,8 @@ function rowStatus(row: SkillSecurityRow): RowStatus {
   return permitsVisibility(row.policy.scope, row.visibility) ? "usable" : "suspended";
 }
 
+const AI_VARIANT: Record<SkillAIStatus, BadgeVariant> = { off: "neutral", pending: "warning", done: "success", failed: "error" };
+
 const STATUS_VARIANT: Record<RowStatus, BadgeVariant> = {
   blocked: "error",
   requested: "purple",
@@ -137,11 +142,13 @@ function FindingItem({ finding }: { finding: SkillFinding }) {
         <span className="claw-skillsec-ast">{finding.ast}</span>
         <Badge variant={SEVERITY_VARIANT[finding.severity]} label={severityLabel(t, finding.severity)} />
         <Text weight="semibold" className="claw-skillsec-finding-title">{finding.title}</Text>
+        {finding.source === "ai" && <Badge variant="info" label={t("skillsec.finding.ai")} />}
         {finding.count > 1 && <Text size="sm" color="secondary">×{finding.count}</Text>}
       </div>
       <Text size="sm" color="secondary" className="claw-skillsec-finding-meta">
         {finding.rule} · <code>{where}</code>
       </Text>
+      {finding.detail && <Text size="sm" as="p">{finding.detail}</Text>}
       {finding.excerpt && <pre className="claw-skillsec-excerpt">{finding.excerpt}</pre>}
     </li>
   );
@@ -326,7 +333,9 @@ function ReportBody({
   const real = findings.filter((f) => f.severity !== "info");
   const found = new Set(real.map((f) => f.ast));
   const quiet = AST_IDS.filter((id) => !found.has(id) && !(id in report.platform));
-  const severity = report.status === "pending" ? "pending" : report.max_severity ?? "none";
+  const ai = report.ai_review;
+  // Content waiting for its AI review has no final severity yet.
+  const severity = report.status === "pending" || ai?.status === "pending" ? "pending" : report.max_severity ?? "none";
   const policy = report.policy;
   return (
     <div className="claw-skillsec-report">
@@ -347,6 +356,12 @@ function ReportBody({
         {report.scanner_version !== undefined && (
           <Text size="sm" color="secondary">{t("skillsec.report.scanner", { version: String(report.scanner_version) })}</Text>
         )}
+        {ai && ai.status !== "off" && (
+          <Badge variant={AI_VARIANT[ai.status]} label={t(`skillsec.ai.status.${ai.status}`)} />
+        )}
+        {ai?.status === "done" && ai.model && (
+          <Text size="sm" color="secondary">{t("skillsec.report.aiModel", { model: ai.model })}</Text>
+        )}
       </div>
       {report.source?.startsWith("https://") && (
         <Text size="sm" color="secondary" className="claw-skillsec-source">
@@ -357,6 +372,9 @@ function ReportBody({
         <Text size="sm" as="p">{t(report.review_failed ? "skillsec.report.failedDesc" : "skillsec.report.pendingDesc")}</Text>
       )}
       {report.status === "outdated" && <Text size="sm" as="p">{t("skillsec.report.outdatedDesc")}</Text>}
+      {report.status !== "pending" && ai?.status === "pending" && <Text size="sm" as="p">{t("skillsec.report.aiPendingDesc")}</Text>}
+      {report.status !== "pending" && ai?.status === "failed" && <Text size="sm" as="p">{t("skillsec.report.failedDesc")}</Text>}
+      {report.content_blocked && <Text size="sm" as="p">{t("skillsec.report.contentBlocked")}</Text>}
       <div className="claw-skillsec-box">
         <Text size="sm" as="p">
           {t(`skillsec.report.policy.${policy.reason}`, { scope: t(`skillsec.scope.${policy.scope}`) })}
@@ -1001,10 +1019,113 @@ function PolicyTab() {
   );
 }
 
+const AI_COUNTED: SkillAIStatus[] = ["done", "pending", "failed", "off"];
+
+function AIReviewTab() {
+  const t = useT();
+  const toast = useToast();
+  const [loaded, setLoaded] = useState<Awaited<ReturnType<typeof api.adminSkillSecurityAIReview>> | null>(null);
+  const [draft, setDraft] = useState<SkillAIReviewSettings | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    api
+      .adminSkillSecurityAIReview()
+      .then((r) => {
+        setLoaded(r);
+        setDraft(r.settings);
+      })
+      .catch((e) => setError(apiErrorMessage(e)));
+  }, []);
+  useEffect(load, [load]);
+
+  if (!loaded || !draft) return error ? <ErrorText>{error}</ErrorText> : <Text color="secondary">{t("admin.common.loading")}</Text>;
+  const saved = loaded.settings;
+  const dirty = draft.enabled !== saved.enabled || draft.model_id !== saved.model_id || draft.max_chars !== saved.max_chars;
+  const defaultLabel = loaded.default_model
+    ? t("skillsec.ai.defaultModel", { model: loaded.default_model })
+    : t("skillsec.ai.providerDefault");
+
+  return (
+    <div className="claw-panel">
+      <div className="claw-card-heading">
+        <Text weight="semibold">{t("skillsec.ai.title")}</Text>
+        <Text size="sm" color="secondary">{t("skillsec.ai.desc")}</Text>
+      </div>
+      <div className="claw-row">
+        <Switch
+          value={draft.enabled}
+          label={t("skillsec.ai.enable")}
+          isDisabled={busy}
+          changeAction={(enabled) => setDraft({ ...draft, enabled })}
+        />
+      </div>
+      <div className="claw-skillsec-filters">
+        <label className="claw-skillsec-field">
+          <Text size="sm" weight="semibold">{t("skillsec.ai.model")}</Text>
+          <select
+            className="claw-token-filter"
+            value={draft.model_id}
+            disabled={busy}
+            onChange={(e) => setDraft({ ...draft, model_id: e.target.value })}
+          >
+            <option value="">{defaultLabel}</option>
+            {loaded.models.map((m) => (
+              <option key={m.model_id} value={m.model_id}>{`${m.label} · ${m.provider}`}</option>
+            ))}
+          </select>
+        </label>
+        <TextInput
+          label={t("skillsec.ai.maxChars")}
+          value={String(draft.max_chars)}
+          isDisabled={busy}
+          onChange={(v) => setDraft({ ...draft, max_chars: Number(v.replace(/\D/g, "")) || 0 })}
+        />
+      </div>
+      <Text size="sm" color="secondary" as="p">{t("skillsec.ai.howItWorks")}</Text>
+      <div className="claw-skillsec-box">
+        <div className="claw-row" style={{ flexWrap: "wrap" }}>
+          {AI_COUNTED.map((status) => (
+            <Badge
+              key={status}
+              variant={AI_VARIANT[status]}
+              label={`${t(`skillsec.ai.status.${status}`)}: ${(loaded.counts[status] ?? 0).toLocaleString()}`}
+            />
+          ))}
+        </div>
+      </div>
+      {error && <ErrorText>{error}</ErrorText>}
+      <div className="claw-row">
+        <Button
+          label={t("skillsec.ai.save")}
+          icon={<Icon icon="check" size="sm" />}
+          isDisabled={busy || !dirty}
+          clickAction={async () => {
+            setBusy(true);
+            try {
+              await api.adminSkillSecuritySaveAIReview(draft);
+              setError("");
+              toast({ body: t(draft.enabled ? "skillsec.ai.savedOn" : "skillsec.ai.savedOff"), type: "info" });
+              load();
+            } catch (e) {
+              setError(apiErrorMessage(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+        <Button label={t("skillsec.policy.discard")} variant="ghost" isDisabled={busy || !dirty} clickAction={() => setDraft(saved)} />
+        <Button label={t("skillsec.ai.refresh")} variant="secondary" isDisabled={busy} clickAction={load} />
+      </div>
+    </div>
+  );
+}
+
 /** Control Plane › Skill Security. */
 export function SkillSecurityAdminPanel() {
   const t = useT();
-  const [tab, setTab] = useState<"review" | "policy">("review");
+  const [tab, setTab] = useState<"review" | "policy" | "ai">("review");
   return (
     <div className="claw-panel">
       <div className="claw-skillsec-intro">
@@ -1014,8 +1135,9 @@ export function SkillSecurityAdminPanel() {
       <TabList value={tab} onChange={(v) => setTab(v as typeof tab)} hasDivider aria-label={t("admin.nav.skillSecurity")}>
         <Tab value="review" label={t("skillsec.admin.tabReview")} />
         <Tab value="policy" label={t("skillsec.admin.tabPolicy")} />
+        <Tab value="ai" label={t("skillsec.admin.tabAI")} />
       </TabList>
-      {tab === "review" ? <ReviewTab /> : <PolicyTab />}
+      {tab === "review" ? <ReviewTab /> : tab === "policy" ? <PolicyTab /> : <AIReviewTab />}
     </div>
   );
 }
