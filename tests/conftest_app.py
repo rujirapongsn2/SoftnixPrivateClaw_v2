@@ -17,6 +17,7 @@ from claw.api import mcp_oauth_routes
 from claw.api.routes import router as core_router
 from claw.api.telegram import router as telegram_router
 from claw.api.workspace_admin import router as workspace_admin_router
+from claw.api.skill_security import router as skill_security_router
 from claw.auth.mcp_oauth import McpOAuth
 from claw.auth.mcp_oauth_discovery import ReturnTo
 from claw.browser.broker import BrowserBrokerStore
@@ -61,6 +62,7 @@ def build_api_app(db_factory, **settings_kwargs) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(admin_router)
     app.include_router(workspace_admin_router)
+    app.include_router(skill_security_router)
     app.include_router(browser_ext_router)
     app.include_router(manage_router)
     app.include_router(telegram_router)

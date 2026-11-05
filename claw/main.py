@@ -337,13 +337,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         import asyncio as _asyncio
 
+        from claw.db.stores import settle_assessments
+
         sandbox_check = _asyncio.create_task(_check_sandbox_image())
+        skill_backfill = _asyncio.create_task(skills.backfill_assessments(retry_s=30))
         if sbot_app is not None:
             async with sbot_app.router.lifespan_context(sbot_app):
                 yield
         else:
             yield
         sandbox_check.cancel()
+        skill_backfill.cancel()
+        await _asyncio.wait([skill_backfill], timeout=5)
         # Stop intake, then let in-flight turns finish before tearing down.
         await scheduler.stop()
         await model_health.stop()
@@ -355,6 +360,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # their own: bounded wait, then cancel, before the database goes away.
         await agent_channel.aclose()
         await runtime.drain()
+        # After the drain: a turn that saved a skill queued a review, and none may outlive the engine.
+        await settle_assessments(cancel=True, timeout=5)
         await connectors_mgr.shutdown()
         if browser_mgr is not None:
             await browser_mgr.close()
@@ -473,6 +480,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from claw.api.workspace_admin import router as workspace_admin_router
 
     app.include_router(workspace_admin_router)
+    from claw.api.skill_security import router as skill_security_router
+
+    app.include_router(skill_security_router)
     app.include_router(browser_ext_router)
     app.include_router(connector_oauth_router)
     from claw.api import mcp_oauth_routes

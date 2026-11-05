@@ -279,6 +279,9 @@ class Skill(Base):
     name: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(String(500), default="")
     content: Mapped[str] = mapped_column(Text, default="")
+    # The content_digest of content, description and bundle_id, kept by a flush hook in
+    # claw/db/stores.py. A review counts only while its sha matches.
+    content_sha256: Mapped[str] = mapped_column(String(64), default="", server_default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # Optional link to the MCP connector this skill's instructions rely on.
     # Lets the skill's content reference tools generically (e.g. "the
@@ -301,6 +304,50 @@ class SkillBundleVersion(Base):
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
     files: Mapped[dict] = mapped_column(JSON)
     source: Mapped[dict] = mapped_column(JSON)
+
+
+class SkillAssessment(Base):
+    """Security review of one version of a skill (claw/skills/assessment.py), keyed by a sha256 of
+    SKILL.md and the bundle version id.
+
+    One row per skill: a new version or scanner version replaces it. checked_at moves on every
+    write that left the content unchanged, so the backfill can tell a reviewed skill from a stale one.
+    """
+
+    __tablename__ = "skill_assessments"
+    __table_args__ = (Index("ix_skill_assessments_severity", "max_severity"),)
+
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), primary_key=True)
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    scanner_version: Mapped[int] = mapped_column(Integer)
+    max_severity: Mapped[str] = mapped_column(String(16))  # none|low|medium|high|critical
+    # ",AST01,AST04," for the admin filter: AST ids of findings above info
+    ast_codes: Mapped[str] = mapped_column(String(128), default="")
+    # [{ast, rule, severity, title, file, line, excerpt, count}], most severe first
+    findings: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SkillSecurityDecision(Base):
+    """An admin decision or owner request about one skill (claw/skills/security_policy.py).
+
+    `allow` and `requested` hold for the reviewed content `content_sha256` only: once the skill
+    changes, they no longer apply. `block` holds whatever the content. History is in the audit log.
+    """
+
+    __tablename__ = "skill_security_decisions"
+    __table_args__ = (Index("ix_skill_security_decisions_decision", "decision"),)
+
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), primary_key=True)
+    decision: Mapped[str] = mapped_column(String(16))  # requested|allow|reject|block
+    content_sha256: Mapped[str] = mapped_column(String(64), default="")
+    scope: Mapped[str | None] = mapped_column(String(16), nullable=True)  # allow: widest permitted share
+    request_reason: Mapped[str] = mapped_column(Text, default="")
+    admin_note: Mapped[str] = mapped_column(Text, default="")
+    requested_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 class SkillSubscription(Base):

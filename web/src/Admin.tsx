@@ -1,4 +1,5 @@
 import { SemanticRulesPanel } from "./SemanticRulesPanel";
+import { SkillSecurityAdminPanel } from "./SkillSecurity";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
@@ -49,6 +50,7 @@ import {
   Send,
   Server,
   Shield,
+  ShieldAlert,
   ShieldCheck,
   ShieldOff,
   Sparkles,
@@ -122,6 +124,7 @@ import {
   type UserImportMapping,
   type UserImportParseResult,
   api,
+  apiErrorMessage,
   ADMIN_CONNECTOR_API,
   ADMIN_LLM_API,
   type LlmApi,
@@ -134,6 +137,7 @@ export type AdminSection =
   | "plans"
   | "acl"
   | "guardrails"
+  | "skillSecurity"
   | "oauth"
   | "telegram"
   | "agents"
@@ -164,6 +168,7 @@ export const ADMIN_SECTIONS: { key: AdminSection; group: AdminGroup; labelKey: s
   { key: "audit", group: "monitor", labelKey: "admin.nav.audit", icon: ScrollText },
   { key: "providers", group: "ai", labelKey: "admin.nav.providers", icon: Cpu },
   { key: "guardrails", group: "ai", labelKey: "admin.nav.guardrails", icon: ShieldCheck },
+  { key: "skillSecurity", group: "ai", labelKey: "admin.nav.skillSecurity", icon: ShieldAlert },
   { key: "plans", group: "ai", labelKey: "admin.nav.plans", icon: Gauge },
   { key: "connectors", group: "integrations", labelKey: "admin.nav.connectors", icon: Plug },
   { key: "telegram", group: "integrations", labelKey: "admin.nav.telegram", icon: Send },
@@ -194,7 +199,8 @@ export function AdminPanel({
   // soup. Overview is the same story: a stat grid + charts that read better
   // with more horizontal room. Widen just these sections rather than the
   // whole panel.
-  const isWide = section === "providers" || section === "overview" || section === "plans" || section === "projects";
+  const isWide =
+    section === "providers" || section === "overview" || section === "plans" || section === "projects" || section === "skillSecurity";
   return (
     <div className="claw-settings-panel">
       <div className="claw-settings-panel-header claw-cp-header">
@@ -217,6 +223,7 @@ export function AdminPanel({
         {section === "plans" && <PlansPanel />}
         {section === "acl" && <SettingsAclPanel />}
         {section === "guardrails" && <GuardrailsPanel />}
+        {section === "skillSecurity" && <SkillSecurityAdminPanel />}
         {section === "projects" && <ProjectContainersAdminPanel />}
         {section === "oauth" && <OAuthAppsPanel />}
         {section === "telegram" && <TelegramConfigPanel />}
@@ -259,9 +266,7 @@ function useAsyncError() {
       // .message, not String(e): a thrown Error renders as "Error: <text>",
       // which reads as a crash when the text is a validation message written
       // for the user.
-      const body = typeof e === "object" && e !== null && "body" in e ? e.body : undefined;
-      const detail = typeof body === "object" && body !== null && "detail" in body ? body.detail : undefined;
-      setError(typeof detail === "string" ? detail : e instanceof Error ? e.message : String(e));
+      setError(apiErrorMessage(e));
     }
   }, []);
   return { error, guard };

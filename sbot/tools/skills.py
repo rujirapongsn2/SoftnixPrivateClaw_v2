@@ -193,9 +193,12 @@ class ManageSkillTool(Tool):
                 return f"Error: {save_error}"
             enabled_raw = kwargs.get("enabled")
             enabled = True if enabled_raw is None else bool(enabled_raw)
-            await self.store.upsert(
-                self.user_id, name, description=description, content=content, enabled=enabled
-            )
+            try:
+                await self.store.upsert(
+                    self.user_id, name, description=description, content=content, enabled=enabled
+                )
+            except ValueError as exc:  # e.g. instructions longer than the security review reads
+                return f"Error: {exc}"
             state = "enabled" if enabled else "disabled"
             from claw.skills.bundles import reference_warnings
             warnings = await reference_warnings(self.store, self.user_id, name, content)

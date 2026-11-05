@@ -2,7 +2,7 @@
 import pytest
 from sqlalchemy import update
 from claw.db.models import User, UserGroup
-from claw.db.stores import SkillStore
+from claw.db.stores import SkillStore, settle_assessments
 from sbot.db.stores import SkillStore as SbotSkillStore
 from claw.tools.skills import ReadSkillTool
 from sbot.tools.skills import ReadSkillTool as SbotReadSkillTool
@@ -110,6 +110,7 @@ async def test_api_shared_skill_is_read_only(db_factory, bot_mode):
         assert (await c.delete(f'/api/skills/{skill_id}', headers=_bearer(peer))).status_code == 404
         # Old clients omitting visibility do not accidentally revoke sharing.
         await c.put('/api/skills/shared-procedure', json={'name': 'shared-procedure', 'content': 'Updated'}, headers=_bearer(owner))
+        await settle_assessments()  # new content is withheld from readers until it is reviewed
         rows = (await c.get('/api/skills', headers=_bearer(peer))).json()
         assert next(s for s in rows if s['id'] == skill_id)['content'] == 'Updated'
         response = await c.put('/api/skills/shared-procedure', json={**payload, 'visibility': 'private'}, headers=_bearer(owner))

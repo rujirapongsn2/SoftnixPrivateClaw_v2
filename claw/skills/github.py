@@ -5,6 +5,11 @@ import httpx
 from claw.skills.bundles import MAX_ARCHIVE
 
 
+def source_url(repository: str, commit: str) -> str:
+    """The pinned source recorded with an import; the security review's provenance check reads it."""
+    return f"{repository.rstrip('/')}/tree/{commit}"
+
+
 async def download_bundle(repository: str, commit: str):
     match = re.fullmatch(r"https://github.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/?", repository)
     if not match or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):

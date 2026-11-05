@@ -28,6 +28,7 @@ import {
   ExternalLink,
   Eye,
   FileSpreadsheet,
+  FileSearch,
   FileText,
   FileType,
   Globe,
@@ -59,6 +60,7 @@ import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useM
 import { ProvidersPanel } from "./Admin";
 import { useBranding, useT } from "./branding";
 import { GroupedPageNav } from "./GroupedPageNav";
+import { ImportReviewStep, SkillReportDialog, SkillSecurityBadge, permitsVisibility, shareBlockedReason, useReportDialog } from "./SkillSecurity";
 import { writeClipboard } from "./clipboard";
 import { ErrorText } from "./ErrorText";
 import { PasswordField } from "./PasswordField";
@@ -91,6 +93,7 @@ import {
   SkillWorkspaceOrphan,
   USER_LLM_API,
   api,
+  apiErrorMessage,
   blueprintFileUrl,
 } from "./shared-api";
 import { MOBILE_QUERY, useMediaQuery } from "./useMediaQuery";
@@ -285,8 +288,8 @@ function useAsyncError() {
     } catch (e) {
       // .message, not String(e): a thrown Error renders as "Error: <text>",
       // which reads as a crash when the text is a validation message written
-      // for the user.
-      setError(e instanceof Error ? e.message : String(e));
+      // for the user. The server's `detail` wins over the raw "409 {json}".
+      setError(apiErrorMessage(e));
     }
   }, []);
   return { error, guard };
@@ -1149,6 +1152,9 @@ function SkillsPanel() {
   const [sharing, setSharing] = useState(false);
   const [viewingDetail, setViewingDetail] = useState<SkillInfo | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  // Set after a successful import: the imported skills whose review results are shown next.
+  const [importReview, setImportReview] = useState<{ id: string; name: string }[] | null>(null);
+  const report = useReportDialog();
   const { error, guard } = useAsyncError();
 
   const reload = useCallback(() => api.listSkills().then(setSkills), []);
@@ -1221,10 +1227,21 @@ function SkillsPanel() {
         }
         await reload();
         setSkillTab("user");
-        setImporting(false);
+        setImportReview(imported.imported ?? [{ id: imported.id, name: imported.name }]);
       });
     } finally { setImportBusy(false); }
   }
+
+  if (importing && importReview) return (
+    <ImportReviewStep
+      skills={importReview}
+      onDone={() => {
+        setImportReview(null);
+        setImporting(false);
+        void reload();
+      }}
+    />
+  );
 
   if (importing) return (
     <div className="claw-panel">
@@ -1249,6 +1266,11 @@ function SkillsPanel() {
     const sharesWithGroup = (editing.visibility ?? "private") === "group";
     // Several groups and none picked yet (a skill already shared keeps its group until the owner changes it).
     const needsGroupChoice = sharesWithGroup && myGroups.length > 1 && !editing.shared_group_id;
+    // Shares the security policy refuses stay visible but disabled, with the reason underneath.
+    const blockedShares = (["group", "public"] as const)
+      .map((v) => ({ v, reason: shareBlockedReason(t, editing.security, v) }))
+      .filter((x): x is { v: "group" | "public"; reason: string } => x.reason !== null);
+    const shareDisabled = (v: "group" | "public") => blockedShares.some((x) => x.v === v);
     return (
       <div className="claw-panel">
         {readOnly && (
@@ -1289,9 +1311,15 @@ function SkillsPanel() {
               onChange={(value) => setEditing({ ...editing, visibility: value as "private" | "group" | "public" })}
             >
               <SegmentedControlItem value="private" label={t("settings.blueprints.private")} />
-              <SegmentedControlItem value="group" label={t("settings.blueprints.group")} />
-              <SegmentedControlItem value="public" label={t("settings.blueprints.public")} />
+              <SegmentedControlItem value="group" label={t("settings.blueprints.group")} isDisabled={shareDisabled("group")} />
+              <SegmentedControlItem value="public" label={t("settings.blueprints.public")} isDisabled={shareDisabled("public")} />
             </SegmentedControl>
+            {blockedShares.length > 0 && (
+              <Text size="sm" color="secondary" as="p" className="claw-skillsec-share-note">
+                {/* Both options share one reason unless an exception narrows only one of them. */}
+                {[...new Set(blockedShares.map((x) => x.reason))].join(" ")}
+              </Text>
+            )}
             {editing.visibility && editing.visibility !== "private" && (
               <Text size="sm" color="secondary" as="p">{t("settings.skills.sharingHint")}</Text>
             )}
@@ -1360,16 +1388,32 @@ function SkillsPanel() {
               clickAction={() =>
                 guard(async () => {
                   const visibility = editing.visibility ?? "private";
-                  const saved = await api.saveSkill({
-                    id: editing.id,
-                    visibility,
-                    ...(visibility === "group" && editing.shared_group_id ? { shared_group_id: editing.shared_group_id } : {}),
-                    name: (editing.name ?? "").trim(),
-                    description: editing.description ?? "",
-                    content: editing.content ?? "",
-                    enabled: editing.enabled ?? true,
-                    connector_id: editing.connector_id ?? null,
-                  });
+                  const name = (editing.name ?? "").trim();
+                  let saved: SkillInfo;
+                  try {
+                    saved = await api.saveSkill({
+                      id: editing.id,
+                      visibility,
+                      ...(visibility === "group" && editing.shared_group_id ? { shared_group_id: editing.shared_group_id } : {}),
+                      name,
+                      description: editing.description ?? "",
+                      content: editing.content ?? "",
+                      enabled: editing.enabled ?? true,
+                      connector_id: editing.connector_id ?? null,
+                    });
+                  } catch (e) {
+                    // The share was refused by the security policy, but everything else in the
+                    // request was saved: show the skill as it now is (old visibility, fresh
+                    // verdict) so the selector explains why, then surface the server's message.
+                    const detail = e instanceof ApiError && e.status === 409 ? (e.body as { detail?: { code?: string } })?.detail : undefined;
+                    if (detail?.code === "skill_share_blocked") {
+                      const list = await api.listSkills();
+                      setSkills(list);
+                      const current = list.find((s) => !s.builtin && !s.read_only && s.name === name);
+                      if (current) setEditing(current);
+                    }
+                    throw e;
+                  }
                   if (saved.visibility !== visibility) {
                     throw new Error(t("settings.skills.saveVisibilityFailed"));
                   }
@@ -1462,7 +1506,9 @@ function SkillsPanel() {
                     <Text weight="semibold">{skill.name}</Text>
                     {!skill.builtin && <Badge variant="neutral" label={t(`settings.blueprints.${skill.visibility ?? "private"}`)} />}
                     {skill.read_only && !skill.builtin && <Badge variant="info" label={t("settings.skills.readOnly")} />}
+                    {!skill.builtin && <SkillSecurityBadge security={skill.security} />}
                   </div>
+                  {skill.security && <SkillSecurityNote skill={skill} />}
                   <Text size="sm" color="secondary" as="p" className="claw-skill-description">
                     {skill.description || "—"}
                   </Text>
@@ -1502,6 +1548,7 @@ function SkillsPanel() {
                     <Switch
                       value={!!skill.subscription_enabled}
                       label={t("settings.skills.useShared")}
+                      isDisabled={skill.security?.readable === false && !skill.subscription_enabled}
                       changeAction={(enabled) =>
                         guard(async () => {
                           await api.setSkillSubscription(skill.id, enabled);
@@ -1509,13 +1556,25 @@ function SkillsPanel() {
                         })
                       }
                     />
-                    <Button
-                      label={t("settings.skills.view")}
-                      icon={<Icon icon={ExternalLink} size="sm" />}
-                      size="sm"
-                      variant="ghost"
-                      clickAction={() => setEditing(skill)}
-                    />
+                    {/* A suspended or blocked share arrives without its text or report. */}
+                    {skill.security?.readable !== false && (
+                      <>
+                        <Button
+                          label={t("settings.skills.view")}
+                          icon={<Icon icon={ExternalLink} size="sm" />}
+                          size="sm"
+                          variant="ghost"
+                          clickAction={() => setEditing(skill)}
+                        />
+                        <Button
+                          label={t("skillsec.viewReport")}
+                          icon={<Icon icon={FileSearch} size="sm" />}
+                          size="sm"
+                          variant="ghost"
+                          clickAction={() => report.show(skill.id)}
+                        />
+                      </>
+                    )}
                   </div>
                 ) : (
                   <div className="claw-row claw-skill-card-actions">
@@ -1529,6 +1588,13 @@ function SkillsPanel() {
                           await reload();
                         })
                       }
+                    />
+                    <Button
+                      label={t("skillsec.viewReport")}
+                      icon={<Icon icon={FileSearch} size="sm" />}
+                      size="sm"
+                      variant="ghost"
+                      clickAction={() => report.show(skill.id)}
                     />
                     <Button
                       label={t("settings.skills.share")}
@@ -1658,8 +1724,38 @@ function SkillsPanel() {
         </details>
       )}
       <SkillDetailModal skill={viewingDetail} isOpen={detailOpen} onOpenChange={setDetailOpen} />
+      <SkillReportDialog
+        skillId={report.id}
+        isOpen={report.open}
+        onOpenChange={report.setOpen}
+        canRequest={!skills.find((s) => s.id === report.id)?.read_only}
+        onChanged={() => void reload()}
+      />
     </div>
   );
+}
+
+// Why a skill in the list is limited: a share this viewer can't use, an own skill an admin
+// blocked, an own share still waiting for its review, or one the policy currently suspends.
+function SkillSecurityNote({ skill }: { skill: SkillInfo }) {
+  const t = useT();
+  const security = skill.security;
+  if (!security) return null;
+  let text: string | null = null;
+  if (skill.read_only) {
+    if (!security.readable) text = t("skillsec.note.suspendedForViewer");
+  } else if (security.reason === "blocked") {
+    text = t("skillsec.note.blockedOwn");
+  } else if (security.reason === "pending") {
+    if ((skill.visibility ?? "private") !== "private") text = t("skillsec.note.sharePending");
+  } else if (!permitsVisibility(security.scope, skill.visibility ?? "private")) {
+    text = t("skillsec.note.shareSuspended", { scope: t(`skillsec.scope.${security.scope}`) });
+  }
+  return text ? (
+    <Text size="sm" as="p" className="claw-skillsec-note">
+      {text}
+    </Text>
+  ) : null;
 }
 
 // ---------------------------------------------------------------- Memory

@@ -15,6 +15,7 @@ import yaml
 from sqlalchemy import select
 
 from claw.db.models import Skill, SkillBundleVersion, User
+from claw.db.stores import schedule_assessment
 
 MAX_ARCHIVE = 12 * 1024 * 1024
 MAX_EXPANDED = 24 * 1024 * 1024
@@ -398,7 +399,9 @@ async def install_bundles(store, user_id, bundles: list[dict]):
             )
             skills.append(skill)
         await db.commit()
-        return skills
+    for skill in skills:
+        schedule_assessment(store.factory, skill.id)
+    return skills
 
 
 async def resource(store, user_id, name, path, binary=False):
