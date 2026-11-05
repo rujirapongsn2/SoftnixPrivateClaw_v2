@@ -160,10 +160,10 @@ class ManageSkillTool(Tool):
             if not repository or not commit:
                 return "Error: import_github requires 'repository' and a full 40-character 'commit' SHA."
             from claw.skills.bundles import install_bundle, parse_bundle, prepare_bundle
-            from claw.skills.github import download_bundle
+            from claw.skills.github import download_bundle, source_url
             try:
                 data = await download_bundle(repository, commit)
-                bundle = await asyncio.to_thread(parse_bundle, data, repository + "/tree/" + commit)
+                bundle = await asyncio.to_thread(parse_bundle, data, source_url(repository, commit))
                 bundle = await prepare_bundle(self.store, self.user_id, bundle)
                 skill = await install_bundle(self.store, self.user_id, bundle)
             except (ValueError, UnicodeError) as exc:
@@ -201,9 +201,12 @@ class ManageSkillTool(Tool):
                 return f"Error: {save_error}"
             enabled_raw = kwargs.get("enabled")
             enabled = True if enabled_raw is None else bool(enabled_raw)
-            await self.store.upsert(
-                self.user_id, name, description=description, content=content, enabled=enabled
-            )
+            try:
+                await self.store.upsert(
+                    self.user_id, name, description=description, content=content, enabled=enabled
+                )
+            except ValueError as exc:  # e.g. instructions longer than the security review reads
+                return f"Error: {exc}"
             state = "enabled" if enabled else "disabled"
             from claw.skills.bundles import reference_warnings
             warnings = await reference_warnings(self.store, self.user_id, name, content)

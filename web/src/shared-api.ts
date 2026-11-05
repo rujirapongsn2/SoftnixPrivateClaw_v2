@@ -330,6 +330,100 @@ export interface SkillInfo {
   // True when this (user-owned) skill's name matches a built-in's, hiding
   // that built-in from the list — surfaced so the collision isn't silent.
   shadows_builtin?: boolean;
+  // The security review's verdict under the admin's share policy (null for
+  // built-ins). `readable` is false on a share this viewer may not use.
+  security?: (SkillSecurityVerdict & { readable: boolean }) | null;
+}
+
+// ---- Skill Security (OWASP Agentic Skills Top 10 review + share policy) ----
+export type SkillSeverity = "info" | "low" | "medium" | "high" | "critical";
+// A skill's highest severity: "none" = no findings above info.
+export type SkillMaxSeverity = "none" | Exclude<SkillSeverity, "info">;
+export type SkillPolicyLevel = "low" | "medium" | "high" | "critical";
+// Widest audience the policy allows, widest first.
+export type SkillShareScope = "public" | "group" | "owner" | "blocked";
+export type SkillVisibility = "private" | "group" | "public";
+
+export interface SkillSecurityVerdict {
+  scope: SkillShareScope;
+  reason: "pending" | "policy" | "exception" | "blocked";
+  max_severity: SkillMaxSeverity | null;
+  ast_codes: string[];
+  widest_visibility: SkillVisibility | null;
+}
+
+export interface SkillFinding {
+  ast: string;
+  rule: string;
+  severity: SkillSeverity;
+  title: string;
+  file: string;
+  line: number;
+  excerpt: string;
+  count: number;
+}
+
+export interface SkillSecurityDecision {
+  decision: "requested" | "allow" | "reject" | "block";
+  // False when the request/approval was made for content that has since changed.
+  current: boolean;
+  scope: Exclude<SkillShareScope, "blocked"> | null;
+  request_reason: string;
+  admin_note: string;
+  updated_at: string;
+}
+
+export interface SkillAssessmentReport {
+  id: string;
+  name: string;
+  visibility: SkillVisibility;
+  source: string | null;
+  platform: Record<string, "platform" | "pattern_only" | "not_applicable">;
+  policy: SkillSecurityVerdict;
+  status: "pending" | "current" | "outdated";
+  // A pending review that gave up after its retries; a rescan or a save tries again.
+  review_failed: boolean;
+  max_severity?: SkillMaxSeverity;
+  sha256?: string;
+  scanner_version?: number;
+  checked_at?: string;
+  findings?: SkillFinding[];
+  // Owner and admin views only.
+  decision?: SkillSecurityDecision;
+  // Admin view only.
+  owner_name?: string;
+}
+
+export interface SkillSecurityRow {
+  id: string;
+  name: string;
+  owner_name: string;
+  visibility: SkillVisibility;
+  enabled: boolean;
+  subscribers: number;
+  checked_at: string | null;
+  review_failed: boolean;
+  decision: SkillSecurityDecision["decision"] | null;
+  policy: SkillSecurityVerdict;
+}
+
+export interface SkillSecurityListParams {
+  severity?: string[];
+  ast?: string;
+  visibility?: SkillVisibility | "";
+  status?: "" | SkillSecurityDecision["decision"];
+  q?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export type SkillSecurityPolicy = Record<SkillPolicyLevel, SkillShareScope>;
+
+export interface SkillPolicyImpact {
+  blocked_skills: number;
+  suspended_shares: number;
+  affected_subscribers: number;
+  restored_shares: number;
 }
 
 export interface SkillWorkspaceOrphan {
@@ -1178,6 +1272,20 @@ export class ApiError extends Error {
   }
 }
 
+/** The user-facing text of a thrown error: the server's `detail` when it is a
+ * string or a structured `{ message }` (e.g. a 409 skill_share_blocked), else
+ * the error's own message. */
+export function apiErrorMessage(e: unknown): string {
+  // Duck-typed: api.ts has its own ApiError class with the same `body`.
+  const body = typeof e === "object" && e !== null && "body" in e ? e.body : undefined;
+  const detail = typeof body === "object" && body !== null && "detail" in body ? body.detail : undefined;
+  if (typeof detail === "string") return detail;
+  if (typeof detail === "object" && detail !== null && "message" in detail && typeof detail.message === "string") {
+    return detail.message;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(endpoint(path), {
     ...init,
@@ -1419,6 +1527,13 @@ export const api = {
     method: "POST", body: JSON.stringify({ repository, commit }),
   }),
   listSkills: () => request<SkillInfo[]>("/api/skills"),
+  skillAssessment: (id: string) =>
+    request<SkillAssessmentReport>(`/api/skills/${encodeURIComponent(id)}/assessment`),
+  requestSkillException: (id: string, reason: string) =>
+    request<SkillAssessmentReport>(`/api/skills/${encodeURIComponent(id)}/security-request`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
   // Built-in skills come back from listSkills with an empty `content` — theirs
   // is static and large enough that shipping all of it on every panel open is
   // wasted bandwidth, so the detail view pulls just the one it is showing.
@@ -1765,6 +1880,57 @@ export const api = {
   adminDeleteBrandingLogo: (slot: BrandingLogoSlot) =>
     request<AdminBranding>(`/api/admin/branding/logo/${slot}`, { method: "DELETE" }),
 
+  adminSkillSecuritySummary: () =>
+    request<{ by_severity: Partial<Record<SkillMaxSeverity | "pending", number>>; requested: number }>(
+      "/api/admin/skill-security/summary",
+    ),
+  adminSkillSecurityList: (params: SkillSecurityListParams) => {
+    const q = new URLSearchParams();
+    if (params.severity?.length) q.set("severity", params.severity.join(","));
+    if (params.ast) q.set("ast", params.ast);
+    if (params.visibility) q.set("visibility", params.visibility);
+    if (params.status) q.set("status", params.status);
+    if (params.q) q.set("q", params.q);
+    q.set("offset", String(params.offset ?? 0));
+    q.set("limit", String(params.limit ?? 25));
+    return request<{ total: number; offset: number; limit: number; items: SkillSecurityRow[] }>(
+      `/api/admin/skill-security/skills?${q.toString()}`,
+    );
+  },
+  adminSkillSecurityReport: (id: string) =>
+    request<SkillAssessmentReport>(`/api/admin/skill-security/skills/${encodeURIComponent(id)}`),
+  adminSkillSecurityDecide: (
+    id: string,
+    body: {
+      decision: "allow" | "reject" | "block" | "clear";
+      scope?: Exclude<SkillShareScope, "blocked">;
+      note: string;
+      sha256?: string;
+    },
+  ) =>
+    request<SkillAssessmentReport>(`/api/admin/skill-security/skills/${encodeURIComponent(id)}/decision`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  adminSkillSecurityRescan: (id: string) =>
+    request<SkillAssessmentReport>(`/api/admin/skill-security/skills/${encodeURIComponent(id)}/rescan`, {
+      method: "POST",
+    }),
+  adminSkillSecurityPolicy: () =>
+    request<{ policy: SkillSecurityPolicy; defaults: SkillSecurityPolicy; levels: SkillPolicyLevel[]; scopes: SkillShareScope[] }>(
+      "/api/admin/skill-security/policy",
+    ),
+  adminSkillSecurityPreview: (policy: SkillSecurityPolicy, signal?: AbortSignal) =>
+    request<SkillPolicyImpact>("/api/admin/skill-security/policy/preview", {
+      method: "POST",
+      body: JSON.stringify({ policy }),
+      signal,
+    }),
+  adminSkillSecuritySavePolicy: (policy: SkillSecurityPolicy) =>
+    request<{ policy: SkillSecurityPolicy; impact: SkillPolicyImpact }>("/api/admin/skill-security/policy", {
+      method: "PUT",
+      body: JSON.stringify({ policy }),
+    }),
   adminAudit: (
     filters: { kind?: string; user_id?: string; search?: string; before?: string; limit?: number } = {},
   ) => {

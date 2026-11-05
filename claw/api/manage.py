@@ -1,10 +1,10 @@
 """Management API: skills, memory, connectors, schedules — all in-chat, no separate control plane."""
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 from claw.api import connector_shared as connectors
 from claw.api import llm_shared as llm
@@ -12,6 +12,8 @@ from claw.api.deps import AppState, current_user, get_state, require_admin
 from claw.core.memory import MAX_CORE_MEMORY_CHARS, sanitize_core_document
 from claw.core.scheduler import compute_next_run
 from claw.db.models import User
+from claw.db.stores import SkillShareBlocked
+from claw.skills.assessment import MAX_SCAN_CHARS
 
 router = APIRouter(prefix="/api")
 
@@ -25,7 +27,7 @@ require_operator = current_user
 class SkillBody(BaseModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9ก-๙_\- ]+$")
     description: str = Field(default="", max_length=500)
-    content: str = ""
+    content: str = Field(default="", max_length=MAX_SCAN_CHARS)  # the security review reads no further
     enabled: bool = True
     visibility: Literal["private", "group", "public"] | None = None
     # Which of the owner's groups a "group" skill is shared with. Only needed when the owner is in
@@ -78,7 +80,18 @@ def _skill_json(
         # hiding that built-in from the list below — surfaced in the UI so
         # the collision isn't silent.
         "shadows_builtin": shadows_builtin,
+        "security": _security_json(s),
     }
+
+
+def _security_json(s) -> dict | None:
+    """The skill's review verdict for badges and the share menu; None for built-ins."""
+    from claw.api.skill_security import verdict_json
+
+    security = getattr(s, "security", None)
+    if security is None:
+        return None
+    return {**verdict_json(security), "readable": getattr(s, "policy_readable", True)}
 
 
 class SkillGitImport(BaseModel):
@@ -91,11 +104,11 @@ async def import_github_skill(body: SkillGitImport, user: User = Depends(current
     import asyncio
     import httpx
     from sqlalchemy.exc import IntegrityError
-    from claw.skills.github import download_bundle
+    from claw.skills.github import download_bundle, source_url
     from claw.skills.bundles import parse_bundle, install_bundle, prepare_bundle
     try:
         data = await download_bundle(body.repository, body.commit)
-        bundle = await asyncio.to_thread(parse_bundle, data, body.repository + "/tree/" + body.commit)
+        bundle = await asyncio.to_thread(parse_bundle, data, source_url(body.repository, body.commit))
         bundle = await prepare_bundle(state.skills, user.id, bundle)
         skill = await install_bundle(state.skills, user.id, bundle)
     except (ValueError, UnicodeError) as exc:
@@ -154,8 +167,10 @@ async def list_skills(user: User = Depends(current_user), state: AppState = Depe
         for b in builtin_skills()
         if b.name not in user_names
     ]
+    # A share the policy withholds arrives from the store already without its text.
     return builtins + [
-        _skill_json(s, shadows_builtin=s.name in builtin_names, viewer_id=user.id, owner_name=owners.get(s.user_id, "")) for s in user_skills
+        _skill_json(s, shadows_builtin=s.name in builtin_names, viewer_id=user.id, owner_name=owners.get(s.user_id, ""))
+        for s in user_skills
     ]
 
 
@@ -174,6 +189,47 @@ async def skill_content(skill_id: str, _: User = Depends(require_operator)) -> d
     return {"content": skill.content}
 
 
+@router.get("/skills/{skill_id}/assessment")
+async def skill_assessment(
+    skill_id: str, user: User = Depends(current_user), state: AppState = Depends(get_state)
+) -> dict:
+    """The security review of a skill this user owns or can read as a share (OWASP AST01-AST10 ids)."""
+    from claw.api.skill_security import report_json
+
+    report = await state.skills.security_report(skill_id, viewer_id=user.id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="skill not found")
+    return report_json(report, show_decision=report["owner_id"] == user.id)
+
+
+class SecurityRequestBody(BaseModel):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=2000)]
+
+
+@router.post("/skills/{skill_id}/security-request")
+async def request_security_exception(
+    skill_id: str, body: SecurityRequestBody, user: User = Depends(require_operator), state: AppState = Depends(get_state)
+) -> dict:
+    """The owner asks an admin to allow this version of the skill beyond the share policy."""
+    from claw.api.skill_security import report_json
+
+    try:
+        row = await state.skills.request_security_exception(user.id, skill_id, body.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="skill not found")
+    report = await state.skills.security_report(skill_id, viewer_id=user.id)
+    await state.audit.log(
+        "skill_sec.request",
+        {"skill_id": skill_id, "skill": report["name"] if report else None, "sha256": row.content_sha256},
+        user_id=user.id,
+    )
+    if report is None:  # deleted meanwhile; the request was recorded and audited
+        raise HTTPException(status_code=404, detail="skill not found")
+    return report_json(report, show_decision=True)
+
+
 @router.put("/skills/{skill_id}/subscription")
 async def set_skill_subscription(
     skill_id: str,
@@ -181,7 +237,11 @@ async def set_skill_subscription(
     user: User = Depends(current_user),
     state: AppState = Depends(get_state),
 ) -> dict:
-    if skill_id.startswith("builtin:") or not await state.skills.set_subscription(user.id, skill_id, body.enabled):
+    try:
+        found = not skill_id.startswith("builtin:") and await state.skills.set_subscription(user.id, skill_id, body.enabled)
+    except SkillShareBlocked as exc:
+        raise HTTPException(status_code=409, detail="The skill security policy does not allow this share right now") from exc
+    if not found:
         raise HTTPException(status_code=404, detail="shared skill not found")
     return {"enabled": body.enabled}
 
@@ -242,6 +302,19 @@ async def upsert_skill(
             name.strip(),
             **updates,
         )
+    except SkillShareBlocked as exc:
+        from claw.api.skill_security import verdict_json
+
+        policy = verdict_json(exc.verdict) if exc.verdict is not None else None
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "skill_share_blocked",
+                "message": str(exc) + "; other changes were saved",
+                "visibility": exc.visibility,
+                "policy": policy,
+            },
+        ) from exc
     except ValueError as exc:  # e.g. "Choose which of your groups to share this skill with"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     result = _skill_json(skill)

@@ -34,7 +34,9 @@ from claw.db.models import UserGroupMember, _uuid as _new_id
 
 from sbot.core.keyed_locks import KeyedLocks
 from sbot.core.plans import cost_allowed, cost_rank
-from claw.db.models import SkillBundleVersion
+# Bot mode reads the same skills, so it uses claw's store: one place applies the skill security
+# policy, the review queue and the share checks.
+from claw.db.stores import SkillStore as SkillStore
 from sbot.db.models import (
     AppSetting,
     AuditEvent,
@@ -61,7 +63,6 @@ from sbot.db.models import (
     Schedule,
     Share,
     Skill,
-    SkillSubscription,
     UsageDaily,
     UsageRecord,
     User,
@@ -1803,148 +1804,6 @@ class MemoryStore:
                 .where(Memory.kind == "core", func.length(Memory.content) > 0)
             )
         return {"consolidations": consolidations or 0, "memory_users": memory_users or 0}
-
-
-class SkillStore:
-    def __init__(self, factory: async_sessionmaker[AsyncSession]):
-        self.factory = factory
-
-    async def list_for_user(self, user_id: str) -> list[Skill]:
-        async with self.factory() as db:
-            rows = await db.scalars(select(Skill).where(Skill.user_id == user_id).order_by(Skill.name))
-            return list(rows)
-
-    async def available_for_user(self, user_id: str) -> list[Skill]:
-        """Own skills plus readable shares, annotated with recipient opt-ins."""
-        async with self.factory() as db:
-            viewer = await db.get(User, user_id)
-            if viewer is None:
-                return []
-            shared_scope = or_(
-                Skill.visibility == "public",
-                (Skill.visibility == "group") & Skill.shared_group_id.in_(gm.member_group_ids_subquery(user_id)),
-            )
-            rows = await db.scalars(
-                select(Skill).join(User, User.id == Skill.user_id).where(
-                    or_(Skill.user_id == user_id,
-                        shared_scope & Skill.enabled.is_(True) & User.is_active.is_(True))
-                ).order_by(Skill.name, Skill.created_at, Skill.id)
-            )
-            skills = list(rows)
-            subscribed_ids = set(
-                (await db.scalars(
-                    select(SkillSubscription.skill_id).where(SkillSubscription.user_id == user_id)
-                )).all()
-            )
-            for skill in skills:
-                skill.subscription_enabled = skill.enabled if skill.user_id == user_id else skill.id in subscribed_ids
-            return skills
-
-    async def enabled_for_user(self, user_id: str) -> list[Skill]:
-        # Filter before resolving collisions: a disabled private copy must not
-        # hide an enabled shared skill of the same name.
-        rows = [s for s in await self.available_for_user(user_id) if getattr(s, "subscription_enabled", s.enabled)]
-        # A private skill wins a name collision. Shared collisions resolve to
-        # the oldest stable ID, identically for discovery and read_skill.
-        rows.sort(key=lambda skill: skill.user_id != user_id)
-        chosen = {}
-        for skill in rows:
-            chosen.setdefault(skill.name, skill)
-        return list(chosen.values())
-
-    async def readable_by_name(self, user_id: str, name: str) -> Skill | None:
-        return next((s for s in await self.enabled_for_user(user_id) if s.name == name), None)
-
-    async def get_by_name(self, user_id: str, name: str) -> Skill | None:
-        async with self.factory() as db:
-            return await db.scalar(select(Skill).where(Skill.user_id == user_id, Skill.name == name))
-
-    async def upsert(self, user_id: str, name: str, **fields: Any) -> Skill:
-        async with self.factory() as db:
-            skill = await db.scalar(select(Skill).where(Skill.user_id == user_id, Skill.name == name))
-            visibility = fields.get("visibility")
-            if visibility is not None and visibility not in {"private", "group", "public"}:
-                raise ValueError("invalid skill visibility")
-            owner_groups: list[str] = []
-            if visibility == "group":
-                owner_groups = await gm.group_ids_of(db, user_id)
-                if not owner_groups:
-                    raise ValueError("Join a group before sharing a skill with your group")
-            if skill is None:
-                skill = Skill(user_id=user_id, name=name)
-                db.add(skill)
-            if getattr(skill, "bundle_id", None) and any(key in fields and fields[key] != getattr(skill, key) for key in ("content", "description")):
-                raise ValueError("Imported bundle instructions are read only")
-            for key in ("description", "content", "enabled", "visibility"):
-                if key in fields and fields[key] is not None:
-                    setattr(skill, key, fields[key])
-            if visibility == "group":
-                # The target is one of the owner's groups. An explicit choice wins; otherwise the
-                # existing target is kept while the owner is still in it; a single-group owner needs
-                # no choice. Members of other groups never gain access by the owner joining them.
-                wanted = fields.get("shared_group_id")
-                if wanted is not None:
-                    if wanted not in owner_groups:
-                        raise ValueError("You can only share with a group you belong to")
-                    skill.shared_group_id = wanted
-                elif skill.shared_group_id in owner_groups:
-                    pass
-                elif len(owner_groups) == 1:
-                    skill.shared_group_id = owner_groups[0]
-                else:
-                    raise ValueError("Choose which of your groups to share this skill with")
-            elif visibility in {"private", "public"}:
-                skill.shared_group_id = None
-            # Unlike the fields above, connector_id's presence itself is the
-            # signal (None is a valid, meaningful value — "no connector
-            # linked" — not "leave unchanged"), so callers must omit the key
-            # entirely to leave it alone.
-            if "connector_id" in fields:
-                skill.connector_id = fields["connector_id"]
-            await db.commit()
-            return skill
-
-    async def set_subscription(self, user_id: str, skill_id: str, enabled: bool) -> bool:
-        """Enable or remove a recipient opt-in after rechecking access."""
-        async with self.factory() as db:
-            viewer = await db.get(User, user_id)
-            if viewer is None:
-                return False
-            shared_scope = or_(
-                Skill.visibility == "public",
-                (Skill.visibility == "group") & Skill.shared_group_id.in_(gm.member_group_ids_subquery(user_id)),
-            )
-            skill = await db.scalar(
-                select(Skill).join(User, User.id == Skill.user_id).where(
-                    Skill.id == skill_id,
-                    Skill.user_id != user_id,
-                    shared_scope & Skill.enabled.is_(True) & User.is_active.is_(True),
-                )
-            )
-            if skill is None:
-                return False
-            subscription = await db.get(SkillSubscription, {"user_id": user_id, "skill_id": skill_id})
-            if enabled and subscription is None:
-                db.add(SkillSubscription(user_id=user_id, skill_id=skill_id))
-            elif not enabled and subscription is not None:
-                await db.delete(subscription)
-            await db.commit()
-            return True
-
-    async def delete(self, user_id: str, skill_id: str) -> bool:
-        async with self.factory() as db:
-            skill = await db.get(Skill, skill_id)
-            if skill is None or skill.user_id != user_id:
-                return False
-            await db.execute(
-                SkillSubscription.__table__.delete().where(SkillSubscription.skill_id == skill_id)
-            )
-            await db.execute(
-                SkillBundleVersion.__table__.delete().where(SkillBundleVersion.skill_id == skill_id)
-            )
-            await db.delete(skill)
-            await db.commit()
-            return True
 
 
 class ConnectorKindMismatch(Exception):

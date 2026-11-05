@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 import hmac
 import secrets
 import time
+from concurrent.futures import ThreadPoolExecutor
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -16,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     Integer,
     String,
+    Text,
     bindparam,
     case,
     cast,
@@ -24,16 +28,19 @@ from sqlalchemy import (
     literal_column,
     or_,
     select,
+    true,
     delete as sa_delete,
     update,
 )
+from sqlalchemy import event, inspect as sa_inspect
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from loguru import logger
 from sqlalchemy import exists as sa_exists
 
 from claw.db import memberships as gm
-from claw.db.models import UserGroupMember, _uuid as _new_id
+from claw.db.models import UserGroupMember, _now, _uuid as _new_id
 
 from claw.core.plans import cost_allowed, cost_rank
 from claw.auth.mcp_oauth_discovery import (
@@ -73,6 +80,8 @@ from claw.db.models import (
     Schedule,
     Share,
     Skill,
+    SkillAssessment,
+    SkillSecurityDecision,
     SkillBundleVersion,
     SkillSubscription,
     UsageDaily,
@@ -575,9 +584,274 @@ class MemoryStore:
         return {"consolidations": consolidations or 0, "memory_users": memory_users or 0}
 
 
+# Reviews run on their own small pool: a burst of imports queues here instead of filling the default
+# executor that every other to_thread caller shares.
+SCAN_WORKERS = 2
+_SCAN_POOL = ThreadPoolExecutor(max_workers=SCAN_WORKERS, thread_name_prefix="skill-scan")
+_reviews: dict[str, asyncio.Task] = {}
+_review_again: set[str] = set()
+_review_forced: set[str] = set()
+
+
+@event.listens_for(Skill, "before_insert")
+@event.listens_for(Skill, "before_update")
+def _stamp_skill_digest(_mapper, _connection, skill: Skill) -> None:
+    """Keep Skill.content_sha256 the digest of the text every ORM write saves, so a review of other
+    text never counts. A Core insert or update of skills bypasses this and must set it itself."""
+    from claw.skills.assessment import content_digest
+
+    state = sa_inspect(skill)
+    if state.persistent and not any(state.attrs[k].history.has_changes() for k in ("content", "description", "bundle_id")):
+        return  # a toggle or share change: same text, same digest
+    skill.content_sha256 = content_digest(skill.content or "", skill.bundle_id, skill.description or "")
+
+
+def _ast_column(findings) -> str:
+    codes = sorted({f.ast for f in findings if f.severity != "info"})
+    return f",{','.join(codes)}," if codes else ""
+
+
+def _decode_and_assess(content: str, stored: str | None, source: dict | None, digest: str, description: str):
+    from claw.skills import assessment
+
+    # The bundle's files arrive as raw JSON text: parsing tens of MB of base64 belongs in the pool,
+    # not on the event loop.
+    files = {k: base64.b64decode(v) for k, v in (json.loads(stored) if stored else {}).items() if k != "SKILL.md"}
+    return assessment.assess(content, files, source, digest, description)
+
+
+async def assess_skill(
+    factory: async_sessionmaker[AsyncSession], skill_id: str, force: bool = False
+) -> SkillAssessment | None:
+    """Review the skill's current version, unless this scanner already reviewed this exact content
+    (`force` reviews it again anyway).
+
+    The scan runs outside any transaction, so its result is dropped if the skill's text changed
+    meanwhile; that save queued a review of its own."""
+    from claw.skills import assessment
+
+    loop = asyncio.get_running_loop()
+    async with factory() as db:
+        skill = await db.get(Skill, skill_id)
+        if skill is None:
+            return None
+        content, description = skill.content or "", skill.description or ""
+        source, bundle_id, stored_digest = skill.bundle_metadata, skill.bundle_id, skill.content_sha256
+        row = await db.get(SkillAssessment, skill_id)
+        previous = (row.content_sha256, row.scanner_version) if row else None
+    digest = assessment.content_digest(content, bundle_id, description)
+    if digest != stored_digest:
+        logger.warning("skill {} text does not match its digest; not reviewed", skill_id)
+        return None
+    result = None
+    if force or previous != (digest, assessment.SCANNER_VERSION):  # a toggle or rename never loads the bundle
+        async with factory() as db:
+            stored = await db.scalar(
+                select(cast(SkillBundleVersion.files, Text)).where(SkillBundleVersion.id == bundle_id)
+            ) if bundle_id else None
+        result = await loop.run_in_executor(_SCAN_POOL, _decode_and_assess, content, stored, source, digest, description)
+    for _ in range(2):  # another process reviewing the same skill: the loser updates the winner's row
+        async with factory() as db:
+            # Locked until commit, so a save cannot land between this check and the write (Postgres).
+            saved = await db.scalar(select(Skill.content_sha256).where(Skill.id == skill_id).with_for_update())
+            if saved != digest:
+                return None
+            row = await db.get(SkillAssessment, skill_id)
+            if result is None:
+                if row is None:
+                    return None
+                row.checked_at = _now()
+            else:
+                values = dict(
+                    content_sha256=result.sha256,
+                    scanner_version=result.scanner_version,
+                    max_severity=result.max_severity,
+                    findings=[f.as_dict() for f in result.findings],
+                    ast_codes=_ast_column(result.findings),
+                    checked_at=_now(),
+                )
+                if row is None:
+                    row = SkillAssessment(skill_id=skill_id, created_at=_now(), **values)
+                    db.add(row)
+                else:
+                    for key, value in values.items():
+                        setattr(row, key, value)
+            try:
+                await db.commit()
+                return row
+            except IntegrityError:
+                await db.rollback()
+    return None
+
+
+# A failed review leaves the skill owner-only, so it is retried after a pause that doubles up to the
+# cap, REVIEW_ATTEMPTS times in all (about 25 minutes). Then it is a failure an admin sees, until the
+# skill is saved or rescanned, or the next startup's backfill reviews it again.
+REVIEW_RETRY_S, REVIEW_RETRY_MAX_S, REVIEW_ATTEMPTS = 30.0, 600.0, 6
+# Skill id -> why its review gave up, in this process.
+_review_failed: dict[str, str] = {}
+
+
+async def _review_until_current(factory: async_sessionmaker[AsyncSession], skill_id: str) -> None:
+    wait, attempts = REVIEW_RETRY_S, 0
+    while True:
+        _review_again.discard(skill_id)
+        force = skill_id in _review_forced
+        _review_forced.discard(skill_id)
+        attempts += 1
+        try:
+            await assess_skill(factory, skill_id, force=force)
+            _review_failed.pop(skill_id, None)
+        except Exception as exc:  # saving a skill never fails because its review did
+            if force:
+                _review_forced.add(skill_id)
+            if attempts >= REVIEW_ATTEMPTS:
+                _review_failed[skill_id] = type(exc).__name__
+                logger.error("skill assessment of {} gave up after {} attempts: {}", skill_id, attempts, type(exc).__name__)
+                return
+            logger.warning("skill assessment failed for {}, retrying in {}s: {}", skill_id, wait, type(exc).__name__)
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, REVIEW_RETRY_MAX_S)
+            continue
+        if skill_id not in _review_again:
+            return
+
+
+def schedule_assessment(factory: async_sessionmaker[AsyncSession], skill_id: str, force: bool = False) -> asyncio.Task:
+    """Queue a review of the skill's current version in the background. `force` reviews it even if
+    this scanner already reviewed this content.
+
+    One review per skill runs at a time. A save during a review makes it run once more afterwards, so
+    the last save is always the one reviewed."""
+    if force:
+        _review_forced.add(skill_id)
+    task = _reviews.get(skill_id)
+    if task is not None and not task.done() and task.get_loop() is asyncio.get_running_loop():
+        _review_again.add(skill_id)
+        return task
+    task = asyncio.create_task(_review_until_current(factory, skill_id))
+    _reviews[skill_id] = task
+    task.add_done_callback(lambda done: _reviews.pop(skill_id) if _reviews.get(skill_id) is done else None)
+    return task
+
+
+async def settle_assessments(cancel: bool = False, timeout: float | None = None) -> None:
+    """Wait for queued reviews (tests), or cancel them and wait briefly (shutdown)."""
+    loop = asyncio.get_running_loop()
+    pending = [t for t in _reviews.values() if t.get_loop() is loop and not t.done()]
+    for task in pending if cancel else ():
+        task.cancel()
+    if pending:
+        await asyncio.wait(pending, timeout=timeout)
+
+
+class SkillShareBlocked(ValueError):
+    """Sharing at `visibility` is beyond what the security policy allows this skill."""
+
+    def __init__(self, visibility: str, found):
+        self.visibility, self.verdict = visibility, found
+        if found is None or found.reason == "pending":
+            super().__init__("The security review of this skill is still running; try sharing it again in a moment")
+        else:
+            super().__init__("This skill cannot be shared that widely under the skill security policy")
+
+
+# How long a widening save waits for its review. Longer reads as not reviewed yet: the share is
+# refused and the owner can try again once the review lands.
+SHARE_REVIEW_TIMEOUT_S = 20.0
+
+
+# A review of other content than the skill now holds reads as no review: pending, owner only.
+_current_review = (SkillAssessment.skill_id == Skill.id) & (SkillAssessment.content_sha256 == Skill.content_sha256)
+
+
+# A request is open only for the content it was made for; an edit since makes the owner ask again.
+_open_request = (SkillSecurityDecision.decision == "requested") & (
+    SkillSecurityDecision.content_sha256 == Skill.content_sha256
+)
+
+
+def _with_security(query):
+    """Add the review and decision columns a Verdict needs, without loading findings."""
+    return query.add_columns(
+        SkillAssessment.content_sha256,
+        SkillAssessment.max_severity,
+        SkillAssessment.ast_codes,
+        SkillSecurityDecision.decision,
+        SkillSecurityDecision.content_sha256,
+        SkillSecurityDecision.scope,
+    ).outerjoin(SkillAssessment, _current_review).outerjoin(
+        SkillSecurityDecision, SkillSecurityDecision.skill_id == Skill.id
+    )
+
+
+def _review_and_decision(sha, severity, codes, decision, decision_sha, scope):
+    from claw.skills.security_policy import Decision, Review
+
+    review = Review(sha, severity, tuple(c for c in (codes or "").split(",") if c)) if sha else None
+    return review, (Decision(decision, decision_sha or "", scope) if decision else None)
+
+
+async def _security_policy(db: AsyncSession) -> dict[str, str]:
+    from claw.skills.security_policy import DEFAULT_POLICY, POLICY_KEY, parse_policy
+
+    row = await db.get(AppSetting, POLICY_KEY)
+    try:
+        return parse_policy(row.value if row else None)
+    except ValueError:  # only the admin API writes it, and it validates; never fail open on a bad row
+        return {level: "owner" for level in DEFAULT_POLICY}
+
+
+def _readable_share(user_id: str):
+    """A Group or Public skill this user may read: enabled, with an active owner. Callers join User."""
+    return (
+        or_(
+            Skill.visibility == "public",
+            (Skill.visibility == "group") & Skill.shared_group_id.in_(gm.member_group_ids_subquery(user_id)),
+        )
+        & Skill.enabled.is_(True)
+        & User.is_active.is_(True)
+    )
+
+
+async def _share_group(db: AsyncSession, user_id: str, skill: Skill | None, visibility: str, wanted: str | None) -> str | None:
+    """The group a Group share goes to, or ValueError. None for other visibilities.
+
+    It is one of the owner's groups. An explicit choice wins; otherwise the existing target is kept
+    while the owner is still in it; a single-group owner needs no choice. Members of other groups
+    never gain access by the owner joining them."""
+    if visibility != "group":
+        return None
+    owner_groups = await gm.group_ids_of(db, user_id)
+    if not owner_groups:
+        raise ValueError("Join a group before sharing a skill with your group")
+    if wanted is not None:
+        if wanted not in owner_groups:
+            raise ValueError("You can only share with a group you belong to")
+        return wanted
+    if skill is not None and skill.shared_group_id in owner_groups:
+        return skill.shared_group_id
+    if len(owner_groups) == 1:
+        return owner_groups[0]
+    raise ValueError("Choose which of your groups to share this skill with")
+
+
 class SkillStore:
+    # Every turn reads the policy and admins rarely change it. This process drops its copy on a
+    # change; other processes pick it up within this many seconds.
+    POLICY_TTL_S = 5.0
+
     def __init__(self, factory: async_sessionmaker[AsyncSession]):
         self.factory = factory
+        self._policy_cache: tuple[dict[str, str], float] | None = None
+
+    async def _policy(self, db: AsyncSession) -> dict[str, str]:
+        cached = self._policy_cache
+        if cached is not None and cached[1] > time.monotonic():
+            return cached[0]
+        policy = await _security_policy(db)
+        self._policy_cache = (policy, time.monotonic() + self.POLICY_TTL_S)
+        return policy
 
     async def list_for_user(self, user_id: str) -> list[Skill]:
         async with self.factory() as db:
@@ -585,37 +859,53 @@ class SkillStore:
             return list(rows)
 
     async def available_for_user(self, user_id: str) -> list[Skill]:
-        """Own skills plus readable shares, annotated with recipient opt-ins."""
+        """Own skills plus readable shares, annotated with recipient opt-ins and the security verdict.
+
+        `security` is the skill's Verdict; `policy_readable` says whether this reader may use it now.
+        A share the reader may not use stays listed so they see why, but without its text, description
+        or bundle details: that is what the policy withholds. Every API listing skills gets it from here."""
+        from claw.skills.security_policy import readable, verdict
+
         async with self.factory() as db:
             viewer = await db.get(User, user_id)
             if viewer is None:
                 return []
-            shared_scope = or_(
-                Skill.visibility == "public",
-                (Skill.visibility == "group") & Skill.shared_group_id.in_(gm.member_group_ids_subquery(user_id)),
-            )
-            rows = await db.scalars(
-                select(Skill).join(User, User.id == Skill.user_id).where(
-                    or_(Skill.user_id == user_id,
-                        shared_scope & Skill.enabled.is_(True) & User.is_active.is_(True))
-                ).order_by(Skill.name, Skill.created_at, Skill.id)
-            )
-            skills = list(rows)
+            shared_scope = _readable_share(user_id)
+            rows = (
+                await db.execute(
+                    _with_security(select(Skill))
+                    .join(User, User.id == Skill.user_id)
+                    .where(or_(Skill.user_id == user_id, shared_scope))
+                    .order_by(Skill.name, Skill.created_at, Skill.id)
+                )
+            ).all()
+            policy = await self._policy(db)
             subscribed_ids = set(
                 (await db.scalars(
                     select(SkillSubscription.skill_id).where(SkillSubscription.user_id == user_id)
                 )).all()
             )
-            for skill in skills:
+            skills = []
+            for skill, *security in rows:
                 # The owner controls source availability; recipients separately
                 # choose whether to include a shared skill in their AI context.
                 skill.subscription_enabled = skill.enabled if skill.user_id == user_id else skill.id in subscribed_ids
+                skill.security = verdict(policy, *_review_and_decision(*security))
+                skill.policy_readable = readable(skill.security.scope, skill.visibility, skill.user_id == user_id)
+                if not skill.policy_readable and skill.user_id != user_id:
+                    db.expunge(skill)  # blanked for this reader only, never written back
+                    skill.content, skill.description, skill.bundle_metadata = "", "", None
+                skills.append(skill)
             return skills
 
     async def enabled_for_user(self, user_id: str) -> list[Skill]:
         # Filter before resolving collisions: a disabled private copy must not
         # hide an enabled shared skill of the same name.
-        rows = [s for s in await self.available_for_user(user_id) if getattr(s, "subscription_enabled", s.enabled)]
+        rows = [
+            s
+            for s in await self.available_for_user(user_id)
+            if getattr(s, "subscription_enabled", s.enabled) and getattr(s, "policy_readable", True)
+        ]
         # A private skill wins a name collision. Shared collisions resolve to
         # the oldest stable ID, identically for discovery and read_skill.
         rows.sort(key=lambda skill: skill.user_id != user_id)
@@ -632,39 +922,82 @@ class SkillStore:
             return await db.scalar(select(Skill).where(Skill.user_id == user_id, Skill.name == name))
 
     async def upsert(self, user_id: str, name: str, **fields: Any) -> Skill:
+        """Save a skill. Widening its share is checked against the security policy first.
+
+        The share target is validated before anything is saved. The other fields are then saved
+        before the policy check, which needs their review, so a refused share raises
+        SkillShareBlocked with the content already saved and the previous visibility kept.
+
+        The returned skill carries `security` and `policy_readable` as `available_for_user` sets them."""
+        from claw.skills.security_policy import permits, readable, widens
+
+        visibility = fields.get("visibility")
+        current = await self.get_by_name(user_id, name) if visibility in ("group", "public") else None
+        if visibility in ("group", "public") and widens(current.visibility if current else "private", visibility):
+            async with self.factory() as db:
+                await _share_group(db, user_id, current, visibility, fields.get("shared_group_id"))
+            held = {key: fields.pop(key) for key in ("visibility", "shared_group_id") if key in fields}
+            skill = await self._save(user_id, name, fields, review=False)
+            review = schedule_assessment(self.factory, skill.id)  # the check needs this content's review
+            await asyncio.wait({review}, timeout=SHARE_REVIEW_TIMEOUT_S)
+            found = await self.share_verdict(skill.id)
+            if found is None or not permits(found.scope, visibility):
+                raise SkillShareBlocked(visibility, found)
+            # Visibility is not reviewed content. By id: a skill deleted during the wait stays deleted.
+            skill = await self._save(user_id, name, held, review=False, skill_id=skill.id)
+        else:
+            skill = await self._save(user_id, name, fields)
+        skill.security = await self.share_verdict(skill.id)
+        if skill.security is not None:
+            skill.policy_readable = readable(skill.security.scope, skill.visibility, True)
+        return skill
+
+    async def share_verdict(self, skill_id: str):
+        """The security Verdict of one skill under the current policy, or None if it does not exist."""
+        from claw.skills.security_policy import verdict
+
         async with self.factory() as db:
-            skill = await db.scalar(select(Skill).where(Skill.user_id == user_id, Skill.name == name))
+            row = (await db.execute(_with_security(select(Skill.id)).where(Skill.id == skill_id))).first()
+            if row is None:
+                return None
+            return verdict(await self._policy(db), *_review_and_decision(*row[1:]))
+
+    async def _save(
+        self, user_id: str, name: str, fields: dict[str, Any], review: bool = True, skill_id: str | None = None
+    ) -> Skill:
+        """Create or update the skill called `name`, or with `skill_id` update only that skill."""
+        async with self.factory() as db:
+            if skill_id is None:
+                skill = await db.scalar(select(Skill).where(Skill.user_id == user_id, Skill.name == name))
+            else:
+                skill = await db.scalar(select(Skill).where(Skill.user_id == user_id, Skill.id == skill_id))
+                if skill is None:
+                    raise ValueError("This skill was deleted before it could be shared")
             visibility = fields.get("visibility")
             if visibility is not None and visibility not in {"private", "group", "public"}:
                 raise ValueError("invalid skill visibility")
-            owner_groups: list[str] = []
-            if visibility == "group":
-                owner_groups = await gm.group_ids_of(db, user_id)
-                if not owner_groups:
-                    raise ValueError("Join a group before sharing a skill with your group")
+            from claw.skills.assessment import MAX_SCAN_CHARS
+
+            if len(fields.get("content") or "") > MAX_SCAN_CHARS:
+                raise ValueError(f"Skill instructions are limited to {MAX_SCAN_CHARS:,} characters")
+            group_id = (
+                await _share_group(db, user_id, skill, visibility, fields.get("shared_group_id"))
+                if visibility == "group" else None
+            )
             if skill is None:
                 skill = Skill(user_id=user_id, name=name)
                 db.add(skill)
             if getattr(skill, "bundle_id", None) and any(key in fields and fields[key] != getattr(skill, key) for key in ("content", "description")):
                 raise ValueError("Imported bundle instructions are read only")
+            # A toggle, a connector link or a narrowing leaves the reviewed text, and so the review, as is.
+            text_changed = skill.id is None or any(
+                fields.get(key) is not None and fields[key] != getattr(skill, key) for key in ("content", "description")
+            )
             for key in ("description", "content", "enabled", "visibility"):
                 if key in fields and fields[key] is not None:
                     setattr(skill, key, fields[key])
             if visibility == "group":
-                # The target is one of the owner's groups. An explicit choice wins; otherwise the
-                # existing target is kept while the owner is still in it; a single-group owner needs
-                # no choice. Members of other groups never gain access by the owner joining them.
-                wanted = fields.get("shared_group_id")
-                if wanted is not None:
-                    if wanted not in owner_groups:
-                        raise ValueError("You can only share with a group you belong to")
-                    skill.shared_group_id = wanted
-                elif skill.shared_group_id in owner_groups:
-                    pass
-                elif len(owner_groups) == 1:
-                    skill.shared_group_id = owner_groups[0]
-                else:
-                    raise ValueError("Choose which of your groups to share this skill with")
+                skill.shared_group_id = group_id
             elif visibility in {"private", "public"}:
                 skill.shared_group_id = None
             # Unlike the fields above, connector_id's presence itself is the
@@ -674,27 +1007,38 @@ class SkillStore:
             if "connector_id" in fields:
                 skill.connector_id = fields["connector_id"]
             await db.commit()
-            return skill
+        if review and text_changed:
+            schedule_assessment(self.factory, skill.id)
+        return skill
 
     async def set_subscription(self, user_id: str, skill_id: str, enabled: bool) -> bool:
-        """Enable or remove a recipient opt-in after rechecking access."""
+        """Enable or remove a recipient opt-in after rechecking access.
+
+        Opting in also needs the security policy to allow the share now, so a suspended share is not
+        silently queued to come back. Opting out always works."""
+        from claw.skills.security_policy import readable, verdict
+
         async with self.factory() as db:
             viewer = await db.get(User, user_id)
             if viewer is None:
                 return False
-            shared_scope = or_(
-                Skill.visibility == "public",
-                (Skill.visibility == "group") & Skill.shared_group_id.in_(gm.member_group_ids_subquery(user_id)),
-            )
-            skill = await db.scalar(
-                select(Skill).join(User, User.id == Skill.user_id).where(
-                    Skill.id == skill_id,
-                    Skill.user_id != user_id,
-                    shared_scope & Skill.enabled.is_(True) & User.is_active.is_(True),
+            shared_scope = _readable_share(user_id)
+            found = (
+                await db.execute(
+                    _with_security(select(Skill)).join(User, User.id == Skill.user_id).where(
+                        Skill.id == skill_id,
+                        Skill.user_id != user_id,
+                        shared_scope,
+                    )
                 )
-            )
-            if skill is None:
+            ).first()
+            if found is None:
                 return False
+            skill, *security = found
+            if enabled:
+                found_verdict = verdict(await self._policy(db), *_review_and_decision(*security))
+                if not readable(found_verdict.scope, skill.visibility, False):
+                    raise SkillShareBlocked(skill.visibility, found_verdict)
             subscription = await db.get(SkillSubscription, {"user_id": user_id, "skill_id": skill_id})
             if enabled and subscription is None:
                 db.add(SkillSubscription(user_id=user_id, skill_id=skill_id))
@@ -705,7 +1049,8 @@ class SkillStore:
 
     async def delete(self, user_id: str, skill_id: str) -> bool:
         async with self.factory() as db:
-            skill = await db.get(Skill, skill_id)
+            # Skill row before its review, the order assess_skill locks them in (no deadlock on Postgres).
+            skill = await db.scalar(select(Skill).where(Skill.id == skill_id).with_for_update())
             if skill is None or skill.user_id != user_id:
                 return False
             # Explicit dependent deletes keep the lifecycle correct even when
@@ -717,9 +1062,324 @@ class SkillStore:
             await db.execute(
                 SkillBundleVersion.__table__.delete().where(SkillBundleVersion.skill_id == skill_id)
             )
+            await db.execute(SkillAssessment.__table__.delete().where(SkillAssessment.skill_id == skill_id))
+            await db.execute(SkillSecurityDecision.__table__.delete().where(SkillSecurityDecision.skill_id == skill_id))
             await db.delete(skill)
             await db.commit()
             return True
+
+
+    async def get_assessment(self, skill_id: str) -> SkillAssessment | None:
+        """The review of the skill's current content, if there is one."""
+        async with self.factory() as db:
+            return await db.scalar(select(SkillAssessment).join(Skill, _current_review).where(Skill.id == skill_id))
+
+    async def security_report(self, skill_id: str, viewer_id: str | None = None) -> dict | None:
+        """A skill's review, decision and verdict. With `viewer_id`, only if that user is the owner or
+        the policy lets them read the share now: findings quote the content.
+
+        Without, for admins. One row, without the skill's content."""
+        from claw.skills.security_policy import readable, verdict
+
+        async with self.factory() as db:
+            query = (
+                select(Skill.id, Skill.name, Skill.user_id, Skill.visibility, Skill.updated_at, Skill.bundle_metadata,
+                       SkillAssessment, SkillSecurityDecision)
+                .join(User, User.id == Skill.user_id)
+                .outerjoin(SkillAssessment, _current_review)
+                .outerjoin(SkillSecurityDecision, SkillSecurityDecision.skill_id == Skill.id)
+                .where(Skill.id == skill_id)
+            )
+            if viewer_id is not None:
+                query = query.where(or_(Skill.user_id == viewer_id, _readable_share(viewer_id)))
+            found = (await db.execute(query)).first()
+            if found is None:
+                return None
+            policy = await self._policy(db)
+        row, decision = found.SkillAssessment, found.SkillSecurityDecision
+        security = verdict(
+            policy,
+            *_review_and_decision(
+                row.content_sha256 if row else None, row.max_severity if row else None, row.ast_codes if row else "",
+                decision.decision if decision else None, decision.content_sha256 if decision else "",
+                decision.scope if decision else None,
+            ),
+        )
+        # The owner always sees the report, including why an admin blocked the skill.
+        if viewer_id is not None and found.user_id != viewer_id and not readable(security.scope, found.visibility, False):
+            return None
+        return {
+            "id": found.id, "name": found.name, "owner_id": found.user_id, "visibility": found.visibility,
+            "saved_at": found.updated_at, "source": (found.bundle_metadata or {}).get("source"),
+            "assessment": row, "decision": decision, "verdict": security,
+            "review_failed": row is None and found.id in _review_failed,
+        }
+
+    async def rescan(self, skill_id: str) -> None:
+        """Review a skill again regardless of its stored review, waiting up to SHARE_REVIEW_TIMEOUT_S."""
+        await asyncio.wait({schedule_assessment(self.factory, skill_id, force=True)}, timeout=SHARE_REVIEW_TIMEOUT_S)
+
+    async def security_policy(self) -> dict[str, str]:
+        async with self.factory() as db:
+            return await _security_policy(db)
+
+    async def set_security_policy(self, value: dict) -> dict[str, str]:
+        from claw.skills.security_policy import POLICY_KEY, parse_policy
+
+        policy = parse_policy(value)
+        async with self.factory() as db:
+            row = await db.get(AppSetting, POLICY_KEY)
+            if row is None:
+                db.add(AppSetting(key=POLICY_KEY, value=policy))
+            else:
+                row.value = policy
+            await db.commit()
+        self._policy_cache = None
+        return policy
+
+    async def policy_impact(self, new: dict[str, str]) -> dict[str, int]:
+        """What saving `new` would change, from one grouped query: skills newly blocked, shares newly
+        suspended and the subscribers who lose them, and shares restored. A blocked skill stays
+        blocked; an allowed one counts where the policy would now reach past its exception."""
+        from claw.skills.security_policy import Decision, Review, parse_policy, permits, verdict
+
+        new = parse_policy(new)
+        subscribers = (
+            select(SkillSubscription.skill_id, func.count().label("n")).group_by(SkillSubscription.skill_id).subquery()
+        )
+        exception = case(
+            (
+                (SkillSecurityDecision.decision == "allow")
+                & (SkillSecurityDecision.content_sha256 == SkillAssessment.content_sha256),
+                SkillSecurityDecision.scope,
+            ),
+            else_=None,
+        )
+        async with self.factory() as db:
+            old = await _security_policy(db)
+            rows = (
+                await db.execute(
+                    select(
+                        SkillAssessment.max_severity, Skill.visibility, exception, func.count(Skill.id),
+                        func.coalesce(func.sum(subscribers.c.n), 0),
+                    )
+                    .join(SkillAssessment, _current_review)  # an unreviewed skill is owner-only whatever the policy
+                    .outerjoin(SkillSecurityDecision, SkillSecurityDecision.skill_id == Skill.id)
+                    .outerjoin(subscribers, subscribers.c.skill_id == Skill.id)
+                    .where(or_(SkillSecurityDecision.decision.is_(None), SkillSecurityDecision.decision != "block"))
+                    .group_by(SkillAssessment.max_severity, Skill.visibility, exception)
+                )
+            ).all()
+        impact = {"blocked_skills": 0, "suspended_shares": 0, "affected_subscribers": 0, "restored_shares": 0}
+        for severity, visibility, allowed, count, subs in rows:
+            review = Review("current", severity, ())
+            decision = Decision("allow", "current", allowed) if allowed else None
+            before, after = verdict(old, review, decision).scope, verdict(new, review, decision).scope
+            if after == "blocked" and before != "blocked":
+                impact["blocked_skills"] += count
+            if visibility in ("group", "public"):
+                if permits(before, visibility) and not permits(after, visibility):
+                    impact["suspended_shares"] += count
+                    impact["affected_subscribers"] += int(subs)
+                elif permits(after, visibility) and not permits(before, visibility):
+                    impact["restored_shares"] += count
+        return impact
+
+    async def security_summary(self) -> dict:
+        async with self.factory() as db:
+            counts = dict(
+                (await db.execute(
+                    select(SkillAssessment.max_severity, func.count(Skill.id))
+                    .select_from(Skill)
+                    .outerjoin(SkillAssessment, _current_review)
+                    .group_by(SkillAssessment.max_severity)
+                )).all()
+            )
+            requested = await db.scalar(
+                select(func.count()).select_from(SkillSecurityDecision).join(Skill, Skill.id == SkillSecurityDecision.skill_id)
+                .where(_open_request)
+            )
+        return {"by_severity": {(k or "pending"): v for k, v in counts.items()}, "requested": requested or 0}
+
+    async def security_list(
+        self, *, severities: tuple[str, ...] = (), ast: str = "", visibility: str = "", status: str = "",
+        q: str = "", offset: int = 0, limit: int = 25,
+    ) -> tuple[list[dict], int]:
+        """One page of skills for the admin Skill Security table, most severe first, plus the total."""
+        from claw.skills.assessment import SEVERITIES
+        from claw.skills.security_policy import verdict
+
+        filters = []
+        if severities:
+            named = [x for x in severities if x != "pending"]
+            filters.append(or_(SkillAssessment.max_severity.in_(named), *(
+                [SkillAssessment.skill_id.is_(None)] if "pending" in severities else []
+            )))
+        if ast:
+            filters.append(SkillAssessment.ast_codes.contains(f",{ast},"))
+        if visibility:
+            filters.append(Skill.visibility == visibility)
+        if status:
+            filters.append(_open_request if status == "requested" else SkillSecurityDecision.decision == status)
+        if q:
+            literal = q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{literal}%"
+            filters.append(or_(*(func.lower(col).like(pattern, escape="\\") for col in (Skill.name, User.display_name, User.email))))
+        rank = case({level: i for i, level in enumerate(("none", *SEVERITIES))}, value=SkillAssessment.max_severity, else_=-1)
+        base = (
+            _with_security(select(Skill.id, Skill.name, Skill.user_id, Skill.visibility, Skill.enabled,
+                                  SkillAssessment.checked_at, Skill.content_sha256))
+            .join(User, User.id == Skill.user_id)
+            .where(*filters)
+        )
+        async with self.factory() as db:
+            total = await db.scalar(select(func.count()).select_from(base.subquery()))
+            rows = (await db.execute(base.order_by(rank.desc(), Skill.name, Skill.id).offset(offset).limit(limit))).all()
+            ids = [r.id for r in rows]
+            subscribers = dict(
+                (await db.execute(
+                    select(SkillSubscription.skill_id, func.count()).where(SkillSubscription.skill_id.in_(ids))
+                    .group_by(SkillSubscription.skill_id)
+                )).all()
+            ) if ids else {}
+            policy = await _security_policy(db)
+        page = []
+        for r in rows:
+            sha, severity, codes, decision, decision_sha, scope = r[7:]
+            review, found = _review_and_decision(sha, severity, codes, decision, decision_sha, scope)
+            if decision == "requested" and decision_sha != r.content_sha256:
+                decision = None  # asked for earlier content: not open any more
+            page.append({
+                "id": r.id, "name": r.name, "owner_id": r.user_id, "visibility": r.visibility, "enabled": r.enabled,
+                "checked_at": r.checked_at, "subscribers": subscribers.get(r.id, 0),
+                "review_failed": review is None and r.id in _review_failed,
+                "decision": decision, "verdict": verdict(policy, review, found),
+            })
+        return page, total or 0
+
+    async def decide_security(
+        self, skill_id: str, decision: str, admin_id: str, scope: str | None = None, note: str = "",
+        sha256: str = "",
+    ) -> SkillSecurityDecision | None:
+        """Admin: `allow` (an exception for the reviewed content, up to `scope`), `reject` a request,
+        `block` whatever the content, or `clear` back to the policy. None if the skill does not exist.
+
+        `allow` names the review the admin read (`sha256`): if the skill changed since, it is refused
+        rather than approving content nobody looked at."""
+        from claw.skills.security_policy import SCOPES
+
+        async with self.factory() as db:
+            skill = await db.get(Skill, skill_id)
+            if skill is None:
+                return None
+            review = await db.get(SkillAssessment, skill_id)
+            if review is not None and review.content_sha256 != skill.content_sha256:
+                review = None  # a review of earlier content
+            row = await db.get(SkillSecurityDecision, skill_id)
+            if decision == "clear":
+                if row is not None:
+                    await db.delete(row)
+                    await db.commit()
+                return row
+            if decision not in ("allow", "reject", "block"):
+                raise ValueError("decision must be allow, reject, block or clear")
+            if decision == "allow" and review is None:
+                raise ValueError("This skill has not been reviewed yet; try again in a moment")
+            if decision == "allow" and review.content_sha256 != sha256:
+                raise ValueError("This skill changed after you opened the report; review it again")
+            if decision == "reject" and (row is None or row.decision != "requested"):
+                raise ValueError("There is no open request to reject")
+            if decision == "allow" and (scope or "public") not in SCOPES[:3]:
+                raise ValueError("scope must be public, group or owner")
+            if row is None:
+                row = SkillSecurityDecision(skill_id=skill_id)
+                db.add(row)
+            row.decision = decision
+            row.content_sha256 = review.content_sha256 if review else ""
+            row.scope = (scope or "public") if decision == "allow" else None
+            row.admin_note = note.strip()[:2000]
+            row.decided_by = admin_id
+            await db.commit()
+            return row
+
+    async def request_security_exception(self, user_id: str, skill_id: str, reason: str) -> SkillSecurityDecision | None:
+        """Owner: ask an admin to allow this reviewed content beyond the policy. None if not the owner."""
+        async with self.factory() as db:
+            skill = await db.get(Skill, skill_id)
+            if skill is None or skill.user_id != user_id:
+                return None
+            review = await db.get(SkillAssessment, skill_id)
+            if review is None or review.content_sha256 != skill.content_sha256:
+                raise ValueError("This skill has not been reviewed yet; try again in a moment")
+            row = await db.get(SkillSecurityDecision, skill_id)
+            if row is not None and row.decision == "block":
+                raise ValueError("An administrator blocked this skill")
+            if row is not None and row.decision == "allow" and row.content_sha256 == review.content_sha256:
+                raise ValueError("An exception for this version is already approved")
+            if row is None:
+                row = SkillSecurityDecision(skill_id=skill_id)
+                db.add(row)
+            row.decision, row.content_sha256, row.scope = "requested", review.content_sha256, None
+            row.request_reason, row.requested_by, row.admin_note, row.decided_by = reason.strip()[:2000], user_id, "", None
+            await db.commit()
+            return row
+
+    async def backfill_assessments(
+        self, batch: int = 50, pause_s: float = 0.2, retry_s: float | None = None, max_retry_s: float = 600.0
+    ) -> int:
+        """Review every skill that has no current review, two at a time to fill the scan pool. Returns how many it reviewed.
+
+        A review that fails retries on its own, so the pass moves on after REVIEW_RETRY_S rather than
+        wait for it. With `retry_s` a failed query is retried after a pause doubling up to
+        `max_retry_s`, since an unreviewed share is owner-only. Cancel it to stop."""
+        from claw.skills.assessment import SCANNER_VERSION
+
+        checked: set[str] = set()
+        wait = retry_s
+        while True:
+            after = ""
+            try:
+                while ids := await self.stale_assessment_ids(batch, after):
+                    for i in range(0, len(ids), SCAN_WORKERS):
+                        reviews = {schedule_assessment(self.factory, x) for x in ids[i : i + SCAN_WORKERS]}
+                        await asyncio.wait(reviews, timeout=REVIEW_RETRY_S)
+                    # Counted only once a current review is stored: a failing one is retrying or gave up.
+                    checked.update(set(ids) - set(await self.stale_assessment_ids(len(ids), among=ids)))
+                    after = ids[-1]
+                    await asyncio.sleep(pause_s)
+                break
+            except Exception as exc:
+                logger.warning("skill assessment backfill pass failed: {}", type(exc).__name__)
+                if wait is None:
+                    break
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, max_retry_s)
+        if checked:
+            logger.info("Skill security review: checked {} skill(s) with scanner v{}", len(checked), SCANNER_VERSION)
+        return len(checked)
+
+    async def stale_assessment_ids(self, limit: int, after: str = "", among: list[str] | None = None) -> list[str]:
+        """Skills with no review, a review by an older scanner, or a review of other content. With
+        `among`, only those skills."""
+        from claw.skills.assessment import SCANNER_VERSION
+
+        async with self.factory() as db:
+            rows = await db.scalars(
+                select(Skill.id)
+                .outerjoin(SkillAssessment, SkillAssessment.skill_id == Skill.id)
+                .where(
+                    Skill.id > after,
+                    Skill.id.in_(among) if among is not None else true(),
+                    or_(
+                        SkillAssessment.skill_id.is_(None),
+                        SkillAssessment.scanner_version != SCANNER_VERSION,
+                        SkillAssessment.content_sha256 != Skill.content_sha256,
+                    ),
+                )
+                .order_by(Skill.id)
+                .limit(limit)
+            )
+            return list(rows)
 
 
 class ConnectorKindMismatch(Exception):

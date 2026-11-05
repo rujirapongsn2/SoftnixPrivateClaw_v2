@@ -13,6 +13,7 @@ from sbot.core.memory import MAX_CORE_MEMORY_CHARS, sanitize_core_document
 from sbot.core.mission_engine import InvalidGraphError
 from sbot.core.scheduler import compute_next_run
 from sbot.core.specialist import DELEGATABLE_TOOLS
+from claw.db.stores import SkillShareBlocked
 from sbot.db.models import User
 from sbot.tools.registry import ALWAYS_AVAILABLE_TOOLS
 
@@ -562,7 +563,11 @@ async def set_skill_subscription(
     user: User = Depends(current_user),
     state: AppState = Depends(get_state),
 ) -> dict:
-    if skill_id.startswith("builtin:") or not await state.skills.set_subscription(user.id, skill_id, body.enabled):
+    try:
+        found = not skill_id.startswith("builtin:") and await state.skills.set_subscription(user.id, skill_id, body.enabled)
+    except SkillShareBlocked as exc:
+        raise HTTPException(status_code=409, detail="The skill security policy does not allow this share right now") from exc
+    if not found:
         raise HTTPException(status_code=404, detail="shared skill not found")
     return {"enabled": body.enabled}
 
@@ -623,6 +628,8 @@ async def upsert_skill(
             name.strip(),
             **updates,
         )
+    except SkillShareBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc) + "; other changes were saved") from exc
     except ValueError as exc:  # e.g. "Choose which of your groups to share this skill with"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     result = _skill_json(skill)

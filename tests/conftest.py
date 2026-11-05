@@ -66,6 +66,9 @@ async def db_factory(tmp_path):
     engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{tmp_path}/test.db")
     await init_db(engine)
     yield factory
+    from claw.db.stores import settle_assessments
+
+    await settle_assessments(cancel=True, timeout=1)  # skill saves queue a background review
     await engine.dispose()
 
 

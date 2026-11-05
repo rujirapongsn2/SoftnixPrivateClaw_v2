@@ -5406,3 +5406,166 @@ a.claw-preview-action { text-decoration: none; }
   .a2ui-weather-icon { width: 160px; top: -36px; }
 }
 .a2ui-location { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+
+/* ---- Skill Security (SkillSecurity.tsx): admin review table, policy matrix, report ---- */
+.claw-skillsec-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 8px;
+}
+/* Each tile doubles as a filter toggle for its severity. */
+.claw-skillsec-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-subtle, #e4e2dd);
+  border-left: 4px solid var(--skillsec-accent, var(--color-border-subtle, #e4e2dd));
+  border-radius: 10px;
+  background: var(--color-surface, #fff);
+  color: var(--color-text-primary, #1c1a18);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.claw-skillsec-tile[aria-pressed="true"] { background: var(--color-surface-2, #f3f1ea); box-shadow: inset 0 0 0 1px var(--skillsec-accent, #8886); }
+.claw-skillsec-tile:focus-visible { outline: 2px solid var(--color-text-primary, #1c1a18); outline-offset: 2px; }
+.claw-skillsec-tile-count { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.claw-skillsec-tile-label { font-size: 12px; color: var(--color-text-secondary, #6b6760); }
+.claw-skillsec-tile--critical { --skillsec-accent: var(--color-error, #c0392b); }
+.claw-skillsec-tile--high { --skillsec-accent: #e67e22; }
+.claw-skillsec-tile--medium { --skillsec-accent: #d4ac0d; }
+.claw-skillsec-tile--low { --skillsec-accent: var(--color-primary, #4b6bfb); }
+.claw-skillsec-tile--none { --skillsec-accent: var(--color-success, #27ae60); }
+.claw-skillsec-tile--requested { --skillsec-accent: #8e44ad; }
+.claw-skillsec-intro { display: flex; align-items: flex-start; gap: 8px; }
+.claw-skillsec-intro svg { flex: none; margin-top: 2px; }
+.claw-skillsec-filters { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.claw-skillsec-chips { flex-wrap: wrap; }
+/* Server-paged table; collapses to stacked cards at phone width (below). */
+.claw-skillsec-table {
+  border: 1px solid var(--color-border-subtle, #e4e2dd);
+  border-radius: 10px;
+  overflow-x: auto;
+  min-width: 0;
+}
+.claw-skillsec-table.is-loading { opacity: 0.6; }
+.claw-skillsec-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.claw-skillsec-table th,
+.claw-skillsec-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border-subtle, #e4e2dd);
+}
+.claw-skillsec-table thead th { color: var(--color-text-secondary, #6b6760); font-weight: 500; white-space: nowrap; }
+.claw-skillsec-table tbody tr { cursor: pointer; }
+.claw-skillsec-table tbody tr:hover { background: var(--color-surface-2, #f3f1ea); }
+.claw-skillsec-table tbody tr:last-child td { border-bottom: 0; }
+.claw-skillsec-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text-primary, #1c1a18);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.claw-skillsec-link:hover { text-decoration: underline; }
+.claw-skillsec-sub { display: block; font-size: 12px; color: var(--color-text-secondary, #6b6760); }
+.claw-skillsec-pager { flex-wrap: wrap; }
+.claw-skillsec-ast {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--color-surface-2, #f3f1ea);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* Policy matrix: severity rows x share-scope radio columns. */
+.claw-skillsec-matrix { overflow-x: auto; border: 1px solid var(--color-border-subtle, #e4e2dd); border-radius: 10px; }
+.claw-skillsec-matrix table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.claw-skillsec-matrix th,
+.claw-skillsec-matrix td { padding: 10px 8px; border-bottom: 1px solid var(--color-border-subtle, #e4e2dd); text-align: center; }
+.claw-skillsec-matrix thead th { color: var(--color-text-secondary, #6b6760); font-weight: 500; }
+.claw-skillsec-matrix th[scope="row"], .claw-skillsec-matrix thead th:first-child { text-align: left; }
+.claw-skillsec-matrix input[type="radio"] { width: 18px; height: 18px; cursor: pointer; accent-color: var(--color-primary, #4b6bfb); }
+.claw-skillsec-matrix-fixed td { text-align: left; }
+.claw-skillsec-matrix tr:last-child > * { border-bottom: 0; }
+/* Report */
+.claw-skillsec-report { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.claw-skillsec-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.claw-skillsec-source { overflow-wrap: anywhere; }
+.claw-skillsec-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--color-surface-2, #f3f1ea);
+  overflow-wrap: anywhere;
+}
+.claw-skillsec-stale { color: var(--color-warning, #b9770e); }
+.claw-skillsec-findings ul { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.claw-skillsec-finding {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-subtle, #e4e2dd);
+  border-radius: 10px;
+  min-width: 0;
+}
+.claw-skillsec-finding-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.claw-skillsec-finding-title { overflow-wrap: anywhere; }
+.claw-skillsec-finding-meta { overflow-wrap: anywhere; }
+/* Excerpts are untrusted skill text: shown verbatim, wrapped, never rendered as markup. */
+.claw-skillsec-excerpt {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--color-surface-2, #f3f1ea);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.claw-skillsec-platform { display: flex; flex-wrap: wrap; gap: 6px; }
+.claw-skillsec-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 3px;
+  border: 1px solid var(--color-border-subtle, #e4e2dd);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b6760);
+}
+.claw-skillsec-credit a, .claw-skillsec-source a { color: inherit; text-decoration: underline; }
+.claw-skillsec-actions { flex-wrap: wrap; }
+/* Settings › Skills */
+.claw-skillsec-note { color: var(--color-warning, #b9770e); }
+.claw-skillsec-share-note { color: var(--color-warning, #b9770e); }
+.claw-skillsec-import-card { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.claw-skillsec-import-findings { margin: 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .claw-skillsec-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .claw-skillsec-tile { padding: 6px 8px; }
+  .claw-skillsec-tile-count { font-size: 18px; }
+  .claw-skillsec-table { overflow-x: visible; }
+  .claw-skillsec-table thead { display: none; }
+  .claw-skillsec-table table, .claw-skillsec-table tbody, .claw-skillsec-table tr, .claw-skillsec-table td { display: block; width: 100%; box-sizing: border-box; }
+  .claw-skillsec-table tr { padding: 8px 0; border-bottom: 1px solid var(--color-border-subtle, #e4e2dd); }
+  .claw-skillsec-table tbody tr:last-child { border-bottom: 0; }
+  .claw-skillsec-table td { display: flex; gap: 8px; padding: 3px 12px; border-bottom: 0; }
+  .claw-skillsec-table td::before { content: attr(data-label); flex: 0 0 84px; color: var(--color-text-secondary, #6b6760); font-size: 12px; }
+  .claw-skillsec-table td > div { min-width: 0; flex: 1; }
+  .claw-skillsec-matrix th, .claw-skillsec-matrix td { padding: 8px 4px; }
+  .claw-skillsec-matrix thead th { font-size: 11px; }
+  .claw-skillsec-filters .claw-token-filter { max-width: 100%; }
+}
