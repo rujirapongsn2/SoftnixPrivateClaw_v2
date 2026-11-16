@@ -650,6 +650,7 @@ class LiteLLMProvider(LLMProvider):
         timeout: float = 120.0,
         explicit_credentials: bool = False,
         request_modalities: tuple[str, ...] | None = None,
+        image_options: dict[str, Any] | None = None,
     ) -> list[tuple[bytes, str]]:
         """Generate image(s) from a text prompt. Returns [(bytes, ext), ...].
 
@@ -662,6 +663,9 @@ class LiteLLMProvider(LLMProvider):
             (``message.images[*].image_url.url`` data URL) — confirmed by the
             verification spike. NEVER sends tool definitions (sending tools is
             exactly what makes these models 404 as chat models).
+          - "openrouter_images": OpenRouter's Image API (POST {base}/images),
+            for models its /images/models catalog lists. ``image_options`` are
+            the catalog-checked request parameters (n, aspect_ratio, ...).
 
         Runs entirely outside the agent loop: no tools, no streaming, no
         EventBus. Raises ProviderError on any failure or if no image comes back.
@@ -686,6 +690,10 @@ class LiteLLMProvider(LLMProvider):
                 results = await self._image_via_images_endpoint(
                     prompt, model, effective_key, effective_base, size, timeout
                 )
+            elif mode == "openrouter_images":
+                results = await _image_via_openrouter_images(
+                    prompt, model, effective_key, effective_base, image_options or {}, timeout
+                )
             else:
                 results = await self._image_via_chat(
                     prompt, model, effective_key, effective_base, timeout, base64, request_modalities
@@ -696,7 +704,7 @@ class LiteLLMProvider(LLMProvider):
             logger.warning("Image generation failed error_type={}", type(exc).__name__)
             raise ProviderError("Image generation failed; check provider configuration and try again") from exc
         if not results:
-            raise ProviderError("the model returned no image")
+            raise ProviderError("the model returned no image", error_type="no_image")
         return results
 
     async def _image_via_images_endpoint(
@@ -794,3 +802,92 @@ class LiteLLMProvider(LLMProvider):
             import json
 
             return len(json.dumps(messages, ensure_ascii=False, default=str)) // 4
+
+
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+# A 20 MB image is ~27 MB as base64; anything past this is refused unread.
+_MAX_IMAGE_RESPONSE_BYTES = 40_000_000
+# Upstream HTTP status -> ProviderError.error_type. The upstream message is
+# never forwarded: it is provider-controlled text.
+_IMAGE_STATUS_ERRORS = {
+    400: "bad_request",
+    401: "auth",
+    402: "credits",
+    403: "auth",
+    404: "bad_request",
+    413: "bad_request",
+    429: "rate_limit",
+}
+
+
+def _sniff_image_ext(data: bytes) -> str | None:
+    """Extension from the bytes themselves, never from the provider's label: an
+    SVG or HTML payload must not land in the workspace as a renderable file."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    return None
+
+
+async def _image_via_openrouter_images(
+    prompt: str, model: str, key: str, base: str, options: dict[str, Any], timeout: float
+) -> list[tuple[bytes, str]]:
+    """One POST to OpenRouter's Image API. Never retried: a timed-out request
+    may still be generated and billed upstream."""
+    import base64
+    import binascii
+    import json
+
+    import httpx
+
+    slug = model.removeprefix("openrouter/")
+    url = (base or OPENROUTER_API_BASE).rstrip("/") + "/images"
+    body = {**options, "model": slug, "prompt": prompt}
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    try:
+        # httpx's timeout is per read; this bounds the whole exchange.
+        async with asyncio.timeout(timeout):
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+                async with client.stream("POST", url, headers=headers, json=body) as resp:
+                    raw = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        raw.extend(chunk)
+                        if len(raw) > _MAX_IMAGE_RESPONSE_BYTES:
+                            raise ProviderError("image response exceeds the size limit", error_type="too_large")
+    except (httpx.TimeoutException, TimeoutError) as exc:
+        raise ProviderError("image generation timed out", error_type="timeout") from exc
+    except httpx.HTTPError as exc:
+        raise ProviderError("image provider unreachable", error_type="network") from exc
+    if resp.status_code >= 400:
+        error_type = _IMAGE_STATUS_ERRORS.get(resp.status_code, "upstream")
+        logger.warning("OpenRouter image request failed status={} error_type={}", resp.status_code, error_type)
+        raise ProviderError(
+            f"image provider returned HTTP {resp.status_code}",
+            error_type=error_type,
+            status_code=resp.status_code,
+        )
+    try:
+        items = json.loads(raw).get("data")
+    except (ValueError, AttributeError) as exc:
+        raise ProviderError("image response is not valid JSON", error_type="invalid_response") from exc
+    out: list[tuple[bytes, str]] = []
+    for item in items if isinstance(items, list) else []:
+        b64 = item.get("b64_json") if isinstance(item, dict) else None
+        if not isinstance(b64, str) or not b64:
+            continue
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ProviderError("image response has invalid base64", error_type="invalid_response") from exc
+        ext = _sniff_image_ext(data)
+        if ext is None:
+            raise ProviderError("image response is not a supported image format", error_type="unsupported_format")
+        out.append((data, ext))
+    if not out:
+        raise ProviderError("the model returned no image", error_type="no_image")
+    return out

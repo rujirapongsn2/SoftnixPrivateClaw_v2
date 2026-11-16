@@ -25,6 +25,18 @@ def _hermetic_env(monkeypatch):
             monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _offline_image_catalog(monkeypatch):
+    """The OpenRouter Image API catalog is a live HTTP read; default it to an
+    empty catalog (lists no model) so no test reaches the network. Tests that
+    exercise it override this with their own monkeypatch."""
+
+    async def empty_catalog():
+        return {}
+
+    monkeypatch.setattr("claw.providers.image_capability.openrouter_image_catalog", empty_catalog)
+
+
 class FakeProvider(LLMProvider):
     """Replays scripted turns: each turn is a list of ProviderEvents."""
 

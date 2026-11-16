@@ -842,6 +842,27 @@ async def upload_attachments(
     return result
 
 
+_IMAGE_ERROR_DEFAULT = (502, "สร้างภาพไม่สำเร็จ กรุณาตรวจสอบการตั้งค่าผู้ให้บริการแล้วลองอีกครั้ง")
+# ProviderError.error_type -> (status, user-facing detail). Never carries
+# provider text or credentials.
+_IMAGE_ERRORS = {
+    "auth": (502, "ผู้ให้บริการปฏิเสธ API key กรุณาตรวจสอบ API key ของผู้ให้บริการ"),
+    "credits": (502, "เครดิตของบัญชีผู้ให้บริการไม่พอสำหรับสร้างภาพ"),
+    "rate_limit": (429, "ผู้ให้บริการจำกัดอัตราการใช้งานอยู่ กรุณารอสักครู่แล้วลองใหม่"),
+    "timeout": (
+        504,
+        "ผู้ให้บริการตอบช้าเกินกำหนด ระบบไม่ส่งคำขอซ้ำอัตโนมัติ เพราะอาจถูกคิดค่าใช้จ่ายซ้ำ "
+        "กรุณาตรวจสอบก่อนลองใหม่",
+    ),
+    "bad_request": (502, "ผู้ให้บริการไม่รับคำขอนี้ กรุณาตรวจสอบ Model ID และพารามิเตอร์ของโมเดล"),
+    "no_image": (502, "โมเดลตอบกลับมาแต่ไม่มีภาพ"),
+    "too_large": (502, "generated image exceeds the size limit"),
+    "unsupported_format": (502, "ผู้ให้บริการส่งไฟล์ที่ไม่ใช่รูปแบบภาพที่รองรับ"),
+    "invalid_response": (502, "ผู้ให้บริการตอบกลับในรูปแบบที่อ่านไม่ได้"),
+    "network": (502, "เชื่อมต่อผู้ให้บริการไม่ได้ กรุณาลองใหม่ภายหลัง"),
+}
+
+
 class GenerateImageRequest(BaseModel):
     prompt: str
     model: str
@@ -932,6 +953,17 @@ async def generate_image(
             raise HTTPException(status_code=413, detail=full.removeprefix("Error: "))
 
     mode = capability.generation_mode
+    image_options = None
+    if mode == "openrouter_images":
+        from claw.providers.image_capability import ImageOptionError, openrouter_image_options
+
+        # Only a size the user asked for: default_size is a DALL·E-style default
+        # that the model's own default should win over. Checked before the
+        # quota reservation so an unsupported size costs nothing.
+        try:
+            image_options = openrouter_image_options(capability.image_parameters, body.size)
+        except ImageOptionError as exc:
+            raise HTTPException(status_code=422, detail=f"ขนาดภาพนี้ใช้กับโมเดลนี้ไม่ได้: {exc}") from exc
 
     # Reserve the images/day slot atomically BEFORE the paid provider call:
     # increment the counter, then verify the user is still within their cap.
@@ -976,11 +1008,13 @@ async def generate_image(
             mode=mode,
             explicit_credentials=True,
             request_modalities=capability.request_modalities,
+            image_options=image_options,
             timeout=state.settings.image.timeout_seconds,
         )
     except ProviderError as exc:
         await _release()
-        raise HTTPException(status_code=502, detail="สร้างภาพไม่สำเร็จ กรุณาตรวจสอบการตั้งค่าผู้ให้บริการแล้วลองอีกครั้ง") from exc
+        status, detail = _IMAGE_ERRORS.get(exc.error_type or "", _IMAGE_ERROR_DEFAULT)
+        raise HTTPException(status_code=status, detail=detail) from exc
 
     data, ext = images[0]
     # Guard against an oversized payload (a misbehaving provider or a
