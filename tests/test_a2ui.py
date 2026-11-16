@@ -114,12 +114,77 @@ def test_compact_form_normalizes():
             {"components": [{"id": "root", "component": "DeltaStat", "label": "x", "value": "12%"}]},
             "must be a number",
         ),
+        (
+            {
+                "components": [
+                    {"id": "root", "component": "Card", "child": "col"},
+                    {"id": "col", "component": "Column", "children": ["t", "root"]},
+                    {"id": "t", "component": "Text", "text": "x"},
+                ]
+            },
+            "cycle: root -> col -> root",
+        ),
+        (
+            {"components": [{"id": "root", "component": "Card", "child": "root"}]},
+            "cycle: root -> root",
+        ),
+        (
+            {
+                "components": [
+                    {"id": "root", "component": "Column", "children": {"componentId": "t", "path": "/rows"}},
+                    {"id": "t", "component": "Text", "text": "x"},
+                ]
+            },
+            "children: must be a list",
+        ),
+        (
+            {"components": [{"id": "root", "component": "Card", "children": {"componentId": "root"}}]},
+            "children: must be a list",
+        ),
     ],
 )
 def test_invalid_payloads_are_rejected_with_paths(payload, needle):
     msgs, errors = normalize(payload)
     assert msgs is None
     assert any(needle in e for e in errors), errors
+
+
+def test_shared_child_is_not_a_cycle():
+    # Two parents pointing at one child is a diamond, not a cycle.
+    msgs, errors = normalize(
+        {
+            "components": [
+                {"id": "root", "component": "Column", "children": ["a", "b"]},
+                {"id": "a", "component": "Card", "child": "t"},
+                {"id": "b", "component": "Card", "child": "t"},
+                {"id": "t", "component": "Text", "text": "x"},
+            ]
+        }
+    )
+    assert errors == []
+    assert msgs is not None
+
+
+def test_null_children_on_leaf_is_accepted():
+    # A null `children` is the same as leaving it out (same rule as protocol.ts).
+    msgs, errors = normalize({"components": [{"id": "root", "component": "Text", "text": "x", "children": None}]})
+    assert errors == []
+    assert msgs is not None
+
+
+def test_cycle_among_orphans_is_ignored():
+    # Orphans never render, so a cycle between them cannot blank the card.
+    msgs, errors = normalize(
+        {
+            "components": [
+                {"id": "root", "component": "Text", "text": "x"},
+                {"id": "a", "component": "Card", "child": "b"},
+                {"id": "b", "component": "Card", "child": "a"},
+            ]
+        }
+    )
+    assert errors == []
+    assert msgs is not None
 
 
 def test_markup_in_text_is_kept_as_data_not_rejected():

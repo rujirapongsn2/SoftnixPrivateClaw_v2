@@ -137,7 +137,8 @@ def _check_component(i: int, c: dict, errors: list[str]) -> None:
         errors.extend(f"{where}.{e}" for e in validate_chart(c))
     elif name == "WeatherCard":
         errors.extend(f"{where}.{e}" for e in validate_weather(c))
-    elif name in ("Column", "Row") and not isinstance(c.get("children"), list):
+    # Template child lists ({componentId, path}) are not supported: same rule as protocol.ts.
+    if (name in ("Column", "Row") or c.get("children") is not None) and not isinstance(c.get("children"), list):
         errors.append(f"{where}.children: must be a list of component ids")
 
 
@@ -275,6 +276,7 @@ def validate_components(components: Any) -> list[str]:
         _check_component(i, c, errors)
     if "root" not in ids:
         errors.append('components: one component must have id "root"')
+    graph: dict[str, list[str]] = {}
     for i, c in enumerate(components):
         if not isinstance(c, dict):
             continue
@@ -284,7 +286,42 @@ def validate_components(components: Any) -> list[str]:
         for r in refs:
             if not isinstance(r, str) or r not in ids:
                 errors.append(f"components[{i}]({c.get('id')!s}): references missing child {r!r}")
+        if isinstance(c.get("id"), str):
+            graph[c["id"]] = [r for r in refs if isinstance(r, str)]
+    cycle = find_cycle(graph, "root")
+    if cycle:
+        errors.append(f"components: child references form a cycle: {' -> '.join(cycle)}")
     return errors
+
+
+def find_cycle(graph: dict[str, list[str]], root: str) -> list[str] | None:
+    """First child-reference cycle reachable from ``root`` as the ids along it, or None.
+
+    Same rule as protocol.ts ``findCycle``. The renderer draws a component that
+    repeats one of its ancestors as nothing, so a cyclic card would reach the
+    user blank; orphans never render, so a cycle among them is ignored. Template
+    child lists are rejected by ``_check_component``, so every edge is a plain id.
+    """
+    if root not in graph:
+        return None
+    done: set[str] = set()
+    path = [root]
+    on_path = {root}
+    iters = [iter(graph[root])]
+    while iters:
+        nxt = next(iters[-1], None)
+        if nxt is None:
+            iters.pop()
+            node = path.pop()
+            on_path.discard(node)
+            done.add(node)
+        elif nxt in on_path:
+            return [*path[path.index(nxt) :], nxt]
+        elif nxt not in done and nxt in graph:
+            path.append(nxt)
+            on_path.add(nxt)
+            iters.append(iter(graph[nxt]))
+    return None
 
 
 def normalize(payload: Any, fallback_surface_id: str = "surface") -> tuple[list[dict] | None, list[str]]:

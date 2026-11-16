@@ -111,8 +111,13 @@ export function validateComponents(components: unknown): string | null {
       const e = validateChart(c);
       if (e) return e;
     }
+    // Template child lists ({componentId, path}) are not supported: same rule as validate.py.
+    if ((c.component === "Column" || c.component === "Row" || c.children != null) && !Array.isArray(c.children)) {
+      return `components[${i}] ("${c.id}").children must be a list of component ids`;
+    }
   }
   if (!ids.has("root")) return 'one component must have id "root"';
+  const graph = new Map<string, string[]>();
   for (const [i, c] of (components as Obj[]).entries()) {
     const refs: unknown[] = [];
     if (typeof c.child === "string") refs.push(c.child);
@@ -120,8 +125,35 @@ export function validateComponents(components: unknown): string | null {
     for (const r of refs) {
       if (typeof r !== "string" || !ids.has(r)) return `components[${i}] ("${c.id}") references missing child "${String(r)}"`;
     }
+    graph.set(c.id as string, refs as string[]);
   }
-  return null;
+  const cycle = findCycle(graph, "root");
+  return cycle ? `components form a cycle: ${cycle.join(" → ")}` : null;
+}
+
+/** First child-reference cycle reachable from `root`, as the ids along it, or null.
+ * Same rule as validate.py `find_cycle`. With plain id lists (template children
+ * are rejected above) a repeated ancestor id is also a repeated (id, dataPath),
+ * which the 0.15 renderer draws as nothing. Orphans never render, so a cycle
+ * among them is harmless and ignored.
+ * Recursion depth is bounded by LIMITS.maxComponents. */
+export function findCycle(graph: Map<string, string[]>, root: string): string[] | null {
+  const state = new Map<string, "open" | "done">();
+  const stack: string[] = [];
+  const visit = (id: string): string[] | null => {
+    if (state.get(id) === "done") return null;
+    if (state.get(id) === "open") return [...stack.slice(stack.indexOf(id)), id];
+    state.set(id, "open");
+    stack.push(id);
+    for (const next of graph.get(id) ?? []) {
+      const found = visit(next);
+      if (found) return found;
+    }
+    stack.pop();
+    state.set(id, "done");
+    return null;
+  };
+  return visit(root);
 }
 
 function messagesFrom(raw: unknown): unknown[] | null {
