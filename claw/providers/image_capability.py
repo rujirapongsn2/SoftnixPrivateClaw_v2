@@ -217,6 +217,10 @@ def openrouter_image_options(parameters: dict[str, Any], size: str | None) -> di
     tier = next((name for edge, name in _RESOLUTION_TIERS if max(w, h) <= edge), None)
     aspect, resolution = parameters.get("aspect_ratio"), parameters.get("resolution")
     if aspect is None and resolution is None:
+        if "size" in parameters:
+            raise ImageOptionError(
+                f"size {size} is not supported (supported: {_choices(parameters['size'])})"
+            )
         raise ImageOptionError("this model does not accept a size")
     if aspect is not None:
         if not _allows(aspect, ratio):
@@ -238,13 +242,25 @@ OPENROUTER_IMAGE_MODELS_URL = "https://openrouter.ai/api/v1/images/models"
 _catalogs: dict[str, tuple[float, dict | None]] = {}
 
 
+_catalog_locks: dict[str, asyncio.Lock] = {}
+
+
 async def _cached_catalog(url: str) -> dict | None:
-    """Public, unauthenticated catalog read: bounded, cached, never retried."""
-    now = time.monotonic()
+    """Public, unauthenticated catalog read: bounded, cached, never retried.
+    Concurrent callers on an expired entry share one download."""
     expires, cached = _catalogs.get(url, (0, None))
-    if now < expires:
+    if time.monotonic() < expires:
         return cached
-    catalog = None
+    async with _catalog_locks.setdefault(url, asyncio.Lock()):
+        expires, cached = _catalogs.get(url, (0, None))
+        if time.monotonic() < expires:
+            return cached
+        catalog = await _fetch_catalog(url)
+        _catalogs[url] = (time.monotonic() + (300 if catalog is not None else 30), catalog)
+        return catalog
+
+
+async def _fetch_catalog(url: str) -> dict | None:
     try:
         async with asyncio.timeout(5):
             async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
@@ -256,14 +272,11 @@ async def _cached_catalog(url: str) -> dict | None:
                         if len(data) > 4_000_000:
                             raise ValueError("metadata_limit")
         entries = json.loads(data).get("data")
-        if isinstance(entries, list) and len(entries) <= 20000:
-            catalog = {
-                row["id"]: row for row in entries if isinstance(row, dict) and isinstance(row.get("id"), str)
-            }
     except (httpx.HTTPError, ValueError, TypeError, AttributeError, TimeoutError):
-        pass
-    _catalogs[url] = (now + (300 if catalog is not None else 30), catalog)
-    return catalog
+        return None
+    if not isinstance(entries, list) or len(entries) > 20000:
+        return None
+    return {row["id"]: row for row in entries if isinstance(row, dict) and isinstance(row.get("id"), str)}
 
 
 async def openrouter_catalog() -> dict | None:
@@ -277,7 +290,11 @@ async def openrouter_image_catalog() -> dict | None:
 async def image_capability(prefix: str, api_base: str, model: str) -> ImageCapability:
     metadata = bundled_metadata()
     preliminary = resolve_capability(prefix, api_base, model, metadata)
-    if preliminary.provider == "openrouter" and preliminary.source != "route":
-        models, images = await asyncio.gather(openrouter_catalog(), openrouter_image_catalog())
-        return resolve_capability(prefix, api_base, model, metadata, models, images)
-    return preliminary
+    if preliminary.provider != "openrouter" or preliminary.source == "route":
+        return preliminary
+    models = await openrouter_catalog()
+    # An empty image catalog leaves the Chat API verdict as is.
+    chat = resolve_capability(prefix, api_base, model, metadata, models, {})
+    if chat.status == "verified":
+        return chat
+    return resolve_capability(prefix, api_base, model, metadata, models, await openrouter_image_catalog())

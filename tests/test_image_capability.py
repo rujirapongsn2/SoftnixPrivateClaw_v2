@@ -453,6 +453,7 @@ async def test_openrouter_metadata_transport_is_bounded_cached_and_read_only(mon
         lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs),
     )
     monkeypatch.setattr(capabilities, "_catalogs", {})
+    monkeypatch.setattr(capabilities, "_catalog_locks", {})
     first = await capabilities._cached_catalog(url)
     assert (first is not None) == (failure is None)
     assert await capabilities._cached_catalog(url) == first

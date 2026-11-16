@@ -834,6 +834,48 @@ def _sniff_image_ext(data: bytes) -> str | None:
     return None
 
 
+def _raise_for_image_status(status: int, what: str) -> None:
+    if status < 300:
+        return
+    if status < 400:
+        error_type = "redirect"
+    elif what == "download":
+        error_type = "download"
+    else:
+        error_type = _IMAGE_STATUS_ERRORS.get(status, "upstream")
+    logger.warning("OpenRouter image {} failed status={} error_type={}", what, status, error_type)
+    raise ProviderError(f"image {what} returned HTTP {status}", error_type=error_type, status_code=status)
+
+
+async def _read_capped(resp: Any) -> bytes:
+    raw = bytearray()
+    async for chunk in resp.aiter_bytes():
+        raw.extend(chunk)
+        if len(raw) > _MAX_IMAGE_RESPONSE_BYTES:
+            raise ProviderError("image response exceeds the size limit", error_type="too_large")
+    return bytes(raw)
+
+
+def _image_items(raw: bytes) -> list[tuple[str, str]]:
+    """``data[]`` as ("b64", value) or ("url", https URL); other items are skipped."""
+    import json
+
+    try:
+        items = json.loads(raw).get("data")
+    except (ValueError, AttributeError) as exc:
+        raise ProviderError("image response is not valid JSON", error_type="invalid_response") from exc
+    out: list[tuple[str, str]] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        b64, url = item.get("b64_json"), item.get("url")
+        if isinstance(b64, str) and b64:
+            out.append(("b64", b64))
+        elif isinstance(url, str) and url.startswith("https://"):
+            out.append(("url", url))
+    return out
+
+
 async def _image_via_openrouter_images(
     prompt: str, model: str, key: str, base: str, options: dict[str, Any], timeout: float
 ) -> list[tuple[bytes, str]]:
@@ -841,7 +883,6 @@ async def _image_via_openrouter_images(
     may still be generated and billed upstream."""
     import base64
     import binascii
-    import json
 
     import httpx
 
@@ -849,45 +890,37 @@ async def _image_via_openrouter_images(
     url = (base or OPENROUTER_API_BASE).rstrip("/") + "/images"
     body = {**options, "model": slug, "prompt": prompt}
     headers = {"Authorization": f"Bearer {key}"} if key else {}
+    out: list[tuple[bytes, str]] = []
     try:
         # httpx's timeout is per read; this bounds the whole exchange.
         async with asyncio.timeout(timeout):
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as resp:
-                    raw = bytearray()
-                    async for chunk in resp.aiter_bytes():
-                        raw.extend(chunk)
-                        if len(raw) > _MAX_IMAGE_RESPONSE_BYTES:
-                            raise ProviderError("image response exceeds the size limit", error_type="too_large")
+                    _raise_for_image_status(resp.status_code, "request")
+                    raw = await _read_capped(resp)
+                for kind, value in _image_items(raw):
+                    if kind == "url":
+                        # No Authorization header: the key belongs to OpenRouter, not the image host.
+                        async with client.stream("GET", value) as download:
+                            _raise_for_image_status(download.status_code, "download")
+                            data = await _read_capped(download)
+                    else:
+                        try:
+                            data = base64.b64decode(value, validate=True)
+                        except (binascii.Error, ValueError) as exc:
+                            raise ProviderError(
+                                "image response has invalid base64", error_type="invalid_response"
+                            ) from exc
+                    ext = _sniff_image_ext(data)
+                    if ext is None:
+                        raise ProviderError(
+                            "image response is not a supported image format", error_type="unsupported_format"
+                        )
+                    out.append((data, ext))
     except (httpx.TimeoutException, TimeoutError) as exc:
         raise ProviderError("image generation timed out", error_type="timeout") from exc
     except httpx.HTTPError as exc:
         raise ProviderError("image provider unreachable", error_type="network") from exc
-    if resp.status_code >= 400:
-        error_type = _IMAGE_STATUS_ERRORS.get(resp.status_code, "upstream")
-        logger.warning("OpenRouter image request failed status={} error_type={}", resp.status_code, error_type)
-        raise ProviderError(
-            f"image provider returned HTTP {resp.status_code}",
-            error_type=error_type,
-            status_code=resp.status_code,
-        )
-    try:
-        items = json.loads(raw).get("data")
-    except (ValueError, AttributeError) as exc:
-        raise ProviderError("image response is not valid JSON", error_type="invalid_response") from exc
-    out: list[tuple[bytes, str]] = []
-    for item in items if isinstance(items, list) else []:
-        b64 = item.get("b64_json") if isinstance(item, dict) else None
-        if not isinstance(b64, str) or not b64:
-            continue
-        try:
-            data = base64.b64decode(b64, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise ProviderError("image response has invalid base64", error_type="invalid_response") from exc
-        ext = _sniff_image_ext(data)
-        if ext is None:
-            raise ProviderError("image response is not a supported image format", error_type="unsupported_format")
-        out.append((data, ext))
     if not out:
         raise ProviderError("the model returned no image", error_type="no_image")
     return out

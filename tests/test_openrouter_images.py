@@ -141,6 +141,44 @@ def test_custom_endpoint_never_uses_image_catalog(base):
     assert (cap.status, cap.reason) == ("unknown", "custom_endpoint")
 
 
+async def test_chat_verified_model_skips_the_image_catalog(monkeypatch):
+    async def models():
+        return {SLUG: {**CHAT_ENTRY, "supported_parameters": ["modalities"]}}
+
+    async def images():
+        pytest.fail("image catalog fetched for a chat-verified model")
+
+    monkeypatch.setattr(capabilities, "openrouter_catalog", models)
+    monkeypatch.setattr(capabilities, "openrouter_image_catalog", images)
+    cap = await image_capability("openrouter", BASE, STORED)
+    assert (cap.status, cap.generation_mode) == ("verified", "chat")
+
+
+async def test_concurrent_cache_misses_share_one_download(monkeypatch):
+    import asyncio
+
+    requests = []
+
+    async def slow_ok(request):
+        requests.append(request)
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={"data": [IMAGE_ENTRY]})
+
+    original = httpx.AsyncClient
+
+    class Slow(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            return await slow_ok(request)
+
+    monkeypatch.setattr(capabilities.httpx, "AsyncClient", lambda **kw: original(transport=Slow(), **kw))
+    monkeypatch.setattr(capabilities, "_catalogs", {})
+    monkeypatch.setattr(capabilities, "_catalog_locks", {})
+    url = capabilities.OPENROUTER_IMAGE_MODELS_URL
+    results = await asyncio.gather(*(capabilities._cached_catalog(url) for _ in range(10)))
+    assert len(requests) == 1
+    assert all(r == {SLUG: IMAGE_ENTRY} for r in results)
+
+
 async def test_image_capability_reads_both_catalogs(monkeypatch):
     calls = []
 
@@ -211,6 +249,8 @@ def test_unsupported_size_is_refused_with_choices(size, message):
 
 def test_model_without_size_parameters():
     assert openrouter_image_options({}, None) == {}
+    with pytest.raises(ImageOptionError, match=r"size 1024x576 is not supported \(supported: 1024x1024\)"):
+        openrouter_image_options({"size": {"type": "enum", "values": ["1024x1024"]}}, "1024x576")
     with pytest.raises(ImageOptionError, match="does not accept a size"):
         openrouter_image_options({}, "1024x1024")
     assert openrouter_image_options({"size": {"type": "enum", "values": ["1024x1024"]}}, "1024x1024") == {
@@ -306,7 +346,8 @@ async def test_missing_saved_key_never_reaches_network(monkeypatch):
         (lambda r: httpx.Response(400, json={"error": {"code": 400, "message": "x"}}), "bad_request"),
         (lambda r: httpx.Response(502, json={"error": {"code": 502, "message": "x"}}), "upstream"),
         (_ok(), "no_image"),
-        (_ok({"url": "https://example.invalid/x.png"}), "no_image"),
+        (_ok({"url": "http://example.invalid/x.png"}), "no_image"),
+        (lambda r: httpx.Response(302, headers={"location": "https://login.invalid"}), "redirect"),
         (_ok({"b64_json": "@@not base64@@"}), "invalid_response"),
         (
             _ok(
@@ -355,6 +396,39 @@ async def test_slow_response_hits_the_overall_deadline(monkeypatch):
         await _generate(timeout=0.2)
     assert error.value.error_type == "timeout"
     assert len(requests) == 1
+
+
+async def test_https_url_item_is_downloaded_without_the_key(monkeypatch):
+    def respond(request):
+        if request.method == "POST":
+            return httpx.Response(200, json={"data": [{"url": "https://cdn.invalid/out.png"}]})
+        return httpx.Response(200, content=_PNG)
+
+    requests = _mock_http(monkeypatch, respond)
+    assert await _generate() == [(_PNG, "png")]
+    post, get = requests
+    assert (get.method, str(get.url)) == ("GET", "https://cdn.invalid/out.png")
+    assert "authorization" not in get.headers
+
+
+async def test_failed_url_download_is_its_own_error(monkeypatch):
+    def respond(request):
+        if request.method == "POST":
+            return httpx.Response(200, json={"data": [{"url": "https://cdn.invalid/out.png"}]})
+        return httpx.Response(403)
+
+    _mock_http(monkeypatch, respond)
+    with pytest.raises(ProviderError) as error:
+        await _generate()
+    assert error.value.error_type == "download"
+
+
+async def test_error_status_wins_over_a_huge_error_body(monkeypatch):
+    monkeypatch.setattr(provider_module, "_MAX_IMAGE_RESPONSE_BYTES", 1000)
+    _mock_http(monkeypatch, lambda r: httpx.Response(401, content=b"x" * 5000))
+    with pytest.raises(ProviderError) as error:
+        await _generate()
+    assert error.value.error_type == "auth"
 
 
 async def test_oversized_response_is_refused(monkeypatch):
