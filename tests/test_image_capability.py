@@ -414,7 +414,10 @@ async def test_legacy_disable_does_not_allow_route_changes_or_activation(db_fact
 
 
 @pytest.mark.parametrize("failure", [None, "oversize", "too_many", "http", "malformed"])
-async def test_openrouter_metadata_transport_is_bounded_cached_and_read_only(monkeypatch, failure):
+@pytest.mark.parametrize(
+    "url", ["https://openrouter.ai/api/v1/models", "https://openrouter.ai/api/v1/images/models"]
+)
+async def test_openrouter_metadata_transport_is_bounded_cached_and_read_only(monkeypatch, failure, url):
     import json
     import httpx
     import claw.providers.image_capability as capabilities
@@ -439,7 +442,7 @@ async def test_openrouter_metadata_transport_is_bounded_cached_and_read_only(mon
 
     def respond(request):
         requests.append(request)
-        assert request.method == "GET" and str(request.url) == "https://openrouter.ai/api/v1/models"
+        assert request.method == "GET" and str(request.url) == url
         assert "authorization" not in request.headers
         return httpx.Response(503 if failure == "http" else 200, content=body)
 
@@ -449,12 +452,13 @@ async def test_openrouter_metadata_transport_is_bounded_cached_and_read_only(mon
         "AsyncClient",
         lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs),
     )
-    monkeypatch.setattr(capabilities, "_catalog", (0, None))
-    first = await capabilities.openrouter_catalog()
+    monkeypatch.setattr(capabilities, "_catalogs", {})
+    monkeypatch.setattr(capabilities, "_catalog_locks", {})
+    first = await capabilities._cached_catalog(url)
     assert (first is not None) == (failure is None)
-    assert await capabilities.openrouter_catalog() == first
+    assert await capabilities._cached_catalog(url) == first
     assert len(requests) == 1
-    assert capabilities._catalog[0] > capabilities.time.monotonic()
+    assert capabilities._catalogs[url][0] > capabilities.time.monotonic()
 
 
 async def test_openrouter_unconfirmed_chat_output_preserves_existing_quota(db_factory, monkeypatch):
