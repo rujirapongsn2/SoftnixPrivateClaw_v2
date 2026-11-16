@@ -12,8 +12,8 @@
     "test:mission-activity": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir .test-dist src/sbot/mission-activity-merge.ts && node --test test/mission-activity.test.mjs"
   },
   "dependencies": {
-    "@a2ui/react": "0.14.0",
-    "@a2ui/web_core": "0.14.0",
+    "@a2ui/react": "0.15.0",
+    "@a2ui/web_core": "0.15.0",
     "@astryxdesign/core": "^0.1.2",
     "@astryxdesign/theme-neutral": "^0.1.2",
     "lucide-react": "^1.18.0",

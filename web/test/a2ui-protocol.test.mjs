@@ -108,6 +108,39 @@ test('structural errors: missing root, dangling child, oversize strings', () => 
   assert.match(parseA2ui({ components: [{ id: 'root', component: 'Text', text: 'x'.repeat(5000) }] }).error, /too long/);
 });
 
+test('cycles reachable from root and template child lists are rejected', () => {
+  const cyc = parseA2ui({ components: [
+    { id: 'root', component: 'Card', child: 'col' },
+    { id: 'col', component: 'Column', children: ['t', 'root'] },
+    { id: 't', component: 'Text', text: 'x' },
+  ] });
+  assert.match(cyc.error, /cycle: root → col → root/);
+  assert.match(parseA2ui({ components: [{ id: 'root', component: 'Card', child: 'root' }] }).error, /cycle/);
+  const tpl = (componentId) => ({ components: [
+    { id: 'root', component: 'Column', children: { componentId, path: '/rows' } },
+    { id: 'item', component: 'Text', text: { path: 'name' } },
+  ], data: { rows: [{ name: 'a' }] } });
+  // Not supported (same rule as validate.py), whether or not the target exists.
+  assert.match(parseA2ui(tpl('ghost')).error, /children must be a list/);
+  assert.match(parseA2ui(tpl('item')).error, /children must be a list/);
+  assert.match(parseA2ui({ components: [{ id: 'root', component: 'Card', children: { componentId: 'root' } }] }).error, /children must be a list/);
+  // A null `children` on a leaf is the same as leaving it out.
+  assert.equal(parseA2ui({ components: [{ id: 'root', component: 'Text', text: 'x', children: null }] }).ok, true);
+  // A child shared by two parents is a diamond, not a cycle.
+  assert.equal(parseA2ui({ components: [
+    { id: 'root', component: 'Column', children: ['a', 'b'] },
+    { id: 'a', component: 'Card', child: 't' },
+    { id: 'b', component: 'Card', child: 't' },
+    { id: 't', component: 'Text', text: 'x' },
+  ] }).ok, true);
+  // Orphans never render, so a cycle between them cannot blank the card.
+  assert.equal(parseA2ui({ components: [
+    { id: 'root', component: 'Text', text: 'x' },
+    { id: 'a', component: 'Card', child: 'b' },
+    { id: 'b', component: 'Card', child: 'a' },
+  ] }).ok, true);
+});
+
 test('actions become a visible, plain chat message', () => {
   const msg = actionToMessage({ name: 'report_brief', context: { style: ['ทางการ'], detail: 'สรุปยอดขาย Q3', empty: '' } });
   assert.equal(msg, '[การ์ด] report_brief\n- style: ทางการ\n- detail: สรุปยอดขาย Q3');
