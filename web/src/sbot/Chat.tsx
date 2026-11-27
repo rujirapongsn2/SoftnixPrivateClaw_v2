@@ -102,6 +102,7 @@ import { LocalWorkspacePicker } from './LocalWorkspacePicker';
 import { TablePreview } from "./TablePreview";
 import { SaveToBlueprintButton } from "./SaveToBlueprintButton";
 import { useBranding, useT } from "../branding";
+import { ThinkingTrace, useReasoningTrace } from "../ThinkingTrace";
 import { sanitizeModelMarkdown, stripMarkdownForSpeech } from "./markdown";
 import { writeClipboard } from "../clipboard";
 
@@ -510,6 +511,7 @@ export function Chat({
   // When the current busy period started (for the "Thinking… 12s" counter) —
   // a ref because it drives a manual re-render tick below, not React state.
   const busyStartedAtRef = useRef<number | null>(null);
+  const reasoning = useReasoningTrace();
   // Forces a re-render once a second while busy so the elapsed counter (and
   // any active tool's live label) visibly moves instead of looking frozen.
   const [, forceBusyTick] = useState(0);
@@ -771,6 +773,7 @@ export function Chat({
     // (empty-dep useCallback further down), and listing it here would try to
     // evaluate an as-yet-undeclared const at this point in the render.
     stopSpeaking();
+    reasoning.reset();
     setItems([]);
     setLoadedSessionId(null);
     setStreaming("");
@@ -884,14 +887,19 @@ export function Chat({
           }
           setBusy(true);
           setStreaming("");
+          reasoning.reset();
           sawCompletionRef.current = false;
           onActivity?.();
           break;
         case "text_delta":
           setStreaming((prev) => prev + (event.text ?? ""));
           break;
+        case "thinking_delta":
+          reasoning.onThinking(event.text ?? "");
+          break;
         case "tool_started":
           setStreaming("");
+          reasoning.reset();
           openExecIfEnabled(); // auto-open the execution panel while the agent works, if enabled
           setItems((prev) => {
             const last = prev[prev.length - 1];
@@ -908,6 +916,7 @@ export function Chat({
           });
           break;
         case "tool_finished":
+          reasoning.reset();
           setItems((prev) => {
             // The finished tool is the most recent still-running call. Don't
             // assume it's in the last item: an "ask"-mode confirm card gets
@@ -3310,16 +3319,21 @@ export function Chat({
             {busy && !streaming && (
               <ChatMessage sender="assistant">
                 <ChatMessageBubble variant="ghost" className="claw-msg-bubble">
-                  <span className="claw-thinking">
-                    <Spinner size="sm" shade="subtle" />{" "}
-                    {(() => {
-                      const elapsed = formatElapsed(busyStartedAtRef.current);
-                      const running = findRunningCall(items);
-                      return running
-                        ? t("chat.msg.workingOn", { label: describeRunningCall(running), elapsed })
-                        : t("chat.msg.thinkingElapsed", { elapsed });
-                    })()}
-                  </span>
+                  {(() => {
+                    const elapsed = formatElapsed(busyStartedAtRef.current);
+                    const running = findRunningCall(items);
+                    return (
+                      <>
+                        <span className="claw-thinking">
+                          <Spinner size="sm" shade="subtle" />{" "}
+                          {running
+                            ? t("chat.msg.workingOn", { label: describeRunningCall(running), elapsed })
+                            : t("chat.msg.thinkingElapsed", { elapsed })}
+                        </span>
+                        {!running && <ThinkingTrace trace={reasoning} busySince={busyStartedAtRef.current} />}
+                      </>
+                    );
+                  })()}
                 </ChatMessageBubble>
               </ChatMessage>
             )}
