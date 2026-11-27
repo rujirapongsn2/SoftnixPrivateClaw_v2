@@ -14,7 +14,8 @@ import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
@@ -33,6 +34,7 @@ from claw.core.context import (
 from claw.workspace.usage import is_cleanup_command
 from claw.core.turn_context import current_session_id, current_turn_deadline
 from claw.core.events import (
+    ThinkingDeltaEvent,
     ToolConfirmRequest,
     ToolConfirmResolved,
     TurnCompleted,
@@ -687,6 +689,31 @@ class ClawAgent:
         if connectors_summary:
             parts.append(connectors_summary)
         return "\n\n---\n\n".join(parts)
+
+
+_HIDDEN_REASONING_INTERVAL = 1.0
+
+
+def _reasoning_gate(policy: Any) -> Callable[[Any], Any | None]:
+    """Maps each loop event to what may be published. While output guardrails
+    can mask or block, a thinking delta keeps only the fact that the model is
+    thinking (empty text, at most once a second): the final answer is checked
+    before it leaves, the reasoning stream would not be."""
+    if policy is None or not policy.guards_output():
+        return lambda ev: ev
+    last = 0.0
+
+    def gate(ev: Any) -> Any | None:
+        nonlocal last
+        if not isinstance(ev, ThinkingDeltaEvent):
+            return ev
+        now = time.monotonic()
+        if now - last < _HIDDEN_REASONING_INTERVAL:
+            return None
+        last = now
+        return ThinkingDeltaEvent(turn_id=ev.turn_id, text="")
+
+    return gate
 
 
 class AgentRuntime:
@@ -1969,10 +1996,17 @@ class AgentRuntime:
                         current_turn_deadline.set(
                             time.monotonic() + budget if budget > 0 else None
                         )
+                        reasoning_gate = _reasoning_gate(self.policy)
+
+                        def publish_turn_event(ev: Any) -> None:
+                            out = reasoning_gate(ev)
+                            if out is not None:
+                                self.bus.publish(session_id, out)
+
                         outcome = await agent.loop.run_turn(
                             turn_id,
                             prompt_messages,
-                            lambda ev: self.bus.publish(session_id, ev),
+                            publish_turn_event,
                             model=effective_model,
                             api_key=model_key,
                             api_base=model_base,

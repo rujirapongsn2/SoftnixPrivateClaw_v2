@@ -505,6 +505,33 @@ async def test_policy_masked_output_is_persisted_masked(stores, tmp_path):
     assert [m for m in history if m["role"] == "assistant"][-1]["content"] == final
 
 
+async def test_guarded_turn_streams_that_it_thinks_but_not_what(stores, tmp_path):
+    from claw.providers.base import ThinkingDelta
+    from claw.security.policy import PolicyEngine
+
+    provider = FakeProvider([[ThinkingDelta(text="mail leak@corp.com"), TextDelta(text="done"), ChatResult(content="done")]])
+    runtime = make_runtime(stores, provider, tmp_path, policy=PolicyEngine())
+    user = await stores["users"].get_or_create_by_email("think@x.y")
+    session = await stores["sessions"].create(user.id)
+    received = []
+
+    async def listen():
+        async with runtime.bus.subscribe(session.id) as queue:
+            while True:
+                event = (await queue.get()).to_dict()
+                received.append(event)
+                if event["type"] in ("turn_completed", "turn_error"):
+                    return
+
+    listener = asyncio.create_task(listen())
+    await asyncio.sleep(0)
+    await runtime.handle_message(user.id, session.id, "go")
+    await asyncio.wait_for(listener, 2)
+
+    assert [e["text"] for e in received if e["type"] == "thinking_delta"] == [""]
+    assert "leak@corp.com" not in json.dumps(received)
+
+
 async def test_turns_serialize_per_session_not_globally(stores, tmp_path):
     provider = FakeProvider([text_turn("a"), text_turn("b")])
     runtime = make_runtime(stores, provider, tmp_path)

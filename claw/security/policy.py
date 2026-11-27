@@ -151,6 +151,18 @@ class PolicyEngine:
         if tool_args_exempt is not None:
             self.tool_args_exempt = list(tool_args_exempt)
 
+    def guards_output(self) -> bool:
+        """True when the final answer can be masked or blocked, so text streamed
+        before that check (the model's reasoning) must not reach the user."""
+        if self.semantic is not None:
+            return True
+        if self.monitor_only:
+            return False
+        return any(
+            rule.enabled and "output" in rule.scopes and rule.action in (Action.MASK, Action.BLOCK)
+            for rule in self.rules
+        )
+
     def is_tool_exempt(self, tool_name: str) -> bool:
         """True when `tool_name` matches any exemption glob — its arguments skip
         tool_args masking/blocking (they are still detected + audited upstream)."""

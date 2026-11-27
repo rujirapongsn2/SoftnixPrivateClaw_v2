@@ -12,6 +12,7 @@ import uuid
 from collections import OrderedDict
 from contextlib import suppress
 from pathlib import Path
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -35,6 +36,7 @@ from sbot.core.context import (
     vision_note,
 )
 from sbot.core.events import (
+    ThinkingDeltaEvent,
     DelegationFinished,
     DelegationStarted,
     ToolConfirmRequest,
@@ -664,6 +666,31 @@ class ClawAgent:
             PromptSection("knowledge", knowledge_summary),
             PromptSection("connectors", connectors_summary),
         ]
+
+
+_HIDDEN_REASONING_INTERVAL = 1.0
+
+
+def _reasoning_gate(policy: Any) -> Callable[[Any], Any | None]:
+    """Maps each loop event to what may be published. While output guardrails
+    can mask or block, a thinking delta keeps only the fact that the model is
+    thinking (empty text, at most once a second): the final answer is checked
+    before it leaves, the reasoning stream would not be."""
+    if policy is None or not policy.guards_output():
+        return lambda ev: ev
+    last = 0.0
+
+    def gate(ev: Any) -> Any | None:
+        nonlocal last
+        if not isinstance(ev, ThinkingDeltaEvent):
+            return ev
+        now = time.monotonic()
+        if now - last < _HIDDEN_REASONING_INTERVAL:
+            return None
+        last = now
+        return ThinkingDeltaEvent(turn_id=ev.turn_id, text="")
+
+    return gate
 
 
 class AgentRuntime:
@@ -1686,7 +1713,12 @@ class AgentRuntime:
                 # reloaded conversation still shows who answered what.
                 delegations: list[dict[str, Any]] = []
 
+                reasoning_gate = _reasoning_gate(self.policy)
+
                 def _relay(ev: Any) -> None:
+                    ev = reasoning_gate(ev)
+                    if ev is None:
+                        return
                     if isinstance(ev, DelegationStarted):
                         delegations.append(
                             {

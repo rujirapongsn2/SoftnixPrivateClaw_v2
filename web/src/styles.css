@@ -5570,3 +5570,31 @@ a.claw-preview-action { text-decoration: none; }
   .claw-skillsec-matrix thead th { font-size: 11px; }
   .claw-skillsec-filters .claw-token-filter { max-width: 100%; }
 }
+
+/* Live reasoning peek under the "Thinking… Ns" spinner (ThinkingTrace.tsx). */
+.claw-thinking-trace,
+.claw-thinking-hint {
+  margin-top: 6px;
+  font-size: 0.85em;
+  opacity: 0.6;
+  max-width: 60ch;
+}
+.claw-thinking-trace summary {
+  cursor: pointer;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* column-reverse keeps the box scrolled to the newest reasoning. */
+.claw-thinking-trace-body {
+  display: flex;
+  flex-direction: column-reverse;
+  max-height: 14em;
+  overflow-y: auto;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--color-border, #ddd);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
